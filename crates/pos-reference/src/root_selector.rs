@@ -5,11 +5,11 @@
 //! both fixed listeners and final production activation to #359, so this module
 //! deliberately exposes no runtime socket by itself.
 
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use rustix::net::sockopt::socket_peercred;
@@ -39,6 +39,7 @@ const CONTROL_LIMIT: u32 = 16 * 1024 * 1024;
 const SELECTOR_INPUT_LIMIT: u64 = 128 * 1024 * 1024;
 const CONTROL_ARTIFACT_LIMIT: u64 = 16 * 1024 * 1024;
 const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
+const MAX_RETAINED_EVALUATION_NAMESPACES: usize = 256;
 const ROOT_UID: u32 = 0;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -169,27 +170,139 @@ struct RootSelectorService<T = ProviderTransport> {
 
 #[derive(Default)]
 struct EvaluationNamespaceBindings {
-    // Retain bindings for this composition's lifetime. #359 may release them
-    // only after its durable attempt snapshot proves every derived provider
-    // request has left retained and live state.
-    retained: Mutex<BTreeMap<[u8; 14], [u8; 32]>>,
+    // A namespace stays bound only while a matching request is live or the
+    // provider has authenticated retained state. #359 may release retained
+    // bindings after its durable attempt snapshot and reconciliation proof.
+    states: Mutex<BTreeMap<[u8; 14], EvaluationNamespaceState>>,
+    changed: Condvar,
+}
+
+struct EvaluationNamespaceState {
+    request_digest: [u8; 32],
+    live_requests: usize,
+    retained: bool,
+}
+
+struct EvaluationNamespaceExecution {
+    conflict: bool,
+    result: Result<AuthenticatedProviderTerminal, ProviderTransportError>,
+}
+
+#[derive(Clone, Copy)]
+struct EvaluationNamespaceLease {
+    namespace: [u8; 14],
+    request_digest: [u8; 32],
+    conflict: bool,
 }
 
 impl EvaluationNamespaceBindings {
-    fn conflicts_with_retained(
+    fn execute_ordered(
         &self,
         request: &crate::evaluator_protocol::EvaluationRequest,
-    ) -> Result<bool, SelectorBoundaryError> {
+        execute: impl FnOnce() -> Result<AuthenticatedProviderTerminal, ProviderTransportError>,
+    ) -> Result<EvaluationNamespaceExecution, SelectorBoundaryError> {
+        let lease = self.acquire(request)?;
+        let result = execute();
+        self.release(lease, provider_retains_namespace(&result))
+            .map(|()| EvaluationNamespaceExecution {
+                conflict: lease.conflict,
+                result,
+            })
+    }
+
+    fn acquire(
+        &self,
+        request: &crate::evaluator_protocol::EvaluationRequest,
+    ) -> Result<EvaluationNamespaceLease, SelectorBoundaryError> {
         let mut namespace = [0; 14];
         namespace.copy_from_slice(&request.request_id[..14]);
-        let mut retained = self.retained.lock().map_err(selector_unavailable)?;
-        Ok(match retained.entry(namespace) {
-            Entry::Occupied(binding) => binding.get() != &request.request_digest,
-            Entry::Vacant(binding) => {
-                binding.insert(request.request_digest);
-                false
+        let mut states = self.states.lock().map_err(selector_unavailable)?;
+        loop {
+            if let Some(state) = states.get_mut(&namespace) {
+                if state.request_digest == request.request_digest {
+                    state.live_requests += 1;
+                    let lease = EvaluationNamespaceLease {
+                        namespace,
+                        request_digest: request.request_digest,
+                        conflict: false,
+                    };
+                    drop(states);
+                    return Ok(lease);
+                }
+                if state.retained {
+                    let lease = EvaluationNamespaceLease {
+                        namespace,
+                        request_digest: request.request_digest,
+                        conflict: true,
+                    };
+                    drop(states);
+                    return Ok(lease);
+                }
+                states = self.changed.wait(states).map_err(selector_unavailable)?;
+            } else {
+                if states.len() >= MAX_RETAINED_EVALUATION_NAMESPACES {
+                    drop(states);
+                    return Err(SelectorBoundaryError::SelectorUnavailable);
+                }
+                states.insert(
+                    namespace,
+                    EvaluationNamespaceState {
+                        request_digest: request.request_digest,
+                        live_requests: 1,
+                        retained: false,
+                    },
+                );
+                let lease = EvaluationNamespaceLease {
+                    namespace,
+                    request_digest: request.request_digest,
+                    conflict: false,
+                };
+                drop(states);
+                return Ok(lease);
             }
-        })
+        }
+    }
+
+    fn release(
+        &self,
+        lease: EvaluationNamespaceLease,
+        provider_retained: bool,
+    ) -> Result<(), SelectorBoundaryError> {
+        if lease.conflict {
+            return Ok(());
+        }
+        let mut states = self.states.lock().map_err(selector_unavailable)?;
+        let remove = {
+            let state = states
+                .get_mut(&lease.namespace)
+                .filter(|state| state.request_digest == lease.request_digest)
+                .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+            state.live_requests -= 1;
+            state.retained |= provider_retained;
+            state.live_requests == 0 && !state.retained
+        };
+        if remove {
+            states.remove(&lease.namespace);
+        }
+        drop(states);
+        self.changed.notify_all();
+        Ok(())
+    }
+}
+
+fn provider_retains_namespace(
+    result: &Result<AuthenticatedProviderTerminal, ProviderTransportError>,
+) -> bool {
+    match result {
+        Ok(AuthenticatedProviderTerminal::Execution(_))
+        | Err(ProviderTransportError::AfterAdmission { .. }) => true,
+        Ok(AuthenticatedProviderTerminal::Error(error)) => {
+            match SandboxProviderError::from_canonical_cbor(error) {
+                Ok(error) => error.code == SandboxProviderErrorCode::RequestIdentityConflict,
+                Err(_) => true,
+            }
+        }
+        Err(ProviderTransportError::BeforeAdmission) => false,
     }
 }
 
@@ -255,22 +368,24 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         // The same EVR1 legitimately derives one ID per selected case and exact
         // retries remain provider-idempotent. Only a namespace bound to another
         // EVR1 digest is a conflict.
-        let namespace_conflict = self
-            .evaluation_namespaces
-            .conflicts_with_retained(&decoded.request)?;
-        let terminal = match self.transport.execute(
-            self.admitted.provider(),
-            &commitment,
-            &spx1,
-            input,
-            Duration::from_millis(resolved.attempt().watchdog_ms),
-        ) {
+        let namespace_execution =
+            self.evaluation_namespaces
+                .execute_ordered(&decoded.request, || {
+                    self.transport.execute(
+                        self.admitted.provider(),
+                        &commitment,
+                        &spx1,
+                        input,
+                        Duration::from_millis(resolved.attempt().watchdog_ms),
+                    )
+                })?;
+        let terminal = match namespace_execution.result {
             Ok(terminal) => terminal,
             Err(ProviderTransportError::BeforeAdmission) => {
                 return write_provider_unavailable(stream, decoded);
             }
             Err(ProviderTransportError::AfterAdmission { agr1_digest, .. })
-                if namespace_conflict =>
+                if namespace_execution.conflict =>
             {
                 return write_post_admission_provider_failure(
                     stream,
@@ -291,7 +406,13 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                 );
             }
         };
-        write_provider_terminal(stream, decoded, &spx1, terminal, namespace_conflict)
+        write_provider_terminal(
+            stream,
+            decoded,
+            &spx1,
+            terminal,
+            namespace_execution.conflict,
+        )
     }
 }
 
@@ -722,6 +843,7 @@ fn root_peer(stream: &UnixStream, expected_uid: u32) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
@@ -1077,34 +1199,76 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_namespace_binding_allows_one_evaluation_and_rejects_competitors() -> TestResult {
+    fn evaluation_namespace_binding_tracks_only_live_or_retained_requests() -> TestResult {
         let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let bindings = EvaluationNamespaceBindings::default();
-        assert!(!bindings.conflicts_with_retained(&request)?);
-        assert!(!bindings.conflicts_with_retained(&request)?);
+        let execution =
+            bindings.execute_ordered(&request, || Err(ProviderTransportError::BeforeAdmission))?;
+        assert!(!execution.conflict);
+        assert!(matches!(
+            execution.result,
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
 
         let mut conflicting = request.clone();
         conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
         refresh_request_digest(&mut conflicting)?;
-        assert!(bindings.conflicts_with_retained(&conflicting)?);
-
-        let concurrent = std::sync::Arc::new(EvaluationNamespaceBindings::default());
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let threads = [request, conflicting].map(|request| {
-            let bindings = std::sync::Arc::clone(&concurrent);
-            let barrier = std::sync::Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                bindings.conflicts_with_retained(&request)
+        let execution = bindings.execute_ordered(&conflicting, || {
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest: [90; 32],
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
             })
-        });
-        let outcomes = threads
-            .into_iter()
-            .map(|thread| thread.join().map_err(|_| "namespace thread panicked"))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(outcomes.iter().filter(|conflict| **conflict).count(), 1);
+        })?;
+        assert!(!execution.conflict);
+        let execution = bindings.execute_ordered(&conflicting, || {
+            Err(ProviderTransportError::BeforeAdmission)
+        })?;
+        assert!(!execution.conflict);
+        let execution =
+            bindings.execute_ordered(&request, || Err(ProviderTransportError::BeforeAdmission))?;
+        assert!(execution.conflict);
+
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        assert!(!provider_retains_namespace(&Ok(
+            AuthenticatedProviderTerminal::Error(fixture.spe1.clone())
+        )));
+        assert!(provider_retains_namespace(&Ok(
+            AuthenticatedProviderTerminal::Error(
+                fixture.request_identity_conflict_for(&fixture.spx1)?
+            )
+        )));
+        assert!(provider_retains_namespace(&Ok(
+            AuthenticatedProviderTerminal::Error(b"invalid".to_vec())
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn evaluation_namespace_binding_is_bounded() -> TestResult {
+        let (mut request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        request.request_id[..14].fill(u8::MAX);
+        let states = (0..MAX_RETAINED_EVALUATION_NAMESPACES)
+            .map(|index| {
+                let mut namespace = [0; 14];
+                namespace[..8].copy_from_slice(&u64::try_from(index)?.to_be_bytes());
+                Ok((
+                    namespace,
+                    EvaluationNamespaceState {
+                        request_digest: [1; 32],
+                        live_requests: 0,
+                        retained: true,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, Box<dyn std::error::Error>>>()?;
+        let bindings = EvaluationNamespaceBindings {
+            states: Mutex::new(states),
+            changed: Condvar::new(),
+        };
+        assert!(matches!(
+            bindings.execute_ordered(&request, || Err(ProviderTransportError::BeforeAdmission)),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        ));
         Ok(())
     }
 
@@ -1125,6 +1289,68 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .ok_or(ProviderTransportError::BeforeAdmission)?
+        }
+    }
+
+    struct SequencedProviderExecutor(
+        Mutex<VecDeque<Result<AuthenticatedProviderTerminal, ProviderTransportError>>>,
+    );
+
+    impl ProviderExecutor for SequencedProviderExecutor {
+        fn execute(
+            &self,
+            _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            _spx1: &[u8],
+            _input: &[u8],
+            _watchdog: Duration,
+        ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            self.0
+                .lock()
+                .map_err(|_| ProviderTransportError::BeforeAdmission)?
+                .pop_front()
+                .ok_or(ProviderTransportError::BeforeAdmission)?
+        }
+    }
+
+    struct OrderedProviderExecutor {
+        first_digest: [u8; 32],
+        entered: std::sync::mpsc::Sender<[u8; 32]>,
+        release_first: std::sync::Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ProviderExecutor for OrderedProviderExecutor {
+        fn execute(
+            &self,
+            _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            spx1: &[u8],
+            _input: &[u8],
+            _watchdog: Duration,
+        ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            let request = SandboxExecuteRequest::from_canonical_cbor(spx1)
+                .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+            let digest = request.authority.evr1_digest;
+            self.entered
+                .send(digest)
+                .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+            if digest == self.first_digest {
+                let (released, changed) = &*self.release_first;
+                let mut released = released
+                    .lock()
+                    .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+                while !*released {
+                    released = changed
+                        .wait(released)
+                        .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+                }
+                drop(released);
+                return Err(ProviderTransportError::AfterAdmission {
+                    agr1_digest: [93; 32],
+                    failure: PostAdmissionProviderFailure::TerminalUnavailable,
+                });
+            }
+            Err(ProviderTransportError::BeforeAdmission)
         }
     }
 
@@ -1360,11 +1586,119 @@ mod tests {
     }
 
     #[test]
+    fn selector_service_releases_namespace_after_pre_admission_failure() -> TestResult {
+        let (request, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let mut conflicting = request.clone();
+        conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
+        refresh_request_digest(&mut conflicting)?;
+        let transport = SequencedProviderExecutor(Mutex::new(VecDeque::from([
+            Err(ProviderTransportError::BeforeAdmission),
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest: [94; 32],
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
+            }),
+        ])));
+        let service = RootSelectorService {
+            admitted,
+            transport,
+            peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+        };
+        assert_service_error(
+            &service,
+            &request,
+            resolved.attempt(),
+            SandboxLocalErrorCode::ProviderUnavailable,
+        )?;
+        assert_service_error(
+            &service,
+            &conflicting,
+            resolved.attempt(),
+            SandboxLocalErrorCode::ProviderTerminalUnavailable,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn selector_service_orders_conflicting_namespaces_before_provider_dispatch() -> TestResult {
+        let (request, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let mut conflicting = request.clone();
+        conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
+        refresh_request_digest(&mut conflicting)?;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release_first = std::sync::Arc::new((Mutex::new(false), Condvar::new()));
+        let service = std::sync::Arc::new(RootSelectorService {
+            admitted,
+            transport: OrderedProviderExecutor {
+                first_digest: request.request_digest,
+                entered: entered_tx,
+                release_first: std::sync::Arc::clone(&release_first),
+            },
+            peer_uid: fs::metadata(".")?.uid(),
+            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+        });
+
+        std::thread::scope(|scope| -> TestResult {
+            let first_service = std::sync::Arc::clone(&service);
+            let first_request = &request;
+            let attempt = resolved.attempt();
+            let first = scope.spawn(move || {
+                assert_service_error(
+                    &first_service,
+                    first_request,
+                    attempt,
+                    SandboxLocalErrorCode::ProviderTerminalUnavailable,
+                )
+                .map_err(|error| error.to_string())
+            });
+            let first_entered = entered_rx.recv_timeout(Duration::from_secs(1));
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let conflicting_service = std::sync::Arc::clone(&service);
+            let conflicting_request = &conflicting;
+            let contender = scope.spawn(move || {
+                started_tx.send(()).map_err(|error| error.to_string())?;
+                assert_service_error(
+                    &conflicting_service,
+                    conflicting_request,
+                    attempt,
+                    SandboxLocalErrorCode::ProviderUnavailable,
+                )
+                .map_err(|error| error.to_string())
+            });
+            let contender_started = started_rx.recv_timeout(Duration::from_secs(1));
+            let overtaking = entered_rx.recv_timeout(Duration::from_millis(100));
+            let (released, changed) = &*release_first;
+            *released.lock().map_err(|_| "release lock poisoned")? = true;
+            changed.notify_all();
+            assert_eq!(first_entered?, request.request_digest);
+            contender_started?;
+            assert!(overtaking.is_err());
+            assert_eq!(
+                entered_rx.recv_timeout(Duration::from_secs(1))?,
+                conflicting.request_digest
+            );
+            first.join().map_err(|_| "first request panicked")??;
+            contender
+                .join()
+                .map_err(|_| "conflicting request panicked")??;
+            Ok(())
+        })
+    }
+
+    #[test]
     fn namespace_conflict_rejects_provider_admission_as_invalid_evidence() -> TestResult {
         let (request, admitted, resolved) =
             crate::selector::installation::tests::root_selector_fixture()?;
         let evaluation_namespaces = EvaluationNamespaceBindings::default();
-        assert!(!evaluation_namespaces.conflicts_with_retained(&request)?);
+        let execution = evaluation_namespaces.execute_ordered(&request, || {
+            Err(ProviderTransportError::AfterAdmission {
+                agr1_digest: [93; 32],
+                failure: PostAdmissionProviderFailure::TerminalUnavailable,
+            })
+        })?;
+        assert!(!execution.conflict);
         let mut conflicting = request;
         conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
         refresh_request_digest(&mut conflicting)?;

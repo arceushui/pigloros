@@ -31,6 +31,7 @@ use crate::selector::SelectorBoundaryError;
 const CONTROL_LIMIT: usize = 16 * 1024 * 1024;
 const CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_AUDIT_RECORDS: usize = 256;
+const MAX_AUDIT_BYTES: usize = CONTROL_LIMIT;
 const ROOT_UID: u32 = 0;
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
@@ -858,14 +859,25 @@ fn read_audit_and_receipt(
     deadline: &Deadline,
 ) -> Result<(Vec<Vec<u8>>, Vec<u8>), ReceiveFailure> {
     let mut records = Vec::new();
+    let mut audit_bytes = 0;
     loop {
         let frame = read_frame(stream, deadline)?.ok_or(ReceiveFailure::Incomplete)?;
         match record_magic(&frame)?.as_str() {
-            "SAU1" if records.len() < MAX_AUDIT_RECORDS => records.push(frame),
+            "SAU1" if records.len() < MAX_AUDIT_RECORDS => {
+                audit_bytes = checked_audit_bytes(audit_bytes, frame.len())?;
+                records.push(frame);
+            }
             "SPR1" => return Ok((records, frame)),
             _ => return Err(ReceiveFailure::Invalid),
         }
     }
+}
+
+fn checked_audit_bytes(current: usize, next: usize) -> Result<usize, ReceiveFailure> {
+    current
+        .checked_add(next)
+        .filter(|total| *total <= MAX_AUDIT_BYTES)
+        .ok_or(ReceiveFailure::Invalid)
 }
 
 fn read_output_frames(
@@ -1365,6 +1377,40 @@ mod tests {
             read_audit_and_receipt(&mut reader, &deadline),
             Err(ReceiveFailure::Invalid)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_reader_rejects_aggregate_bytes_over_control_limit() -> TestResult {
+        assert_eq!(checked_audit_bytes(0, MAX_AUDIT_BYTES), Ok(MAX_AUDIT_BYTES));
+        assert_eq!(
+            checked_audit_bytes(MAX_AUDIT_BYTES, 1),
+            Err(ReceiveFailure::Invalid)
+        );
+        assert_eq!(
+            checked_audit_bytes(usize::MAX, 1),
+            Err(ReceiveFailure::Invalid)
+        );
+
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        let audit = selector_record_with_payload("SAU1", MAX_AUDIT_BYTES / 2)?;
+        let audit_writer = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("audit deadline failed: {error}"))?;
+            for _ in 0..2 {
+                write_frame(&mut writer, &audit, &deadline)
+                    .map_err(|error| format!("audit write failed: {error:?}"))?;
+            }
+            writer
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| format!("audit shutdown failed: {error}"))
+        });
+        let deadline = Deadline::new(Duration::from_secs(5))?;
+        assert_eq!(
+            read_audit_and_receipt(&mut reader, &deadline),
+            Err(ReceiveFailure::Invalid)
+        );
+        audit_writer.join().map_err(|_| "audit writer panicked")??;
         Ok(())
     }
 
@@ -2363,8 +2409,15 @@ mod tests {
     }
 
     fn selector_record(magic: &str) -> TestResult<Vec<u8>> {
+        selector_record_with_payload(magic, 1)
+    }
+
+    fn selector_record_with_payload(magic: &str, payload_bytes: usize) -> TestResult<Vec<u8>> {
         let unsigned = Value::Array(vec![Value::Text(magic.to_owned())]);
-        encode_value(&Value::Array(vec![unsigned, Value::Bytes(vec![1])]))
-            .map_err(|error| format!("{error:?}").into())
+        encode_value(&Value::Array(vec![
+            unsigned,
+            Value::Bytes(vec![1; payload_bytes]),
+        ]))
+        .map_err(|error| format!("{error:?}").into())
     }
 }
