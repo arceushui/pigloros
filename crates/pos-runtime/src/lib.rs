@@ -47,9 +47,9 @@ pub use driver::{
 pub use erasure_authority::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
     ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
-    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
-    ErasureAuthorityTopologyBindingV1, HostConfiguredErasureCoordinatorAuthorityV1,
-    MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES,
+    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityOwnersV1,
+    ErasureAuthorityRequestBindingV1, ErasureAuthorityTopologyBindingV1,
+    HostConfiguredErasureCoordinatorAuthorityV1, MAX_ERASURE_AUTHORITY_EVIDENCE_BYTES,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,

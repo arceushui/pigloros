@@ -217,6 +217,53 @@ impl ErasureAuthorityTopologyBindingV1 {
     }
 }
 
+/// Host-selected owner identity for each inventory category.
+///
+/// This named value prevents configuration from silently exchanging owners
+/// between categories at the host-authority seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureAuthorityOwnersV1 {
+    artifact: ErasureReferenceV1,
+    key: ErasureReferenceV1,
+    replica: ErasureReferenceV1,
+    backup: ErasureReferenceV1,
+}
+
+impl ErasureAuthorityOwnersV1 {
+    /// Validate one distinct owner for every canonical inventory category.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ScopeInvalid`] when an owner is absent or
+    /// assigned to more than one category.
+    pub fn new(
+        artifact: ErasureReferenceV1,
+        key: ErasureReferenceV1,
+        replica: ErasureReferenceV1,
+        backup: ErasureReferenceV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let owners = [artifact, key, replica, backup];
+        let mut distinct = owners;
+        distinct.sort_unstable();
+        (references_present(&owners) && !has_duplicate(&distinct))
+            .then_some(Self {
+                artifact,
+                key,
+                replica,
+                backup,
+            })
+            .ok_or(ErasureErrorV1::ScopeInvalid)
+    }
+
+    const fn for_category(self, category: ErasureInventoryCategoryV1) -> ErasureReferenceV1 {
+        match category {
+            ErasureInventoryCategoryV1::Artifact => self.artifact,
+            ErasureInventoryCategoryV1::Key => self.key,
+            ErasureInventoryCategoryV1::Replica => self.replica,
+            ErasureInventoryCategoryV1::Backup => self.backup,
+        }
+    }
+}
+
 /// Host-selected freeze policy for every category in a frozen target closure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureAuthorityFreezeProfileV1 {
@@ -224,8 +271,8 @@ pub struct ErasureAuthorityFreezeProfileV1 {
     scope_members: Vec<ErasureReferenceV1>,
     /// Canonical target closure admitted by policy.
     targets: Vec<pos_core::ErasureRequiredTargetV1>,
-    /// Owner identity for Artifact, Key, Replica, and Backup categories.
-    owners: [ErasureReferenceV1; 4],
+    /// Owner identity for every canonical inventory category.
+    owners: ErasureAuthorityOwnersV1,
     /// Optional immutable future-Fork lineage rule.
     lineage_rule: Option<ErasureReferenceV1>,
     /// Scope reference assigned to an admitted child Fork.
@@ -237,11 +284,11 @@ impl ErasureAuthorityFreezeProfileV1 {
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::ScopeInvalid`] for an empty, duplicate, or
-    /// zero-valued scope, target, owner, or lineage reference.
+    /// zero-valued scope, target, or lineage reference.
     pub fn new(
         mut scope_members: Vec<ErasureReferenceV1>,
         mut targets: Vec<pos_core::ErasureRequiredTargetV1>,
-        owners: [ErasureReferenceV1; 4],
+        owners: ErasureAuthorityOwnersV1,
         lineage_rule: Option<ErasureReferenceV1>,
         child_scope: ErasureReferenceV1,
     ) -> Result<Self, ErasureErrorV1> {
@@ -250,7 +297,6 @@ impl ErasureAuthorityFreezeProfileV1 {
             || !references_present(&scope_members)
             || targets.is_empty()
             || targets.len() > pos_core::ERASURE_MAX_TARGETS
-            || !references_present(&owners)
             || targets
                 .iter()
                 .any(|target| !target_references_present(*target))
@@ -259,11 +305,8 @@ impl ErasureAuthorityFreezeProfileV1 {
         }
         scope_members.sort_unstable();
         targets.sort_unstable();
-        let mut owner_set = owners.to_vec();
-        owner_set.sort_unstable();
         if has_duplicate(&scope_members)
             || has_duplicate(&targets)
-            || has_duplicate(&owner_set)
             || !reference_present(child_scope)
             || lineage_rule.is_some_and(|rule| !reference_present(rule))
         {
@@ -514,7 +557,7 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
         );
         let mut applicability_matrix = Vec::with_capacity(obligations.capacity());
         for category in ErasureInventoryCategoryV1::CANONICAL {
-            let owner = category_owner(binding.freeze.owners, category);
+            let owner = binding.freeze.owners.for_category(category);
             for (target_index, target) in targets.iter().copied().enumerate() {
                 #[expect(clippy::expect_used, reason = "validated freeze profile")]
                 obligations.push(
@@ -607,7 +650,7 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
                 let candidate = ErasureObligationV1::new(ErasureObligationInputV1 {
                     category,
                     target,
-                    owner: category_owner(binding.freeze.owners, category),
+                    owner: binding.freeze.owners.for_category(category),
                     command_identity: destruction_command_reference(
                         binding.request.reference(),
                         target,
@@ -902,7 +945,7 @@ impl ErasureCoordinatorAuthorityV1 for HostConfiguredErasureCoordinatorAuthority
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
-            (command.owner == category_owner(binding.freeze.owners, command.category))
+            (command.owner == binding.freeze.owners.for_category(command.category))
                 .then_some(())
                 .ok_or(ErasureErrorV1::Unauthorized)?;
             binding
@@ -1031,18 +1074,6 @@ fn target_references_present(target: pos_core::ErasureRequiredTargetV1) -> bool 
 
 fn has_duplicate<T: PartialEq>(values: &[T]) -> bool {
     values.windows(2).any(|pair| pair[0] == pair[1])
-}
-
-const fn category_owner(
-    owners: [ErasureReferenceV1; 4],
-    category: ErasureInventoryCategoryV1,
-) -> ErasureReferenceV1 {
-    match category {
-        ErasureInventoryCategoryV1::Artifact => owners[0],
-        ErasureInventoryCategoryV1::Key => owners[1],
-        ErasureInventoryCategoryV1::Replica => owners[2],
-        ErasureInventoryCategoryV1::Backup => owners[3],
-    }
 }
 
 fn lifecycle_context(

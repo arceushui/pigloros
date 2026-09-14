@@ -18,9 +18,10 @@ use pos_core::{
 use pos_runtime::{
     Ed25519ErasureAuthorityEvidenceVerifierV1, ErasureAuthorityConfigurationV1,
     ErasureAuthorityEvidenceKindV1, ErasureAuthorityEvidenceVerifierV1,
-    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
-    ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
-    ErasureCoordinatorCompositionV1, HostConfiguredErasureCoordinatorAuthorityV1,
+    ErasureAuthorityExecutionV1, ErasureAuthorityFreezeProfileV1, ErasureAuthorityOwnersV1,
+    ErasureAuthorityRequestBindingV1, ErasureAuthorityTopologyBindingV1,
+    ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1,
+    HostConfiguredErasureCoordinatorAuthorityV1,
 };
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -32,6 +33,20 @@ pub mod configured_authority_support;
 
 use configured_authority_support::{TestEvidenceVerifier, TestExecution};
 use erasure_support::{persistence_request, persistence_target, reference, retry_admission};
+
+fn owners(
+    artifact: u8,
+    key: u8,
+    replica: u8,
+    backup: u8,
+) -> Result<ErasureAuthorityOwnersV1, pos_core::ErasureErrorV1> {
+    ErasureAuthorityOwnersV1::new(
+        reference(artifact),
+        reference(key),
+        reference(replica),
+        reference(backup),
+    )
+}
 
 #[derive(Debug)]
 struct RejectingEvidenceVerifier;
@@ -95,7 +110,7 @@ fn authority_with(
     let profile = ErasureAuthorityFreezeProfileV1::new(
         vec![reference(9)],
         vec![target],
-        [reference(21), reference(22), reference(23), reference(24)],
+        owners(21, 22, 23, 24)?,
         Some(reference(25)),
         reference(26),
     )?;
@@ -138,7 +153,7 @@ fn simple_profile(
     Ok(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(9)],
         vec![persistence_target()],
-        [reference(21), reference(22), reference(23), reference(24)],
+        owners(21, 22, 23, 24)?,
         lineage_rule.map(reference),
         reference(child_scope),
     )?)
@@ -657,7 +672,7 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
     assert!(ErasureAuthorityFreezeProfileV1::new(
         Vec::new(),
         vec![target],
-        [reference(1), reference(2), reference(3), reference(4)],
+        owners(1, 2, 3, 4)?,
         None,
         reference(5),
     )
@@ -665,7 +680,7 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![ErasureReferenceV1::from_digest([0; 32])],
         vec![target],
-        [reference(1), reference(2), reference(3), reference(4)],
+        owners(1, 2, 3, 4)?,
         None,
         reference(5),
     )
@@ -675,7 +690,7 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(1)],
         vec![malformed_target],
-        [reference(2), reference(3), reference(4), reference(5)],
+        owners(2, 3, 4, 5)?,
         None,
         reference(6),
     )
@@ -683,7 +698,7 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(1); pos_core::ERASURE_MAX_REFERENCES + 1],
         vec![target],
-        [reference(2), reference(3), reference(4), reference(5)],
+        owners(2, 3, 4, 5)?,
         None,
         reference(6),
     )
@@ -691,7 +706,7 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(1)],
         vec![target; pos_core::ERASURE_MAX_TARGETS + 1],
-        [reference(2), reference(3), reference(4), reference(5)],
+        owners(2, 3, 4, 5)?,
         None,
         reference(6),
     )
@@ -703,7 +718,7 @@ fn configured_authority_rejects_malformed_configuration() -> Result<(), Box<dyn 
         ErasureAuthorityFreezeProfileV1::new(
             vec![reference(9)],
             vec![target],
-            [reference(21), reference(22), reference(23), reference(24)],
+            owners(21, 22, 23, 24)?,
             Some(reference(25)),
             reference(26),
         )?,
@@ -729,7 +744,7 @@ fn configured_authority_rejects_profile_binding_and_configuration_duplicates(
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(1), reference(1)],
         vec![target],
-        [reference(2), reference(3), reference(4), reference(5)],
+        owners(2, 3, 4, 5)?,
         Some(reference(6)),
         reference(7),
     )
@@ -737,23 +752,26 @@ fn configured_authority_rejects_profile_binding_and_configuration_duplicates(
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(1)],
         vec![target, target],
-        [reference(2), reference(3), reference(4), reference(5)],
+        owners(2, 3, 4, 5)?,
         Some(reference(6)),
         reference(7),
+    )
+    .is_err());
+    assert!(
+        ErasureAuthorityOwnersV1::new(reference(2), reference(2), reference(2), reference(2),)
+            .is_err()
+    );
+    assert!(ErasureAuthorityOwnersV1::new(
+        ErasureReferenceV1::from_digest([0; 32]),
+        reference(3),
+        reference(4),
+        reference(5),
     )
     .is_err());
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(1)],
         vec![target],
-        [reference(2); 4],
-        Some(reference(6)),
-        reference(7),
-    )
-    .is_err());
-    assert!(ErasureAuthorityFreezeProfileV1::new(
-        vec![reference(1)],
-        vec![target],
-        [reference(2), reference(3), reference(4), reference(5)],
+        owners(2, 3, 4, 5)?,
         Some(ErasureReferenceV1::from_digest([0; 32])),
         reference(7),
     )
@@ -761,7 +779,7 @@ fn configured_authority_rejects_profile_binding_and_configuration_duplicates(
     assert!(ErasureAuthorityFreezeProfileV1::new(
         vec![reference(1)],
         vec![target],
-        [reference(2), reference(3), reference(4), reference(5)],
+        owners(2, 3, 4, 5)?,
         Some(reference(6)),
         ErasureReferenceV1::from_digest([0; 32]),
     )

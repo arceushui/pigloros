@@ -27,7 +27,7 @@ use pos_core::{
 };
 use pos_runtime::{
     ClosedErasureCoordinatorAuthorityV1, ErasureAuthorityConfigurationV1,
-    ErasureAuthorityFreezeProfileV1, ErasureAuthorityRequestBindingV1,
+    ErasureAuthorityFreezeProfileV1, ErasureAuthorityOwnersV1, ErasureAuthorityRequestBindingV1,
     ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
     HostConfiguredErasureCoordinatorAuthorityV1,
@@ -173,7 +173,7 @@ fn configured_fork_authority(
     let profile = ErasureAuthorityFreezeProfileV1::new(
         vec![reference(9)],
         vec![persistence_target()],
-        [reference(21), reference(22), reference(23), reference(24)],
+        ErasureAuthorityOwnersV1::new(reference(21), reference(22), reference(23), reference(24))?,
         Some(lineage_rule),
         reference(19),
     )?;
@@ -1563,6 +1563,26 @@ fn assert_configured_nonempty_recovery(
     )?;
     assert_eq!(writable_recovery.status(), ErasureHostStatusV1::Ready);
     drop(writable_recovery);
+    let denied_composition = test_stage(
+        "construct denied configured recovery composition",
+        ErasureCoordinatorCompositionV1::from_host_configuration(
+            configured_authority.configuration().clone(),
+            Arc::new(ExactRecoveryEvidenceVerifier {
+                expected: b"untrusted-recovery-evidence".to_vec(),
+            }),
+            Arc::new(TestExecution),
+            reference(30),
+        ),
+    )?;
+    assert!(
+        ErasureExecutionHostV1::open_read_only_with_authority(
+            path,
+            &denied_composition,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .is_err(),
+        "non-empty recovery must fail closed when configured evidence is denied"
+    );
     let mut recovered = test_stage(
         "reopen persistent configured coordinator host",
         ErasureExecutionHostV1::open_read_only_with_authority(
