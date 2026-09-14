@@ -87,7 +87,7 @@ pub use sandbox_provider_contract::{
     ReceiptAuthorityV1, RequestAuthorityV1, SandboxArchitectureV1, SandboxCancelRequestV1,
     SandboxCancelResponseV1, SandboxCancelResultV1, SandboxContractErrorV1,
     SandboxDescribeRequestV1, SandboxDescribeResponseV1, SandboxExecuteRequestV1, SandboxLimitV1,
-    SandboxLocalErrorCodeV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
+    SandboxLocalErrorCodeV1, SandboxLocalErrorPhaseV1, SandboxLocalErrorV1, SandboxPayloadChunkV1,
     SandboxProviderErrorCodeV1, SandboxProviderErrorV1, SandboxProviderManifestV1,
     SandboxProviderOperationV1, SandboxProviderReceiptV1, SandboxProviderResultV1,
     SandboxReconcileRequestV1, SandboxReconcileResponseV1, SandboxSyscallSetV1,

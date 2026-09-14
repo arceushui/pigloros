@@ -3,18 +3,52 @@
 //! This module deliberately does not depend on `pos-conformance`. It gives the
 //! reference evaluator a second implementation of the public wire contract.
 
+mod admission;
+mod audit;
 mod authority;
 mod codec;
 mod execution;
 mod operations;
 mod policy;
 mod revocation;
+mod revocation_update;
 mod trust;
+
+/// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.
+pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
+    "broker-lifecycle",
+    "cgroup-kill",
+    "cgroup-v2-cpu",
+    "cgroup-v2-memory",
+    "cgroup-v2-pids",
+    "ipc-namespace",
+    "limit-observation",
+    "managed-attempt-exec",
+    "mount-namespace",
+    "network-namespace",
+    "nftables-atomic",
+    "pid-namespace",
+    "process-isolation-controls",
+    "signed-root-image",
+    "user-namespace",
+    "uts-namespace",
+];
 
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
+pub use revocation_update::{
+    RevocationAcknowledgement, RevocationUpdateRequest, SandboxRevocationUpdateError,
+    SelectorRevocationState,
+};
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
+pub use admission::{
+    AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
+    AuthenticatedSandboxProviderReceipt, AuthenticatedSandboxProviderResult, HostCapabilityProfile,
+    HostFeatureProof, ProviderConformanceReport, SandboxAdmissionError,
+    SandboxProviderAdmissionInputs, SelectorGrantCommitment,
+};
+pub use audit::SandboxAuditRecord;
 pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
@@ -29,7 +63,8 @@ pub use execution::{
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,
     SandboxDescribeRequest, SandboxDescribeResponse, SandboxLocalError, SandboxLocalErrorCode,
-    SandboxProviderOperation, SandboxReconcileRequest, SandboxReconcileResponse,
+    SandboxLocalErrorPhase, SandboxProviderOperation, SandboxReconcileRequest,
+    SandboxReconcileResponse,
 };
 
 /// Closed failures produced before a provider operation is trusted.
