@@ -161,7 +161,10 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -208,7 +211,10 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -263,7 +269,11 @@ jobs:
       - ci_change_scope
       - conformance-fixtures
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.conformance-fixtures.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -575,7 +585,10 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -607,7 +620,10 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -623,7 +639,10 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     permissions:
       actions: read
       contents: read
@@ -807,7 +826,10 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -843,7 +865,10 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -866,7 +891,10 @@ jobs:
     needs:
       - ci_change_scope
       - world-client-wasm
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    if: >-
+      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      needs.world-client-wasm.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

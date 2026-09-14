@@ -150,8 +150,11 @@ class RustScopePolicyTests(unittest.TestCase):
         self.assertIn("ci_change_scope", materialization["needs"])
         self.assertEqual(
             materialization["if"],
-            "${{ needs.ci_change_scope.outputs.rust == 'true' || "
-            "github.event_name != 'pull_request' }}",
+            "${{ always() && needs.ci_change_scope.result == 'success' && "
+            "needs.conformance-fixtures.result == 'success' && "
+            "needs.cargo-crap.result == 'success' && "
+            "(needs.ci_change_scope.outputs.rust == 'true' || "
+            "github.event_name != 'pull_request') }}",
         )
 
 

@@ -40,6 +40,21 @@ ANALYZE_COMMAND = (
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
 )
+STAGED_MAIN_JOBS = {
+    "rustdoc": ["ci_change_scope", "cargo-crap"],
+    "reference-evaluator-release": ["ci_change_scope", "cargo-crap"],
+    "materialize-conformance-bundles": [
+        "ci_change_scope",
+        "conformance-fixtures",
+        "cargo-crap",
+    ],
+    "audit": ["ci_change_scope", "cargo-crap"],
+    "geiger": ["ci_change_scope", "cargo-crap"],
+    "codeql": ["ci_change_scope", "cargo-crap"],
+    "docker-build": ["ci_change_scope", "cargo-crap"],
+    "world-client-wasm": ["ci_change_scope", "cargo-crap"],
+    "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
+}
 
 
 class PolicyError(RuntimeError):
@@ -57,6 +72,28 @@ def named_step(steps: list[object], name: str) -> dict:
     ]
     require(len(matches) == 1, f"expected exactly one {name!r} step")
     return matches[0]
+
+
+def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
+    job = jobs.get(name)
+    require(isinstance(job, dict), f"missing staged main job {name!r}")
+    require(job.get("needs") == needs, f"{name} direct dependencies changed")
+    condition = job.get("if")
+    require(isinstance(condition, str), f"{name} must have a job condition")
+    require(
+        condition.startswith("${{ always() && "),
+        f"{name} must opt into evaluation after optional skipped ancestors",
+    )
+    for dependency in needs:
+        require(
+            f"needs.{dependency}.result == 'success'" in condition,
+            f"{name} must require successful {dependency}",
+        )
+    require(
+        "needs.ci_change_scope.outputs.rust == 'true' || "
+        "github.event_name != 'pull_request'" in condition,
+        f"{name} must retain Rust-scope filtering",
+    )
 
 
 def check_baseline_resolver(path: pathlib.Path | None = None) -> None:
@@ -337,6 +374,9 @@ def check_workflow(
         "CARGO_CRAP_RESULT" in verdict.get("run", ""),
         "standard-gate must reject a non-success cargo-crap result",
     )
+
+    for name, needs in STAGED_MAIN_JOBS.items():
+        check_staged_main_job(jobs, name, needs)
 
 
 def main() -> int:

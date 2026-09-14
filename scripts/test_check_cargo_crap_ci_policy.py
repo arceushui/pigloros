@@ -354,6 +354,27 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_staged_main_jobs_ignore_accepted_skipped_ancestors(self) -> None:
+        for job_name in CHECKER.STAGED_MAIN_JOBS:
+            with self.subTest(job=job_name):
+                def remove_always(workflow, *, job_name=job_name):
+                    workflow["jobs"][job_name]["if"] = workflow["jobs"][job_name][
+                        "if"
+                    ].replace("always() && ", "")
+
+                self.assert_rejected(remove_always)
+
+    def test_staged_main_jobs_require_successful_direct_dependencies(self) -> None:
+        for job_name, needs in CHECKER.STAGED_MAIN_JOBS.items():
+            with self.subTest(job=job_name):
+                def remove_dependency_result(workflow, *, job_name=job_name, needs=needs):
+                    dependency = needs[-1]
+                    workflow["jobs"][job_name]["if"] = workflow["jobs"][job_name][
+                        "if"
+                    ].replace(f"needs.{dependency}.result == 'success' && ", "")
+
+                self.assert_rejected(remove_dependency_result)
+
     def test_requires_successful_coverage_for_cargo_crap(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["cargo-crap"].update(
