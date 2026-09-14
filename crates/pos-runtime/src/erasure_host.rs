@@ -1091,27 +1091,6 @@ impl ErasureExecutionHostV1 {
         Self::open_with_authority(config, &composition, maximum_requests)
     }
 
-    /// Open one store through the production recovery boundary.
-    ///
-    /// `Some` installs the complete coordinator-backed inventory. `None` is
-    /// retained as a compatibility path for a positively proven empty
-    /// inventory only; production roots must call
-    /// [`Self::open_with_authority`] and pass an explicit composition.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_with_recovery(
-        config: StoreConfig,
-        composition: Option<&ErasureCoordinatorCompositionV1>,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        let Some(composition) = composition else {
-            return Self::recover_verified_empty(store, maximum_requests);
-        };
-        Self::recover_with_composition(store, composition, maximum_requests)
-    }
-
     /// Open one store with an explicit authority composition.
     ///
     /// This is the required production composition-root entry point. The
@@ -1159,25 +1138,6 @@ impl ErasureExecutionHostV1 {
         Self::open_read_only_with_authority(path, &composition, maximum_requests)
     }
 
-    /// Open one read-only `SQLite` store through the production recovery
-    /// boundary. A closed composition is limited to a proven-empty store.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_read_only_with_recovery(
-        path: &str,
-        composition: Option<&ErasureCoordinatorCompositionV1>,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
-            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        let Some(composition) = composition else {
-            return Self::recover_verified_empty(store, maximum_requests);
-        };
-        Self::recover_with_composition(store, composition, maximum_requests)
-    }
-
     /// Open one read-only `SQLite` store with an explicit authority
     /// composition. Production roots must use this entry point.
     ///
@@ -1223,24 +1183,6 @@ impl ErasureExecutionHostV1 {
         let composition = ErasureCoordinatorCompositionV1::new(authority, coordinator)
             .map_err(map_erasure_error)?;
         Self::open_gateway_with_authority(config, &composition, maximum_requests)
-    }
-
-    /// Open one Gateway-capable store through the production recovery
-    /// boundary. A closed composition is limited to a proven-empty store.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_gateway_with_recovery(
-        config: StoreConfig,
-        composition: Option<&ErasureCoordinatorCompositionV1>,
-        maximum_requests: usize,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        let store =
-            open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        let Some(composition) = composition else {
-            return Self::recover_verified_empty_gateway(store, maximum_requests);
-        };
-        Self::recover_gateway_with_composition(store, composition, maximum_requests)
     }
 
     /// Open one Gateway-capable store with an explicit authority composition.

@@ -48,10 +48,10 @@ struct HostedLedgerStore {
 impl HostedLedgerStore {
     fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
-        Self::open_with_recovery(config, &composition)
+        Self::open_with_authority(config, &composition)
     }
 
-    fn open_with_recovery(
+    fn open_with_authority(
         config: pos_store::StoreConfig,
         composition: &pos_runtime::ErasureCoordinatorCompositionV1,
     ) -> Result<Self, pos_core::ErasureHostErrorV1> {
@@ -65,10 +65,10 @@ impl HostedLedgerStore {
 
     fn open_read_only(path: &str) -> Result<Self, pos_core::ErasureHostErrorV1> {
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
-        Self::open_read_only_with_recovery(path, &composition)
+        Self::open_read_only_with_authority(path, &composition)
     }
 
-    fn open_read_only_with_recovery(
+    fn open_read_only_with_authority(
         path: &str,
         composition: &pos_runtime::ErasureCoordinatorCompositionV1,
     ) -> Result<Self, pos_core::ErasureHostErrorV1> {

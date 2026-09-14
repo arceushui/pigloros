@@ -10,10 +10,10 @@ struct HostedCliStore {
 impl HostedCliStore {
     fn open(config: pos_store::StoreConfig) -> Result<Self, pos_core::ErasureHostErrorV1> {
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed();
-        Self::open_with_recovery(config, &composition)
+        Self::open_with_authority(config, &composition)
     }
 
-    fn open_with_recovery(
+    fn open_with_authority(
         config: pos_store::StoreConfig,
         composition: &pos_runtime::ErasureCoordinatorCompositionV1,
     ) -> Result<Self, pos_core::ErasureHostErrorV1> {

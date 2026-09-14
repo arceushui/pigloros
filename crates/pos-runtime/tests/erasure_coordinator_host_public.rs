@@ -1733,9 +1733,9 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
     let composition = ErasureCoordinatorCompositionV1::closed();
     let host = test_stage(
         "open explicitly closed composition",
-        ErasureExecutionHostV1::open_with_recovery(
+        ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Memory,
-            Some(&composition),
+            &composition,
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
@@ -1999,33 +1999,31 @@ fn closed_authority_rejects_receipt_and_administrative_operations(
 }
 
 #[test]
-fn compatibility_recovery_without_composition_remains_empty_only(
+fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host = test_stage(
-        "open compatibility host",
-        ErasureExecutionHostV1::open_with_recovery(
+        "open verified-empty host",
+        ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            None,
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
 
     let gateway_host = test_stage(
-        "open compatibility gateway host",
-        ErasureExecutionHostV1::open_gateway_with_recovery(
+        "open verified-empty gateway host",
+        ErasureExecutionHostV1::open_gateway_verified_empty(
             StoreConfig::Memory,
-            None,
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
     assert_eq!(gateway_host.status(), ErasureHostStatusV1::Ready);
     let composition = ErasureCoordinatorCompositionV1::closed();
     let composed_gateway_host = test_stage(
-        "open composed compatibility gateway host",
-        ErasureExecutionHostV1::open_gateway_with_recovery(
+        "open explicit composed gateway host",
+        ErasureExecutionHostV1::open_gateway_with_authority(
             StoreConfig::Memory,
-            Some(&composition),
+            &composition,
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
@@ -2055,19 +2053,10 @@ fn compatibility_recovery_without_composition_remains_empty_only(
     )?;
     assert_eq!(legacy_read_only_host.status(), ErasureHostStatusV1::Ready);
     let read_only_host = test_stage(
-        "open compatibility read-only host",
-        ErasureExecutionHostV1::open_read_only_with_recovery(
+        "open explicit composed read-only host",
+        ErasureExecutionHostV1::open_read_only_with_authority(
             &path_text,
-            None,
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-    )?;
-    assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
-    let composed_read_only_host = test_stage(
-        "open composed compatibility read-only host",
-        ErasureExecutionHostV1::open_read_only_with_recovery(
-            &path_text,
-            Some(&composition),
+            &composition,
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
@@ -2087,20 +2076,18 @@ fn recovery_entrypoints_map_store_open_failures_to_adapter_failure() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        ErasureExecutionHostV1::open_with_recovery(
+        ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Sqlite {
                 path: missing_path.clone(),
             },
-            None,
             ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .map(|_| ()),
         Err(ErasureHostErrorV1::AdapterFailure)
     );
     assert_eq!(
-        ErasureExecutionHostV1::open_gateway_with_recovery(
+        ErasureExecutionHostV1::open_gateway_verified_empty(
             StoreConfig::Sqlite { path: missing_path },
-            None,
             ERASURE_MAX_INVENTORY_REQUESTS,
         )
         .map(|_| ()),
