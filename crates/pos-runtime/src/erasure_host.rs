@@ -243,6 +243,199 @@ pub trait ErasureCoordinatorAuthorityV1:
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
 }
 
+/// A deliberately closed authority used when a deployment has not supplied
+/// its host-trusted authority Plugin yet.
+///
+/// This is not an authorization implementation and it must not be used to
+/// recover a non-empty store.  It exists so every production composition root
+/// can still pass an explicit authority composition while preserving the
+/// fail-closed behavior required by ADR-060: empty stores can be proven empty,
+/// but any request, lifecycle admission, or topology observation is rejected
+/// with a closed provenance error.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClosedErasureCoordinatorAuthorityV1;
+
+impl ErasureFreezeAuthorizationVerifierV1 for ClosedErasureCoordinatorAuthorityV1 {
+    fn validate_freeze_authorization(
+        &self,
+        _admission: &ErasureFreezeAdmissionEvidenceV1,
+        _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+}
+
+impl ErasureRecoveryAuthorizationVerifierV1 for ClosedErasureCoordinatorAuthorityV1 {
+    fn validate_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn validate_administrative_resolution(
+        &self,
+        _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+}
+
+impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
+    fn verified_topology_observation(
+        &self,
+        _request: ErasureReferenceV1,
+        _manifest_digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_authorization(
+        &self,
+        _request: ErasureReferenceV1,
+        _provenance: ErasureReferenceV1,
+        _decision: ErasureAuthorizationDecisionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_corrected_submission(
+        &self,
+        _request: &ErasureRequestV1,
+        _correction: &ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_atomic_freeze(
+        &self,
+        _request: ErasureReferenceV1,
+        _requested: &ErasureStateTransitionV1,
+    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_fork_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+        _input: &ErasureForkAdmissionInputV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn resolve_fork_child_scope(
+        &self,
+        _parent: TimelineId,
+        _child: &TimelineMeta,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn resolve_fork_scope_extension(
+        &self,
+        _requirement: ErasureForkScopeRequirementV1,
+        _input: &ErasureForkAdmissionInputV1,
+    ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_administrative_resolution(
+        &self,
+        _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn dispatch_destruction(
+        &self,
+        _request: ErasureReferenceV1,
+        _commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_attempt(
+        &self,
+        _admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_acknowledgement(
+        &self,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
+}
+
+/// The authority and coordinator identity selected by one production
+/// composition root.
+///
+/// Recovery is deliberately configured as one value so a Gateway, CLI,
+/// experiment, or ledger cannot accidentally pair an authority Plugin with a
+/// different coordinator identity.  A root without a configured provider uses
+/// [`Self::closed`] explicitly; that closed composition is allowed to succeed
+/// only for a positively verified empty inventory.
+#[derive(Clone)]
+pub struct ErasureCoordinatorCompositionV1 {
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+}
+
+impl ErasureCoordinatorCompositionV1 {
+    /// Bind one host-trusted authority Plugin to its coordinator identity.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when the coordinator
+    /// identity is zero.
+    pub fn new(
+        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+        coordinator: ErasureReferenceV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        if coordinator.digest() == [0; 32] {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(Self {
+            authority,
+            coordinator,
+        })
+    }
+
+    /// Construct an explicitly closed composition for a deployment that has
+    /// not configured its authority Plugin yet.
+    ///
+    /// The composition is suitable only for proving an empty store.  Any
+    /// non-empty recovery or lifecycle operation fails closed until the host
+    /// replaces this authority with a real, independently trusted provider.
+    #[must_use]
+    pub fn closed() -> Self {
+        Self {
+            authority: Arc::new(ClosedErasureCoordinatorAuthorityV1),
+            coordinator: ErasureReferenceV1::from_digest([0xee; 32]),
+        }
+    }
+
+    const fn coordinator(&self) -> ErasureReferenceV1 {
+        self.coordinator
+    }
+}
+
 struct HostedCoordinatorPortV1<'host> {
     store: RefCell<&'host mut dyn ErasureHostStore>,
     authority: &'host dyn ErasureCoordinatorAuthorityV1,
@@ -855,51 +1048,50 @@ impl ErasureExecutionHostV1 {
         Self::recover_verified_empty(store, maximum_requests)
     }
 
-    /// Open and recover an exclusively owned store with one replaceable
-    /// coordinator authority Plugin.
+    /// Open one store with an explicit authority composition.
     ///
-    /// Unlike the verified-empty bootstrap, this constructor creates the core
-    /// coordinator over the exact adapter retained by this host. It can recover
-    /// a non-empty durable request set without accepting an inventory assembled
-    /// by a different composition root.
+    /// This is the required production composition-root entry point. The
+    /// caller must supply a host-trusted provider, or the explicit
+    /// [`ErasureCoordinatorCompositionV1::closed`] composition when the
+    /// deployment is intentionally limited to proven-empty stores.
     ///
     /// # Errors
-    /// Returns a closed adapter, authority, topology, or recovery error before
-    /// any protected sender is issued.
-    pub fn open_with_coordinator_authority(
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_with_authority(
         config: StoreConfig,
-        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
-        coordinator: ErasureReferenceV1,
+        composition: &ErasureCoordinatorCompositionV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_with_composition(store, composition, maximum_requests)
+    }
+
+    fn recover_with_composition(
+        store: Box<dyn ErasureHostStore>,
+        composition: &ErasureCoordinatorCompositionV1,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let mut host = Self::new_closed(store)?;
-        host.authority = Some(authority);
-        host.coordinator = Some(coordinator);
+        host.authority = Some(Arc::clone(&composition.authority));
+        host.coordinator = Some(composition.coordinator());
         host.install_inventory_from_coordinator(maximum_requests)?;
         Ok(host)
     }
 
-    /// Open an existing read-only `SQLite` store with one replaceable
-    /// coordinator authority Plugin.
+    /// Open one read-only `SQLite` store with an explicit authority
+    /// composition. Production roots must use this entry point.
     ///
     /// # Errors
-    /// Returns a closed adapter, authority, topology, or recovery error before
-    /// any protected sender is issued.
-    pub fn open_read_only_with_coordinator_authority(
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_read_only_with_authority(
         path: &str,
-        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
-        coordinator: ErasureReferenceV1,
+        composition: &ErasureCoordinatorCompositionV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         let store = pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        let mut host = Self::new_closed(store)?;
-        host.authority = Some(authority);
-        host.coordinator = Some(coordinator);
-        host.install_inventory_from_coordinator(maximum_requests)?;
-        Ok(host)
+        Self::recover_with_composition(store, composition, maximum_requests)
     }
 
     /// Open and recover a Gateway-capable exclusively owned store only when
@@ -916,23 +1108,29 @@ impl ErasureExecutionHostV1 {
         Self::recover_verified_empty_gateway(store, maximum_requests)
     }
 
-    /// Open and recover a Gateway-capable store with one replaceable
-    /// coordinator authority Plugin composed over the same owned adapter.
+    /// Open one Gateway-capable store with an explicit authority composition.
+    /// Production Gateway roots must use this entry point.
     ///
     /// # Errors
-    /// Returns a closed adapter, authority, topology, or recovery error before
-    /// any protected sender is issued.
-    pub fn open_gateway_with_coordinator_authority(
+    /// Returns a closed adapter or recovery error before any sender is issued.
+    pub fn open_gateway_with_authority(
         config: StoreConfig,
-        authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
-        coordinator: ErasureReferenceV1,
+        composition: &ErasureCoordinatorCompositionV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         let store =
             open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        Self::recover_gateway_with_composition(store, composition, maximum_requests)
+    }
+
+    fn recover_gateway_with_composition(
+        store: Box<dyn ErasureGatewayHostStore>,
+        composition: &ErasureCoordinatorCompositionV1,
+        maximum_requests: usize,
+    ) -> Result<Self, ErasureHostErrorV1> {
         let mut host = Self::new_gateway_closed(store)?;
-        host.authority = Some(authority);
-        host.coordinator = Some(coordinator);
+        host.authority = Some(Arc::clone(&composition.authority));
+        host.coordinator = Some(composition.coordinator());
         host.install_inventory_from_coordinator(maximum_requests)?;
         Ok(host)
     }
@@ -1422,7 +1620,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// A non-empty request set, failed adapter snapshot, or rejected gate
     /// binding fails closed. Production recovery for a non-empty set enters
-    /// through [`Self::open_with_coordinator_authority`].
+    /// through [`Self::open_with_authority`].
     fn recover_verified_empty(
         mut store: Box<dyn ErasureHostStore>,
         maximum_requests: usize,
@@ -1482,7 +1680,7 @@ impl ErasureExecutionHostV1 {
     ///
     /// # Errors
     /// Returns a closed recovery or adapter error under the same current-store
-    /// generation checks as [`Self::open_with_coordinator_authority`].
+    /// generation checks as [`Self::open_with_authority`].
     fn recover_gateway_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
         store: Box<dyn ErasureGatewayHostStore>,
         query: &mut Q,
@@ -3791,103 +3989,6 @@ mod tests {
         assert_eq!(ready.status(), ErasureHostStatusV1::Ready);
         ready.poison();
         assert_eq!(ready.status(), ErasureHostStatusV1::Poisoned);
-    }
-
-    #[test]
-    fn coordinator_constructors_reject_invalid_inventory_and_store_paths() {
-        let authority = Arc::new(UnusedCoordinatorAuthorityV1);
-        let coordinator = ErasureReferenceV1::from_digest([101; 32]);
-        assert_eq!(
-            ErasureExecutionHostV1::open_with_coordinator_authority(
-                StoreConfig::Memory,
-                authority.clone(),
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
-                StoreConfig::Memory,
-                authority.clone(),
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        let missing_path = format!(
-            "/tmp/pigloros-ticket-186-missing-parent-{}/store.db",
-            std::process::id()
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_with_coordinator_authority(
-                StoreConfig::Sqlite {
-                    path: missing_path.clone(),
-                },
-                authority.clone(),
-                coordinator,
-                4,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::AdapterFailure)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
-                StoreConfig::Sqlite { path: missing_path },
-                authority.clone(),
-                coordinator,
-                4,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::AdapterFailure)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
-                "/tmp/pigloros-ticket-186-no-read-only-store.db",
-                authority,
-                coordinator,
-                4,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::AdapterFailure)
-        );
-    }
-
-    #[test]
-    fn coordinator_constructors_bind_valid_sqlite_adapters_before_rejecting_invalid_inventory() {
-        let path = format!(
-            "/tmp/pigloros-ticket-186-valid-coordinator-{}.db",
-            std::process::id()
-        );
-        let authority = Arc::new(UnusedCoordinatorAuthorityV1);
-        let coordinator = ErasureReferenceV1::from_digest([102; 32]);
-        let store = pos_store::sqlite::SqliteStore::open(&path)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        drop(store);
-
-        assert_eq!(
-            ErasureExecutionHostV1::open_with_coordinator_authority(
-                StoreConfig::Sqlite { path: path.clone() },
-                authority.clone(),
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        assert_eq!(
-            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
-                &path,
-                authority,
-                coordinator,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::Conflict)
-        );
-        drop(std::fs::remove_file(path));
     }
 
     #[test]

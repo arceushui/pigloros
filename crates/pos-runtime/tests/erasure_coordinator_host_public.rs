@@ -7,8 +7,9 @@ use std::sync::{
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
-    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionV1,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
+    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
     ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
     ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceInputV1,
@@ -24,7 +25,10 @@ use pos_core::{
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
     ErasureVerifiedTopologyObservationV1, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
-use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
+use pos_runtime::{
+    ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
+};
 use pos_store::StoreConfig;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
@@ -34,6 +38,79 @@ use erasure_support::{
     freeze_evidence_fixture, obligation, persistence_request, persistence_target, reference,
     retry_admission, FreezeEvidenceFixtureInput, RetryAdmissionFixture,
 };
+
+fn authority_composition(
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+) -> Result<ErasureCoordinatorCompositionV1, ErasureHostErrorV1> {
+    ErasureCoordinatorCompositionV1::new(authority, coordinator)
+        .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)
+}
+
+fn open_with_authority(
+    config: StoreConfig,
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
+) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
+    let composition = authority_composition(authority, coordinator)?;
+    ErasureExecutionHostV1::open_with_authority(config, &composition, maximum_requests)
+}
+
+fn open_read_only_with_authority(
+    path: &str,
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
+) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
+    let composition = authority_composition(authority, coordinator)?;
+    ErasureExecutionHostV1::open_read_only_with_authority(path, &composition, maximum_requests)
+}
+
+fn open_gateway_with_authority(
+    config: StoreConfig,
+    authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
+    coordinator: ErasureReferenceV1,
+    maximum_requests: usize,
+) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
+    let composition = authority_composition(authority, coordinator)?;
+    ErasureExecutionHostV1::open_gateway_with_authority(config, &composition, maximum_requests)
+}
+
+#[test]
+fn coordinator_composition_rejects_zero_identity_at_every_public_entry() {
+    let zero = ErasureReferenceV1::from_digest([0; 32]);
+    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+    assert!(matches!(
+        ErasureCoordinatorCompositionV1::new(Arc::clone(&authority), zero),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    ));
+    for result in [
+        open_with_authority(
+            StoreConfig::Memory,
+            Arc::clone(&authority),
+            zero,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        open_read_only_with_authority(
+            "unused.db",
+            Arc::clone(&authority),
+            zero,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        open_gateway_with_authority(
+            StoreConfig::Memory,
+            Arc::clone(&authority),
+            zero,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    ] {
+        assert!(matches!(
+            result,
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        ));
+    }
+}
 
 #[derive(Default)]
 struct TestAuthority {
@@ -50,6 +127,7 @@ struct TestAuthority {
     allow_ack: AtomicBool,
     allow_receipt: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
+    use_closed_scope_resolution: AtomicBool,
 }
 
 impl TestAuthority {
@@ -250,6 +328,10 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+        if self.use_closed_scope_resolution.load(Ordering::Acquire) {
+            return ClosedErasureCoordinatorAuthorityV1
+                .resolve_fork_scope_extension(requirement, input);
+        }
         if self.fail_fork_scope_extension.load(Ordering::Acquire) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -492,12 +574,26 @@ fn test_stage<T, E: std::fmt::Debug>(
     result.map_err(|error| std::io::Error::other(format!("{stage}: {error:?}")).into())
 }
 
+fn assert_recovered_fork_is_frozen(
+    host: &mut ErasureExecutionHostV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reads = test_stage("open recovered persistent read sender", host.read_sender())?;
+    assert_eq!(
+        reads.timeline(parent),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
+    Ok(())
+}
+
 fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open coordinator host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             config,
             authority_plugin,
             reference(30),
@@ -587,7 +683,7 @@ fn memory_host_completes_post_freeze_lifecycle_through_public_sender(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open lifecycle host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -677,7 +773,7 @@ fn delivery_denial_keeps_the_durable_attempt_retryable_without_poisoning_host(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open retryable-denial host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -757,7 +853,7 @@ fn public_sender_reaches_rejected_lifecycle_before_containment(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open rejected-lifecycle host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -794,7 +890,7 @@ fn public_sender_reaches_corrected_submission_after_rejection(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open corrected-submission host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -859,7 +955,7 @@ fn public_read_sender_reports_missing_request_and_missing_authority(
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
         "open read-contract host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority,
             reference(30),
@@ -896,7 +992,7 @@ fn public_sender_reaches_administrative_resolution() -> Result<(), Box<dyn std::
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open resolution host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -984,7 +1080,7 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open partial-failure host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::SqliteInMemory,
             authority_plugin,
             reference(30),
@@ -1051,7 +1147,7 @@ fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open fork failure host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -1083,7 +1179,7 @@ fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
         commands.freeze_access(request_reference, &freeze_transition()),
     )?;
     authority
-        .fail_fork_scope_extension
+        .use_closed_scope_resolution
         .store(true, Ordering::Release);
 
     assert_eq!(
@@ -1117,7 +1213,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
         let mut host = test_stage(
             "open persistent coordinator host",
-            ErasureExecutionHostV1::open_with_coordinator_authority(
+            open_with_authority(
                 StoreConfig::Sqlite {
                     path: path_text.clone(),
                 },
@@ -1126,61 +1222,61 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                 ERASURE_MAX_INVENTORY_REQUESTS,
             ),
         )?;
-        let mut commands = test_stage("open persistent command sender", host.command_sender())?;
-        let parent = test_stage(
-            "create persistent parent",
-            commands.create_timeline("restart-parent"),
-        )?;
-        test_stage(
-            "publish persistent authority topology",
-            authority.set_timeline(parent.id()),
-        )?;
-        let request = test_stage("construct persistent request", persistence_request())?;
-        let request_reference = request.reference();
-        let request_provenance = request.provenance();
-        test_stage(
-            "submit persistent request",
-            commands.submit_erasure_request(request, request_provenance),
-        )?;
-        test_stage(
-            "authorize persistent request",
-            commands.authorize_erasure_request(request_reference, reference(32)),
-        )?;
-        test_stage(
-            "freeze persistent request",
-            commands.freeze_access(request_reference, &freeze_transition()),
-        )?;
-        let child = test_stage(
-            "fork persistent frozen timeline",
-            commands.fork_timeline_identified(
-                reference(41),
-                parent.id(),
-                pos_core::Seq::ZERO,
-                "restart-child",
-            ),
-        )?;
-        (parent.id(), child.id())
+        let (parent, child) = {
+            let mut commands = test_stage("open persistent command sender", host.command_sender())?;
+            let parent = test_stage(
+                "create persistent parent",
+                commands.create_timeline("restart-parent"),
+            )?;
+            test_stage(
+                "publish persistent authority topology",
+                authority.set_timeline(parent.id()),
+            )?;
+            let request = test_stage("construct persistent request", persistence_request())?;
+            let request_reference = request.reference();
+            let request_provenance = request.provenance();
+            test_stage(
+                "submit persistent request",
+                commands.submit_erasure_request(request, request_provenance),
+            )?;
+            test_stage(
+                "authorize persistent request",
+                commands.authorize_erasure_request(request_reference, reference(32)),
+            )?;
+            test_stage(
+                "freeze persistent request",
+                commands.freeze_access(request_reference, &freeze_transition()),
+            )?;
+            let child = test_stage(
+                "fork persistent frozen timeline",
+                commands.fork_timeline_identified(
+                    reference(41),
+                    parent.id(),
+                    pos_core::Seq::ZERO,
+                    "restart-child",
+                ),
+            )?;
+            (parent.id(), child.id())
+        };
+        (parent, child)
     };
-    {
-        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-        let mut recovered = test_stage(
-            "reopen persistent coordinator host",
-            ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
-                &path_text,
-                authority_plugin,
-                reference(30),
-                ERASURE_MAX_INVENTORY_REQUESTS,
-            ),
-        )?;
-        let mut reads = test_stage("open recovered read sender", recovered.read_sender())?;
-        assert_eq!(
-            reads.timeline(parent),
-            Err(ErasureHostErrorV1::AccessFrozen)
-        );
-        assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
-    }
+    let mut original_authority_recovery = test_stage(
+        "reopen persistent coordinator host with the original authority",
+        open_read_only_with_authority(
+            &path_text,
+            authority.clone(),
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(
+        original_authority_recovery.status(),
+        ErasureHostStatusV1::Ready
+    );
+    assert_recovered_fork_is_frozen(&mut original_authority_recovery, parent, child)?;
+    drop(original_authority_recovery);
     authority.deny_topology.store(true, Ordering::Release);
-    let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
+    let denied_recovery = open_read_only_with_authority(
         &path_text,
         authority,
         reference(30),
@@ -1208,7 +1304,7 @@ fn gateway_host_uses_the_same_coordinator_authority_boundary(
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
         "open gateway coordinator host",
-        ErasureExecutionHostV1::open_gateway_with_coordinator_authority(
+        open_gateway_with_authority(
             StoreConfig::Memory,
             authority,
             reference(30),
@@ -1224,12 +1320,448 @@ fn gateway_host_uses_the_same_coordinator_authority_boundary(
 }
 
 #[test]
+fn closed_composition_proves_empty_but_rejects_non_empty_authority(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let composition = ErasureCoordinatorCompositionV1::closed();
+    let host = test_stage(
+        "open explicitly closed composition",
+        ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-closed-composition-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    {
+        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+        let mut persistent_host = test_stage(
+            "open non-empty host for closed-composition recovery",
+            open_with_authority(
+                StoreConfig::Sqlite {
+                    path: path_text.clone(),
+                },
+                authority_plugin,
+                reference(30),
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            ),
+        )?;
+        let mut commands = test_stage(
+            "open non-empty host command sender",
+            persistent_host.command_sender(),
+        )?;
+        let timeline = test_stage(
+            "create non-empty host timeline",
+            commands.create_timeline("closed-composition-recovery"),
+        )?;
+        test_stage(
+            "publish non-empty host topology",
+            authority.set_timeline(timeline.id()),
+        )?;
+        let request = test_stage("construct non-empty host request", persistence_request())?;
+        let request_reference = request.reference();
+        let request_provenance = request.provenance();
+        test_stage(
+            "submit non-empty host request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize non-empty host request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze non-empty host request",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+    }
+    let closed_recovery = ErasureExecutionHostV1::open_read_only_with_authority(
+        &path_text,
+        &composition,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    );
+    assert_eq!(
+        closed_recovery.err(),
+        Some(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    assert_eq!(
+        authority.verified_topology_observation(reference(1), reference(2)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_request_operations() -> Result<(), Box<dyn std::error::Error>> {
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage("construct closed-authority request", persistence_request())?;
+    let request_reference = request.reference();
+    assert_eq!(
+        authority.authenticate(&request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_authorization(
+            request_reference,
+            reference(230),
+            ErasureAuthorizationDecisionV1::Authorized,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let correction = test_stage(
+        "construct closed-authority correction",
+        pos_core::ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: request_reference,
+            rejected_terminal_state: reference(231),
+            correction_reason: reference(232),
+            authorization_provenance: reference(233),
+        }),
+    )?;
+    assert_eq!(
+        authority.admit_corrected_submission(&request, &correction),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_freeze_and_scope_operations() -> Result<(), Box<dyn std::error::Error>>
+{
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage(
+        "construct closed-authority freeze request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    let target = persistence_target();
+    let obligation = test_stage(
+        "construct closed-authority obligation",
+        obligation(request_reference, target),
+    )?;
+    let obligations = vec![obligation];
+    let targets = vec![target];
+    let obligation_set = test_stage(
+        "construct closed-authority obligation set",
+        ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request: request_reference,
+            obligations: obligations
+                .iter()
+                .map(ErasureObligationV1::reference)
+                .collect(),
+            policy: reference(201),
+            trust: reference(202),
+        }),
+    )?;
+    let (freeze_admission, freeze_authorization) = test_stage(
+        "construct closed-authority freeze evidence",
+        freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+            request: request_reference,
+            scope_commitment: reference(203),
+            obligation_set: &obligation_set,
+            targets: &targets,
+            obligations: &obligations,
+            freeze_position: 1,
+            evidence: b"closed-authority",
+        }),
+    )?;
+    assert_eq!(
+        authority.validate_freeze_authorization(&freeze_admission, &freeze_authorization),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let extension = test_stage(
+        "construct closed-authority scope extension",
+        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: request_reference,
+            scope_commitment: reference(204),
+            fork: reference(205),
+            lineage_rule: reference(206),
+            predecessor_extension: None,
+            admission_provenance: reference(207),
+        }),
+    )?;
+    let transition = ErasureStateTransitionV1 {
+        lifecycle: ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(1),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: ErasureReplayClaimV1::Exact,
+        provenance: reference(226),
+    };
+    let fork_input = ErasureForkAdmissionInputV1 {
+        operation: reference(227),
+        expected_inventory_generation: reference(228),
+        child_scope: reference(229),
+        child: pos_core::TimelineMeta::root("closed-authority-child"),
+    };
+    assert_eq!(
+        authority.admit_atomic_freeze(request_reference, &transition),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_scope_extension(&extension),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_fork_scope_extension(&extension, &fork_input),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.resolve_fork_child_scope(fork_input.child.id, &fork_input.child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.validate_scope_extension(&extension),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_retry_and_acknowledgement_operations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage(
+        "construct closed-authority retry request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    let target = persistence_target();
+    let obligation = test_stage(
+        "construct closed-authority retry obligation",
+        obligation(request_reference, target),
+    )?;
+    let obligations = vec![obligation];
+    let retry = test_stage(
+        "construct closed-authority retry admission",
+        retry_admission(RetryAdmissionFixture {
+            request: request_reference,
+            attempt_ordinal: 0,
+            source_receipt: None,
+            obligations: &obligations,
+            policy: reference(215),
+            trust: reference(216),
+            admitted_position: 1,
+            deadline_position: 2,
+            authorization_provenance: reference(217),
+        }),
+    )?;
+    let acknowledgement = test_stage(
+        "construct closed-authority acknowledgement",
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request: request_reference,
+            command: reference(218),
+            attempt: retry.reference(),
+            obligation: obligation.reference(),
+            owner: reference(219),
+            scope: reference(220),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(221),
+            policy: reference(215),
+            trust: reference(216),
+        }),
+    )?;
+    assert_eq!(
+        authority.admit_attempt(&retry),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_acknowledgement(&acknowledgement),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn closed_authority_rejects_receipt_and_administrative_operations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = ClosedErasureCoordinatorAuthorityV1;
+    let request = test_stage(
+        "construct closed-authority receipt request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    let resolution = test_stage(
+        "construct closed-authority resolution",
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: request_reference,
+            affected_digests: vec![reference(208)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: reference(209),
+            policy: reference(210),
+            trust: reference(211),
+            principal: reference(212),
+            authorization_provenance: reference(213),
+            reason: reference(214),
+            issue_position: 1,
+            predecessor_resolution: None,
+        }),
+    )?;
+    let receipt = ErasureReceiptInputV1 {
+        request: request_reference,
+        terminal_state: reference(222),
+        coordinator: reference(223),
+        lifecycle: ErasureLifecycleV1::Complete,
+        freeze_position: 1,
+        acknowledgements: Vec::new(),
+        frozen_targets: Vec::new(),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: Vec::new(),
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(215),
+        trust: reference(216),
+        provenance: reference(224),
+        issue_position: 2,
+        signature: reference(225),
+        receipt_digest: reference(0),
+    };
+    assert_eq!(
+        authority.admit_receipt(&receipt),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.admit_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.validate_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        authority.dispatch_destruction(request_reference, &[]),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let host = test_stage(
+        "open verified-empty host",
+        ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+
+    let gateway_host = test_stage(
+        "open verified-empty gateway host",
+        ErasureExecutionHostV1::open_gateway_verified_empty(
+            StoreConfig::Memory,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(gateway_host.status(), ErasureHostStatusV1::Ready);
+    let composition = ErasureCoordinatorCompositionV1::closed();
+    let composed_gateway_host = test_stage(
+        "open explicit composed gateway host",
+        ErasureExecutionHostV1::open_gateway_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(composed_gateway_host.status(), ErasureHostStatusV1::Ready);
+
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-runtime-recovery-{}.db",
+        TimelineId::new()
+    ));
+    if path.exists() {
+        return Err(format!("recovery fixture already exists: {}", path.display()).into());
+    }
+    let path_text = path.to_string_lossy().into_owned();
+    drop(test_stage(
+        "create compatibility read-only database",
+        ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?);
+    let legacy_read_only_host = test_stage(
+        "open legacy verified-empty read-only host",
+        ErasureExecutionHostV1::open_read_only_verified_empty(
+            &path_text,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(legacy_read_only_host.status(), ErasureHostStatusV1::Ready);
+    let read_only_host = test_stage(
+        "open explicit composed read-only host",
+        ErasureExecutionHostV1::open_read_only_with_authority(
+            &path_text,
+            &composition,
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn recovery_entrypoints_map_store_open_failures_to_adapter_failure() {
+    let missing_path = std::env::temp_dir()
+        .join(format!(
+            "pigloros-erasure-recovery-missing-parent-{}",
+            std::process::id()
+        ))
+        .join("store.db")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Sqlite {
+                path: missing_path.clone(),
+            },
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(|_| ()),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+    assert_eq!(
+        ErasureExecutionHostV1::open_gateway_verified_empty(
+            StoreConfig::Sqlite { path: missing_path },
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        )
+        .map(|_| ()),
+        Err(ErasureHostErrorV1::AdapterFailure)
+    );
+}
+
+#[test]
 fn authentication_denial_preserves_a_recovered_host() -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open rejected-command host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority_plugin,
             reference(30),
@@ -1257,7 +1789,7 @@ fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventor
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
         "open stale-fork host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
+        open_with_authority(
             StoreConfig::Memory,
             authority,
             reference(30),
