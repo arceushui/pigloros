@@ -2060,7 +2060,7 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
-    assert_eq!(composed_read_only_host.status(), ErasureHostStatusV1::Ready);
+    assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
     std::fs::remove_file(path)?;
     Ok(())
 }
