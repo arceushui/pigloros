@@ -1195,7 +1195,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
     ));
     let path_text = path.to_string_lossy().into_owned();
     let authority = Arc::new(TestAuthority::default());
-    {
+    let (parent, child) = {
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
         let mut host = test_stage(
             "open persistent coordinator host",
@@ -1208,7 +1208,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                 ERASURE_MAX_INVENTORY_REQUESTS,
             ),
         )?;
-        {
+        let (parent, child) = {
             let mut commands = test_stage("open persistent command sender", host.command_sender())?;
             let parent = test_stage(
                 "create persistent parent",
@@ -1233,7 +1233,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                 "freeze persistent request",
                 commands.freeze_access(request_reference, &freeze_transition()),
             )?;
-            test_stage(
+            let child = test_stage(
                 "fork persistent frozen timeline",
                 commands.fork_timeline_identified(
                     reference(41),
@@ -1242,8 +1242,10 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                     "restart-child",
                 ),
             )?;
-        }
-    }
+            (parent.id(), child.id())
+        };
+        (parent, child)
+    };
     let original_authority_recovery = test_stage(
         "reopen persistent coordinator host with the original authority",
         open_read_only_with_authority(
@@ -1257,6 +1259,17 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         original_authority_recovery.status(),
         ErasureHostStatusV1::Ready
     );
+    {
+        let mut reads = test_stage(
+            "open recovered persistent read sender",
+            original_authority_recovery.read_sender(),
+        )?;
+        assert_eq!(
+            reads.timeline(parent),
+            Err(ErasureHostErrorV1::AccessFrozen)
+        );
+        assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
+    }
     drop(original_authority_recovery);
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = open_read_only_with_authority(
