@@ -121,6 +121,7 @@ pub mod selector_transport_test_fixture {
 
         pub(crate) fn execution_response_for(
             &self,
+            provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
             execute_request_bytes: &[u8],
             commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
             epochs: [u64; 3],
@@ -145,18 +146,35 @@ pub mod selector_transport_test_fixture {
                     (17, integer(epochs[0])),
                     (18, integer(epochs[1])),
                     (19, integer(epochs[2])),
+                    (
+                        22,
+                        Value::Array(
+                            request
+                                .network_plans
+                                .iter()
+                                .map(|plan| bytes(plan.plan_digest))
+                                .collect(),
+                        ),
+                    ),
                     (23, bytes(request.authority.lps1_digest)),
                 ],
                 &self.fixture.authority.runtime,
             )?;
-            let grant = AdmissionGrant::from_canonical_cbor(&agr1)?;
+            let grant = provider.authenticate_selector_grant(&agr1, &request, commitment)?;
             let audit = audit_chain_for_events(&self.fixture, &grant, &[0])?;
             let audit_digest = wrapped_digest(audit.last().ok_or("audit chain is empty")?)?;
             let receipt_bytes =
                 provider_receipt_for_lifecycle(&self.fixture, &grant, audit_digest, None, None)?;
-            let receipt = SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?;
+            let receipt = provider.authenticate_receipt(&receipt_bytes, &grant)?;
             let terminal_result_bytes =
                 terminal_result_for_outcome(&self.fixture, &request, &grant, &receipt, 4, &[0])?;
+            let result = provider.authenticate_terminal_result(
+                &terminal_result_bytes,
+                &request,
+                &grant,
+                &receipt,
+            )?;
+            provider.authenticate_audit_chain(&audit, &receipt, &result)?;
             Ok(std::iter::once(agr1)
                 .chain(audit)
                 .chain([receipt_bytes, terminal_result_bytes])
