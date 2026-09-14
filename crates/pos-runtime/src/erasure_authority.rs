@@ -516,18 +516,24 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
         for category in ErasureInventoryCategoryV1::CANONICAL {
             let owner = category_owner(binding.freeze.owners, category);
             for (target_index, target) in targets.iter().copied().enumerate() {
-                obligations.push(ErasureObligationV1::new(ErasureObligationInputV1 {
-                    category,
-                    target,
-                    owner,
-                    command_identity: destruction_command_reference(request, target),
-                })?);
-                applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
-                    category,
-                    target_index as u64,
-                    ErasureApplicabilityDecisionV1::Applicable,
-                    Some(owner),
-                )?);
+                obligations.push(
+                    ErasureObligationV1::new(ErasureObligationInputV1 {
+                        category,
+                        target,
+                        owner,
+                        command_identity: destruction_command_reference(request, target),
+                    })
+                    .expect("validated freeze profile yields a valid obligation"),
+                );
+                applicability_matrix.push(
+                    ErasureFreezeApplicabilityRowV1::new(
+                        category,
+                        target_index as u64,
+                        ErasureApplicabilityDecisionV1::Applicable,
+                        Some(owner),
+                    )
+                    .expect("validated freeze profile yields an applicable row"),
+                );
             }
         }
         obligations.sort_unstable_by_key(ErasureObligationV1::reference);
@@ -540,14 +546,17 @@ impl HostConfiguredErasureCoordinatorAuthorityV1 {
             obligations: obligation_references,
             policy: self.configuration.policy,
             trust: self.configuration.trust,
-        })?;
+        })
+        .expect("validated freeze profile yields a valid obligation set");
         let scope = ErasureScopeCommitmentInputV1 {
             request,
             scope_members: binding.freeze.scope_members.clone(),
             target_closure,
             lineage_rule: binding.freeze.lineage_rule,
         };
-        let scope_reference = pos_core::ErasureScopeCommitmentV1::new(scope.clone())?.reference();
+        let scope_reference = pos_core::ErasureScopeCommitmentV1::new(scope.clone())
+            .expect("validated freeze profile yields a valid scope")
+            .reference();
         let placeholder =
             ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
                 request,
