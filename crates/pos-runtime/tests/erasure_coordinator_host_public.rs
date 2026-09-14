@@ -1246,7 +1246,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         };
         (parent, child)
     };
-    let original_authority_recovery = test_stage(
+    let mut original_authority_recovery = test_stage(
         "reopen persistent coordinator host with the original authority",
         open_read_only_with_authority(
             &path_text,
