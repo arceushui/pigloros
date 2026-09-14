@@ -127,6 +127,21 @@ class RustScopePolicyTests(unittest.TestCase):
         self.assertIn('"${RUST_SCOPE_RESULT}" = true', run)
         self.assertIn('"${SCOPE_JOB_RESULT}" != "success"', run)
 
+    def test_core_gates_run_after_successful_preflight_on_push(self) -> None:
+        workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
+        with workflow_path.open(encoding="utf-8") as stream:
+            workflow = yaml.safe_load(stream)
+        expected_if = (
+            "${{ always() && needs.preflight-gate.result == 'success' && "
+            "(needs.ci_change_scope.outputs.rust == 'true' || "
+            "github.event_name != 'pull_request') }}"
+        )
+        for job_name in ("fmt", "test", "clippy", "coverage"):
+            with self.subTest(job=job_name):
+                job = workflow["jobs"][job_name]
+                self.assertEqual(job["needs"], ["ci_change_scope", "preflight-gate"])
+                self.assertEqual(job["if"], expected_if)
+
     def test_conformance_materialization_honors_rust_scope(self) -> None:
         workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
         with workflow_path.open(encoding="utf-8") as stream:
