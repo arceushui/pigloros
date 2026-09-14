@@ -46,15 +46,15 @@ fn empty_complete_inventory_generation_has_a_stable_vector(
 
 #[test]
 fn complete_inventory_rejects_descending_canonical_members() {
-    assert!(matches!(
+    assert_eq!(
         ErasurePersistenceInventorySnapshotV1::new(
             vec![(reference(2), reference(3)), (reference(1), reference(4))],
             Vec::new(),
             2,
         ),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    ));
-    assert!(matches!(
+        Err(ErasureErrorV1::ProvenanceMissing),
+    );
+    assert_eq!(
         ErasurePersistenceInventorySnapshotV1::new(
             Vec::new(),
             vec![
@@ -63,6 +63,6 @@ fn complete_inventory_rejects_descending_canonical_members() {
             ],
             1,
         ),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    ));
+        Err(ErasureErrorV1::ProvenanceMissing),
+    );
 }
