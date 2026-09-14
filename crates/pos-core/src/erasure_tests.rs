@@ -15,12 +15,17 @@ fn canonical_inventory_lengths_use_shortest_definite_cbor_headers() {
         (24, &[0x98, 24]),
         (256, &[0x99, 1, 0]),
         (65_536, &[0x9a, 0, 1, 0, 0]),
-        (4_294_967_296, &[0x9b, 0, 0, 0, 1, 0, 0, 0, 0]),
     ];
 
     for (length, expected) in cases {
         let (actual, actual_length) = canonical_cbor_major_length(0x80, *length);
         assert_eq!(&actual[..actual_length], *expected);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        let (actual, actual_length) = canonical_cbor_major_length(0x80, 4_294_967_296);
+        assert_eq!(&actual[..actual_length], &[0x9b, 0, 0, 0, 1, 0, 0, 0, 0],);
     }
 }
 
