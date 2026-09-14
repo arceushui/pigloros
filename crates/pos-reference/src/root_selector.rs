@@ -852,12 +852,9 @@ mod tests {
         let control = read_frame(&mut client)?;
         let mut trailing = Vec::new();
         client.read_to_end(&mut trailing)?;
-        control_provider
-            .join()
-            .map_err(|_| "provider control thread panicked")??;
-        execute_provider
-            .join()
-            .map_err(|_| "provider execute thread panicked")??;
+        if let Ok(local) = SandboxLocalError::from_canonical_cbor(&control) {
+            return Err(format!("composition returned local selector failure: {local:?}").into());
+        }
         let reply = crate::selector_protocol::decode_reply(
             &control,
             &trailing,
@@ -873,6 +870,12 @@ mod tests {
             })
         );
         assert!(reply.provenance.is_some());
+        control_provider
+            .join()
+            .map_err(|_| "provider control thread panicked")??;
+        execute_provider
+            .join()
+            .map_err(|_| "provider execute thread panicked")??;
         Ok(())
     }
 
