@@ -1333,6 +1333,72 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
     )?;
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
 
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-closed-composition-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    {
+        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+        let mut persistent_host = test_stage(
+            "open non-empty host for closed-composition recovery",
+            open_with_authority(
+                StoreConfig::Sqlite {
+                    path: path_text.clone(),
+                },
+                authority_plugin,
+                reference(30),
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            ),
+        )?;
+        let mut commands = test_stage(
+            "open non-empty host command sender",
+            persistent_host.command_sender(),
+        )?;
+        let timeline = test_stage(
+            "create non-empty host timeline",
+            commands.create_timeline("closed-composition-recovery"),
+        )?;
+        test_stage(
+            "publish non-empty host topology",
+            authority.set_timeline(timeline.id()),
+        )?;
+        let request = test_stage("construct non-empty host request", persistence_request())?;
+        let request_reference = request.reference();
+        let request_provenance = request.provenance();
+        test_stage(
+            "submit non-empty host request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize non-empty host request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze non-empty host request",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+    }
+    let closed_recovery = ErasureExecutionHostV1::open_read_only_with_authority(
+        &path_text,
+        &composition,
+        ERASURE_MAX_INVENTORY_REQUESTS,
+    );
+    assert_eq!(
+        closed_recovery.err(),
+        Some(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+
     let authority = ClosedErasureCoordinatorAuthorityV1;
     assert_eq!(
         authority.verified_topology_observation(reference(1), reference(2)),
