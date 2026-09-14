@@ -985,9 +985,14 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         .status()?
         .success());
 
+    let loaded_executable = directory.path().join("loaded-evaluator");
     let executable = directory.path().join("running-evaluator");
     let replacement = directory.path().join("replacement-evaluator");
-    fs::copy(env!("CARGO_BIN_EXE_pos-reference-evaluator"), &executable)?;
+    fs::copy(
+        env!("CARGO_BIN_EXE_pos-reference-evaluator"),
+        &loaded_executable,
+    )?;
+    symlink(&loaded_executable, &executable)?;
     fs::write(&replacement, b"replacement path contents")?;
     let mut command = Command::new(&executable);
     command
@@ -997,9 +1002,11 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     let mut child = command.spawn()?;
 
     // Opening the FIFO synchronizes with the evaluator after exec and before
-    // the executable path is replaced.
+    // the launcher path is replaced. The launcher is a symlink, so replacing
+    // it does not touch the live executable inode.
     let mut request_writer = open_fifo_writer_after_child_ready(&request_path, &mut child)?;
     fs::rename(&replacement, &executable)?;
+    assert_eq!(fs::read(&executable)?, b"replacement path contents");
     request_writer.write_all(&request)?;
     drop(request_writer);
 
