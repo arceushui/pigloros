@@ -581,10 +581,11 @@ where
     let required_target = target();
     let _first = frozen_coordinator(Rc::clone(&shared), &first_request, required_target)?;
     let _second = frozen_coordinator(Rc::clone(&shared), &second_request, required_target)?;
-    Ok(shared
+    let generation = shared
         .borrow_mut()
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
-        .generation())
+        .generation();
+    Ok(generation)
 }
 
 fn prepared_fork<S>(mut store: S) -> Result<PreparedFork<S>, Box<dyn std::error::Error>>
