@@ -1,16 +1,13 @@
-//! Fixed normal-path composition for ADR-069's root-owned selector.
+//! Non-activating normal-path composition for ADR-069's root-owned selector.
 //!
 //! This module owns no caller-configurable authority. It opens exactly one
-//! SIC1 state, fails closed while SIR1 recovery is pending, and exposes the
-//! evaluator listener only after bootstrap authentication, provider admission,
-//! and fixed administrative-listener binding complete.
+//! SIC1 state and fails closed while SIR1 recovery is pending. ADR-069 assigns
+//! both fixed listeners and final production activation to #359, so this module
+//! deliberately exposes no runtime socket by itself.
 
-use std::fs::{self, File, Metadata};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use rustix::net::sockopt::socket_peercred;
@@ -26,10 +23,8 @@ use crate::sandbox_provider_protocol::{
     SignedImageManifest,
 };
 use crate::selector::installation::authority::AdmittedSelectorProvider;
-use crate::selector::installation::{
-    open_directory_chain, InstallationObjectKind, InstalledSelectorState, SANDBOX_ADMIN_SOCKET,
-};
-use crate::selector::{SelectorBoundaryError, SANDBOX_SELECTOR_SOCKET};
+use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
+use crate::selector::SelectorBoundaryError;
 use crate::selector_protocol::{
     decode_request, encode_authenticated_reply, encode_local_error_reply,
     AuthenticatedSelectorReply, DecodedSelectorRequest, EncodedSelectorReply,
@@ -41,7 +36,6 @@ const SELECTOR_INPUT_LIMIT: u64 = 128 * 1024 * 1024;
 const CONTROL_ARTIFACT_LIMIT: u64 = 16 * 1024 * 1024;
 const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
 const ROOT_UID: u32 = 0;
-const SOCKET_MODE: u32 = 0o600;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
@@ -58,43 +52,50 @@ fn io_error<T>(_: T) -> SelectorBoundaryError {
 
 fn map_to_unit_error<T>(_: T) {}
 
-/// Run the normal (no pending SIR1) selector composition.
+/// Authenticated normal-path composition without fixed runtime activation.
 ///
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
-/// rejects it before any listener can be exposed, until #214 supplies the
-/// required lifecycle-backed recovery composition.
-pub(crate) fn run_fixed() -> Result<(), SelectorBoundaryError> {
-    InstalledSelectorState::open()
-        .and_then(InstalledSelectorState::authenticate_bootstrap)
-        .and_then(|bootstrap| {
-            bind_admin_listener().map(|admin_listener| (bootstrap, admin_listener))
-        })
-        .and_then(|(bootstrap, admin_listener)| {
-            bootstrap
-                .admit_provider()
-                .map(|admitted| (admitted, admin_listener))
-        })
-        .and_then(|(admitted, admin_listener)| {
-            connect_fixed_provider(&admitted).map(|transport| (admitted, transport, admin_listener))
-        })
-        .and_then(|(admitted, transport, admin_listener)| {
-            bind_evaluator_listener().map(|evaluator_listener| {
-                fixed_service(admitted, transport, admin_listener, evaluator_listener)
+/// rejects it before any capability can be returned. #359 consumes this seam
+/// only after composing the mandatory administrative and evaluator listeners.
+pub struct RootSelectorComposition {
+    service: RootSelectorService<ProviderTransport>,
+}
+
+impl RootSelectorComposition {
+    /// Opens and authenticates the exact fixed installation and selected provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed boundary error for missing, invalid, pending-recovery,
+    /// or unavailable installation/provider state.
+    pub fn open() -> Result<Self, SelectorBoundaryError> {
+        InstalledSelectorState::open()
+            .and_then(InstalledSelectorState::authenticate_bootstrap)
+            .and_then(|bootstrap| bootstrap.admit_provider())
+            .and_then(|admitted| {
+                connect_fixed_provider(&admitted).map(|transport| Self {
+                    service: RootSelectorService {
+                        admitted,
+                        transport,
+                        peer_uid: ROOT_UID,
+                    },
+                })
             })
-        })
-        .and_then(|service| service.serve())
-}
+    }
 
-fn bind_listener(path: &Path, owner: u32) -> Result<FixedListener, SelectorBoundaryError> {
-    FixedListener::bind_owned(path, owner)
-}
-
-fn bind_admin_listener() -> Result<FixedListener, SelectorBoundaryError> {
-    bind_listener(Path::new(SANDBOX_ADMIN_SOCKET), ROOT_UID)
-}
-
-fn bind_evaluator_listener() -> Result<FixedListener, SelectorBoundaryError> {
-    bind_listener(Path::new(SANDBOX_SELECTOR_SOCKET), ROOT_UID)
+    /// Evaluates one already-accepted root peer without binding any socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed boundary error when the stream cannot be authenticated,
+    /// decoded, executed, or answered. Protocol-level failures are encoded in
+    /// the selector reply where the request identity permits one.
+    pub fn evaluate_root_connection(
+        &self,
+        stream: UnixStream,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.service.handle_connection(stream)
+    }
 }
 
 fn connect_fixed_provider(
@@ -130,21 +131,6 @@ fn connect_and_synchronize<Admitted, Transport, Error>(
     Ok(transport)
 }
 
-const fn fixed_service(
-    admitted: AdmittedSelectorProvider,
-    transport: ProviderTransport,
-    admin_listener: FixedListener,
-    evaluator_listener: FixedListener,
-) -> RootSelectorService {
-    RootSelectorService {
-        admitted,
-        transport,
-        admin_listener,
-        evaluator_listener,
-        peer_uid: ROOT_UID,
-    }
-}
-
 trait ProviderExecutor {
     fn execute(
         &self,
@@ -172,31 +158,10 @@ impl ProviderExecutor for ProviderTransport {
 struct RootSelectorService<T = ProviderTransport> {
     admitted: AdmittedSelectorProvider,
     transport: T,
-    admin_listener: FixedListener,
-    evaluator_listener: FixedListener,
     peer_uid: u32,
 }
 
 impl<T: ProviderExecutor> RootSelectorService<T> {
-    fn serve(&self) -> Result<(), SelectorBoundaryError> {
-        loop {
-            self.admin_listener.verify_continuity()?;
-            self.evaluator_listener.verify_continuity()?;
-            let Some((stream, _)) = accepted_connection(self.evaluator_listener.listener.accept())?
-            else {
-                continue;
-            };
-            match self.handle_connection(stream) {
-                Ok(())
-                | Err(
-                    SelectorBoundaryError::ArtifactInvalid
-                    | SelectorBoundaryError::SelectorUnavailable
-                    | SelectorBoundaryError::Io,
-                ) => {}
-            }
-        }
-    }
-
     fn handle_connection(&self, mut stream: UnixStream) -> Result<(), SelectorBoundaryError> {
         if !root_peer(&stream, self.peer_uid) {
             return Ok(());
@@ -659,129 +624,20 @@ fn validate_selector_input_length(length: usize) -> Result<(), ()> {
         .and_then(|length| (length <= SELECTOR_INPUT_LIMIT).then_some(()).ok_or(()))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ListenerAcceptAction {
-    Retry,
-    Backoff,
-    Fail,
-}
-
-fn listener_accept_action(error: &std::io::Error) -> ListenerAcceptAction {
-    if matches!(
-        error.kind(),
-        ErrorKind::Interrupted | ErrorKind::ConnectionAborted
-    ) {
-        ListenerAcceptAction::Retry
-    } else if [Some(libc::EMFILE), Some(libc::ENFILE)].contains(&error.raw_os_error()) {
-        ListenerAcceptAction::Backoff
-    } else {
-        ListenerAcceptAction::Fail
-    }
-}
-
-fn accepted_connection<T>(result: std::io::Result<T>) -> Result<Option<T>, SelectorBoundaryError> {
-    match result {
-        Ok(connection) => Ok(Some(connection)),
-        Err(error) => match listener_accept_action(&error) {
-            ListenerAcceptAction::Retry => Ok(None),
-            ListenerAcceptAction::Backoff => {
-                std::thread::sleep(Duration::from_millis(100));
-                Ok(None)
-            }
-            ListenerAcceptAction::Fail => Err(SelectorBoundaryError::Io),
-        },
-    }
-}
-
 fn root_peer(stream: &UnixStream, expected_uid: u32) -> bool {
     socket_peercred(stream.as_fd())
         .is_ok_and(|credentials| credentials.uid.as_raw() == expected_uid)
-}
-
-struct FixedListener {
-    listener: UnixListener,
-    parent: File,
-    parent_device: u64,
-    parent_inode: u64,
-    socket_device: u64,
-    socket_inode: u64,
-    path: PathBuf,
-    owner: u32,
-}
-
-impl FixedListener {
-    fn bind_owned(path: impl AsRef<Path>, owner: u32) -> Result<Self, SelectorBoundaryError> {
-        let path = path.as_ref();
-        let parent_path = path
-            .parent()
-            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-        let relative = parent_path.strip_prefix("/").map_err(artifact_invalid)?;
-        let root = File::open("/").map_err(io_error)?;
-        Self::bind_beneath(path, root, relative, owner)
-    }
-
-    fn bind_beneath(
-        path: &Path,
-        root: File,
-        relative_parent: &Path,
-        owner: u32,
-    ) -> Result<Self, SelectorBoundaryError> {
-        let parent = open_directory_chain(root, relative_parent, owner)?;
-        let parent_metadata = parent.metadata().map_err(io_error)?;
-        let listener = UnixListener::bind(path).map_err(selector_unavailable)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(SOCKET_MODE)).map_err(io_error)?;
-        let socket_metadata = fs::symlink_metadata(path).map_err(io_error)?;
-        validate_listener_leaf(&socket_metadata, owner)?;
-        Ok(Self {
-            listener,
-            parent,
-            parent_device: parent_metadata.dev(),
-            parent_inode: parent_metadata.ino(),
-            socket_device: socket_metadata.dev(),
-            socket_inode: socket_metadata.ino(),
-            path: path.to_owned(),
-            owner,
-        })
-    }
-
-    fn verify_continuity(&self) -> Result<(), SelectorBoundaryError> {
-        let parent = self.parent.metadata().map_err(io_error)?;
-        if parent.dev() != self.parent_device
-            || parent.ino() != self.parent_inode
-            || !parent.is_dir()
-            || parent.uid() != self.owner
-            || parent.mode() & 0o022 != 0
-        {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        let leaf = fs::symlink_metadata(&self.path).map_err(io_error)?;
-        validate_listener_leaf(&leaf, self.owner)?;
-        if leaf.dev() != self.socket_device || leaf.ino() != self.socket_inode {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        Ok(())
-    }
-}
-
-fn validate_listener_leaf(metadata: &Metadata, owner: u32) -> Result<(), SelectorBoundaryError> {
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != owner
-        || metadata.mode() & 0o777 != SOCKET_MODE
-    {
-        Err(SelectorBoundaryError::ArtifactInvalid)
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::RefCell;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
+    use std::path::Path;
     use std::process::Command;
-    use std::time::Instant;
 
     use super::*;
 
@@ -789,6 +645,7 @@ mod tests {
     const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
     const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
     const RUNTIME_DIRECTORY: &str = "/run/pigloros";
+    const SOCKET_MODE: u32 = 0o600;
 
     struct FixedCompositionFixture;
 
@@ -816,8 +673,6 @@ mod tests {
             for socket in [
                 "/run/pigloros/provider-execute.sock",
                 "/run/pigloros/provider-control.sock",
-                SANDBOX_ADMIN_SOCKET,
-                SANDBOX_SELECTOR_SOCKET,
             ] {
                 drop(fs::remove_file(socket));
             }
@@ -840,7 +695,7 @@ mod tests {
             .arg(std::env::current_exe()?)
             .args([
                 "--exact",
-                "root_selector::tests::fixed_public_entrypoint_composes_the_normal_service",
+                "root_selector::tests::nonactivating_public_composition_authenticates_sly1",
                 "--nocapture",
             ])
             .output()?;
@@ -880,25 +735,43 @@ mod tests {
         Ok(())
     }
 
-    fn wait_for_selector_socket(
-        selector: &std::thread::JoinHandle<Result<(), SelectorBoundaryError>>,
+    fn read_frame(stream: &mut UnixStream) -> TestResult<Vec<u8>> {
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix)?;
+        let mut frame = vec![0; usize::try_from(u32::from_be_bytes(prefix))?];
+        stream.read_exact(&mut frame)?;
+        Ok(frame)
+    }
+
+    fn write_frame(stream: &mut UnixStream, frame: &[u8]) -> TestResult {
+        stream.write_all(&u32::try_from(frame.len())?.to_be_bytes())?;
+        stream.write_all(frame)?;
+        Ok(())
+    }
+
+    fn serve_execution_response(
+        listener: &UnixListener,
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
     ) -> TestResult {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !Path::new(SANDBOX_SELECTOR_SOCKET).exists() {
-            if selector.is_finished() {
-                return Err("selector exited before exposing its fixed socket".into());
-            }
-            if Instant::now() >= deadline {
-                return Err("selector did not expose its fixed socket before the deadline".into());
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let spx1 = read_frame(&mut stream)?;
+        let mut input_frames = Vec::new();
+        stream.read_to_end(&mut input_frames)?;
+        if input_frames.is_empty() {
+            return Err("provider input frames missing".into());
         }
+        for response in fixture.execution_response_for(&spx1)? {
+            write_frame(&mut stream, &response)?;
+        }
+        stream.shutdown(std::net::Shutdown::Write)?;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn fixed_public_entrypoint_composes_the_normal_service() -> TestResult {
+    fn nonactivating_public_composition_authenticates_sly1() -> TestResult {
         if privileged_composition_child()? {
             return Ok(());
         }
@@ -909,11 +782,15 @@ mod tests {
         }
 
         let _paths = FixedCompositionFixture::create()?;
-        assert!(crate::run_fixed_root_selector().is_err());
+        assert!(RootSelectorComposition::open().is_err());
+        let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
+        let encoded = encoded_request(&request, resolved.attempt())?;
         let admitted = crate::selector::installation::tests::materialize_admitted_state(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
-        let transport_fixture =
+        let control_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let execute_fixture =
             crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
 
         let execute_listener = UnixListener::bind("/run/pigloros/provider-execute.sock")?;
@@ -926,28 +803,48 @@ mod tests {
             "/run/pigloros/provider-control.sock",
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
-        let provider = std::thread::spawn(move || {
-            serve_describe_response(&control_listener, &transport_fixture, admitted.provider())
+        let control_provider = std::thread::spawn(move || {
+            serve_describe_response(&control_listener, &control_fixture, admitted.provider())
                 .map_err(|error| error.to_string())
         });
-        let selector = std::thread::spawn(crate::run_fixed_root_selector);
-        wait_for_selector_socket(&selector)?;
-        assert!(Path::new(SANDBOX_ADMIN_SOCKET).exists());
+        let execute_provider = std::thread::spawn(move || {
+            serve_execution_response(&execute_listener, &execute_fixture)
+                .map_err(|error| error.to_string())
+        });
+        let composition = RootSelectorComposition::open()?;
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
 
-        let client = UnixStream::connect(SANDBOX_SELECTOR_SOCKET)?;
-        fs::remove_file(SANDBOX_SELECTOR_SOCKET)?;
+        let (mut client, server) = UnixStream::pair()?;
+        write_frame(&mut client, &encoded.control)?;
+        client.write_all(&encoded.attempt_stream)?;
         client.shutdown(std::net::Shutdown::Write)?;
-        drop(client);
+        composition.evaluate_root_connection(server)?;
+        let control = read_frame(&mut client)?;
+        let mut trailing = Vec::new();
+        client.read_to_end(&mut trailing)?;
+        let reply = crate::selector_protocol::decode_reply(
+            &control,
+            &trailing,
+            &encoded,
+            request.request_digest,
+            SELECTOR_INPUT_LIMIT,
+        )?;
         assert_eq!(
-            selector
-                .join()
-                .map_err(|_| "selector composition thread panicked")?,
-            Err(SelectorBoundaryError::Io)
+            reply.observation,
+            Ok(crate::evaluator::SubjectObservation {
+                result: crate::evaluator::SubjectResult::Unavailable,
+                usage: crate::evaluator::ResourceUsage::default(),
+            })
         );
-        provider
+        assert!(reply.provenance.is_some());
+
+        control_provider
             .join()
             .map_err(|_| "provider control thread panicked")??;
-        drop(execute_listener);
+        execute_provider
+            .join()
+            .map_err(|_| "provider execute thread panicked")??;
         Ok(())
     }
 
@@ -1028,10 +925,6 @@ mod tests {
             validate_selector_input_length(usize::try_from(SELECTOR_INPUT_LIMIT)? + 1),
             Err(())
         );
-        assert_eq!(
-            bind_listener(Path::new("relative.sock"), ROOT_UID).err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
-        );
         Ok(())
     }
 
@@ -1056,33 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn listener_accept_retries_only_transient_connection_errors() {
-        for kind in [ErrorKind::Interrupted, ErrorKind::ConnectionAborted] {
-            let error = std::io::Error::from(kind);
-            assert_eq!(listener_accept_action(&error), ListenerAcceptAction::Retry);
-            assert_eq!(accepted_connection::<()>(Err(error)), Ok(None));
-        }
-        for error in [
-            std::io::Error::from_raw_os_error(rustix::io::Errno::MFILE.raw_os_error()),
-            std::io::Error::from_raw_os_error(rustix::io::Errno::NFILE.raw_os_error()),
-        ] {
-            assert_eq!(
-                listener_accept_action(&error),
-                ListenerAcceptAction::Backoff
-            );
-            assert_eq!(accepted_connection::<()>(Err(error)), Ok(None));
-        }
-        let fatal = std::io::Error::from(ErrorKind::ConnectionReset);
-        assert_eq!(listener_accept_action(&fatal), ListenerAcceptAction::Fail);
-        assert_eq!(
-            accepted_connection::<()>(Err(fatal)),
-            Err(SelectorBoundaryError::Io)
-        );
-        assert_eq!(accepted_connection(Ok(7)), Ok(Some(7)));
-    }
-
-    #[test]
-    fn listener_loop_fails_closed_when_host_state_is_lost() -> TestResult {
+    fn provider_synchronization_fails_closed_when_host_state_is_lost() -> TestResult {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         assert!(connect_fixed_provider(&admitted).is_err());
         let sync_directory = tempfile::tempdir()?;
@@ -1105,73 +972,11 @@ mod tests {
         sync_provider
             .join()
             .map_err(|_| "provider synchronization thread panicked")??;
-        let provider_directory = tempfile::tempdir()?;
-        let provider_path = provider_directory.path().join("provider.sock");
-        let _provider_listener = UnixListener::bind(&provider_path)?;
-        let evaluator_directory = tempfile::tempdir()?;
-        let mut service = fixed_service(
-            admitted,
-            ProviderTransport::from_path_for_test(&provider_path)?,
-            fixed_listener(&evaluator_directory, "admin.sock")?,
-            fixed_listener(&evaluator_directory, "evaluator.sock")?,
-        );
-        service.peer_uid = fs::metadata(".")?.uid();
-        let mut client = UnixStream::connect(&service.evaluator_listener.path)?;
-        client.shutdown(std::net::Shutdown::Write)?;
-        service.evaluator_listener.listener.set_nonblocking(true)?;
-        assert_eq!(service.serve(), Err(SelectorBoundaryError::Io));
-        assert_eq!(
-            read_local_error(&mut client)?.code,
-            SandboxLocalErrorCode::InvalidSelectorRequest
-        );
-        fs::set_permissions(
-            evaluator_directory.path(),
-            fs::Permissions::from_mode(0o722),
-        )?;
-        assert_eq!(service.serve(), Err(SelectorBoundaryError::ArtifactInvalid));
         Ok(())
     }
 
     #[test]
-    fn listener_leaf_requires_an_exact_owner_only_socket_mode(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("selector.sock");
-        let listener = UnixListener::bind(&path)?;
-        let owner = fs::symlink_metadata(&path)?.uid();
-        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
-        assert!(validate_listener_leaf(&fs::symlink_metadata(&path)?, owner).is_ok());
-        assert!(validate_listener_leaf(&fs::metadata(directory.path())?, owner).is_err());
-        assert!(validate_listener_leaf(&fs::symlink_metadata(&path)?, owner ^ 1).is_err());
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o620))?;
-        assert!(validate_listener_leaf(&fs::symlink_metadata(&path)?, owner).is_err());
-        drop(listener);
-        Ok(())
-    }
-
-    #[test]
-    fn listener_binding_and_request_reader_cover_the_normal_socket_boundary() -> TestResult {
-        let directory = tempfile::tempdir()?;
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
-        let owner = fs::metadata(directory.path())?.uid();
-        let path = directory.path().join("selector.sock");
-        let listener = FixedListener::bind_beneath(
-            &path,
-            File::open(directory.path())?,
-            Path::new(""),
-            owner,
-        )?;
-        assert!(listener.verify_continuity().is_ok());
-        assert_eq!(
-            fs::symlink_metadata(&listener.path)?.mode() & 0o777,
-            SOCKET_MODE
-        );
-        assert_eq!(
-            FixedListener::bind_owned("relative.sock", owner).err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
-        );
-        assert_listener_bind_failures(&directory, owner)?;
-
+    fn request_reader_covers_the_normal_framed_boundary() -> TestResult {
         let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
         let encoded = encoded_request(&request, resolved.attempt())?;
         let (mut client, mut server) = UnixStream::pair()?;
@@ -1270,12 +1075,9 @@ mod tests {
         let provider_path = provider_directory.path().join("provider.sock");
         let provider_listener = UnixListener::bind(&provider_path)?;
         let transport = ProviderTransport::from_path_for_test(&provider_path)?;
-        let evaluator_directory = tempfile::tempdir()?;
         let service = RootSelectorService {
             admitted,
             transport,
-            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
-            evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
 
@@ -1365,12 +1167,9 @@ mod tests {
         for (result, expected) in cases {
             let (request, admitted, resolved) =
                 crate::selector::installation::tests::root_selector_fixture()?;
-            let evaluator_directory = tempfile::tempdir()?;
             let service = RootSelectorService {
                 admitted,
                 transport: FixedProviderExecutor(RefCell::new(Some(result))),
-                admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
-                evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
                 peer_uid: fs::metadata(".")?.uid(),
             };
             assert_service_error(&service, &request, resolved.attempt(), expected)?;
@@ -1390,14 +1189,11 @@ mod tests {
             fixture.sau1,
             None,
         );
-        let evaluator_directory = tempfile::tempdir()?;
         let service = RootSelectorService {
             admitted,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Execution(execution),
             )))),
-            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
-            evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
         assert_service_error(
@@ -1414,14 +1210,11 @@ mod tests {
         let (request, admitted, resolved) =
             crate::selector::installation::tests::root_selector_fixture()?;
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let evaluator_directory = tempfile::tempdir()?;
         let service = RootSelectorService {
             admitted,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Error(fixture.spe1),
             )))),
-            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
-            evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: fs::metadata(".")?.uid(),
         };
         let encoded = encoded_request(&request, resolved.attempt())?;
@@ -1445,13 +1238,10 @@ mod tests {
         let provider_directory = tempfile::tempdir()?;
         let provider_path = provider_directory.path().join("provider.sock");
         let _provider_listener = UnixListener::bind(&provider_path)?;
-        let evaluator_directory = tempfile::tempdir()?;
         let owner = fs::metadata(".")?.uid();
         let mut service = RootSelectorService {
             admitted,
             transport: ProviderTransport::from_path_for_test(&provider_path)?,
-            admin_listener: fixed_listener(&evaluator_directory, "admin.sock")?,
-            evaluator_listener: fixed_listener(&evaluator_directory, "evaluator.sock")?,
             peer_uid: owner ^ 1,
         };
 
@@ -1662,35 +1452,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn listener_continuity_rejects_parent_and_socket_replacement() -> TestResult {
-        let directory = tempfile::tempdir()?;
-        let listener = fixed_listener(&directory, "selector.sock")?;
-        assert!(listener.verify_continuity().is_ok());
-
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o722))?;
-        assert_eq!(
-            listener.verify_continuity(),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
-
-        fs::set_permissions(&listener.path, fs::Permissions::from_mode(0o620))?;
-        assert_eq!(
-            listener.verify_continuity(),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        fs::remove_file(&listener.path)?;
-        assert_eq!(listener.verify_continuity(), Err(SelectorBoundaryError::Io));
-        let _replacement = UnixListener::bind(&listener.path)?;
-        fs::set_permissions(&listener.path, fs::Permissions::from_mode(SOCKET_MODE))?;
-        assert_eq!(
-            listener.verify_continuity(),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        Ok(())
-    }
-
     fn encoded_request(
         request: &crate::evaluator_protocol::EvaluationRequest,
         attempt: &crate::evaluator::CaseAttempt,
@@ -1706,68 +1467,6 @@ mod tests {
         request.output_capability.capability_digest =
             request.expected_output_capability_digest()?;
         request.request_digest = request.digest()?;
-        Ok(())
-    }
-
-    fn fixed_listener(directory: &tempfile::TempDir, name: &str) -> TestResult<FixedListener> {
-        let path = directory.path().join(name);
-        let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
-        let parent = File::open(directory.path())?;
-        let parent_metadata = parent.metadata()?;
-        let socket_metadata = fs::symlink_metadata(&path)?;
-        Ok(FixedListener {
-            listener,
-            parent,
-            parent_device: parent_metadata.dev(),
-            parent_inode: parent_metadata.ino(),
-            socket_device: socket_metadata.dev(),
-            socket_inode: socket_metadata.ino(),
-            path,
-            owner: socket_metadata.uid(),
-        })
-    }
-
-    fn assert_listener_bind_failures(directory: &tempfile::TempDir, owner: u32) -> TestResult {
-        assert_eq!(
-            FixedListener::bind_owned(Path::new("/"), owner).err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
-        );
-        assert_eq!(
-            FixedListener::bind_owned("relative/selector.sock", owner).err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
-        );
-        assert_eq!(
-            FixedListener::bind_owned(
-                "/__pigloros_missing_listener_parent__/selector.sock",
-                ROOT_UID,
-            )
-            .err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
-        );
-
-        let unavailable_path = directory.path().join("unavailable.sock");
-        File::create(&unavailable_path)?;
-        assert_eq!(
-            FixedListener::bind_beneath(
-                &unavailable_path,
-                File::open(directory.path())?,
-                Path::new(""),
-                owner,
-            )
-            .err(),
-            Some(SelectorBoundaryError::SelectorUnavailable)
-        );
-        assert_eq!(
-            FixedListener::bind_beneath(
-                &directory.path().join("missing/selector.sock"),
-                File::open(directory.path())?,
-                Path::new("missing"),
-                owner,
-            )
-            .err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
-        );
         Ok(())
     }
 

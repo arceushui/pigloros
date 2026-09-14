@@ -82,7 +82,7 @@ pub mod selector_transport_test_fixture {
         pub(crate) describe_request_id: [u8; 16],
         pub(crate) describe_nonce: [u8; 16],
         pub(crate) sdy1: Vec<u8>,
-        runtime: SigningKey,
+        fixture: Fixture,
         pub(crate) non_output_result:
             crate::sandbox_provider_protocol::AuthenticatedSandboxProviderResult,
     }
@@ -93,7 +93,13 @@ pub mod selector_transport_test_fixture {
             field: usize,
             replacement: Value,
         ) -> TestResult<Vec<u8>> {
-            resign_unsigned_field(&self.sdy1, "SDY1", field, replacement, &self.runtime)
+            resign_unsigned_field(
+                &self.sdy1,
+                "SDY1",
+                field,
+                replacement,
+                &self.fixture.authority.runtime,
+            )
         }
 
         pub(crate) fn describe_response_for_provider(
@@ -106,11 +112,43 @@ pub mod selector_transport_test_fixture {
                     request,
                 )?;
             sign_describe_response(
-                &self.runtime,
+                &self.fixture.authority.runtime,
                 provider,
                 request.request.request_id,
                 request.request.apt1_digest,
             )
+        }
+
+        pub(crate) fn execution_response_for(&self, spx1: &[u8]) -> TestResult<Vec<Vec<u8>>> {
+            let request =
+                crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(spx1)?;
+            let image = self.provider.admit_image(
+                &self.fixture.sim1,
+                &self.fixture.root_image,
+                &self.fixture.executable,
+            )?;
+            let launch = self
+                .provider
+                .admit_launch_policy(&self.fixture.lps1, &image)?;
+            let commitment = self.fixture.selector_grant_commitment(
+                &self.provider,
+                &image,
+                &launch,
+                &request,
+            )?;
+            let agr1 = admission_grant(&self.fixture, &request, &launch, &commitment)?;
+            let grant = AdmissionGrant::from_canonical_cbor(&agr1)?;
+            let audit = audit_chain_for_events(&self.fixture, &grant, &[0])?;
+            let audit_digest = wrapped_digest(audit.last().ok_or("audit chain is empty")?)?;
+            let spr1 =
+                provider_receipt_for_lifecycle(&self.fixture, &grant, audit_digest, None, None)?;
+            let receipt = SandboxProviderReceipt::from_canonical_cbor(&spr1)?;
+            let spy1 =
+                terminal_result_for_outcome(&self.fixture, &request, &grant, &receipt, 4, &[0])?;
+            Ok(std::iter::once(agr1)
+                .chain(audit)
+                .chain([spr1, spy1])
+                .collect())
         }
     }
 
@@ -241,24 +279,10 @@ pub mod selector_transport_test_fixture {
             describe_request_id,
             describe_nonce,
             sdy1,
-            runtime: fixture.authority.runtime,
+            fixture,
             non_output_result,
         })
     }
-}
-
-/// Run ADR-069's fixed root-owned selector executable.
-///
-/// This is the sole public binary entry point. It accepts no configuration,
-/// authority, endpoint, artifact path, or compatibility input; all authority
-/// is opened by the crate-private composition from fixed root-owned locations.
-///
-/// # Errors
-/// Returns a closed failure when normal selector composition cannot establish
-/// the required immutable installation, listener, provider, or peer boundary.
-#[cfg(unix)]
-pub fn run_fixed_root_selector() -> Result<(), selector::SelectorBoundaryError> {
-    root_selector::run_fixed()
 }
 
 /// Divergence classes emitted by the independent JSON evaluator.
