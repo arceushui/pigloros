@@ -26,6 +26,7 @@ use pos_core::{
     ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
+use ulid::Ulid;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
 pub mod erasure_support;
@@ -571,10 +572,23 @@ fn assert_empty_backend<S: ErasurePersistencePortV1 + ErasureInventoryPersistenc
     Ok(())
 }
 
-fn two_request_inventory_generation<S>(store: S) -> Result<ErasureReferenceV1, ErasureErrorV1>
+fn two_request_inventory_generation<S>(
+    store: S,
+) -> Result<ErasureReferenceV1, Box<dyn std::error::Error>>
 where
-    S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
+    let mut store = store;
+    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    for (id, name) in [(1_u128, "first"), (2_u128, "second")] {
+        store.create_timeline_with_meta(TimelineMeta {
+            id: TimelineId::from_ulid(Ulid::from(id)),
+            mode: TimelineMode::Live,
+            name: Some(name.to_owned()),
+            owner: None,
+            fork_point: None,
+        })?;
+    }
     let shared = Rc::new(RefCell::new(store));
     let first_request = request()?;
     let second_request = overlapping_request()?;
