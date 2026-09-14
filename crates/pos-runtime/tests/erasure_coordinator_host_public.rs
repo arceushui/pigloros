@@ -2,7 +2,7 @@
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
+    Arc, Mutex,
 };
 
 use pos_core::erasure::target_closure_digest;
@@ -26,21 +26,14 @@ use pos_core::{
     ErasureVerifiedTopologyObservationV1, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{
-    ClosedErasureCoordinatorAuthorityV1, ErasureAuthorityConfigurationV1,
-    ErasureAuthorityFreezeProfileV1, ErasureAuthorityOwnersV1, ErasureAuthorityRequestBindingV1,
-    ErasureAuthorityTopologyBindingV1, ErasureCoordinatorAuthorityV1,
+    ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
-    HostConfiguredErasureCoordinatorAuthorityV1,
 };
 use pos_store::StoreConfig;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
 pub mod erasure_support;
 
-#[path = "support/configured_authority.rs"]
-pub mod configured_authority_support;
-
-use configured_authority_support::{TestEvidenceVerifier, TestExecution};
 use erasure_support::{
     freeze_evidence_fixture, obligation, persistence_request, persistence_target, reference,
     retry_admission, FreezeEvidenceFixtureInput, RetryAdmissionFixture,
@@ -97,8 +90,6 @@ struct TestAuthority {
     allow_receipt: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
     use_closed_scope_resolution: AtomicBool,
-    substitute_configured_child_scope: AtomicBool,
-    configured_fork_authority: OnceLock<HostConfiguredErasureCoordinatorAuthorityV1>,
 }
 
 impl TestAuthority {
@@ -115,17 +106,6 @@ impl TestAuthority {
         self.allow_dispatch.store(true, Ordering::Release);
         self.allow_ack.store(true, Ordering::Release);
         self.allow_receipt.store(true, Ordering::Release);
-    }
-
-    fn install_configured_fork_authority(
-        &self,
-        authority: HostConfiguredErasureCoordinatorAuthorityV1,
-    ) {
-        drop(self.configured_fork_authority.set(authority));
-    }
-
-    fn configured_fork_authority(&self) -> Option<HostConfiguredErasureCoordinatorAuthorityV1> {
-        self.configured_fork_authority.get().cloned()
     }
 
     fn topology(
@@ -158,119 +138,6 @@ impl TestAuthority {
             ))
         }
     }
-}
-
-fn configured_fork_authority(
-    request: ErasureRequestV1,
-    manifest: ErasureReferenceV1,
-    parent: TimelineId,
-    child: Option<TimelineId>,
-    lineage_rule: ErasureReferenceV1,
-    lifecycle_provenance: ErasureReferenceV1,
-    authorization_evidence: Vec<u8>,
-) -> Result<HostConfiguredErasureCoordinatorAuthorityV1, ErasureErrorV1> {
-    let request_reference = request.reference();
-    let profile = ErasureAuthorityFreezeProfileV1::new(
-        vec![reference(9)],
-        vec![persistence_target()],
-        ErasureAuthorityOwnersV1::new(reference(21), reference(22), reference(23), reference(24))?,
-        Some(lineage_rule),
-        reference(19),
-    )?;
-    let mut topology = vec![ErasureAuthorityTopologyBindingV1::new(
-        request_reference,
-        manifest,
-        parent,
-        Some(reference(9)),
-    )];
-    if let Some(child) = child {
-        topology.push(ErasureAuthorityTopologyBindingV1::new(
-            request_reference,
-            manifest,
-            child,
-            Some(reference(19)),
-        ));
-    }
-    let binding = ErasureAuthorityRequestBindingV1::new(
-        request,
-        topology,
-        profile,
-        reference(40),
-        authorization_evidence,
-        lifecycle_provenance,
-        true,
-    )?;
-    ErasureAuthorityConfigurationV1::new(reference(6), reference(8), vec![binding]).map(
-        |configuration| {
-            HostConfiguredErasureCoordinatorAuthorityV1::new(
-                configuration,
-                Arc::new(TestEvidenceVerifier),
-                Arc::new(TestExecution),
-            )
-        },
-    )
-}
-
-#[derive(Debug)]
-struct ExactRecoveryEvidenceVerifier {
-    expected: Vec<u8>,
-}
-
-impl pos_runtime::ErasureAuthorityEvidenceVerifierV1 for ExactRecoveryEvidenceVerifier {
-    fn verify(
-        &self,
-        _kind: pos_runtime::ErasureAuthorityEvidenceKindV1,
-        _request: &ErasureRequestV1,
-        context: &[u8],
-        evidence: &[u8],
-    ) -> Result<(), ErasureErrorV1> {
-        (!context.is_empty() && evidence == self.expected)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
-    }
-}
-
-fn configured_fork_fixture(
-    authority: &Arc<TestAuthority>,
-) -> Result<
-    (
-        ErasureExecutionHostV1,
-        TimelineId,
-        ErasureRequestV1,
-        ErasureReferenceV1,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-    let mut host = test_stage(
-        "open configured fork fixture host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
-            StoreConfig::Memory,
-            authority_plugin,
-            reference(30),
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-    )?;
-    let parent = create_lifecycle_fork_parent(&mut host, authority)?;
-    let request = test_stage(
-        "construct configured fork fixture request",
-        persistence_request(),
-    )?;
-    let request_reference = request.reference();
-    test_stage(
-        "submit authorize and freeze configured fork fixture request",
-        submit_authorize_freeze(&mut host, request.clone()),
-    )?;
-    let manifest = {
-        let mut reads = test_stage("open configured fork fixture reader", host.read_sender())?;
-        test_stage(
-            "read configured fork fixture state",
-            reads.erasure_state(request_reference),
-        )?
-        .ok_or("configured fork fixture state missing")?
-        .manifest_digest()
-    };
-    Ok((host, parent, request, manifest))
 }
 
 impl ErasureFreezeAuthorizationVerifierV1 for TestAuthority {
@@ -408,22 +275,9 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
 
     fn resolve_fork_child_scope(
         &self,
-        parent: TimelineId,
+        _parent: TimelineId,
         child: &pos_core::TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-        if let Some(authority) = self.configured_fork_authority() {
-            let child_scope = authority.resolve_fork_child_scope(parent, child)?;
-            return Ok(
-                if self
-                    .substitute_configured_child_scope
-                    .load(Ordering::Acquire)
-                {
-                    reference(101)
-                } else {
-                    child_scope
-                },
-            );
-        }
         self.timelines
             .lock()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
@@ -436,9 +290,6 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         requirement: ErasureForkScopeRequirementV1,
         input: &ErasureForkAdmissionInputV1,
     ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
-        if let Some(authority) = self.configured_fork_authority() {
-            return authority.resolve_fork_scope_extension(requirement, input);
-        }
         if self.use_closed_scope_resolution.load(Ordering::Acquire) {
             return ClosedErasureCoordinatorAuthorityV1
                 .resolve_fork_scope_extension(requirement, input);
@@ -1238,231 +1089,6 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
 }
 
 #[test]
-fn memory_host_resolves_configured_fork_scope_through_public_sender(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let authority = Arc::new(TestAuthority::default());
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-    let mut host = test_stage(
-        "open configured fork host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
-            StoreConfig::Memory,
-            authority_plugin,
-            reference(30),
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-    )?;
-    let parent = create_lifecycle_fork_parent(&mut host, &authority)?;
-    let request = test_stage("construct configured fork request", persistence_request())?;
-    let request_reference = request.reference();
-    test_stage(
-        "submit authorize and freeze configured fork request",
-        submit_authorize_freeze(&mut host, request.clone()),
-    )?;
-    let manifest = {
-        let mut reads = test_stage("open configured fork reader", host.read_sender())?;
-        test_stage(
-            "read configured fork state",
-            reads.erasure_state(request_reference),
-        )?
-        .ok_or("configured fork state missing")?
-        .manifest_digest()
-    };
-    authority.install_configured_fork_authority(configured_fork_authority(
-        request,
-        manifest,
-        parent,
-        None,
-        reference(100),
-        reference(11),
-        b"host-proof".to_vec(),
-    )?);
-    let child = {
-        let mut commands = test_stage("open configured fork sender", host.command_sender())?;
-        test_stage(
-            "fork configured scope",
-            commands.fork_timeline_identified(
-                reference(45),
-                parent,
-                pos_core::Seq::ZERO,
-                "configured-fork-child",
-            ),
-        )?
-    };
-    assert_ne!(child.id(), parent);
-    Ok(())
-}
-
-#[test]
-fn memory_host_rejects_configured_fork_with_zero_public_operation(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let authority = Arc::new(TestAuthority::default());
-    let (mut host, parent, request, manifest) = configured_fork_fixture(&authority)?;
-    authority.install_configured_fork_authority(configured_fork_authority(
-        request,
-        manifest,
-        parent,
-        None,
-        reference(100),
-        reference(11),
-        b"host-proof".to_vec(),
-    )?);
-    let mut commands = test_stage(
-        "open zero-operation configured fork sender",
-        host.command_sender(),
-    )?;
-    assert!(test_stage(
-        "reject zero-operation configured fork",
-        commands.fork_timeline_identified(
-            reference(0),
-            parent,
-            pos_core::Seq::ZERO,
-            "zero-operation-configured-fork-child",
-        ),
-    )
-    .is_err());
-    Ok(())
-}
-
-#[test]
-fn memory_host_rejects_configured_fork_with_unbound_requirement_request(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let authority = Arc::new(TestAuthority::default());
-    let (mut host, parent, _request, _manifest) = configured_fork_fixture(&authority)?;
-    let alternate = test_stage(
-        "construct alternate configured fork request",
-        erasure_support::request(erasure_support::RequestFixtureInput {
-            request: reference(90),
-            subject: reference(91),
-            scope: pos_core::ErasureScopeV1::PrivateSubjectData,
-            selectors: vec![reference(92)],
-            requester: reference(93),
-            authorization: reference(94),
-            policy: reference(6),
-            request_position: 12,
-            horizon_position: 24,
-            provenance: reference(95),
-        }),
-    )?;
-    authority.install_configured_fork_authority(configured_fork_authority(
-        alternate,
-        reference(96),
-        parent,
-        None,
-        reference(100),
-        reference(11),
-        b"host-proof".to_vec(),
-    )?);
-    let mut commands = test_stage("open unbound configured fork sender", host.command_sender())?;
-    assert!(test_stage(
-        "reject configured fork with unbound requirement request",
-        commands.fork_timeline_identified(
-            reference(45),
-            parent,
-            pos_core::Seq::ZERO,
-            "unbound-requirement-configured-fork-child",
-        ),
-    )
-    .is_err());
-    Ok(())
-}
-
-#[test]
-fn memory_host_rejects_configured_fork_with_substituted_child_scope(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let authority = Arc::new(TestAuthority::default());
-    let (mut host, parent, request, manifest) = configured_fork_fixture(&authority)?;
-    authority.install_configured_fork_authority(configured_fork_authority(
-        request,
-        manifest,
-        parent,
-        None,
-        reference(100),
-        reference(11),
-        b"host-proof".to_vec(),
-    )?);
-    authority
-        .substitute_configured_child_scope
-        .store(true, Ordering::Release);
-    let mut commands = test_stage(
-        "open substituted-scope configured fork sender",
-        host.command_sender(),
-    )?;
-    assert!(test_stage(
-        "reject configured fork with substituted child scope",
-        commands.fork_timeline_identified(
-            reference(45),
-            parent,
-            pos_core::Seq::ZERO,
-            "substituted-scope-configured-fork-child",
-        ),
-    )
-    .is_err());
-    Ok(())
-}
-
-#[test]
-fn memory_host_rejects_configured_fork_lineage_that_conflicts_with_inventory(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let authority = Arc::new(TestAuthority::default());
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-    let mut host = test_stage(
-        "open conflicting configured fork host",
-        ErasureExecutionHostV1::open_with_coordinator_authority(
-            StoreConfig::Memory,
-            authority_plugin,
-            reference(30),
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-    )?;
-    let parent = create_lifecycle_fork_parent(&mut host, &authority)?;
-    let request = test_stage(
-        "construct conflicting configured fork request",
-        persistence_request(),
-    )?;
-    let request_reference = request.reference();
-    test_stage(
-        "submit authorize and freeze conflicting configured fork request",
-        submit_authorize_freeze(&mut host, request.clone()),
-    )?;
-    let manifest = {
-        let mut reads = test_stage(
-            "open conflicting configured fork reader",
-            host.read_sender(),
-        )?;
-        test_stage(
-            "read conflicting configured fork state",
-            reads.erasure_state(request_reference),
-        )?
-        .ok_or("conflicting configured fork state missing")?
-        .manifest_digest()
-    };
-    authority.install_configured_fork_authority(configured_fork_authority(
-        request,
-        manifest,
-        parent,
-        None,
-        reference(99),
-        reference(11),
-        b"host-proof".to_vec(),
-    )?);
-    let mut commands = test_stage(
-        "open conflicting configured fork sender",
-        host.command_sender(),
-    )?;
-    assert!(test_stage(
-        "reject conflicting configured fork lineage",
-        commands.fork_timeline_identified(
-            reference(45),
-            parent,
-            pos_core::Seq::ZERO,
-            "conflicting-configured-fork-child",
-        ),
-    )
-    .is_err());
-    Ok(())
-}
-
-#[test]
 fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
@@ -1522,85 +1148,6 @@ fn sqlite_host_freezes_access_at_the_coordinator_cas_boundary(
     assert_atomic_freeze_parity(StoreConfig::SqliteInMemory)
 }
 
-fn assert_configured_nonempty_recovery(
-    path: &str,
-    request: ErasureRequestV1,
-    manifest: ErasureReferenceV1,
-    parent: TimelineId,
-    child: TimelineId,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let evidence = freeze_transition().provenance.digest().to_vec();
-    let configured_authority = test_stage(
-        "construct configured recovery authority",
-        configured_fork_authority(
-            request,
-            manifest,
-            parent,
-            Some(child),
-            reference(100),
-            reference(20),
-            evidence.clone(),
-        ),
-    )?;
-    let composition = test_stage(
-        "construct configured recovery composition",
-        ErasureCoordinatorCompositionV1::from_host_configuration(
-            configured_authority.configuration().clone(),
-            Arc::new(ExactRecoveryEvidenceVerifier { expected: evidence }),
-            Arc::new(TestExecution),
-            reference(30),
-        ),
-    )?;
-    let writable_recovery = test_stage(
-        "reopen persistent configured coordinator host writable",
-        ErasureExecutionHostV1::open_with_authority(
-            StoreConfig::Sqlite {
-                path: path.to_owned(),
-            },
-            &composition,
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-    )?;
-    assert_eq!(writable_recovery.status(), ErasureHostStatusV1::Ready);
-    drop(writable_recovery);
-    let denied_composition = test_stage(
-        "construct denied configured recovery composition",
-        ErasureCoordinatorCompositionV1::from_host_configuration(
-            configured_authority.configuration().clone(),
-            Arc::new(ExactRecoveryEvidenceVerifier {
-                expected: b"untrusted-recovery-evidence".to_vec(),
-            }),
-            Arc::new(TestExecution),
-            reference(30),
-        ),
-    )?;
-    assert!(
-        ErasureExecutionHostV1::open_read_only_with_authority(
-            path,
-            &denied_composition,
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        )
-        .is_err(),
-        "non-empty recovery must fail closed when configured evidence is denied"
-    );
-    let mut recovered = test_stage(
-        "reopen persistent configured coordinator host",
-        ErasureExecutionHostV1::open_read_only_with_authority(
-            path,
-            &composition,
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-    )?;
-    assert_eq!(recovered.status(), ErasureHostStatusV1::Ready);
-    let mut reads = test_stage("open recovered read sender", recovered.read_sender())?;
-    assert_eq!(
-        reads.timeline(parent),
-        Err(ErasureHostErrorV1::AccessFrozen)
-    );
-    assert_eq!(reads.timeline(child), Err(ErasureHostErrorV1::AccessFrozen));
-    Ok(())
-}
-
 #[test]
 fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1610,7 +1157,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
     ));
     let path_text = path.to_string_lossy().into_owned();
     let authority = Arc::new(TestAuthority::default());
-    let (parent, child, request, manifest) = {
+    let (parent, child) = {
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
         let mut host = test_stage(
             "open persistent coordinator host",
@@ -1623,7 +1170,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                 ERASURE_MAX_INVENTORY_REQUESTS,
             ),
         )?;
-        let (parent, child, request, request_reference) = {
+        let (parent, child, request_reference) = {
             let mut commands = test_stage("open persistent command sender", host.command_sender())?;
             let parent = test_stage(
                 "create persistent parent",
@@ -1657,16 +1204,9 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
                     "restart-child",
                 ),
             )?;
-            (parent, child, request, request_reference)
+            (parent, child, request_reference)
         };
-        let mut reads = test_stage("open persistent recovery reader", host.read_sender())?;
-        let manifest = test_stage(
-            "read persistent frozen state",
-            reads.erasure_state(request_reference),
-        )?
-        .ok_or("persistent frozen state missing")?
-        .manifest_digest();
-        (parent.id(), child.id(), request, manifest)
+        (parent.id(), child.id())
     };
     let original_authority_recovery = test_stage(
         "reopen persistent coordinator host with the original authority",
@@ -1682,7 +1222,6 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         ErasureHostStatusV1::Ready
     );
     drop(original_authority_recovery);
-    assert_configured_nonempty_recovery(&path_text, request, manifest, parent, child)?;
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = ErasureExecutionHostV1::open_read_only_with_coordinator_authority(
         &path_text,

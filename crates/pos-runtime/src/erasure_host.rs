@@ -417,27 +417,6 @@ impl ErasureCoordinatorCompositionV1 {
         })
     }
 
-    /// Build a composition from independently authenticated host authority
-    /// material. This is the production injection seam; no persistence data
-    /// is read while constructing the authority.
-    ///
-    /// # Errors
-    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when the coordinator
-    /// identity is zero.
-    pub fn from_host_configuration(
-        configuration: super::erasure_authority::ErasureAuthorityConfigurationV1,
-        verifier: Arc<dyn super::erasure_authority::ErasureAuthorityEvidenceVerifierV1>,
-        execution: Arc<dyn super::erasure_authority::ErasureAuthorityExecutionV1>,
-        coordinator: ErasureReferenceV1,
-    ) -> Result<Self, ErasureErrorV1> {
-        let authority = super::erasure_authority::HostConfiguredErasureCoordinatorAuthorityV1::new(
-            configuration,
-            verifier,
-            execution,
-        );
-        Self::new(Arc::new(authority), coordinator)
-    }
-
     /// Construct an explicitly closed composition for a deployment that has
     /// not configured its authority Plugin yet.
     ///
