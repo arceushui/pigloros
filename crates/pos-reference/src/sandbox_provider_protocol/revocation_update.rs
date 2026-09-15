@@ -3,8 +3,9 @@
 use ciborium::value::Value;
 
 use super::codec::{
-    bounded_array, byte_string, decode_document, digest32, id16, key_id, require_canonical_order,
-    signed, uint, verify_digest, verify_signature,
+    bounded_array, byte_string, bytes_value, decode_document, digest32, encode, id16, key_id,
+    record_digest, require_canonical_order, self_digested, signed, uint, uint_value, verify_digest,
+    verify_signature,
 };
 use super::{
     SandboxProviderProtocolError, SandboxRevocationSnapshot, SandboxTrustError, SandboxTrustRole,
@@ -23,6 +24,119 @@ pub enum SandboxRevocationUpdateError {
     /// RCA1 does not acknowledge the exact pending update and cancellation set.
     #[error("sandbox revocation acknowledgement does not match the pending update")]
     AcknowledgementMismatch,
+}
+
+/// Root-channel-only RCC1 binding for one exact committed SIR1 transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryCancellationContext {
+    /// Exact committed SIR1 self-digest.
+    pub sir1_digest: [u8; 32],
+    /// Domain-separated digest of the exact previous-provider binding in SIR1.
+    pub previous_provider_binding_digest: [u8; 32],
+    /// Domain-separated digest of the exact RCU1 bytes.
+    pub rcu1_wire_digest: [u8; 32],
+    /// Complete fenced attempt snapshot for the previous runtime.
+    pub previous_live_attempt_ids: Vec<[u8; 16]>,
+    /// Exact affected subset that RCA1 must report cancelled.
+    pub required_cancelled_attempt_ids: Vec<[u8; 16]>,
+    /// Exact RCC1 self-digest.
+    pub context_digest: [u8; 32],
+}
+
+impl RecoveryCancellationContext {
+    /// Construct exact RCC1 from one committed SIR1 and its exact RCU1 bytes.
+    ///
+    /// # Errors
+    /// Rejects zero identities, malformed attempt sets, a non-subset cancellation
+    /// set, or an invalid RCU1 document.
+    pub fn for_committed_recovery(
+        sir1_digest: [u8; 32],
+        previous_provider_binding_digest: [u8; 32],
+        rcu1_bytes: &[u8],
+        previous_live_attempt_ids: Vec<[u8; 16]>,
+        required_cancelled_attempt_ids: Vec<[u8; 16]>,
+    ) -> Result<Self, SandboxRevocationUpdateError> {
+        decode_document(rcu1_bytes)?;
+        let mut context = Self {
+            sir1_digest,
+            previous_provider_binding_digest,
+            rcu1_wire_digest: wire_digest(rcu1_bytes),
+            previous_live_attempt_ids,
+            required_cancelled_attempt_ids,
+            context_digest: [0; 32],
+        };
+        context.validate()?;
+        context.context_digest =
+            record_digest("RCC1", &Value::Array(context.unsigned_fields().to_vec()))?;
+        Ok(context)
+    }
+
+    /// Decode one exact preferred-deterministic RCC1.
+    ///
+    /// # Errors
+    /// Rejects malformed, legacy, reordered, inconsistent, or digest-invalid records.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxRevocationUpdateError> {
+        let document = decode_document(bytes)?;
+        let (fields, context_digest) = self_digested::<7>(&document, "RCC1")?;
+        let context = Self {
+            sir1_digest: digest32(&fields[2])?,
+            previous_provider_binding_digest: digest32(&fields[3])?,
+            rcu1_wire_digest: digest32(&fields[4])?,
+            previous_live_attempt_ids: decode_attempts(&fields[5])?,
+            required_cancelled_attempt_ids: decode_attempts(&fields[6])?,
+            context_digest,
+        };
+        context.verify()?;
+        Ok(context)
+    }
+
+    /// Encode the exact RCC1 wrapper sent immediately before RCU1.
+    ///
+    /// # Errors
+    /// Rejects an internally altered context.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SandboxRevocationUpdateError> {
+        self.verify()?;
+        Ok(encode(&Value::Array(vec![
+            Value::Array(self.unsigned_fields().to_vec()),
+            bytes_value(&self.context_digest),
+        ]))?)
+    }
+
+    fn verify(&self) -> Result<(), SandboxRevocationUpdateError> {
+        self.validate()?;
+        verify_digest("RCC1", &self.unsigned_fields(), self.context_digest).map_err(Into::into)
+    }
+
+    fn validate(&self) -> Result<(), SandboxRevocationUpdateError> {
+        if self.sir1_digest == [0; 32]
+            || self.previous_provider_binding_digest == [0; 32]
+            || self.rcu1_wire_digest == [0; 32]
+        {
+            return Err(SandboxProviderProtocolError::FieldOutOfBounds.into());
+        }
+        validate_attempts(&self.previous_live_attempt_ids)?;
+        validate_attempts(&self.required_cancelled_attempt_ids)?;
+        if self.required_cancelled_attempt_ids.iter().any(|attempt| {
+            self.previous_live_attempt_ids
+                .binary_search(attempt)
+                .is_err()
+        }) {
+            return Err(SandboxProviderProtocolError::InconsistentFields.into());
+        }
+        Ok(())
+    }
+
+    fn unsigned_fields(&self) -> [Value; 7] {
+        [
+            Value::Text("RCC1".to_owned()),
+            uint_value(1),
+            bytes_value(&self.sir1_digest),
+            bytes_value(&self.previous_provider_binding_digest),
+            bytes_value(&self.rcu1_wire_digest),
+            attempt_values(&self.previous_live_attempt_ids),
+            attempt_values(&self.required_cancelled_attempt_ids),
+        ]
+    }
 }
 
 /// Administrator-authenticated RCU1 request and its next RVS1 snapshot.
@@ -99,7 +213,7 @@ pub struct RevocationAcknowledgement {
     /// Newly installed RVS1 digest.
     pub revocation_digest: [u8; 32],
     /// Exact committed SIR1 identity.
-    pub recovery_digest: [u8; 32],
+    pub sir1_digest: [u8; 32],
     /// Exact previous provider/runtime binding committed by SIR1.
     pub previous_provider_binding_digest: [u8; 32],
     /// Canonically ordered attempts cancelled before acknowledgement.
@@ -109,6 +223,38 @@ pub struct RevocationAcknowledgement {
     /// Exact RCA1 self-digest.
     pub acknowledgement_digest: [u8; 32],
     signature: [u8; 64],
+}
+
+/// RCA1 authenticated against one exact previous runtime and committed RCC1.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedRevocationAcknowledgement {
+    request_id: [u8; 16],
+    revocation_digest: [u8; 32],
+    sir1_digest: [u8; 32],
+    previous_provider_binding_digest: [u8; 32],
+    cancelled_attempt_ids: Vec<[u8; 16]>,
+    acknowledgement_digest: [u8; 32],
+}
+
+impl AuthenticatedRevocationAcknowledgement {
+    /// Exact authenticated RCA1 self-digest.
+    #[must_use]
+    pub const fn acknowledgement_digest(&self) -> [u8; 32] {
+        self.acknowledgement_digest
+    }
+
+    pub(crate) fn matches_context(
+        &self,
+        context: &RecoveryCancellationContext,
+        request_id: [u8; 16],
+        revocation_digest: [u8; 32],
+    ) -> bool {
+        self.request_id == request_id
+            && self.revocation_digest == revocation_digest
+            && self.sir1_digest == context.sir1_digest
+            && self.previous_provider_binding_digest == context.previous_provider_binding_digest
+            && self.cancelled_attempt_ids == context.required_cancelled_attempt_ids
+    }
 }
 
 impl RevocationAcknowledgement {
@@ -135,7 +281,7 @@ impl RevocationAcknowledgement {
         let acknowledgement = Self {
             request_id: id16(&fields[2])?,
             revocation_digest: digest32(&fields[3])?,
-            recovery_digest: digest32(&fields[4])?,
+            sir1_digest: digest32(&fields[4])?,
             previous_provider_binding_digest: digest32(&fields[5])?,
             cancelled_attempt_ids: cancelled_values
                 .iter()
@@ -145,6 +291,7 @@ impl RevocationAcknowledgement {
             acknowledgement_digest,
             signature,
         };
+        validate_attempts(&acknowledgement.cancelled_attempt_ids)?;
         verify_digest("RCA1", fields, acknowledgement.acknowledgement_digest)?;
         if acknowledgement.runtime_attestation_key_id != runtime_key_id {
             return Err(SandboxRevocationUpdateError::AcknowledgementMismatch);
@@ -157,4 +304,64 @@ impl RevocationAcknowledgement {
         )?;
         Ok(acknowledgement)
     }
+
+    /// Authenticate RCA1 and bind it to the exact committed update context.
+    ///
+    /// # Errors
+    /// Rejects a forged runtime signature or any request, RVS1, SIR1, provider,
+    /// cancellation-set, or remaining-count mismatch.
+    pub fn authenticate_for_context(
+        bytes: &[u8],
+        runtime_key_id: &str,
+        runtime_key: &ed25519_dalek::VerifyingKey,
+        context: &RecoveryCancellationContext,
+        request_id: [u8; 16],
+        revocation_digest: [u8; 32],
+    ) -> Result<AuthenticatedRevocationAcknowledgement, SandboxRevocationUpdateError> {
+        context.verify()?;
+        let acknowledgement = Self::authenticate(bytes, runtime_key_id, runtime_key)?;
+        let authenticated = AuthenticatedRevocationAcknowledgement {
+            request_id: acknowledgement.request_id,
+            revocation_digest: acknowledgement.revocation_digest,
+            sir1_digest: acknowledgement.sir1_digest,
+            previous_provider_binding_digest: acknowledgement.previous_provider_binding_digest,
+            cancelled_attempt_ids: acknowledgement.cancelled_attempt_ids,
+            acknowledgement_digest: acknowledgement.acknowledgement_digest,
+        };
+        if !authenticated.matches_context(context, request_id, revocation_digest) {
+            return Err(SandboxRevocationUpdateError::AcknowledgementMismatch);
+        }
+        Ok(authenticated)
+    }
+}
+
+fn validate_attempts(attempts: &[[u8; 16]]) -> Result<(), SandboxProviderProtocolError> {
+    if attempts.contains(&[0; 16]) || !attempts.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+    }
+    Ok(())
+}
+
+fn decode_attempts(value: &Value) -> Result<Vec<[u8; 16]>, SandboxProviderProtocolError> {
+    let values = bounded_array(value, 0)?;
+    require_canonical_order(values)?;
+    let attempts = values.iter().map(id16).collect::<Result<Vec<_>, _>>()?;
+    validate_attempts(&attempts)?;
+    Ok(attempts)
+}
+
+fn attempt_values(attempts: &[[u8; 16]]) -> Value {
+    Value::Array(
+        attempts
+            .iter()
+            .map(|attempt| bytes_value(attempt))
+            .collect(),
+    )
+}
+
+fn wire_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.RCU1.Wire.v1\0");
+    hasher.update(bytes);
+    *hasher.finalize().as_bytes()
 }

@@ -6,9 +6,10 @@ mod policy_transition;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    RevocationAcknowledgement, RevocationUpdateRequest, SandboxAdministratorPolicy,
-    SandboxProviderProtocolError as ProtocolError, SandboxRevocationSnapshot,
-    SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    RecoveryCancellationContext, RevocationAcknowledgement, RevocationUpdateRequest,
+    SandboxAdministratorPolicy, SandboxProviderProtocolError as ProtocolError,
+    SandboxRevocationSnapshot, SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole,
+    SandboxTrustSnapshot,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -768,7 +769,7 @@ fn revocation_acknowledgement_binds_the_committed_recovery_transaction() -> Test
         RevocationAcknowledgement::authenticate(&bytes, "runtime", &signer.verifying_key())?;
     assert_eq!(acknowledgement.request_id, [21; 16]);
     assert_eq!(acknowledgement.revocation_digest, next.snapshot_digest());
-    assert_eq!(acknowledgement.recovery_digest, [31; 32]);
+    assert_eq!(acknowledgement.sir1_digest, [31; 32]);
     assert_eq!(acknowledgement.previous_provider_binding_digest, [32; 32]);
     assert_eq!(acknowledgement.cancelled_attempt_ids, vec![[23; 16]]);
     assert_eq!(acknowledgement.runtime_attestation_key_id, "runtime");
@@ -781,6 +782,86 @@ fn revocation_acknowledgement_binds_the_committed_recovery_transaction() -> Test
         &revocation_acknowledgement(&next, &signer, 1)?,
         "runtime",
         &signer.verifying_key(),
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() -> TestResult {
+    let trust = update_registry()?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let current = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?,
+        &trust,
+    )?;
+    let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
+    let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
+    let rcu1 = revocation_update(&current, &next_bytes, &next, &signer, [22; 16])?;
+    let context = RecoveryCancellationContext::for_committed_recovery(
+        [31; 32],
+        [32; 32],
+        &rcu1,
+        vec![[22; 16], [23; 16]],
+        vec![[23; 16]],
+    )?;
+    let encoded = context.to_canonical_cbor()?;
+    assert_eq!(
+        RecoveryCancellationContext::from_canonical_cbor(&encoded)?,
+        context
+    );
+
+    let acknowledgement = revocation_acknowledgement(&next, &signer, 0)?;
+    let authenticated = RevocationAcknowledgement::authenticate_for_context(
+        &acknowledgement,
+        "runtime",
+        &signer.verifying_key(),
+        &context,
+        [21; 16],
+        next.snapshot_digest(),
+    )?;
+    assert_ne!(authenticated.acknowledgement_digest(), [0; 32]);
+
+    for invalid in [
+        RecoveryCancellationContext::for_committed_recovery(
+            [0; 32],
+            [32; 32],
+            &rcu1,
+            Vec::new(),
+            Vec::new(),
+        ),
+        RecoveryCancellationContext::for_committed_recovery(
+            [31; 32],
+            [32; 32],
+            &rcu1,
+            vec![[23; 16]],
+            vec![[22; 16]],
+        ),
+        RecoveryCancellationContext::for_committed_recovery(
+            [31; 32],
+            [32; 32],
+            &rcu1,
+            vec![[0; 16]],
+            Vec::new(),
+        ),
+        RecoveryCancellationContext::for_committed_recovery(
+            [31; 32],
+            [32; 32],
+            &rcu1,
+            vec![[23; 16], [22; 16]],
+            Vec::new(),
+        ),
+    ] {
+        assert!(invalid.is_err());
+    }
+
+    assert!(RevocationAcknowledgement::authenticate_for_context(
+        &acknowledgement,
+        "runtime",
+        &signer.verifying_key(),
+        &context,
+        [99; 16],
+        next.snapshot_digest(),
     )
     .is_err());
     Ok(())

@@ -37,7 +37,8 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
-    RevocationAcknowledgement, RevocationUpdateRequest, SandboxRevocationUpdateError,
+    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, RevocationAcknowledgement,
+    RevocationUpdateRequest, SandboxRevocationUpdateError,
 };
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
