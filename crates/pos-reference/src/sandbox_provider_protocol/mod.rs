@@ -11,6 +11,7 @@ mod execution;
 mod operations;
 mod policy;
 mod revocation;
+mod revocation_update;
 mod trust;
 
 /// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.
@@ -35,6 +36,9 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
 
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
+pub use revocation_update::{
+    RevocationAcknowledgement, RevocationUpdateRequest, SandboxRevocationUpdateError,
+};
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use admission::{
