@@ -27,12 +27,12 @@ impl ProviderRuntimeSlot {
         admitted: &AdmittedSelectorProvider,
     ) -> Result<Self, SelectorBoundaryError> {
         let provider_manifest_digest = admitted.provider().manifest().manifest_digest;
-        let runtime_instance_id = fresh_distinct_selector_id(&[])?;
-        let lifecycle_scope_id = fresh_distinct_selector_id(&[runtime_instance_id])?;
-        Ok(Self {
-            provider_manifest_digest,
-            runtime_instance_id,
-            lifecycle_scope_id,
+        fresh_distinct_selector_id(&[]).and_then(|runtime_instance_id| {
+            fresh_distinct_selector_id(&[runtime_instance_id]).map(|lifecycle_scope_id| Self {
+                provider_manifest_digest,
+                runtime_instance_id,
+                lifecycle_scope_id,
+            })
         })
     }
 
@@ -138,10 +138,12 @@ impl PreviousProviderBinding {
     }
 
     fn digest(&self) -> Result<[u8; 32], SelectorBoundaryError> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(PREVIOUS_PROVIDER_BINDING_DOMAIN);
-        hasher.update(&encode(&self.value()).map_err(invalid)?);
-        Ok(*hasher.finalize().as_bytes())
+        encode(&self.value()).map_err(invalid).map(|encoded| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(PREVIOUS_PROVIDER_BINDING_DOMAIN);
+            hasher.update(&encoded);
+            *hasher.finalize().as_bytes()
+        })
     }
 }
 
@@ -155,14 +157,22 @@ struct RecoveryPeerSlot {
 impl RecoveryPeerSlot {
     fn allocate(previous: &PreviousProviderBinding) -> Result<Self, SelectorBoundaryError> {
         let excluded = [previous.runtime_instance_id, previous.lifecycle_scope_id];
-        let runtime = fresh_distinct_selector_id(&excluded)?;
-        let lifecycle_scope = fresh_distinct_selector_id(&[excluded[0], excluded[1], runtime])?;
-        let endpoint =
-            fresh_distinct_selector_id(&[excluded[0], excluded[1], runtime, lifecycle_scope])?;
-        Ok(Self {
-            runtime,
-            lifecycle_scope,
-            endpoint,
+        fresh_distinct_selector_id(&excluded).and_then(|runtime| {
+            fresh_distinct_selector_id(&[excluded[0], excluded[1], runtime]).and_then(
+                |lifecycle_scope| {
+                    fresh_distinct_selector_id(&[
+                        excluded[0],
+                        excluded[1],
+                        runtime,
+                        lifecycle_scope,
+                    ])
+                    .map(|endpoint| Self {
+                        runtime,
+                        lifecycle_scope,
+                        endpoint,
+                    })
+                },
+            )
         })
     }
 
@@ -222,8 +232,7 @@ impl InstallationRecoverySnapshot {
             main_pid: runtime.main_pid(),
             main_start_time_ticks: runtime.main_start_time_ticks(),
         };
-        let recovery_slot = RecoveryPeerSlot::allocate(&previous_provider)?;
-        Ok(Self {
+        RecoveryPeerSlot::allocate(&previous_provider).map(|recovery_slot| Self {
             previous_provider,
             recovery_slot,
             previous_live_attempt_ids,

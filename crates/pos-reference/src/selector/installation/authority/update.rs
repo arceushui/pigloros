@@ -68,7 +68,7 @@ impl InstallationChallenge {
     }
 
     #[cfg(test)]
-    pub(crate) fn replace_installation_for_test(&mut self, installation: [u8; 32]) {
+    pub(crate) const fn replace_installation_for_test(&mut self, installation: [u8; 32]) {
         self.installation = installation;
     }
 }
@@ -329,7 +329,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signed_record_extractors_reject_malformed_nested_values() {
+    fn signed_record_extractors_reject_malformed_nested_values(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let malformed = encode(&Value::Array(vec![
             Value::Array(vec![
                 Value::Text("RCU1".to_owned()),
@@ -343,8 +344,7 @@ mod tests {
             ]),
             Value::Bytes(vec![0; 32]),
             Value::Bytes(vec![0; 64]),
-        ]))
-        .expect("test fixture must encode");
+        ]))?;
         assert_eq!(
             embedded_revocation(&malformed),
             Err(SelectorBoundaryError::ArtifactInvalid)
@@ -353,5 +353,6 @@ mod tests {
             signed_digest(&[0xff]),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
+        Ok(())
     }
 }

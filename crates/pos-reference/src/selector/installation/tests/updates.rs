@@ -563,6 +563,53 @@ fn update_rejects_missing_or_changed_successor_artifacts() -> TestResult {
 }
 
 #[test]
+fn manifest_successor_validation_rejects_each_forbidden_change_class() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.bootstrap.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let fields = array(&decode_canonical(&request)?, 5)?;
+    let Value::Bytes(next_bytes) = &fields[3] else {
+        return Err("SIU1 successor manifest is not bytes".into());
+    };
+    let previous = fixture.bootstrap.installed().manifest().clone();
+    let next = InstallationManifest::from_canonical_cbor(next_bytes)?;
+    previous.validate_revocation_successor(&next)?;
+
+    let mut fixed_authority_changed = next.clone();
+    fixed_authority_changed.root_key_id = "foreign-root".to_owned();
+    assert!(previous
+        .validate_revocation_successor(&fixed_authority_changed)
+        .is_err());
+
+    let mut existing_object_changed = next.clone();
+    let previous_object = &previous.objects[0];
+    let existing = existing_object_changed
+        .objects
+        .iter_mut()
+        .find(|object| {
+            object.kind == previous_object.kind && object.identity == previous_object.identity
+        })
+        .ok_or("existing successor object missing")?;
+    existing.byte_length = existing.byte_length.saturating_add(1);
+    assert!(previous
+        .validate_revocation_successor(&existing_object_changed)
+        .is_err());
+
+    let mut unauthorized_object = next;
+    let mut added = previous.objects[0].clone();
+    added.identity = [99; 32];
+    added.content_digest = [98; 32];
+    unauthorized_object.objects.push(added);
+    unauthorized_object
+        .objects
+        .sort_by_key(|object| (object.kind.code(), object.identity));
+    assert!(previous
+        .validate_revocation_successor(&unauthorized_object)
+        .is_err());
+    Ok(())
+}
+
+#[test]
 fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let admitted = fixture.admitted()?;

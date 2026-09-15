@@ -2651,10 +2651,15 @@ mod tests {
     fn selector_admission_reopens_only_with_the_exact_successor_transition() -> TestResult {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;
+        let current = admission.current()?;
+        let (_, premature, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        assert!(admission.admit_successor(&current, premature).is_err());
         let closed = admission.close_and_snapshot()?;
         let (_, foreign, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let foreign = Arc::new(foreign);
         assert!(admission.reopen_previous(&foreign).is_err());
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        assert!(admission.admit_successor(&foreign, successor).is_err());
         let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
         admission.admit_successor(&closed.admitted, successor)?;
         assert!(!Arc::ptr_eq(&admission.current()?, &closed.admitted));
@@ -2802,6 +2807,73 @@ mod tests {
             bindings.execute_ordered(&request, || Err(ProviderTransportError::BeforeAdmission)),
             Err(SelectorBoundaryError::SelectorUnavailable)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn selector_admission_capacity_and_release_edges_fail_closed() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        {
+            let mut state = admission
+                .state
+                .lock()
+                .map_err(|_| "admission lock poisoned")?;
+            for index in 0..(MAX_RETAINED_EVALUATION_NAMESPACES - 1) {
+                let mut attempt = [0; 16];
+                attempt[..8].copy_from_slice(&u64::try_from(index + 1)?.to_be_bytes());
+                state
+                    .attempts
+                    .insert(attempt, AttemptAdmissionState::default());
+            }
+            state
+                .attempts
+                .insert([1; 16], AttemptAdmissionState::default());
+        }
+        assert!(matches!(
+            admission.acquire([u8::MAX; 16]),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        ));
+        admission.release([1; 16]);
+        assert_eq!(
+            admission
+                .state
+                .lock()
+                .map_err(|_| "admission lock poisoned")?
+                .attempts
+                .len(),
+            MAX_RETAINED_EVALUATION_NAMESPACES
+        );
+        admission
+            .state
+            .lock()
+            .map_err(|_| "admission lock poisoned")?
+            .attempts
+            .get_mut(&[1; 16])
+            .ok_or("retained admission missing")?
+            .active_requests = 1;
+        admission.release([1; 16]);
+        assert_eq!(
+            admission
+                .state
+                .lock()
+                .map_err(|_| "admission lock poisoned")?
+                .attempts
+                .len(),
+            MAX_RETAINED_EVALUATION_NAMESPACES - 1
+        );
+
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let poisoned = SelectorAdmission::for_test(admitted)?;
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        poisoned.release([1; 16]);
         Ok(())
     }
 
@@ -3074,6 +3146,14 @@ mod tests {
         )?;
 
         drop(provider_listener);
+        assert_service_error(
+            &service,
+            &request,
+            resolved.attempt(),
+            SandboxLocalErrorCode::ProviderUnavailable,
+        )?;
+
+        service.admission.close()?;
         assert_service_error(
             &service,
             &request,
