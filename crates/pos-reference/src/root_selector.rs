@@ -448,14 +448,18 @@ fn serve_evaluator(
         match listener.try_accept()? {
             Some(stream) => {
                 let composition = Arc::clone(composition);
-                let _connection = thread::spawn(move || {
-                    let _evaluation_result = composition.evaluate_root_connection(stream);
-                });
+                spawn_evaluator_connection(composition, stream);
             }
             None => thread::sleep(Duration::from_millis(10)),
         }
     }
     Ok(())
+}
+
+fn spawn_evaluator_connection(composition: Arc<RootSelectorComposition>, stream: UnixStream) {
+    let _connection = thread::spawn(move || {
+        let _evaluation_result = composition.evaluate_root_connection(stream);
+    });
 }
 
 impl Drop for OwnedSelectorListener {
@@ -606,7 +610,7 @@ impl RootSelectorComposition {
     /// # Errors
     /// Returns a closed boundary error for a foreign peer, malformed framing,
     /// invalid authority, failed durability, timeout, or provider rejection.
-    pub fn update_installation(&self, mut stream: UnixStream) -> Result<(), SelectorBoundaryError> {
+    fn update_installation(&self, mut stream: UnixStream) -> Result<(), SelectorBoundaryError> {
         if !root_peer(&stream, ROOT_UID) {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }

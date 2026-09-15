@@ -27,7 +27,7 @@ pub const SANDBOX_ARTIFACT_ROOT: &str = "/var/lib/pigloros/sandbox";
 /// Root-only endpoint for the separate revocation transaction.
 pub const SANDBOX_ADMIN_SOCKET: &str = "/run/pigloros/sandbox-selector-admin.sock";
 
-const MANIFEST_NAME: &str = "installation.cbor";
+pub(crate) const MANIFEST_NAME: &str = "installation.cbor";
 pub(super) const RECOVERY_NAME: &str = "installation-update.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
