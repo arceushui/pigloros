@@ -43,6 +43,7 @@ done
 
 if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
   profile_directory=$(realpath -- "$(dirname -- "$LLVM_PROFILE_FILE")")
+  profile_pattern=$(basename -- "$LLVM_PROFILE_FILE")
   case "$profile_directory" in
     "$REPOSITORY_ROOT"/target/*) ;;
     *)
@@ -51,8 +52,8 @@ if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
       ;;
   esac
   docker_arguments+=(
-    --env "LLVM_PROFILE_FILE=$LLVM_PROFILE_FILE"
-    --mount "type=bind,source=$profile_directory,target=$profile_directory"
+    --env "LLVM_PROFILE_FILE=/pigloros-profile/$profile_pattern"
+    --mount "type=bind,source=$profile_directory,target=/pigloros-profile"
   )
 fi
 

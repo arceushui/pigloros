@@ -70,6 +70,8 @@ def main() -> None:
             "--tmpfs /run:rw,nosuid,nodev,mode=0755",
             'source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT,readonly',
             '"$REPOSITORY_ROOT"/target/*',
+            'LLVM_PROFILE_FILE=/pigloros-profile/$profile_pattern',
+            'source=$profile_directory,target=/pigloros-profile',
             '"$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
         ):
             require(runner, fragment, runner_path)

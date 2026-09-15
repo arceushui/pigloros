@@ -102,6 +102,11 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
+            "target=/pigloros-profile",
+            "target=$profile_directory",
+        ),
+        (
+            PRIMARY_RUNNER,
             "@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254",
             ":latest",
         ),
