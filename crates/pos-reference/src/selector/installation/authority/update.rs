@@ -1,0 +1,319 @@
+//! Single-use administrator challenges and revocation-only SIC1 validation.
+
+use std::fs::File;
+use std::os::unix::fs::MetadataExt as _;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use ciborium::value::Value;
+use rustix::rand::{getrandom, GetRandomFlags};
+
+use super::AuthenticatedSelectorBootstrap;
+use crate::evaluator_protocol::{array, decode_canonical, encode, fixed_bytes, text, uint};
+use crate::sandbox_provider_protocol::{
+    RevocationUpdateRequest, SandboxAdministratorPolicy, SandboxRevocationSnapshot,
+};
+use crate::selector::installation::{
+    digest_complete_file, hex_name, open_directory_chain, open_immutable_file,
+    HeldInstallationArtifact, InstallationManifest, InstallationObjectKind, MANIFEST_LIMIT,
+};
+use crate::selector::SelectorBoundaryError;
+
+const CHALLENGE_LIFETIME: Duration = Duration::from_secs(30);
+
+/// One fresh selector-issued challenge owned by one administrative connection.
+///
+/// The value cannot be cloned. Validation consumes it, which prevents replay
+/// across requests even before the connection owner closes the stream.
+#[derive(Debug)]
+pub struct InstallationChallenge {
+    installation: [u8; 32],
+    nonce: [u8; 16],
+    expires_at: Instant,
+}
+
+impl InstallationChallenge {
+    /// Encode the exact fresh-mode SICN1 challenge.
+    ///
+    /// # Errors
+    /// Returns a closed boundary error after expiry or on local encoding failure.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SelectorBoundaryError> {
+        self.require_live()?;
+        encode(&Value::Array(vec![
+            Value::Text("SICN1".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Bytes(self.installation.to_vec()),
+            Value::Bytes(self.nonce.to_vec()),
+            Value::Integer(0_u64.into()),
+        ]))
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    }
+
+    fn require_live(&self) -> Result<(), SelectorBoundaryError> {
+        (Instant::now() < self.expires_at)
+            .then_some(())
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+    }
+
+    fn consume(self) -> Result<([u8; 32], [u8; 16], Instant), SelectorBoundaryError> {
+        self.require_live()?;
+        Ok((self.installation, self.nonce, self.expires_at))
+    }
+}
+
+/// Fully authenticated SIU1 content awaiting an atomic attempt snapshot and SIR1 commit.
+///
+/// The next APT1 and RVS1 descriptors stay open so the durability boundary can
+/// synchronize the exact bytes that validation authenticated.
+#[derive(Debug)]
+pub struct ValidatedInstallationUpdate {
+    previous_manifest: Vec<u8>,
+    next_manifest_bytes: Vec<u8>,
+    next_manifest: InstallationManifest,
+    revocation_update_bytes: Vec<u8>,
+    revocation_update: RevocationUpdateRequest,
+    next_policy: HeldInstallationArtifact,
+    next_revocation: HeldInstallationArtifact,
+}
+
+impl AuthenticatedSelectorBootstrap {
+    /// Issue a cryptographically random fresh-mode challenge.
+    ///
+    /// # Errors
+    /// Returns a closed boundary error if randomness or deadline creation fails.
+    pub fn issue_update_challenge(&self) -> Result<InstallationChallenge, SelectorBoundaryError> {
+        let expires_at = Instant::now()
+            .checked_add(CHALLENGE_LIFETIME)
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+        Ok(InstallationChallenge {
+            installation: self.installed.manifest().digest(),
+            nonce: random_nonzero_id()?,
+            expires_at,
+        })
+    }
+
+    /// Consume one connection-owned challenge and authenticate one exact SIU1.
+    ///
+    /// This operation performs no durable write and grants no execution. Its
+    /// caller must already have closed admission and serialized updates.
+    ///
+    /// # Errors
+    /// Rejects expired, stale, malformed, substituted, non-successor, or
+    /// incorrectly authorized installation updates.
+    pub fn validate_update(
+        &self,
+        challenge: InstallationChallenge,
+        bytes: &[u8],
+    ) -> Result<ValidatedInstallationUpdate, SelectorBoundaryError> {
+        let (installation, nonce, expires_at) = challenge.consume()?;
+        if installation != self.installed.manifest().digest() {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        let (next_manifest_bytes, revocation_update_bytes) = decode_update(bytes, installation)?;
+        let next_manifest = InstallationManifest::from_canonical_cbor(&next_manifest_bytes)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        self.installed
+            .manifest()
+            .validate_revocation_successor(&next_manifest)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        let next_revocation = self.open_updated_record(&next_manifest, 1)?;
+        let next_policy = self.open_updated_record(&next_manifest, 2)?;
+        let next_revocation_bytes = next_revocation.read_control(MANIFEST_LIMIT)?;
+        let next_policy_bytes = next_policy.read_control(MANIFEST_LIMIT)?;
+        let revocation_update = self.authenticate_update_records(
+            &next_manifest,
+            &next_policy_bytes,
+            &next_revocation_bytes,
+            &revocation_update_bytes,
+        )?;
+        if revocation_update.selector_nonce != nonce || Instant::now() >= expires_at {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        Ok(ValidatedInstallationUpdate {
+            previous_manifest: self.installed.manifest_bytes().to_vec(),
+            next_manifest_bytes,
+            next_manifest,
+            revocation_update_bytes,
+            revocation_update,
+            next_policy,
+            next_revocation,
+        })
+    }
+
+    fn authenticate_update_records(
+        &self,
+        next_manifest: &InstallationManifest,
+        next_policy_bytes: &[u8],
+        next_revocation_bytes: &[u8],
+        revocation_update_bytes: &[u8],
+    ) -> Result<RevocationUpdateRequest, SelectorBoundaryError> {
+        let next_revocation =
+            SandboxRevocationSnapshot::authenticate(next_revocation_bytes, &self.trust)
+                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        SandboxAdministratorPolicy::validate_revocation_successor(
+            &self.installed.control_record(
+                InstallationObjectKind::from_code(2)
+                    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+                self.policy.policy_digest(),
+            )?,
+            next_policy_bytes,
+            &self.trust,
+            &self.revocation,
+            &next_revocation,
+        )
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        let update = RevocationUpdateRequest::authenticate(
+            revocation_update_bytes,
+            &self.trust,
+            &self.revocation,
+        )
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        let [_, expected_revocation, expected_policy] = next_manifest.authority_digests();
+        if next_revocation.snapshot_digest() != expected_revocation
+            || update.next_revocation != next_revocation
+            || signed_digest(next_policy_bytes)? != expected_policy
+            || embedded_revocation(revocation_update_bytes)? != next_revocation_bytes
+        {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        Ok(update)
+    }
+
+    fn open_updated_record(
+        &self,
+        manifest: &InstallationManifest,
+        code: u8,
+    ) -> Result<HeldInstallationArtifact, SelectorBoundaryError> {
+        let kind = InstallationObjectKind::from_code(code)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+        let identity = manifest.authority_digests()[usize::from(code)];
+        let object = manifest
+            .object(kind, identity)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?
+            .clone();
+        if object.byte_length() > MANIFEST_LIMIT {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        let owner = self
+            .installed
+            .root
+            .metadata()
+            .map_err(|_| SelectorBoundaryError::Io)?
+            .uid();
+        let directory = open_directory_chain(
+            self.installed
+                .root
+                .try_clone()
+                .map_err(|_| SelectorBoundaryError::Io)?,
+            Path::new(kind.directory()),
+            owner,
+        )?;
+        let file = open_immutable_file(
+            &directory,
+            &hex_name(object.content_digest()),
+            kind.required_mode(),
+            object.byte_length(),
+            owner,
+        )?;
+        if digest_complete_file(&file, object.byte_length())? != object.content_digest() {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        Ok(HeldInstallationArtifact { file, object })
+    }
+}
+
+impl ValidatedInstallationUpdate {
+    /// Exact current SIC1 retained before validation.
+    #[must_use]
+    pub fn previous_manifest_bytes(&self) -> &[u8] {
+        &self.previous_manifest
+    }
+
+    /// Exact canonical successor SIC1.
+    #[must_use]
+    pub fn next_manifest_bytes(&self) -> &[u8] {
+        &self.next_manifest_bytes
+    }
+
+    /// Parsed successor installation metadata.
+    #[must_use]
+    pub const fn next_manifest(&self) -> &InstallationManifest {
+        &self.next_manifest
+    }
+
+    /// Exact administrator-signed RCU1 bytes.
+    #[must_use]
+    pub fn revocation_update_bytes(&self) -> &[u8] {
+        &self.revocation_update_bytes
+    }
+
+    /// Authenticated RCU1 authority and successor RVS1.
+    #[must_use]
+    pub const fn revocation_update(&self) -> &RevocationUpdateRequest {
+        &self.revocation_update
+    }
+
+    /// Retained successor APT1 and RVS1 descriptors.
+    #[must_use]
+    pub const fn record_files(&self) -> [&File; 2] {
+        [self.next_policy.file(), self.next_revocation.file()]
+    }
+}
+
+fn random_nonzero_id() -> Result<[u8; 16], SelectorBoundaryError> {
+    let mut id = [0_u8; 16];
+    let mut remaining = id.as_mut_slice();
+    while !remaining.is_empty() {
+        let read = getrandom(remaining, GetRandomFlags::empty())
+            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+        if read == 0 {
+            return Err(SelectorBoundaryError::SelectorUnavailable);
+        }
+        remaining = &mut remaining[read..];
+    }
+    (id != [0; 16])
+        .then_some(id)
+        .ok_or(SelectorBoundaryError::SelectorUnavailable)
+}
+
+fn decode_update(
+    bytes: &[u8],
+    expected_installation: [u8; 32],
+) -> Result<(Vec<u8>, Vec<u8>), SelectorBoundaryError> {
+    let document = decode_canonical(bytes).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let fields = array(&document, 5).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    if text(&fields[0]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)? != "SIU1"
+        || uint(&fields[1]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)? != 1
+        || fixed_bytes::<32>(&fields[2]).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?
+            != expected_installation
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    let (Value::Bytes(next), Value::Bytes(update)) = (&fields[3], &fields[4]) else {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    };
+    if next.is_empty()
+        || next.len() as u64 > MANIFEST_LIMIT
+        || update.is_empty()
+        || update.len() as u64 > MANIFEST_LIMIT
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok((next.clone(), update.clone()))
+}
+
+fn signed_digest(bytes: &[u8]) -> Result<[u8; 32], SelectorBoundaryError> {
+    let document = decode_canonical(bytes).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    fixed_bytes(&array(&document, 3).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?[1])
+        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+}
+
+fn embedded_revocation(bytes: &[u8]) -> Result<Vec<u8>, SelectorBoundaryError> {
+    let document = decode_canonical(bytes).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let wrapper = array(&document, 3).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    let fields = array(&wrapper[0], 8).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
+    match &fields[4] {
+        Value::Bytes(bytes) => Ok(bytes.clone()),
+        _ => Err(SelectorBoundaryError::ArtifactInvalid),
+    }
+}

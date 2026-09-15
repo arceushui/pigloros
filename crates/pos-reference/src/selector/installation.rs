@@ -393,6 +393,7 @@ impl HeldInstallationArtifact {
 /// Retained root-owned SIC1 and all of its verified immutable descriptors.
 #[derive(Debug)]
 pub struct InstalledSelectorState {
+    root: File,
     manifest_file: File,
     manifest_bytes: Vec<u8>,
     manifest: InstallationManifest,
@@ -432,12 +433,17 @@ impl InstalledSelectorState {
                     InstallationManifest::from_canonical_cbor(&manifest_bytes)
                         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
                         .and_then(|manifest| {
-                            open_indexed_artifacts(root, &manifest, expected_owner).map(
-                                |artifacts| Self {
-                                    manifest_file,
-                                    manifest_bytes,
-                                    manifest,
-                                    artifacts,
+                            open_indexed_artifacts(root, &manifest, expected_owner).and_then(
+                                |artifacts| {
+                                    root.try_clone().map_err(|_| SelectorBoundaryError::Io).map(
+                                        |root| Self {
+                                            root,
+                                            manifest_file,
+                                            manifest_bytes,
+                                            manifest,
+                                            artifacts,
+                                        },
+                                    )
                                 },
                             )
                         })
@@ -981,6 +987,7 @@ pub mod tests {
             .map(|artifact| artifact.object.clone())
             .collect();
         Ok(InstalledSelectorState {
+            root: tempfile::tempdir().and_then(|directory| File::open(directory.path()))?,
             manifest_file: tempfile::NamedTempFile::new()?.into_file(),
             manifest_bytes: Vec::new(),
             manifest: InstallationManifest {
@@ -1438,6 +1445,7 @@ pub mod tests {
             .map(|artifact| artifact.object.clone())
             .collect();
         Ok(InstalledSelectorState {
+            root: tempfile::tempdir().and_then(|directory| File::open(directory.path()))?,
             manifest_file: tempfile::NamedTempFile::new()?.into_file(),
             manifest_bytes: Vec::new(),
             manifest: InstallationManifest {

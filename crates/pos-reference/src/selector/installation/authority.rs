@@ -1,5 +1,9 @@
 //! Authentication of SIC1's pinned bootstrap authority.
 
+mod update;
+
+pub use update::{InstallationChallenge, ValidatedInstallationUpdate};
+
 use ed25519_dalek::VerifyingKey;
 
 use super::{InstallationObjectKind, InstalledSelectorState, MANIFEST_LIMIT};
