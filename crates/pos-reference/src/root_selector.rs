@@ -59,6 +59,7 @@ const ROOT_UID: u32 = 0;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const SELECTOR_SOCKET_MODE: u32 = 0o600;
 const SELECTOR_PARENT_MODE: u32 = 0o700;
+const SANDBOX_SELECTOR_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-provider.sock";
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
@@ -161,9 +162,11 @@ impl OwnedSelectorListener {
     /// unsafe, the endpoint already exists, or the bound socket cannot be
     /// authenticated through the retained parent directory.
     pub fn bind() -> Result<Self, SelectorBoundaryError> {
-        let path = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
-        let relative = path.strip_prefix("/").map_err(artifact_invalid)?;
-        Self::bind_beneath(Path::new("/"), relative, ROOT_UID)
+        Self::bind_beneath(
+            Path::new("/"),
+            Path::new(SANDBOX_SELECTOR_SOCKET_RELATIVE),
+            ROOT_UID,
+        )
     }
 
     #[cfg(test)]
@@ -1260,6 +1263,10 @@ mod tests {
 
     #[test]
     fn owned_selector_listener_accepts_and_removes_only_its_socket() -> TestResult {
+        assert_eq!(
+            Path::new("/").join(SANDBOX_SELECTOR_SOCKET_RELATIVE),
+            Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET)
+        );
         let fixture = ListenerTestDirectory::create()?;
         let listener = OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid)?;
         let client = UnixStream::connect(&fixture.socket)?;
@@ -1437,6 +1444,22 @@ mod tests {
             ),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
+        assert!(matches!(
+            remove_matching_socket(&parent, &leaf, identity, foreign_uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(matches!(
+            remove_matching_socket(
+                &parent,
+                &leaf,
+                SocketIdentity {
+                    device: identity.device,
+                    inode: identity.inode.wrapping_add(1),
+                },
+                fixture.uid,
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
         drop(listener);
         fs::remove_file(&fixture.socket)?;
 
@@ -1473,6 +1496,13 @@ mod tests {
     #[test]
     fn listener_setup_and_cleanup_propagate_each_identity_failure() -> TestResult {
         let fixture = ListenerTestDirectory::create()?;
+
+        let owned = capture_test_listener(&fixture.socket, fixture.uid)?;
+        assert!(matches!(
+            owned.path.finish_setup(Path::new("/different-parent")),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        owned.close()?;
 
         let listener = UnixListener::bind(&fixture.socket)?;
         let parent = File::open(fixture.directory.path())?;
