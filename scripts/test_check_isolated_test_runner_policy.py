@@ -82,8 +82,8 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
-            "exec timeout",
-            "sudo -n timeout",
+            "docker run",
+            "sudo -n docker run",
         ),
         (
             PRIMARY_RUNNER,
@@ -104,6 +104,11 @@ def main() -> None:
             PRIMARY_RUNNER,
             "target=/pigloros-profile",
             "target=$profile_directory",
+        ),
+        (
+            PRIMARY_RUNNER,
+            'compgen -G "$profile_directory/$profile_prefix-*.profraw"',
+            "true",
         ),
         (
             PRIMARY_RUNNER,

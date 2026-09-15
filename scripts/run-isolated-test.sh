@@ -34,6 +34,7 @@ docker_arguments=(
   --workdir "$REPOSITORY_ROOT"
   --env PIGLOROS_PRIVILEGED_COMPOSITION_TEST=1
 )
+profile_prefix=
 
 for variable in ASAN_OPTIONS LSAN_OPTIONS; do
   if [[ -n ${!variable:-} ]]; then
@@ -43,7 +44,8 @@ done
 
 if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
   profile_directory=$(realpath -- "$(dirname -- "$LLVM_PROFILE_FILE")")
-  profile_pattern=$(basename -- "$LLVM_PROFILE_FILE")
+  profile_prefix="isolated-$BASHPID"
+  profile_pattern="$profile_prefix-%p-%m.profraw"
   case "$profile_directory" in
     "$REPOSITORY_ROOT"/target/*) ;;
     *)
@@ -57,6 +59,18 @@ if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
   )
 fi
 
-exec timeout --signal=TERM --kill-after=5s 30s \
+set +e
+timeout --signal=TERM --kill-after=5s 30s \
   docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE" \
   "$TEST_BINARY" --exact "$TEST_NAME" --nocapture
+status=$?
+set -e
+
+if [[ $status -ne 0 ]]; then
+  exit "$status"
+fi
+if [[ -n $profile_prefix ]] &&
+  ! compgen -G "$profile_directory/$profile_prefix-*.profraw" >/dev/null; then
+  echo "isolated coverage process did not create a profile" >&2
+  exit 1
+fi
