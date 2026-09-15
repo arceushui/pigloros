@@ -71,14 +71,18 @@ impl CommittedInstallationUpdate {
     pub fn cancellation_context(
         &self,
     ) -> Result<RecoveryCancellationContext, SelectorBoundaryError> {
-        RecoveryCancellationContext::for_committed_recovery(
-            self.sir1_digest,
-            self.snapshot.previous_provider_digest()?,
-            self.update.revocation_update_bytes(),
-            self.snapshot.previous_live_attempt_ids().to_vec(),
-            self.snapshot.required_cancelled_attempt_ids().to_vec(),
-        )
-        .map_err(invalid)
+        self.snapshot
+            .previous_provider_digest()
+            .and_then(|previous_provider_binding_digest| {
+                RecoveryCancellationContext::for_committed_recovery(
+                    self.sir1_digest,
+                    previous_provider_binding_digest,
+                    self.update.revocation_update_bytes(),
+                    self.snapshot.previous_live_attempt_ids().to_vec(),
+                    self.snapshot.required_cancelled_attempt_ids().to_vec(),
+                )
+                .map_err(invalid)
+            })
     }
 
     /// Authenticate one RCA1 against this exact committed live transaction.
@@ -92,21 +96,25 @@ impl CommittedInstallationUpdate {
         &self,
         bytes: &[u8],
     ) -> Result<AuthenticatedRevocationAcknowledgement, SelectorBoundaryError> {
-        let context = self.cancellation_context()?;
-        let (runtime_key_id, runtime_public_key) = self.snapshot.runtime_key();
-        let runtime_key = VerifyingKey::from_bytes(&runtime_public_key).map_err(invalid)?;
-        RevocationAcknowledgement::authenticate_for_context(
-            bytes,
-            runtime_key_id,
-            &runtime_key,
-            &context,
-            self.update.revocation_update().request_id,
-            self.update
-                .revocation_update()
-                .next_revocation
-                .snapshot_digest(),
-        )
-        .map_err(invalid)
+        self.cancellation_context().and_then(|context| {
+            let (runtime_key_id, runtime_public_key) = self.snapshot.runtime_key();
+            VerifyingKey::from_bytes(&runtime_public_key)
+                .map_err(invalid)
+                .and_then(|runtime_key| {
+                    RevocationAcknowledgement::authenticate_for_context(
+                        bytes,
+                        runtime_key_id,
+                        &runtime_key,
+                        &context,
+                        self.update.revocation_update().request_id,
+                        self.update
+                            .revocation_update()
+                            .next_revocation
+                            .snapshot_digest(),
+                    )
+                    .map_err(invalid)
+                })
+        })
     }
 
     /// Recheck the retained SIR1 descriptor and current SIC1 recovery floor.
@@ -115,14 +123,22 @@ impl CommittedInstallationUpdate {
     /// Rejects replaced, unsafe, truncated, or altered durable state.
     pub fn verify_recovery_floor(&self) -> Result<(), SelectorBoundaryError> {
         let root = &self.admitted.bootstrap().installed().root;
-        let owner = root.metadata().map_err(io)?.uid();
-        let current = read_bounded_immutable(root, MANIFEST_NAME, owner, MANIFEST_LIMIT)?;
-        if current != self.update.previous_manifest_bytes()
-            && current != self.update.next_manifest_bytes()
-        {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        verify_recovery_identity(root, owner, &self.recovery_file, &self.recovery_bytes)
+        root.metadata()
+            .map_err(io)
+            .map(|metadata| metadata.uid())
+            .and_then(|owner| {
+                read_bounded_immutable(root, MANIFEST_NAME, owner, MANIFEST_LIMIT)
+                    .map(|current| (owner, current))
+            })
+            .and_then(|(owner, current)| {
+                if current == self.update.previous_manifest_bytes()
+                    || current == self.update.next_manifest_bytes()
+                {
+                    verify_recovery_identity(root, owner, &self.recovery_file, &self.recovery_bytes)
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
     }
 
     /// Publish successor SIC1, remove SIR1, and admit only the successor state.
@@ -134,30 +150,37 @@ impl CommittedInstallationUpdate {
         self,
         acknowledgement: &AuthenticatedRevocationAcknowledgement,
     ) -> Result<AdmittedSelectorProvider, SelectorBoundaryError> {
-        self.verify_recovery_floor()?;
-        let context = self.cancellation_context()?;
-        if !acknowledgement.matches_context(
-            &context,
-            self.update.revocation_update().request_id,
-            self.update
-                .revocation_update()
-                .next_revocation
-                .snapshot_digest(),
-        ) {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        let root = &self.admitted.bootstrap().installed().root;
-        let owner = root.metadata().map_err(io)?.uid();
-        publish_successor(
-            root,
-            owner,
-            self.update.previous_manifest_bytes(),
-            self.update.next_manifest_bytes(),
-            &self.recovery_file,
-            &self.recovery_bytes,
-        )?
-        .authenticate_bootstrap()?
-        .admit_provider()
+        self.verify_recovery_floor()
+            .and_then(|()| self.cancellation_context())
+            .and_then(|context| {
+                if acknowledgement.matches_context(
+                    &context,
+                    self.update.revocation_update().request_id,
+                    self.update
+                        .revocation_update()
+                        .next_revocation
+                        .snapshot_digest(),
+                ) {
+                    Ok(())
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
+            .and_then(|()| {
+                let root = &self.admitted.bootstrap().installed().root;
+                root.metadata().map_err(io).and_then(|metadata| {
+                    publish_successor(
+                        root,
+                        metadata.uid(),
+                        self.update.previous_manifest_bytes(),
+                        self.update.next_manifest_bytes(),
+                        &self.recovery_file,
+                        &self.recovery_bytes,
+                    )
+                })
+            })
+            .and_then(InstalledSelectorState::authenticate_bootstrap)
+            .and_then(super::super::AuthenticatedSelectorBootstrap::admit_provider)
     }
 }
 
@@ -175,29 +198,52 @@ impl AdmittedSelectorProvider {
         update: ValidatedInstallationUpdate,
         snapshot: InstallationRecoverySnapshot,
     ) -> Result<CommittedInstallationUpdate, SelectorBoundaryError> {
+        let admitted = Arc::clone(&self);
         let installed = self.bootstrap().installed();
         if installed.manifest_bytes() != update.previous_manifest_bytes() {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        let owner = installed.root.metadata().map_err(io)?.uid();
-        if read_bounded_immutable(&installed.root, MANIFEST_NAME, owner, MANIFEST_LIMIT)?
-            != update.previous_manifest_bytes()
-        {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        ensure_no_pending_recovery(&installed.root)?;
-        let (recovery_bytes, sir1_digest) = recovery_bytes(&update, &snapshot)?;
-        synchronize_successor_records(installed, &update, owner)?;
-        let staging = open_staging_directory(&installed.root, owner)?;
-        let recovery_file = write_recovery(&staging, &installed.root, owner, &recovery_bytes)?;
-        Ok(CommittedInstallationUpdate {
-            admitted: self,
-            update,
-            snapshot,
-            sir1_digest,
-            recovery_file,
-            recovery_bytes,
-        })
+        installed
+            .root
+            .metadata()
+            .map_err(io)
+            .map(|metadata| metadata.uid())
+            .and_then(|owner| {
+                read_bounded_immutable(&installed.root, MANIFEST_NAME, owner, MANIFEST_LIMIT)
+                    .and_then(|current| {
+                        if current == update.previous_manifest_bytes() {
+                            Ok(owner)
+                        } else {
+                            Err(SelectorBoundaryError::ArtifactInvalid)
+                        }
+                    })
+            })
+            .and_then(|owner| ensure_no_pending_recovery(&installed.root).map(|()| owner))
+            .and_then(|owner| {
+                recovery_bytes(&update, &snapshot).map(|(bytes, digest)| (owner, bytes, digest))
+            })
+            .and_then(|(owner, bytes, digest)| {
+                synchronize_successor_records(installed, &update, owner)
+                    .map(|()| (owner, bytes, digest))
+            })
+            .and_then(|(owner, bytes, digest)| {
+                open_staging_directory(&installed.root, owner)
+                    .map(|staging| (owner, bytes, digest, staging))
+            })
+            .and_then(|(owner, bytes, digest, staging)| {
+                write_recovery(&staging, &installed.root, owner, &bytes)
+                    .map(|file| (bytes, digest, file))
+            })
+            .map(
+                |(recovery_bytes, sir1_digest, recovery_file)| CommittedInstallationUpdate {
+                    admitted,
+                    update,
+                    snapshot,
+                    sir1_digest,
+                    recovery_file,
+                    recovery_bytes,
+                },
+            )
     }
 }
 
@@ -227,17 +273,20 @@ fn recovery_bytes(
         attempt_values(snapshot.previous_live_attempt_ids()),
         attempt_values(snapshot.required_cancelled_attempt_ids()),
     ]);
-    let unsigned_bytes = encode_with_limit(&unsigned, RECOVERY_LIMIT).map_err(invalid)?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"PiglorOS.SIR1.v1\0");
-    hasher.update(&unsigned_bytes);
-    let sir1_digest = *hasher.finalize().as_bytes();
-    let encoded = encode_with_limit(
-        &Value::Array(vec![unsigned, Value::Bytes(sir1_digest.to_vec())]),
-        RECOVERY_LIMIT,
-    )
-    .map_err(invalid)?;
-    Ok((encoded, sir1_digest))
+    encode_with_limit(&unsigned, RECOVERY_LIMIT)
+        .map_err(invalid)
+        .and_then(|unsigned_bytes| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"PiglorOS.SIR1.v1\0");
+            hasher.update(&unsigned_bytes);
+            let sir1_digest = *hasher.finalize().as_bytes();
+            encode_with_limit(
+                &Value::Array(vec![unsigned, Value::Bytes(sir1_digest.to_vec())]),
+                RECOVERY_LIMIT,
+            )
+            .map_err(invalid)
+            .map(|encoded| (encoded, sir1_digest))
+        })
 }
 
 fn attempt_values(attempts: &[[u8; 16]]) -> Value {
@@ -254,44 +303,54 @@ fn synchronize_successor_records(
     update: &ValidatedInstallationUpdate,
     owner: u32,
 ) -> Result<(), SelectorBoundaryError> {
-    let directory = open_directory_chain(
-        installed.root.try_clone().map_err(io)?,
-        Path::new("authority"),
-        owner,
-    )?;
-    for (kind, held) in [
-        (
-            InstallationObjectKind::ADMINISTRATOR_POLICY,
-            update.record_files()[0],
-        ),
-        (
-            InstallationObjectKind::REVOCATION_SNAPSHOT,
-            update.record_files()[1],
-        ),
-    ] {
-        let identity = update.next_manifest().authority_digests()[usize::from(kind.code())];
-        let object = update
-            .next_manifest()
-            .object(kind, identity)
-            .map_err(invalid)?;
-        let reopened = open_immutable_file(
-            &directory,
-            &hex_name(object.content_digest()),
-            kind.required_mode(),
-            object.byte_length(),
-            owner,
-        )?;
-        let reopened_metadata = reopened.metadata().map_err(io)?;
-        let held_metadata = held.metadata().map_err(io)?;
-        if reopened_metadata.dev() != held_metadata.dev()
-            || reopened_metadata.ino() != held_metadata.ino()
-        {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        fsync(held).map_err(io)?;
-    }
-    fsync(&directory).map_err(io)?;
-    fsync(&installed.root).map_err(io)
+    installed
+        .root
+        .try_clone()
+        .map_err(io)
+        .and_then(|root| open_directory_chain(root, Path::new("authority"), owner))
+        .and_then(|directory| {
+            [
+                (
+                    InstallationObjectKind::ADMINISTRATOR_POLICY,
+                    update.record_files()[0],
+                ),
+                (
+                    InstallationObjectKind::REVOCATION_SNAPSHOT,
+                    update.record_files()[1],
+                ),
+            ]
+            .into_iter()
+            .try_for_each(|(kind, held)| {
+                let identity = update.next_manifest().authority_digests()[usize::from(kind.code())];
+                update
+                    .next_manifest()
+                    .object(kind, identity)
+                    .map_err(invalid)
+                    .and_then(|object| {
+                        open_immutable_file(
+                            &directory,
+                            &hex_name(object.content_digest()),
+                            kind.required_mode(),
+                            object.byte_length(),
+                            owner,
+                        )
+                    })
+                    .and_then(|reopened| {
+                        reopened.metadata().map_err(io).and_then(|reopened| {
+                            held.metadata().map_err(io).map(|held| (reopened, held))
+                        })
+                    })
+                    .and_then(|(reopened, retained)| {
+                        if reopened.dev() == retained.dev() && reopened.ino() == retained.ino() {
+                            fsync(held).map_err(io)
+                        } else {
+                            Err(SelectorBoundaryError::ArtifactInvalid)
+                        }
+                    })
+            })
+            .and_then(|()| fsync(&directory).map_err(io))
+        })
+        .and_then(|()| fsync(&installed.root).map_err(io))
 }
 
 fn open_staging_directory(root: &File, owner: u32) -> Result<File, SelectorBoundaryError> {
@@ -300,7 +359,7 @@ fn open_staging_directory(root: &File, owner: u32) -> Result<File, SelectorBound
         Err(rustix::io::Errno::EXIST) => false,
         Err(_) => return Err(SelectorBoundaryError::Io),
     };
-    let staging = openat2(
+    openat2(
         root,
         STAGING_NAME,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
@@ -308,22 +367,39 @@ fn open_staging_directory(root: &File, owner: u32) -> Result<File, SelectorBound
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(invalid)?;
-    if created {
-        fchmod(&staging, PRIVATE_DIRECTORY_MODE).map_err(io)?;
-        fsync(&staging).map_err(io)?;
-        fsync(root).map_err(io)?;
-    }
-    let metadata = staging.metadata().map_err(io)?;
-    let root_metadata = root.metadata().map_err(io)?;
-    if !metadata.is_dir()
-        || metadata.uid() != owner
-        || metadata.mode() & 0o7777 != 0o700
-        || metadata.dev() != root_metadata.dev()
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(staging)
+    .map_err(invalid)
+    .and_then(|staging| {
+        if created {
+            fchmod(&staging, PRIVATE_DIRECTORY_MODE)
+                .map_err(io)
+                .and_then(|()| fsync(&staging).map_err(io))
+                .and_then(|()| fsync(root).map_err(io))
+                .map(|()| staging)
+        } else {
+            Ok(staging)
+        }
+    })
+    .and_then(|staging| {
+        staging
+            .metadata()
+            .map_err(io)
+            .and_then(|metadata| {
+                root.metadata()
+                    .map_err(io)
+                    .map(|root_metadata| (metadata, root_metadata))
+            })
+            .and_then(|(metadata, root_metadata)| {
+                if metadata.is_dir()
+                    && metadata.uid() == owner
+                    && metadata.mode() & 0o7777 == 0o700
+                    && metadata.dev() == root_metadata.dev()
+                {
+                    Ok(staging)
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
+    })
 }
 
 fn write_recovery(
@@ -332,28 +408,30 @@ fn write_recovery(
     owner: u32,
     bytes: &[u8],
 ) -> Result<File, SelectorBoundaryError> {
-    let temporary_name = temporary_name("sir1")?;
-    let mut temporary = create_staging_file(staging, &temporary_name, owner)?;
-    temporary.write_all(bytes).map_err(io)?;
-    fsync(&temporary).map_err(io)?;
-    renameat_with(
-        staging,
-        &temporary_name,
-        root,
-        RECOVERY_NAME,
-        RenameFlags::NOREPLACE,
-    )
-    .map_err(invalid)?;
-    let recovery = open_immutable_file(
-        root,
-        RECOVERY_NAME,
-        0o400,
-        u64::try_from(bytes.len()).map_err(invalid)?,
-        owner,
-    )?;
-    verify_file_identity(&temporary, &recovery)?;
-    fsync(root).map_err(io)?;
-    Ok(recovery)
+    temporary_name("sir1")
+        .and_then(|name| create_staging_file(staging, &name, owner).map(|file| (name, file)))
+        .and_then(|(name, mut temporary)| {
+            temporary
+                .write_all(bytes)
+                .map_err(io)
+                .and_then(|()| fsync(&temporary).map_err(io))
+                .map(|()| (name, temporary))
+        })
+        .and_then(|(name, temporary)| {
+            renameat_with(staging, &name, root, RECOVERY_NAME, RenameFlags::NOREPLACE)
+                .map_err(invalid)
+                .map(|()| temporary)
+        })
+        .and_then(|temporary| {
+            u64::try_from(bytes.len())
+                .map_err(invalid)
+                .and_then(|length| open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner))
+                .map(|recovery| (temporary, recovery))
+        })
+        .and_then(|(temporary, recovery)| {
+            verify_file_identity(&temporary, &recovery).map(|()| recovery)
+        })
+        .and_then(|recovery| fsync(root).map_err(io).map(|()| recovery))
 }
 
 fn publish_successor(
@@ -364,31 +442,52 @@ fn publish_successor(
     retained_recovery: &File,
     recovery_bytes: &[u8],
 ) -> Result<InstalledSelectorState, SelectorBoundaryError> {
-    let current = read_bounded_immutable(root, MANIFEST_NAME, owner, MANIFEST_LIMIT)?;
-    if current != previous && current != next {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    verify_recovery_identity(root, owner, retained_recovery, recovery_bytes)?;
-    if current != next {
-        let staging = open_staging_directory(root, owner)?;
-        let temporary_name = temporary_name("sic1")?;
-        let mut temporary = create_staging_file(&staging, &temporary_name, owner)?;
-        temporary.write_all(next).map_err(io)?;
-        fsync(&temporary).map_err(io)?;
-        renameat_with(
-            &staging,
-            &temporary_name,
-            root,
-            MANIFEST_NAME,
-            RenameFlags::empty(),
-        )
-        .map_err(io)?;
-        fsync(root).map_err(io)?;
-    }
-    verify_recovery_identity(root, owner, retained_recovery, recovery_bytes)?;
-    unlinkat(root, RECOVERY_NAME, AtFlags::empty()).map_err(io)?;
-    fsync(root).map_err(io)?;
-    InstalledSelectorState::open_at_for_owner(root, owner)
+    read_bounded_immutable(root, MANIFEST_NAME, owner, MANIFEST_LIMIT)
+        .and_then(|current| {
+            if current == previous || current == next {
+                Ok(current)
+            } else {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            }
+        })
+        .and_then(|current| {
+            verify_recovery_identity(root, owner, retained_recovery, recovery_bytes)
+                .map(|()| current)
+        })
+        .and_then(|current| {
+            if current == next {
+                Ok(())
+            } else {
+                write_successor_manifest(root, owner, next)
+            }
+        })
+        .and_then(|()| verify_recovery_identity(root, owner, retained_recovery, recovery_bytes))
+        .and_then(|()| unlinkat(root, RECOVERY_NAME, AtFlags::empty()).map_err(io))
+        .and_then(|()| fsync(root).map_err(io))
+        .and_then(|()| InstalledSelectorState::open_at_for_owner(root, owner))
+}
+
+fn write_successor_manifest(
+    root: &File,
+    owner: u32,
+    next: &[u8],
+) -> Result<(), SelectorBoundaryError> {
+    open_staging_directory(root, owner)
+        .and_then(|staging| temporary_name("sic1").map(|name| (staging, name)))
+        .and_then(|(staging, name)| {
+            create_staging_file(&staging, &name, owner).map(|temporary| (staging, name, temporary))
+        })
+        .and_then(|(staging, name, mut temporary)| {
+            temporary
+                .write_all(next)
+                .map_err(io)
+                .and_then(|()| fsync(&temporary).map_err(io))
+                .map(|()| (staging, name))
+        })
+        .and_then(|(staging, name)| {
+            renameat_with(&staging, &name, root, MANIFEST_NAME, RenameFlags::empty()).map_err(io)
+        })
+        .and_then(|()| fsync(root).map_err(io))
 }
 
 fn create_staging_file(
@@ -396,7 +495,7 @@ fn create_staging_file(
     name: &str,
     owner: u32,
 ) -> Result<File, SelectorBoundaryError> {
-    let file = openat2(
+    openat2(
         staging,
         name,
         OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
@@ -404,18 +503,24 @@ fn create_staging_file(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(io)?;
-    fchmod(&file, RECORD_MODE).map_err(io)?;
-    let metadata = file.metadata().map_err(io)?;
-    if !metadata.is_file()
-        || metadata.uid() != owner
-        || metadata.mode() & 0o7777 != 0o400
-        || metadata.nlink() != 1
-        || metadata.len() != 0
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(file)
+    .map_err(io)
+    .and_then(|file| {
+        fchmod(&file, RECORD_MODE)
+            .map_err(io)
+            .and_then(|()| file.metadata().map_err(io))
+            .and_then(|metadata| {
+                if metadata.is_file()
+                    && metadata.uid() == owner
+                    && metadata.mode() & 0o7777 == 0o400
+                    && metadata.nlink() == 1
+                    && metadata.len() == 0
+                {
+                    Ok(file)
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
+    })
 }
 
 fn read_bounded_immutable(
@@ -424,13 +529,17 @@ fn read_bounded_immutable(
     owner: u32,
     limit: u64,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let metadata = statat(root, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
-    let length = u64::try_from(metadata.st_size).map_err(invalid)?;
-    if length == 0 || length > limit {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    let file = open_immutable_file(root, name, 0o400, length, owner)?;
-    read_complete_file(&file, limit)
+    statat(root, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(io)
+        .and_then(|metadata| u64::try_from(metadata.st_size).map_err(invalid))
+        .and_then(|length| {
+            if length == 0 || length > limit {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            } else {
+                open_immutable_file(root, name, 0o400, length, owner)
+            }
+        })
+        .and_then(|file| read_complete_file(&file, limit))
 }
 
 fn verify_recovery_identity(
@@ -439,40 +548,48 @@ fn verify_recovery_identity(
     retained: &File,
     expected_bytes: &[u8],
 ) -> Result<(), SelectorBoundaryError> {
-    let current = open_immutable_file(
-        root,
-        RECOVERY_NAME,
-        0o400,
-        u64::try_from(expected_bytes.len()).map_err(invalid)?,
-        owner,
-    )?;
-    verify_file_identity(retained, &current)?;
-    if read_complete_file(&current, RECOVERY_LIMIT as u64)? != expected_bytes {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(())
+    u64::try_from(expected_bytes.len())
+        .map_err(invalid)
+        .and_then(|length| open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner))
+        .and_then(|current| verify_file_identity(retained, &current).map(|()| current))
+        .and_then(|current| read_complete_file(&current, RECOVERY_LIMIT as u64))
+        .and_then(|current| {
+            if current == expected_bytes {
+                Ok(())
+            } else {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            }
+        })
 }
 
 fn verify_file_identity(left: &File, right: &File) -> Result<(), SelectorBoundaryError> {
-    let left = left.metadata().map_err(io)?;
-    let right = right.metadata().map_err(io)?;
-    if left.dev() != right.dev() || left.ino() != right.ino() {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(())
+    left.metadata()
+        .map_err(io)
+        .and_then(|left| right.metadata().map_err(io).map(|right| (left, right)))
+        .and_then(|(left, right)| {
+            if left.dev() == right.dev() && left.ino() == right.ino() {
+                Ok(())
+            } else {
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            }
+        })
 }
 
 fn temporary_name(prefix: &str) -> Result<String, SelectorBoundaryError> {
-    let id = fresh_selector_id()?;
-    let mut name = String::with_capacity(prefix.len() + 39);
-    name.push_str(prefix);
-    name.push('-');
-    for byte in id {
-        use std::fmt::Write as _;
-        write!(name, "{byte:02x}").map_err(io)?;
-    }
-    name.push_str(".cbor");
-    Ok(name)
+    fresh_selector_id().and_then(|id| {
+        let mut name = String::with_capacity(prefix.len() + 39);
+        name.push_str(prefix);
+        name.push('-');
+        id.into_iter()
+            .try_for_each(|byte| {
+                use std::fmt::Write as _;
+                write!(name, "{byte:02x}").map_err(io)
+            })
+            .map(|()| {
+                name.push_str(".cbor");
+                name
+            })
+    })
 }
 
 fn invalid<T>(_: T) -> SelectorBoundaryError {
