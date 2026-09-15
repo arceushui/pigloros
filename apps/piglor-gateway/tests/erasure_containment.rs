@@ -21,7 +21,6 @@ use pos_core::{
     ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
     ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1, TimelineId,
-    ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{
     ErasureCoordinatorAuthorityV1, ErasureCoordinatorCompositionV1, ErasureExecutionHostV1,
@@ -356,7 +355,7 @@ async fn host_owned_gateway_covers_store_boundary(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Memory,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
     let gateway = Gateway::new_with_erasure_host(host)?;
     let timeline = gateway.create_timeline("shared-gate").await?;
@@ -385,7 +384,7 @@ async fn recovered_access_frozen_gateway_health_is_payload_free(
     let mut initial = ErasureExecutionHostV1::open_gateway_with_authority(
         config(),
         &composition,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
     {
         let mut commands = initial.command_sender()?;
@@ -405,7 +404,7 @@ async fn recovered_access_frozen_gateway_health_is_payload_free(
     let mut recovered = ErasureExecutionHostV1::open_gateway_with_authority(
         config(),
         &composition,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
     {
         let mut reads = recovered.read_sender()?;
@@ -463,7 +462,7 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let geo_host = ErasureExecutionHostV1::open_gateway_verified_empty(
         StoreConfig::Memory,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
     let geo_gateway = Gateway::new_with_erasure_host(geo_host)?;
     geo_gateway.shutdown().await?;
@@ -479,12 +478,11 @@ async fn specialized_gate_gateway_constructors_bind_and_shutdown(
     }
     let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
 
-    assert!(ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, 0).is_err());
-    assert!(ErasureExecutionHostV1::open_gateway_verified_empty(StoreConfig::Memory, 0).is_err());
+    assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
 
     let owntracks_host = ErasureExecutionHostV1::open_gateway_verified_empty(
         StoreConfig::SqliteInMemory,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
     let owntracks_gateway = Gateway::new_with_owntracks_erasure_host(owntracks_host, &owner_key)?;
     owntracks_gateway.shutdown().await?;

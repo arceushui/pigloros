@@ -66,7 +66,7 @@ fn registry(gate: &Arc<dyn pos_core::ErasureGate>) -> ProjectionRegistry {
 fn snapshot_verification_requires_authoritative_artifact_evidence() {
     let mut host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Memory,
-        pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok();
     let gate = host.containment_gate();
@@ -134,7 +134,7 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
 fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
     let mut host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Memory,
-        pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok();
     let gate = host.containment_gate();

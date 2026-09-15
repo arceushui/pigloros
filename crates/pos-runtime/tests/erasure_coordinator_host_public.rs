@@ -19,8 +19,8 @@ use pos_core::{
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
     ErasureVerifiedTopologyObservationV1, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
@@ -54,7 +54,9 @@ fn open_with_authority(
     maximum_requests: usize,
 ) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
     let composition = authority_composition(authority, coordinator)?;
-    ErasureExecutionHostV1::open_with_authority(config, &composition, maximum_requests)
+    let limits = ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)
+        .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+    ErasureExecutionHostV1::open_with_authority(config, &composition, limits)
 }
 
 fn open_read_only_with_authority(
@@ -64,7 +66,9 @@ fn open_read_only_with_authority(
     maximum_requests: usize,
 ) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
     let composition = authority_composition(authority, coordinator)?;
-    ErasureExecutionHostV1::open_read_only_with_authority(path, &composition, maximum_requests)
+    let limits = ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)
+        .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+    ErasureExecutionHostV1::open_read_only_with_authority(path, &composition, limits)
 }
 
 fn open_gateway_with_authority(
@@ -74,7 +78,9 @@ fn open_gateway_with_authority(
     maximum_requests: usize,
 ) -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
     let composition = authority_composition(authority, coordinator)?;
-    ErasureExecutionHostV1::open_gateway_with_authority(config, &composition, maximum_requests)
+    let limits = ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)
+        .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
+    ErasureExecutionHostV1::open_gateway_with_authority(config, &composition, limits)
 }
 
 #[test]
@@ -975,7 +981,7 @@ fn public_read_sender_reports_missing_request_and_missing_authority(
         "open authority-free read host",
         ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
     let mut empty_reads = test_stage("open authority-free reader", empty_host.read_sender())?;
@@ -1328,7 +1334,7 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
         ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Memory,
             &composition,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
@@ -1383,7 +1389,7 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
     let closed_recovery = ErasureExecutionHostV1::open_read_only_with_authority(
         &path_text,
         &composition,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     );
     assert_eq!(
         closed_recovery.err(),
@@ -1663,7 +1669,7 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
         "open verified-empty host",
         ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
@@ -1672,7 +1678,7 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
         "open verified-empty gateway host",
         ErasureExecutionHostV1::open_gateway_verified_empty(
             StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
     assert_eq!(gateway_host.status(), ErasureHostStatusV1::Ready);
@@ -1682,7 +1688,7 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
         ErasureExecutionHostV1::open_gateway_with_authority(
             StoreConfig::Memory,
             &composition,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
     assert_eq!(composed_gateway_host.status(), ErasureHostStatusV1::Ready);
@@ -1701,14 +1707,14 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
             StoreConfig::Sqlite {
                 path: path_text.clone(),
             },
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?);
     let legacy_read_only_host = test_stage(
         "open legacy verified-empty read-only host",
         ErasureExecutionHostV1::open_read_only_verified_empty(
             &path_text,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
     assert_eq!(legacy_read_only_host.status(), ErasureHostStatusV1::Ready);
@@ -1717,7 +1723,7 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
         ErasureExecutionHostV1::open_read_only_with_authority(
             &path_text,
             &composition,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
     assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
@@ -1740,7 +1746,7 @@ fn recovery_entrypoints_map_store_open_failures_to_adapter_failure() {
             StoreConfig::Sqlite {
                 path: missing_path.clone(),
             },
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .map(|_| ()),
         Err(ErasureHostErrorV1::AdapterFailure)
@@ -1748,7 +1754,7 @@ fn recovery_entrypoints_map_store_open_failures_to_adapter_failure() {
     assert_eq!(
         ErasureExecutionHostV1::open_gateway_verified_empty(
             StoreConfig::Sqlite { path: missing_path },
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .map(|_| ()),
         Err(ErasureHostErrorV1::AdapterFailure)

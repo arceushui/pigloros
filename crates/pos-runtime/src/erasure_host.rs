@@ -1081,12 +1081,9 @@ impl ErasureExecutionHostV1 {
     /// Returns a closed adapter or recovery error before any sender is issued.
     pub fn open_verified_empty(
         config: StoreConfig,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_verified_empty_with_limits(
-            config,
-            Self::legacy_recovery_limits(maximum_requests)?,
-        )
+        Self::open_verified_empty_with_limits(config, limits)
     }
 
     /// Open and recover an exclusively owned store with deployment recovery ceilings.
@@ -1108,10 +1105,9 @@ impl ErasureExecutionHostV1 {
     /// Returns a closed adapter or recovery error before any sender is issued.
     pub fn open_read_only_verified_empty(
         path: &str,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::legacy_recovery_limits(maximum_requests)
-            .and_then(|limits| Self::open_read_only_verified_empty_with_limits(path, limits))
+        Self::open_read_only_verified_empty_with_limits(path, limits)
     }
 
     /// Open a read-only `SQLite` store with deployment recovery ceilings.
@@ -1140,10 +1136,9 @@ impl ErasureExecutionHostV1 {
     pub fn open_with_authority(
         config: StoreConfig,
         composition: &ErasureCoordinatorCompositionV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::legacy_recovery_limits(maximum_requests)
-            .and_then(|limits| Self::open_with_authority_and_limits(config, composition, limits))
+        Self::open_with_authority_and_limits(config, composition, limits)
     }
 
     /// Open one store with explicit authority and deployment recovery ceilings.
@@ -1183,11 +1178,9 @@ impl ErasureExecutionHostV1 {
     pub fn open_read_only_with_authority(
         path: &str,
         composition: &ErasureCoordinatorCompositionV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::legacy_recovery_limits(maximum_requests).and_then(|limits| {
-            Self::open_read_only_with_authority_and_limits(path, composition, limits)
-        })
+        Self::open_read_only_with_authority_and_limits(path, composition, limits)
     }
 
     /// Open a read-only `SQLite` store with authority and deployment recovery ceilings.
@@ -1212,12 +1205,9 @@ impl ErasureExecutionHostV1 {
     /// Returns a closed adapter or recovery error before any sender is issued.
     pub fn open_gateway_verified_empty(
         config: StoreConfig,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_gateway_verified_empty_with_limits(
-            config,
-            Self::legacy_recovery_limits(maximum_requests)?,
-        )
+        Self::open_gateway_verified_empty_with_limits(config, limits)
     }
 
     /// Open a Gateway-capable store with deployment recovery ceilings.
@@ -1241,13 +1231,9 @@ impl ErasureExecutionHostV1 {
     pub fn open_gateway_with_authority(
         config: StoreConfig,
         composition: &ErasureCoordinatorCompositionV1,
-        maximum_requests: usize,
+        limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_gateway_with_authority_and_limits(
-            config,
-            composition,
-            Self::legacy_recovery_limits(maximum_requests)?,
-        )
+        Self::open_gateway_with_authority_and_limits(config, composition, limits)
     }
 
     /// Open a Gateway-capable store with authority and deployment recovery ceilings.
@@ -4281,13 +4267,8 @@ mod tests {
             limits,
         )?;
         assert_eq!(
-            ErasureExecutionHostV1::open_gateway_with_authority(
-                StoreConfig::Memory,
-                &composition,
-                0,
-            )
-            .map(|_| ()),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
+            ErasureRecoveryLimitsV1::new(0, 1, 1),
+            Err(ErasureErrorV1::ScopeInvalid)
         );
 
         Ok(())
@@ -4306,17 +4287,16 @@ mod tests {
 
         let limits = ErasureRecoveryLimitsV1::new(1, 1, 1)?;
         let composition = ErasureCoordinatorCompositionV1::closed();
-        ErasureExecutionHostV1::open_read_only_verified_empty(&path, 1)?;
+        ErasureExecutionHostV1::open_read_only_verified_empty(&path, limits)?;
         assert_eq!(
-            ErasureExecutionHostV1::open_read_only_verified_empty(&path, 0).map(|_| ()),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
+            ErasureRecoveryLimitsV1::new(0, 1, 1),
+            Err(ErasureErrorV1::ScopeInvalid)
         );
         ErasureExecutionHostV1::open_read_only_verified_empty_with_limits(&path, limits)?;
-        ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, 1)?;
+        ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, limits)?;
         assert_eq!(
-            ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, 0)
-                .map(|_| ()),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
+            ErasureRecoveryLimitsV1::new(0, 1, 1),
+            Err(ErasureErrorV1::ScopeInvalid)
         );
         ErasureExecutionHostV1::open_read_only_with_authority_and_limits(
             &path,
@@ -4330,12 +4310,17 @@ mod tests {
         ));
         let missing_path = missing_path.to_string_lossy().into_owned();
         assert_eq!(
-            ErasureExecutionHostV1::open_read_only_verified_empty(&missing_path, 1).map(|_| ()),
+            ErasureExecutionHostV1::open_read_only_verified_empty(&missing_path, limits)
+                .map(|_| ()),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
         assert_eq!(
-            ErasureExecutionHostV1::open_read_only_with_authority(&missing_path, &composition, 1,)
-                .map(|_| ()),
+            ErasureExecutionHostV1::open_read_only_with_authority(
+                &missing_path,
+                &composition,
+                limits,
+            )
+            .map(|_| ()),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
 
