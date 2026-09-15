@@ -7847,6 +7847,18 @@ mod coverage_entrypoints {
         ));
         assert!(bind_registry_to_host_gate(&mut missing_bound_gate, gate).is_err());
 
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let registry = PluginRegistry::new().with_erasure_gate(gate);
+        let mut store = pos_store::memory::MemoryStore::new();
+        assert!(matches!(
+            bind_registry_erasure_gate(
+                &mut store,
+                &registry,
+                Arc::new(ErasureContainmentGateV1::new_test_open()),
+            ),
+            Err(pos_core::CoreError::ErasureContainmentUnavailable)
+        ));
+
         let mut fork_registry = PluginRegistry::new();
         ok(bind_fork_registry_erasure_gate(
             &mut fork_registry,

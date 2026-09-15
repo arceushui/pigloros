@@ -7715,6 +7715,14 @@ mod coverage_paths {
         poison_authority(&block_authority);
         block_authority.block_timeline(TimelineId::new());
 
+        let freeze_fence = Arc::new(ErasureContainmentGateV1::new_test_open());
+        poison_fence(&freeze_fence);
+        freeze_fence.freeze_timeline_for_test(TimelineId::new());
+
+        let freeze_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
+        poison_authority(&freeze_authority);
+        freeze_authority.freeze_timeline_for_test(TimelineId::new());
+
         let state = coverage_state(reference(6));
         let timeline = TimelineId::new();
         let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
