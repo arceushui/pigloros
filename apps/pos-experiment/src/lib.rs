@@ -11,7 +11,6 @@
 
 include!("host_store.rs");
 
-#[cfg(test)]
 use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::WallTime,
@@ -128,7 +127,7 @@ fn bind_registry_erasure_gate(
     let registry_gate = registry
         .clone_erasure_gate()
         .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-    let gate_as_trait: Arc<dyn ErasureGate> = Arc::clone(&gate);
+    let gate_as_trait: Arc<dyn ErasureGate> = gate.clone();
     if !Arc::ptr_eq(&registry_gate, &gate_as_trait) {
         return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     }
@@ -190,7 +189,7 @@ fn bind_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Arc<ErasureContainmentGateV1>, pos_core::CoreError> {
-    let gate_as_trait: Arc<dyn ErasureGate> = Arc::clone(&gate);
+    let gate_as_trait: Arc<dyn ErasureGate> = gate.clone();
     if registry.erasure_gate_is_bound() {
         let existing = registry
             .clone_erasure_gate()
@@ -201,7 +200,7 @@ fn bind_backtest_erasure_gate(
     } else {
         registry.bind_erasure_gate(gate_as_trait);
     }
-    store.bind_erasure_gate(Arc::clone(&gate))?;
+    store.bind_erasure_gate(gate.clone())?;
     Ok(gate)
 }
 
@@ -1108,7 +1107,7 @@ impl Experiment {
     /// Tick Boundary created by this experiment.
     #[must_use]
     pub fn with_erasure_gate(mut self, gate: Arc<ErasureContainmentGateV1>) -> Self {
-        self.registry = self.registry.with_erasure_gate(Arc::clone(&gate));
+        self.registry = self.registry.with_erasure_gate(gate.clone());
         self.erasure_gate = Some(gate);
         self
     }
@@ -1229,7 +1228,7 @@ impl Experiment {
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let gate = store.containment_gate();
-        bind_registry_to_host_gate(&mut self.registry, Arc::clone(&gate))?;
+        bind_registry_to_host_gate(&mut self.registry, gate.clone())?;
         self.erasure_gate = Some(gate);
         self.start_with_store_and_recipe(Box::new(store), recovery_store_config)
     }
@@ -1264,7 +1263,7 @@ impl Experiment {
         store_config: StoreConfig,
     ) -> Result<ExperimentSession, ExperimentError> {
         let gate = store.containment_gate();
-        bind_registry_to_host_gate(&mut self.registry, Arc::clone(&gate))?;
+        bind_registry_to_host_gate(&mut self.registry, gate.clone())?;
         self.erasure_gate = Some(gate);
         self.resume_with_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
     }
@@ -5696,7 +5695,7 @@ mod tests {
     fn backtest_rejects_a_bound_but_unavailable_registry_gate() {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut registry = PluginRegistry::new()
-            .with_erasure_gate(Arc::clone(&gate))
+            .with_erasure_gate(gate.clone())
             .without_erasure_gate();
         let mut store = pos_store::memory::MemoryStore::new();
         assert!(matches!(
@@ -7862,8 +7861,8 @@ mod coverage_entrypoints {
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut registry = PluginRegistry::new();
-        ok(bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)));
-        ok(bind_registry_to_host_gate(&mut registry, Arc::clone(&gate)));
+        ok(bind_registry_to_host_gate(&mut registry, gate.clone()));
+        ok(bind_registry_to_host_gate(&mut registry, gate.clone()));
         assert!(bind_registry_to_host_gate(
             &mut registry,
             Arc::new(ErasureContainmentGateV1::new_test_open())
@@ -7872,14 +7871,14 @@ mod coverage_entrypoints {
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut missing_bound_gate = PluginRegistry::new()
-            .with_erasure_gate(Arc::clone(&gate))
+            .with_erasure_gate(gate.clone())
             .without_erasure_gate();
         let mut store = pos_store::memory::MemoryStore::new();
         assert!(matches!(
             bind_registry_erasure_gate(&mut store, &missing_bound_gate, gate),
             Err(pos_core::CoreError::ErasureContainmentUnavailable)
         ));
-        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, Arc::clone(&gate)).is_err());
+        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, gate.clone()).is_err());
 
         let mut fork_registry = PluginRegistry::new();
         ok(bind_fork_registry_erasure_gate(

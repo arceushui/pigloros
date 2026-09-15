@@ -494,7 +494,7 @@ mod tests {
             (timeline.id(), entity)
         };
         let evaluation = snapshot_evaluation(ArtifactStateV1::Retained);
-        let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         projected.register("count", Box::new(CountReducer));
         let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
         verified.register("count", Box::new(CountReducer));

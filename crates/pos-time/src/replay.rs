@@ -263,7 +263,7 @@ mod tests {
             (timeline.id(), entity, events[2].seq)
         };
 
-        let mut complete = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut complete = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         complete.register("count", Box::new(CountReducer));
         let mut partial = ProjectionRegistry::new().with_erasure_gate(gate);
         partial.register("count", Box::new(CountReducer));

@@ -353,7 +353,7 @@ mod tests {
             &claims,
         )
         .test_ok();
-        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
         registry_b.register("count", Box::new(CountReducer));
