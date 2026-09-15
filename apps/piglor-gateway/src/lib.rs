@@ -35,7 +35,7 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, Plugin,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1, Plugin,
     ProposedAction,
 };
 #[cfg(test)]
@@ -664,7 +664,7 @@ fn gateway_action_registry_builder(
 fn gateway_action_registry_with_authority_and_erasure_gate(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    gate: Arc<dyn ErasureGate>,
+    gate: Arc<ErasureContainmentGateV1>,
 ) -> Arc<PluginRegistry> {
     let mut registry = gateway_action_registry_builder(bodies, authority);
     registry.bind_erasure_gate(gate);

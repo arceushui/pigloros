@@ -135,8 +135,7 @@ fn bind_registry_erasure_gate_inner(
     let registry_gate = registry
         .clone_erasure_gate()
         .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-    let gate_as_trait: Arc<dyn ErasureGate> = gate.clone();
-    if !Arc::ptr_eq(&registry_gate, &gate_as_trait) {
+    if !Arc::ptr_eq(&registry_gate, &gate) {
         return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     }
     store.bind_erasure_gate(gate)
@@ -167,7 +166,7 @@ fn map_action_submission_error(error: pos_runtime::ActionSubmissionError) -> Exp
 
 fn bind_registry_to_host_gate(
     registry: &mut PluginRegistry,
-    gate: Arc<dyn ErasureGate>,
+    gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<(), ExperimentError> {
     if !registry.erasure_gate_is_bound() {
         registry.bind_erasure_gate(gate);
@@ -220,16 +219,15 @@ fn bind_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Arc<ErasureContainmentGateV1>, pos_core::CoreError> {
-    let gate_as_trait: Arc<dyn ErasureGate> = gate.clone();
     if registry.erasure_gate_is_bound() {
         let existing = registry
             .clone_erasure_gate()
             .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-        if !Arc::ptr_eq(&existing, &gate_as_trait) {
+        if !Arc::ptr_eq(&existing, &gate) {
             return Err(pos_core::CoreError::ErasureContainmentUnavailable);
         }
     } else {
-        registry.bind_erasure_gate(gate_as_trait);
+        registry.bind_erasure_gate(gate.clone());
     }
     store.bind_erasure_gate(gate.clone())?;
     Ok(gate)
@@ -237,7 +235,7 @@ fn bind_backtest_erasure_gate(
 
 fn inherit_backtest_erasure_gate(
     registry: &mut PluginRegistry,
-    gate: Arc<dyn ErasureGate>,
+    gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<(), pos_core::CoreError> {
     if registry.erasure_gate_is_bound() {
         let existing = registry
@@ -1032,7 +1030,7 @@ fn prepare_backtest_eval_registry(
     timeline: pos_core::ids::TimelineId,
     train_head: pos_core::clock::Seq,
     registry: &mut PluginRegistry,
-    gate: Arc<dyn ErasureGate>,
+    gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Vec<pos_core::Event>, ExperimentError> {
     inherit_backtest_erasure_gate(registry, gate)?;
     restore_inherited_eval_events(store, timeline, train_head, registry)
