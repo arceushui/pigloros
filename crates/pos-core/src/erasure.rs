@@ -213,7 +213,10 @@ impl ErasureRecoveryLimitsV1 {
     pub const fn admits(self, requests: usize, timelines: usize) -> bool {
         requests <= self.requests
             && timelines <= self.timelines
-            && requests * timelines <= self.classifications
+            && matches!(
+                requests.checked_mul(timelines),
+                Some(classifications) if classifications <= self.classifications
+            )
     }
 }
 
@@ -7322,6 +7325,12 @@ mod coverage_paths {
         assert!(limits.admits(2, 3));
         assert!(!limits.admits(3, 1));
         assert!(!limits.admits(1, 4));
+        let overflowing = ErasureRecoveryLimitsV1 {
+            requests: usize::MAX,
+            timelines: 2,
+            classifications: usize::MAX,
+        };
+        assert!(!overflowing.admits(usize::MAX, 2));
         assert_eq!(
             ErasureRecoveryLimitsV1::new(0, 1, 1),
             Err(ErasureErrorV1::ScopeInvalid)
