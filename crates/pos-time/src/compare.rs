@@ -229,8 +229,8 @@ mod tests {
     }
 
     fn make_registry() -> ProjectionRegistry {
-        let mut reg =
-            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let mut reg = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         reg.register("count", Box::new(CountReducer));
         reg
     }

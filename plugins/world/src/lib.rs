@@ -2559,8 +2559,8 @@ mod tests {
             ),
         ];
         let plugin = WorldPlugin::new().with_bodies([body]);
-        let mut registry =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
             .register(
                 &plugin,
@@ -2726,8 +2726,8 @@ mod tests {
         let body = EntityId::new();
         let timeline = TimelineId::new();
         let plugin = WorldPlugin::new().with_bodies([body]);
-        let mut registry =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
             .register(
                 &plugin,

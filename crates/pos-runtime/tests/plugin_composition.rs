@@ -619,8 +619,8 @@ fn pinned_action_policy_retains_the_single_approver_route() {
         PluginIsolationV1::OperatorTrustedNative,
         &["domain-action-policy"],
     );
-    let mut registry =
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+    let mut registry = PluginRegistry::new()
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     registry
         .register_pinned_with_approver(
             &action,
@@ -663,8 +663,8 @@ fn pinned_action_policy_rejects_an_oversized_approver_draft() {
         has_driver: false,
         event_type: Some("world.action"),
     };
-    let mut registry =
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+    let mut registry = PluginRegistry::new()
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     registry
         .register_pinned_with_approver(
             &action,

@@ -5482,8 +5482,8 @@ mod erasure_gate_coverage {
             missing.step_all_anchored(timeline, pos_core::clock::Seq::ZERO),
             Err(RuntimeError::ErasureContainment(_))
         ));
-        let mut missing =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let mut missing = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert!(missing
             .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
@@ -5499,8 +5499,8 @@ mod erasure_gate_coverage {
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
 
-        let mut rejecting =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let mut rejecting = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         // A second binding is ignored, so a host cannot replace the original
         // gate after composition and reopen the protected path.
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));

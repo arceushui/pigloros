@@ -1775,8 +1775,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
         let timeline = TimelineId::new();
-        let mut registry =
-            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let mut registry = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         registry.apply_event(&make_event(entity));
