@@ -4574,10 +4574,28 @@ impl ErasureVerifiedInventoryV1 {
 
         let Self {
             members,
-            mut classifications,
+            classifications,
             limits,
             ..
         } = self;
+        Self::prepare_successor_fork_batch(
+            members,
+            classifications,
+            limits,
+            input,
+            admissions,
+            parent_index,
+        )
+    }
+
+    fn prepare_successor_fork_batch(
+        members: Vec<(ErasureVerifiedStateV1, ErasureVerifiedTopologyProofV1)>,
+        mut classifications: Vec<(TimelineId, Vec<ErasureInventoryClassificationV1>)>,
+        limits: ErasureRecoveryLimitsV1,
+        input: ErasureForkAdmissionInputV1,
+        mut admissions: Vec<PreparedErasureForkAdmissionV1>,
+        parent_index: usize,
+    ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
         let (parent_timeline, parent_classifications) = classifications.swap_remove(parent_index);
 
         let mut successor_members = Vec::new();

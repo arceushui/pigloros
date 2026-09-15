@@ -4334,6 +4334,21 @@ mod tests {
             limits,
         )?;
 
+        let missing_path = std::env::temp_dir().join(format!(
+            "pigloros-erasure-host-missing-{}.sqlite",
+            std::process::id()
+        ));
+        let missing_path = missing_path.to_string_lossy().into_owned();
+        assert_eq!(
+            ErasureExecutionHostV1::open_read_only_verified_empty(&missing_path, 1).map(|_| ()),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(
+            ErasureExecutionHostV1::open_read_only_with_authority(&missing_path, &composition, 1,)
+                .map(|_| ()),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+
         std::fs::remove_file(path)?;
         Ok(())
     }
