@@ -1110,13 +1110,8 @@ impl ErasureExecutionHostV1 {
         path: &str,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
-            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_verified_empty_with_limits(
-            store,
-            Self::legacy_recovery_limits(maximum_requests)?,
-        )
+        Self::legacy_recovery_limits(maximum_requests)
+            .and_then(|limits| Self::open_read_only_verified_empty_with_limits(path, limits))
     }
 
     /// Open a read-only `SQLite` store with deployment recovery ceilings.
@@ -1190,14 +1185,9 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
-            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_with_composition(
-            store,
-            composition,
-            Self::legacy_recovery_limits(maximum_requests)?,
-        )
+        Self::legacy_recovery_limits(maximum_requests).and_then(|limits| {
+            Self::open_read_only_with_authority_and_limits(path, composition, limits)
+        })
     }
 
     /// Open a read-only `SQLite` store with authority and deployment recovery ceilings.
