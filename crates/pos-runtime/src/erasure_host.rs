@@ -1007,6 +1007,7 @@ impl ErasureExecutionHostV1 {
     ///
     /// # Errors
     /// Returns [`ErasureHostErrorV1::RecoveryUnavailable`] for an invalid ceiling.
+    #[cfg(test)]
     fn legacy_recovery_limits(
         maximum_requests: usize,
     ) -> Result<ErasureRecoveryLimitsV1, ErasureHostErrorV1> {
