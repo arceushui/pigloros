@@ -132,7 +132,7 @@ impl CommittedInstallationUpdate {
     /// failure after SIR1 commit leaves previous-state admission closed.
     pub fn complete_live_update(
         self,
-        acknowledgement: AuthenticatedRevocationAcknowledgement,
+        acknowledgement: &AuthenticatedRevocationAcknowledgement,
     ) -> Result<AdmittedSelectorProvider, SelectorBoundaryError> {
         self.verify_recovery_floor()?;
         let context = self.cancellation_context()?;

@@ -1,11 +1,9 @@
-//! Non-activating normal-path composition for ADR-069's root-owned selector.
+//! Final composition and activation for ADR-069's root-owned selector.
 //!
 //! This module owns no caller-configurable authority. It opens exactly one
-//! SIC1 state and fails closed while SIR1 recovery is pending. ADR-069 assigns
-//! both fixed listeners and final production activation to #359, so this module
-//! does not activate a runtime socket by itself. [`OwnedSelectorListener`]
-//! exposes the separate, non-activating listener-ownership seam consumed by the
-//! production activation work.
+//! SIC1 state, fails closed while SIR1 recovery is pending, binds the fixed
+//! administrative listener before the evaluator listener, and keeps both
+//! pathname identities under one admission lifetime.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -15,11 +13,13 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::Duration;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 use rustix::fs::{chmodat, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
@@ -80,11 +80,11 @@ fn io_error<T>(_: T) -> SelectorBoundaryError {
 
 fn map_to_unit_error<T>(_: T) {}
 
-/// Authenticated normal-path composition without fixed runtime activation.
+/// Authenticated selector composition before fixed runtime activation.
 ///
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
-/// rejects it before any capability can be returned. #359 consumes this seam
-/// only after composing the mandatory administrative and evaluator listeners.
+/// rejects it before any capability can be returned. [`RootSelectorRuntime`]
+/// owns the only production activation path.
 pub struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
     updates: Mutex<()>,
@@ -157,6 +157,18 @@ pub struct OwnedSelectorListener {
     listener: UnixListener,
     path: OwnedSocketPath,
     owned: bool,
+}
+
+/// Identity-bound owner of the fixed root-administrator listener.
+pub struct OwnedAdministratorListener {
+    inner: OwnedSelectorListener,
+}
+
+/// Fully activated root selector with both fixed listeners owned together.
+pub struct RootSelectorRuntime {
+    composition: RootSelectorComposition,
+    administrator: OwnedAdministratorListener,
+    evaluator: OwnedSelectorListener,
 }
 
 impl OwnedSelectorListener {
@@ -270,6 +282,19 @@ impl OwnedSelectorListener {
             .map_err(io_error)
     }
 
+    fn set_nonblocking(&self) -> Result<(), SelectorBoundaryError> {
+        self.listener.set_nonblocking(true).map_err(io_error)
+    }
+
+    fn try_accept(&self) -> Result<Option<UnixStream>, SelectorBoundaryError> {
+        self.path.verify()?;
+        match self.listener.accept() {
+            Ok((stream, _)) => Ok(Some(stream)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
     /// Remove the exact owned socket and consume the listener.
     ///
     /// # Errors
@@ -286,6 +311,137 @@ impl OwnedSelectorListener {
     fn remove_owned_socket(&self) -> Result<(), SelectorBoundaryError> {
         self.path.remove()
     }
+}
+
+impl OwnedAdministratorListener {
+    fn bind() -> Result<Self, SelectorBoundaryError> {
+        OwnedSelectorListener::bind_path(
+            Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET),
+            ROOT_UID,
+        )
+        .map(|inner| Self { inner })
+    }
+
+    fn set_nonblocking(&self) -> Result<(), SelectorBoundaryError> {
+        self.inner.set_nonblocking()
+    }
+
+    fn try_accept(&self) -> Result<Option<UnixStream>, SelectorBoundaryError> {
+        self.inner.try_accept()
+    }
+}
+
+impl RootSelectorRuntime {
+    /// Authenticate the fixed installation and expose both listeners in safe order.
+    ///
+    /// # Errors
+    /// Returns a closed boundary error unless provider synchronization succeeds,
+    /// the administrative listener is valid first, and the evaluator listener
+    /// can then be bound without replacing any existing node.
+    pub fn activate() -> Result<Self, SelectorBoundaryError> {
+        RootSelectorComposition::open().and_then(Self::from_composition)
+    }
+
+    fn from_composition(
+        composition: RootSelectorComposition,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let administrator = OwnedAdministratorListener::bind()?;
+        let evaluator = OwnedSelectorListener::bind()?;
+        administrator.set_nonblocking()?;
+        evaluator.set_nonblocking()?;
+        Ok(Self {
+            composition,
+            administrator,
+            evaluator,
+        })
+    }
+
+    /// Serve both fixed root-only endpoints until a listener invariant fails.
+    ///
+    /// Administrative transactions are serialized; evaluator connections may
+    /// overlap and are fenced by the root-owned admission registry.
+    ///
+    /// # Errors
+    /// Returns after closing admission when either fixed listener loses its
+    /// retained pathname identity or its accept loop encounters a local error.
+    pub fn serve(self) -> Result<(), SelectorBoundaryError> {
+        let Self {
+            composition,
+            administrator,
+            evaluator,
+        } = self;
+        let composition = Arc::new(composition);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (completed, completion) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            let admin_composition = Arc::clone(&composition);
+            let admin_stopped = Arc::clone(&stopped);
+            let admin_completed = completed.clone();
+            let admin = scope.spawn(move || {
+                let result =
+                    serve_administrator(&administrator, &admin_composition, &admin_stopped);
+                drop(admin_completed.send(result));
+                result
+            });
+
+            let evaluator_composition = Arc::clone(&composition);
+            let evaluator_stopped = Arc::clone(&stopped);
+            let evaluator_completed = completed.clone();
+            let evaluator_thread = scope.spawn(move || {
+                let result =
+                    serve_evaluator(&evaluator, &evaluator_composition, &evaluator_stopped);
+                drop(evaluator_completed.send(result));
+                result
+            });
+            drop(completed);
+
+            let first = completion
+                .recv()
+                .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+            composition.service.admission.close()?;
+            stopped.store(true, Ordering::Release);
+            let admin = admin
+                .join()
+                .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+            let evaluator = evaluator_thread
+                .join()
+                .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+            first.and(admin).and(evaluator)
+        })
+    }
+}
+
+fn serve_administrator(
+    listener: &OwnedAdministratorListener,
+    composition: &RootSelectorComposition,
+    stopped: &AtomicBool,
+) -> Result<(), SelectorBoundaryError> {
+    while !stopped.load(Ordering::Acquire) {
+        if let Some(stream) = listener.try_accept()? {
+            drop(composition.update_installation(stream));
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Ok(())
+}
+
+fn serve_evaluator(
+    listener: &OwnedSelectorListener,
+    composition: &Arc<RootSelectorComposition>,
+    stopped: &AtomicBool,
+) -> Result<(), SelectorBoundaryError> {
+    while !stopped.load(Ordering::Acquire) {
+        if let Some(stream) = listener.try_accept()? {
+            let composition = Arc::clone(composition);
+            drop(thread::spawn(move || {
+                drop(composition.evaluate_root_connection(stream));
+            }));
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Ok(())
 }
 
 impl Drop for OwnedSelectorListener {
@@ -667,6 +823,12 @@ impl SelectorAdmission {
             .ok_or(SelectorBoundaryError::SelectorUnavailable)
     }
 
+    fn close(&self) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        state.open = false;
+        Ok(())
+    }
+
     fn close_and_snapshot(&self) -> Result<ClosedSelectorAdmission, SelectorBoundaryError> {
         let mut state = self.state.lock().map_err(selector_unavailable)?;
         if !state.open {
@@ -689,6 +851,7 @@ impl SelectorAdmission {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         state.open = true;
+        drop(state);
         Ok(())
     }
 
@@ -703,6 +866,7 @@ impl SelectorAdmission {
         }
         state.admitted = Arc::new(successor);
         state.open = true;
+        drop(state);
         Ok(())
     }
 
@@ -902,9 +1066,8 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         decoded: &DecodedSelectorRequest,
         input: &mut dyn ReadSeek,
     ) -> Result<(), SelectorBoundaryError> {
-        let admission = match self.admission.acquire(decoded.attempt_id) {
-            Ok(admission) => admission,
-            Err(_) => return write_provider_unavailable(stream, decoded),
+        let Ok(admission) = self.admission.acquire(decoded.attempt_id) else {
+            return write_provider_unavailable(stream, decoded);
         };
         let admitted = admission.admitted.as_ref();
         let Some(requirement) = decoded.request.sandbox_requirement.as_ref() else {
@@ -1933,9 +2096,7 @@ mod tests {
             }
             return Ok(IsolatedCompositionRole::ExecuteBody);
         }
-        run_isolated_test(
-            "root_selector::tests::nonactivating_public_composition_authenticates_sly1",
-        )?;
+        run_isolated_test("root_selector::tests::activated_public_composition_authenticates_sly1")?;
         Ok(IsolatedCompositionRole::Delegated)
     }
 
@@ -2069,7 +2230,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn nonactivating_public_composition_authenticates_sly1() -> TestResult {
+    fn activated_public_composition_authenticates_sly1() -> TestResult {
         if matches!(
             isolated_composition_role()?,
             IsolatedCompositionRole::Delegated
@@ -2133,12 +2294,12 @@ mod tests {
         let composition = RootSelectorComposition::open()?;
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
-        let evaluator_listener = OwnedSelectorListener::bind()?;
+        let runtime = RootSelectorRuntime::from_composition(composition)?;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
-        evaluator_listener.close()?;
-        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
 
-        let (_, reply) = evaluate_composition_request(&composition, &request, resolved.attempt())?;
+        let (_, reply) =
+            evaluate_composition_request(&runtime.composition, &request, resolved.attempt())?;
         assert_eq!(
             reply.observation,
             Ok(crate::evaluator::SubjectObservation {
@@ -2151,8 +2312,11 @@ mod tests {
         let mut conflicting_request = request.clone();
         conflicting_request.implementation.organization_id = Some("conflicting-owner".to_owned());
         refresh_request_digest(&mut conflicting_request)?;
-        let (_, reply) =
-            evaluate_composition_request(&composition, &conflicting_request, resolved.attempt())?;
+        let (_, reply) = evaluate_composition_request(
+            &runtime.composition,
+            &conflicting_request,
+            resolved.attempt(),
+        )?;
         assert_eq!(
             reply.observation,
             Err(crate::evaluator::AdapterError::ProtocolFailure)
@@ -2164,6 +2328,9 @@ mod tests {
         execute_provider
             .join()
             .map_err(|_| "provider execute thread panicked")??;
+        drop(runtime);
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         Ok(())
     }
 

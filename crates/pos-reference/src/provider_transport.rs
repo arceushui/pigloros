@@ -508,14 +508,16 @@ impl ProviderTransport {
         observed: ProviderProcessIdentity,
     ) -> Result<(), SelectorBoundaryError> {
         let mut admitted = self.admitted_process.lock().map_err(selector_unavailable)?;
-        match *admitted {
+        let result = match *admitted {
             None => {
                 *admitted = Some(observed);
                 Ok(())
             }
             Some(expected) if expected == observed => Ok(()),
             Some(_) => Err(SelectorBoundaryError::ArtifactInvalid),
-        }
+        };
+        drop(admitted);
+        result
     }
 
     fn require_admitted_process(
@@ -604,7 +606,7 @@ impl ProviderTransport {
         ensure_eof(&mut connected.stream, &deadline).map_err(selector_unavailable)?;
         let acknowledgement = committed.authenticate_live_acknowledgement(&response)?;
         committed
-            .complete_live_update(acknowledgement)
+            .complete_live_update(&acknowledgement)
             .map(|admitted| (admitted, response))
     }
 

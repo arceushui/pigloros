@@ -366,7 +366,7 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
     let runtime_signer = SigningKey::from_bytes(&[4; 32]);
     let rca1 = live_acknowledgement(&committed, &runtime_signer, vec![[42; 16]])?;
     let acknowledgement = committed.authenticate_live_acknowledgement(&rca1)?;
-    let next = committed.complete_live_update(acknowledgement)?;
+    let next = committed.complete_live_update(&acknowledgement)?;
     assert_eq!(
         next.bootstrap().installed().manifest().digest(),
         next_manifest
