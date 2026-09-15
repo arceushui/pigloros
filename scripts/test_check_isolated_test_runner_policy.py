@@ -72,8 +72,8 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
-            "unshare --user --map-root-user --mount --fork --propagation private",
-            "unshare --mount --fork --propagation private",
+            "--network none",
+            "--network host",
         ),
         (
             PRIMARY_RUNNER,
@@ -87,8 +87,23 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
-            "mount --make-rprivate /",
+            "--tmpfs /run:rw,nosuid,nodev,mode=0755",
             "rm -rf /run",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "--read-only",
+            "--read-write",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "--cap-drop ALL",
+            "--cap-drop NET_ADMIN",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254",
+            ":latest",
         ),
     )
     with tempfile.TemporaryDirectory() as directory:

@@ -49,17 +49,28 @@ def main() -> None:
             raise SystemExit(f"{runner_path}: isolated test runner must be executable")
         if re.search(r"\bsudo\b", runner):
             raise SystemExit(f"{runner_path}: ambient sudo is forbidden")
-        if re.search(r"\brm\s+-[^\n]*r", runner):
+        if re.search(r"(?m)(?:^[ \t]*|[;&|][ \t]*)rm[ \t]+-[^\n]*r", runner):
             raise SystemExit(f"{runner_path}: recursive host-path deletion is forbidden")
+        if not re.search(
+            r"readonly ISOLATION_IMAGE='[^']+@sha256:[0-9a-f]{64}'", runner
+        ):
+            raise SystemExit(f"{runner_path}: isolation image must be digest-pinned")
         for fragment in (
             "set -euo pipefail",
             "[[ $# -ne 2 ]]",
             "timeout --signal=TERM --kill-after=5s 30s",
-            "unshare --user --map-root-user --mount --fork --propagation private",
-            "mount --make-rprivate /",
-            "export PIGLOROS_TEST_BINARY=$1",
-            "export PIGLOROS_TEST_NAME=$2",
-            'exec "$PIGLOROS_TEST_BINARY" --exact "$PIGLOROS_TEST_NAME" --nocapture',
+            "docker run",
+            "--network none",
+            "--read-only",
+            "--cap-drop ALL",
+            "--security-opt no-new-privileges",
+            "--pids-limit 256",
+            "--tmpfs /tmp:rw,nosuid,nodev,mode=1777",
+            "--tmpfs /var/lib:rw,nosuid,nodev,mode=0755",
+            "--tmpfs /run:rw,nosuid,nodev,mode=0755",
+            'source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT,readonly',
+            '"$REPOSITORY_ROOT"/target/*',
+            '"$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
         ):
             require(runner, fragment, runner_path)
 
