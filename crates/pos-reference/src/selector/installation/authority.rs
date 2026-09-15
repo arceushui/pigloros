@@ -1,8 +1,12 @@
 //! Authentication of SIC1's pinned bootstrap authority.
 
+mod recovery_identity;
 mod update;
 
-pub use update::{InstallationChallenge, ValidatedInstallationUpdate};
+pub use recovery_identity::{
+    AdmittedProviderRuntime, InstallationRecoverySnapshot, ProviderRuntimeSlot,
+};
+pub use update::{CommittedInstallationUpdate, InstallationChallenge, ValidatedInstallationUpdate};
 
 use ed25519_dalek::VerifyingKey;
 use rustix::rand::{getrandom, GetRandomFlags};
@@ -19,6 +23,15 @@ pub(crate) fn fresh_selector_id() -> Result<[u8; 16], SelectorBoundaryError> {
         getrandom(remaining, GetRandomFlags::empty())
             .map_err(|_| SelectorBoundaryError::SelectorUnavailable)
     })
+}
+
+fn fresh_distinct_selector_id(excluded: &[[u8; 16]]) -> Result<[u8; 16], SelectorBoundaryError> {
+    loop {
+        let candidate = fresh_selector_id()?;
+        if !excluded.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
 }
 
 fn fill_nonzero_id(

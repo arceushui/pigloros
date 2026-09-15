@@ -7,7 +7,8 @@ use ed25519_dalek::SigningKey;
 use super::*;
 use crate::evaluator_protocol::{array, array_values, decode_canonical, fixed_bytes, text, uint};
 use crate::selector::installation::authority::{
-    AuthenticatedSelectorBootstrap, InstallationChallenge,
+    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap, InstallationChallenge,
+    InstallationRecoverySnapshot, ProviderRuntimeSlot,
 };
 
 struct UpdateFixture {
@@ -28,6 +29,13 @@ impl UpdateFixture {
             bootstrap,
             policy_signer: SigningKey::from_bytes(&[2; 32]),
         })
+    }
+
+    fn admitted(&self) -> TestResult<AdmittedSelectorProvider> {
+        let root = File::open(self.directory.path())?;
+        Ok(InstalledSelectorState::open_at_for_test(&root)?
+            .authenticate_bootstrap()?
+            .admit_provider()?)
     }
 
     fn request(
@@ -166,6 +174,36 @@ impl UpdateFixture {
     }
 }
 
+fn live_acknowledgement(
+    committed: &crate::selector::installation::authority::CommittedInstallationUpdate,
+    signer: &SigningKey,
+    cancelled_attempt_ids: Vec<[u8; 16]>,
+) -> TestResult<Vec<u8>> {
+    let rcu1 = decode_canonical(committed.revocation_update_bytes())?;
+    let rcu1_fields = array(&array(&rcu1, 3)?[0], 8)?;
+    let context = committed.cancellation_context()?;
+    sign_record(
+        "RCA1",
+        Value::Array(vec![
+            Value::Text("RCA1".to_owned()),
+            integer(1),
+            Value::Bytes(fixed_bytes::<16>(&rcu1_fields[2])?.to_vec()),
+            digest(fixed_bytes(&rcu1_fields[5])?),
+            digest(context.sir1_digest),
+            digest(context.previous_provider_binding_digest),
+            Value::Array(
+                cancelled_attempt_ids
+                    .into_iter()
+                    .map(|attempt| Value::Bytes(attempt.to_vec()))
+                    .collect(),
+            ),
+            integer(0),
+            Value::Text("runtime".to_owned()),
+        ]),
+        signer,
+    )
+}
+
 #[test]
 fn challenge_bound_update_retains_exact_successor_without_installing_it() -> TestResult {
     let fixture = UpdateFixture::new()?;
@@ -288,5 +326,87 @@ fn update_rejects_forged_or_changed_successor_records() -> TestResult {
             .validate_update(challenge, &request)
             .is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let admitted = fixture.admitted()?;
+    let challenge = admitted.bootstrap().issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let update = admitted.bootstrap().validate_update(challenge, &request)?;
+    let next_manifest = update.next_manifest().digest();
+    let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+    let snapshot = InstallationRecoverySnapshot::seal(
+        &admitted,
+        &runtime,
+        vec![[41; 16], [42; 16]],
+        vec![[42; 16]],
+    )?;
+    let committed = admitted.commit_update(update, snapshot)?;
+
+    let recovery_path = fixture.directory.path().join(RECOVERY_NAME);
+    let recovery_metadata = fs::metadata(&recovery_path)?;
+    assert!(recovery_metadata.is_file());
+    assert_eq!(recovery_metadata.mode() & 0o7777, 0o400);
+    assert_eq!(recovery_metadata.nlink(), 1);
+    assert_eq!(fs::read(&recovery_path)?, committed.recovery_bytes());
+    committed.verify_recovery_floor()?;
+    let context = committed.cancellation_context()?;
+    assert_eq!(
+        crate::sandbox_provider_protocol::RecoveryCancellationContext::from_canonical_cbor(
+            &context.to_canonical_cbor()?
+        )?,
+        context
+    );
+
+    let runtime_signer = SigningKey::from_bytes(&[4; 32]);
+    let rca1 = live_acknowledgement(&committed, &runtime_signer, vec![[42; 16]])?;
+    let acknowledgement = committed.authenticate_live_acknowledgement(&rca1)?;
+    let next = committed.complete_live_update(acknowledgement)?;
+    assert_eq!(
+        next.bootstrap().installed().manifest().digest(),
+        next_manifest
+    );
+    assert!(!recovery_path.exists());
+    assert_eq!(
+        InstallationManifest::from_canonical_cbor(&fs::read(
+            fixture.directory.path().join(MANIFEST_NAME)
+        )?)?
+        .digest(),
+        next_manifest
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_update_rejects_invalid_snapshots_and_foreign_acknowledgements() -> TestResult {
+    for (live, cancelled) in [
+        (vec![[0; 16]], Vec::new()),
+        (vec![[42; 16]], vec![[41; 16]]),
+        (vec![[42; 16], [41; 16]], Vec::new()),
+    ] {
+        let fixture = UpdateFixture::new()?;
+        let admitted = fixture.admitted()?;
+        let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+        assert!(InstallationRecoverySnapshot::seal(&admitted, &runtime, live, cancelled).is_err());
+    }
+
+    let fixture = UpdateFixture::new()?;
+    let admitted = fixture.admitted()?;
+    let challenge = admitted.bootstrap().issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let update = admitted.bootstrap().validate_update(challenge, &request)?;
+    let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+    let snapshot =
+        InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[41; 16]], vec![[41; 16]])?;
+    let committed = admitted.commit_update(update, snapshot)?;
+    let runtime_signer = SigningKey::from_bytes(&[4; 32]);
+    let wrong_set = live_acknowledgement(&committed, &runtime_signer, Vec::new())?;
+    assert!(committed
+        .authenticate_live_acknowledgement(&wrong_set)
+        .is_err());
+    assert!(fixture.directory.path().join(RECOVERY_NAME).exists());
     Ok(())
 }
