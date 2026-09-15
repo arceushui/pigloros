@@ -59,24 +59,26 @@ impl RecoveryCancellationContext {
         previous_live_attempt_ids: Vec<[u8; 16]>,
         required_cancelled_attempt_ids: Vec<[u8; 16]>,
     ) -> Result<Self, SandboxRevocationUpdateError> {
-        decode_document(rcu1_bytes).and_then(|_| {
-            let mut context = Self {
-                sir1_digest,
-                previous_provider_binding_digest,
-                rcu1_wire_digest: wire_digest(rcu1_bytes),
-                previous_live_attempt_ids,
-                required_cancelled_attempt_ids,
-                context_digest: [0; 32],
-            };
-            context.validate().and_then(|()| {
-                record_digest("RCC1", &Value::Array(context.unsigned_fields().to_vec())).map(
-                    |context_digest| {
-                        context.context_digest = context_digest;
-                        context
-                    },
-                )
+        decode_document(rcu1_bytes)
+            .map_err(SandboxRevocationUpdateError::from)
+            .and_then(|_| {
+                let mut context = Self {
+                    sir1_digest,
+                    previous_provider_binding_digest,
+                    rcu1_wire_digest: wire_digest(rcu1_bytes),
+                    previous_live_attempt_ids,
+                    required_cancelled_attempt_ids,
+                    context_digest: [0; 32],
+                };
+                context.validate().and_then(|()| {
+                    record_digest("RCC1", &Value::Array(context.unsigned_fields().to_vec()))
+                        .map_err(SandboxRevocationUpdateError::from)
+                        .map(|context_digest| {
+                            context.context_digest = context_digest;
+                            context
+                        })
+                })
             })
-        })
     }
 
     /// Decode one exact preferred-deterministic RCC1.
@@ -84,18 +86,20 @@ impl RecoveryCancellationContext {
     /// # Errors
     /// Rejects malformed, legacy, reordered, inconsistent, or digest-invalid records.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxRevocationUpdateError> {
-        decode_document(bytes).and_then(|document| {
-            let (fields, context_digest) = self_digested::<7>(&document, "RCC1")?;
-            let context = Self {
-                sir1_digest: digest32(&fields[2])?,
-                previous_provider_binding_digest: digest32(&fields[3])?,
-                rcu1_wire_digest: digest32(&fields[4])?,
-                previous_live_attempt_ids: decode_attempts(&fields[5])?,
-                required_cancelled_attempt_ids: decode_attempts(&fields[6])?,
-                context_digest,
-            };
-            context.verify().map(|()| context)
-        })
+        decode_document(bytes)
+            .map_err(SandboxRevocationUpdateError::from)
+            .and_then(|document| {
+                let (fields, context_digest) = self_digested::<7>(&document, "RCC1")?;
+                let context = Self {
+                    sir1_digest: digest32(&fields[2])?,
+                    previous_provider_binding_digest: digest32(&fields[3])?,
+                    rcu1_wire_digest: digest32(&fields[4])?,
+                    previous_live_attempt_ids: decode_attempts(&fields[5])?,
+                    required_cancelled_attempt_ids: decode_attempts(&fields[6])?,
+                    context_digest,
+                };
+                context.verify().map(|()| context)
+            })
     }
 
     /// Encode the exact RCC1 wrapper sent immediately before RCU1.
@@ -126,7 +130,11 @@ impl RecoveryCancellationContext {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds.into());
         }
         validate_attempts(&self.previous_live_attempt_ids)
-            .and_then(|()| validate_attempts(&self.required_cancelled_attempt_ids))
+            .map_err(SandboxRevocationUpdateError::from)
+            .and_then(|()| {
+                validate_attempts(&self.required_cancelled_attempt_ids)
+                    .map_err(SandboxRevocationUpdateError::from)
+            })
             .and_then(|()| {
                 if self.required_cancelled_attempt_ids.iter().any(|attempt| {
                     self.previous_live_attempt_ids
@@ -181,20 +189,22 @@ impl RevocationUpdateRequest {
         trust: &SandboxTrustSnapshot,
         current: &SandboxRevocationSnapshot,
     ) -> Result<Self, SandboxRevocationUpdateError> {
-        decode_document(bytes).and_then(|document| {
-            let (fields, request_digest, signature) = signed::<8>(&document, "RCU1")?;
-            let next_bytes = byte_string(&fields[4])?;
-            let request = Self {
-                request_id: id16(&fields[2])?,
-                previous_revocation_digest: digest32(&fields[3])?,
-                next_revocation: SandboxRevocationSnapshot::authenticate(next_bytes, trust)?,
-                selector_nonce: id16(&fields[6])?,
-                policy_signer_key_id: key_id(&fields[7])?,
-                request_digest,
-                signature,
-            };
-            request.validate(fields, trust, current).map(|()| request)
-        })
+        decode_document(bytes)
+            .map_err(SandboxRevocationUpdateError::from)
+            .and_then(|document| {
+                let (fields, request_digest, signature) = signed::<8>(&document, "RCU1")?;
+                let next_bytes = byte_string(&fields[4])?;
+                let request = Self {
+                    request_id: id16(&fields[2])?,
+                    previous_revocation_digest: digest32(&fields[3])?,
+                    next_revocation: SandboxRevocationSnapshot::authenticate(next_bytes, trust)?,
+                    selector_nonce: id16(&fields[6])?,
+                    policy_signer_key_id: key_id(&fields[7])?,
+                    request_digest,
+                    signature,
+                };
+                request.validate(fields, trust, current).map(|()| request)
+            })
     }
 
     fn validate(
@@ -285,39 +295,41 @@ impl RevocationAcknowledgement {
         runtime_key_id: &str,
         runtime_key: &ed25519_dalek::VerifyingKey,
     ) -> Result<Self, SandboxRevocationUpdateError> {
-        decode_document(bytes).and_then(|document| {
-            let (fields, acknowledgement_digest, signature) = signed::<9>(&document, "RCA1")?;
-            if uint(&fields[7])? != 0 {
-                return Err(SandboxProviderProtocolError::InconsistentFields.into());
-            }
-            let cancelled_values = bounded_array(&fields[6], 0)?;
-            require_canonical_order(cancelled_values)?;
-            let acknowledgement = Self {
-                request_id: id16(&fields[2])?,
-                revocation_digest: digest32(&fields[3])?,
-                sir1_digest: digest32(&fields[4])?,
-                previous_provider_binding_digest: digest32(&fields[5])?,
-                cancelled_attempt_ids: cancelled_values
-                    .iter()
-                    .map(id16)
-                    .collect::<Result<Vec<_>, _>>()?,
-                runtime_attestation_key_id: key_id(&fields[8])?,
-                acknowledgement_digest,
-                signature,
-            };
-            validate_attempts(&acknowledgement.cancelled_attempt_ids)?;
-            verify_digest("RCA1", fields, acknowledgement.acknowledgement_digest)?;
-            if acknowledgement.runtime_attestation_key_id != runtime_key_id {
-                return Err(SandboxRevocationUpdateError::AcknowledgementMismatch);
-            }
-            verify_signature(
-                "RCA1",
-                &acknowledgement.acknowledgement_digest,
-                &acknowledgement.signature,
-                runtime_key,
-            )
-            .map(|()| acknowledgement)
-        })
+        decode_document(bytes)
+            .map_err(SandboxRevocationUpdateError::from)
+            .and_then(|document| {
+                let (fields, acknowledgement_digest, signature) = signed::<9>(&document, "RCA1")?;
+                if uint(&fields[7])? != 0 {
+                    return Err(SandboxProviderProtocolError::InconsistentFields.into());
+                }
+                let cancelled_values = bounded_array(&fields[6], 0)?;
+                require_canonical_order(cancelled_values)?;
+                let acknowledgement = Self {
+                    request_id: id16(&fields[2])?,
+                    revocation_digest: digest32(&fields[3])?,
+                    sir1_digest: digest32(&fields[4])?,
+                    previous_provider_binding_digest: digest32(&fields[5])?,
+                    cancelled_attempt_ids: cancelled_values
+                        .iter()
+                        .map(id16)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    runtime_attestation_key_id: key_id(&fields[8])?,
+                    acknowledgement_digest,
+                    signature,
+                };
+                validate_attempts(&acknowledgement.cancelled_attempt_ids)?;
+                verify_digest("RCA1", fields, acknowledgement.acknowledgement_digest)?;
+                if acknowledgement.runtime_attestation_key_id != runtime_key_id {
+                    return Err(SandboxRevocationUpdateError::AcknowledgementMismatch);
+                }
+                verify_signature(
+                    "RCA1",
+                    &acknowledgement.acknowledgement_digest,
+                    &acknowledgement.signature,
+                    runtime_key,
+                )
+                .map(|()| acknowledgement)
+            })
     }
 
     /// Authenticate RCA1 and bind it to the exact committed update context.
