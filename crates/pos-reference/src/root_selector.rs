@@ -1030,17 +1030,11 @@ fn write_policy_error(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
 ) -> Result<(), SelectorBoundaryError> {
-    write_local_error(
+    write_pre_admission_error(
         stream,
-        &SandboxLocalError {
-            phase: SandboxLocalErrorPhase::BeforeSpx1,
-            operation: Some(SandboxProviderOperation::Execute),
-            request_id: Some(decoded.provider_request_id),
-            attempt_id: Some(decoded.attempt_id),
-            agr1_digest: None,
-            code: SandboxLocalErrorCode::PolicyUnavailable,
-            safe_detail: None,
-        },
+        decoded,
+        SandboxLocalErrorPhase::BeforeSpx1,
+        SandboxLocalErrorCode::PolicyUnavailable,
     )
 }
 
@@ -1048,17 +1042,11 @@ fn write_authority_mismatch(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
 ) -> Result<(), SelectorBoundaryError> {
-    write_local_error(
+    write_pre_admission_error(
         stream,
-        &SandboxLocalError {
-            phase: SandboxLocalErrorPhase::BeforeSpx1,
-            operation: Some(SandboxProviderOperation::Execute),
-            request_id: Some(decoded.provider_request_id),
-            attempt_id: Some(decoded.attempt_id),
-            agr1_digest: None,
-            code: SandboxLocalErrorCode::RequestAuthorityMismatch,
-            safe_detail: None,
-        },
+        decoded,
+        SandboxLocalErrorPhase::BeforeSpx1,
+        SandboxLocalErrorCode::RequestAuthorityMismatch,
     )
 }
 
@@ -1066,15 +1054,29 @@ fn write_provider_unavailable(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
 ) -> Result<(), SelectorBoundaryError> {
+    write_pre_admission_error(
+        stream,
+        decoded,
+        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+        SandboxLocalErrorCode::ProviderUnavailable,
+    )
+}
+
+fn write_pre_admission_error(
+    stream: &mut UnixStream,
+    decoded: &DecodedSelectorRequest,
+    phase: SandboxLocalErrorPhase,
+    code: SandboxLocalErrorCode,
+) -> Result<(), SelectorBoundaryError> {
     write_local_error(
         stream,
         &SandboxLocalError {
-            phase: SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+            phase,
             operation: Some(SandboxProviderOperation::Execute),
             request_id: Some(decoded.provider_request_id),
             attempt_id: Some(decoded.attempt_id),
             agr1_digest: None,
-            code: SandboxLocalErrorCode::ProviderUnavailable,
+            code,
             safe_detail: None,
         },
     )

@@ -14,6 +14,20 @@ def require(text: str, fragment: str, source: Path) -> None:
         raise SystemExit(f"{source}: missing required policy fragment: {fragment}")
 
 
+def require_option_once(text: str, option: str, source: Path) -> None:
+    pattern = rf"(?<![A-Za-z0-9_-]){re.escape(option)}(?=$|[=\s])"
+    count = len(re.findall(pattern, text, flags=re.MULTILINE))
+    if count != 1:
+        raise SystemExit(
+            f"{source}: protected Docker option {option} must occur exactly once; found {count}"
+        )
+
+
+def reject(text: str, pattern: str, description: str, source: Path) -> None:
+    if re.search(pattern, text, flags=re.MULTILINE):
+        raise SystemExit(f"{source}: forbidden Docker policy override: {description}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
@@ -67,6 +81,7 @@ def main() -> None:
             "--pids-limit 256",
             "--memory 2g",
             "--memory-swap 2g",
+            "--ulimit fsize=268435456:268435456",
             "--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m",
             "--tmpfs /var/lib:rw,nosuid,nodev,mode=0755,size=64m",
             "--tmpfs /run:rw,nosuid,nodev,mode=0755,size=64m",
@@ -74,13 +89,55 @@ def main() -> None:
             '"$REPOSITORY_ROOT"/target/*',
             'mktemp "$profile_directory/isolated-profile.XXXXXX.profraw"',
             'chmod 0666 "$profile_output"',
-            'LLVM_PROFILE_FILE=/pigloros-profile/$profile_name',
-            'source=$profile_directory,target=/pigloros-profile',
+            "LLVM_PROFILE_FILE=/pigloros-profile.profraw",
+            'source=$profile_output,target=/pigloros-profile.profraw',
             'chmod 0600 "$profile_output"',
             '[[ -n $profile_output && ! -s $profile_output ]]',
             '"$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
         ):
             require(runner, fragment, runner_path)
+
+        for option in (
+            "--network",
+            "--read-only",
+            "--cap-drop",
+            "--security-opt",
+            "--pids-limit",
+            "--memory",
+            "--memory-swap",
+            "--ulimit",
+        ):
+            require_option_once(runner, option, runner_path)
+        reject(
+            runner,
+            r"(?<![A-Za-z0-9_-])-m(?=$|[=\s])",
+            "short memory option",
+            runner_path,
+        )
+        reject(
+            runner,
+            r"(?<![A-Za-z0-9_-])--read-write(?=$|[=\s])",
+            "writable root filesystem",
+            runner_path,
+        )
+        reject(
+            runner,
+            r"(?<![A-Za-z0-9_-])--cap-add(?=$|[=\s])",
+            "capability addition",
+            runner_path,
+        )
+        reject(
+            runner,
+            r"(?<![A-Za-z0-9_-])--privileged(?=$|[=\s])",
+            "privileged container",
+            runner_path,
+        )
+        reject(
+            runner,
+            r"source=\$profile_directory,target=/pigloros-profile(?:[,\"\s]|$)",
+            "writable profile directory bind",
+            runner_path,
+        )
 
         owners = [
             (source, text)

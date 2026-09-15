@@ -29,6 +29,7 @@ docker_arguments=(
   --pids-limit 256
   --memory 2g
   --memory-swap 2g
+  --ulimit fsize=268435456:268435456
   --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m
   --tmpfs /var/lib:rw,nosuid,nodev,mode=0755,size=64m
   --tmpfs /run:rw,nosuid,nodev,mode=0755,size=64m
@@ -55,10 +56,9 @@ if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
   esac
   profile_output=$(mktemp "$profile_directory/isolated-profile.XXXXXX.profraw")
   chmod 0666 "$profile_output"
-  profile_name=$(basename -- "$profile_output")
   docker_arguments+=(
-    --env "LLVM_PROFILE_FILE=/pigloros-profile/$profile_name"
-    --mount "type=bind,source=$profile_directory,target=/pigloros-profile"
+    --env LLVM_PROFILE_FILE=/pigloros-profile.profraw
+    --mount "type=bind,source=$profile_output,target=/pigloros-profile.profraw"
   )
 fi
 

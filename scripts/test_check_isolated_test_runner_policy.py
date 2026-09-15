@@ -102,6 +102,11 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
+            "--ulimit fsize=268435456:268435456",
+            "--ulimit fsize=-1:-1",
+        ),
+        (
+            PRIMARY_RUNNER,
             "--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m",
             "--tmpfs /tmp:rw,nosuid,nodev,mode=1777",
         ),
@@ -117,8 +122,8 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
-            "target=/pigloros-profile",
-            "target=$profile_directory",
+            "source=$profile_output,target=/pigloros-profile.profraw",
+            "source=$profile_directory,target=/pigloros-profile",
         ),
         (
             PRIMARY_RUNNER,
@@ -129,6 +134,21 @@ def main() -> None:
             PRIMARY_RUNNER,
             "@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254",
             ":latest",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "set +e",
+            "docker_arguments+=(--memory 0)\nset +e",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "set +e",
+            "docker_arguments+=(--read-only=false)\nset +e",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "set +e",
+            "docker_arguments+=(--cap-add SYS_ADMIN)\nset +e",
         ),
     )
     with tempfile.TemporaryDirectory() as directory:
