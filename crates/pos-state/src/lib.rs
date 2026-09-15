@@ -1776,7 +1776,7 @@ mod tests {
     fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
         let timeline = TimelineId::new();
         let mut registry =
-            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         registry.apply_event(&make_event(entity));
@@ -1804,7 +1804,7 @@ mod tests {
             Err(AuthorityErrorV1::SourceUnavailable)
         );
 
-        let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
+        let blocked_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         blocked_gate.block_timeline(timeline);
         let blocked = ProjectionRegistry::new().with_erasure_gate(blocked_gate);
         assert_eq!(
@@ -2042,11 +2042,11 @@ mod tests {
             Err(AuthorityErrorV1::SourceUnavailable)
         );
 
-        let blocked_gate = Arc::new(ErasureContainmentGateV1::new());
+        let blocked_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         blocked_gate.block_timeline(timeline);
         registry.bind_erasure_gate(blocked_gate);
         // A second binding cannot replace the host gate with a permissive one.
-        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert_eq!(
             registry.materialize_authorized_observation(
                 &fixture.request,
@@ -2259,7 +2259,7 @@ mod wave3_tests {
         let mut registry = ProjectionRegistry::new();
         assert!(registry.clone_erasure_gate().is_none());
 
-        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_test_open());
         registry.bind_erasure_gate(Arc::clone(&gate));
         let cloned = registry.clone_erasure_gate();
         assert!(cloned

@@ -1532,7 +1532,7 @@ mod tests {
 
     fn open_store(config: StoreConfig) -> Result<Box<dyn pos_core::EventStore>, CoreError> {
         let mut store = open_unbound_store(config)?;
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         Ok(store)
     }
 
@@ -2560,7 +2560,7 @@ mod tests {
         ];
         let plugin = WorldPlugin::new().with_bodies([body]);
         let mut registry =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
             .register(
                 &plugin,
@@ -2727,7 +2727,7 @@ mod tests {
         let timeline = TimelineId::new();
         let plugin = WorldPlugin::new().with_bodies([body]);
         let mut registry =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
             .register(
                 &plugin,

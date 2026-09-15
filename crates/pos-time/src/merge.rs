@@ -309,7 +309,7 @@ mod tests {
         fn new() -> Self {
             let mut inner = MemoryStore::new();
             inner
-                .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+                .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .test_ok();
             Self {
                 inner,
@@ -407,7 +407,7 @@ mod tests {
     fn setup_store() -> MemoryStore {
         let mut store = MemoryStore::new();
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         store
     }

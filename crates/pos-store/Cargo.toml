@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
+pos-core = { path = "../pos-core", features = ["test-support"] }
 blake3 = { workspace = true }
 tempfile = "3"
 

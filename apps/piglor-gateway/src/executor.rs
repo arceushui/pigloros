@@ -643,14 +643,14 @@ impl ExecutorStore {
         match self {
             Self::Host(_) => {}
             Self::Generic(store) => {
-                drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
+                drop(store.bind_erasure_gate(Arc::new(
+                    pos_core::ErasureContainmentGateV1::new_test_open(),
+                )));
             }
             Self::Gateway(store) => {
-                drop(
-                    store
-                        .event_store()
-                        .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())),
-                );
+                drop(store.event_store().bind_erasure_gate(Arc::new(
+                    pos_core::ErasureContainmentGateV1::new_test_open(),
+                )));
             }
         }
     }
@@ -974,7 +974,9 @@ pub(crate) struct StoreExecutor {
 impl StoreExecutor {
     #[cfg(test)]
     pub(crate) fn new(mut store: Box<dyn EventStore>) -> Self {
-        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
+        drop(
+            store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
+        );
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
@@ -984,7 +986,9 @@ impl StoreExecutor {
         permit: ConsentAppendPermit,
     ) -> Self {
         #[cfg(test)]
-        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
+        drop(
+            store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
+        );
         drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::Generic(store), None)
     }
@@ -1020,7 +1024,9 @@ impl StoreExecutor {
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
         #[cfg(test)]
-        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
+        drop(
+            store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
+        );
         drop(store.bind_consent_authority(permit));
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store))),
@@ -1038,7 +1044,9 @@ impl StoreExecutor {
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
         #[cfg(test)]
-        drop(store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new())));
+        drop(
+            store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
+        );
         drop(store.bind_consent_authority(permit));
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(store))),
@@ -3218,7 +3226,7 @@ mod tests {
     fn execute_consent_revocation_reports_a_lost_session_after_append(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut store = MemoryStore::new();
-        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new()))?;
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
         let timeline = store
             .create_timeline("lost-revocation-session")
             .test_ok()?
@@ -3284,7 +3292,7 @@ mod tests {
     impl EventStore for BlockingRootCountStore {
         fn bind_erasure_gate(
             &mut self,
-            gate: Arc<dyn pos_core::ErasureGate>,
+            gate: Arc<pos_core::ErasureContainmentGateV1>,
         ) -> Result<(), CoreError> {
             self.inner.bind_erasure_gate(gate)
         }
@@ -3357,7 +3365,7 @@ mod tests {
     impl EventStore for BlockingCreateStore {
         fn bind_erasure_gate(
             &mut self,
-            gate: Arc<dyn pos_core::ErasureGate>,
+            gate: Arc<pos_core::ErasureContainmentGateV1>,
         ) -> Result<(), CoreError> {
             self.inner.bind_erasure_gate(gate)
         }
@@ -3419,7 +3427,7 @@ mod tests {
     impl EventStore for OrderedStore {
         fn bind_erasure_gate(
             &mut self,
-            gate: Arc<dyn pos_core::ErasureGate>,
+            gate: Arc<pos_core::ErasureContainmentGateV1>,
         ) -> Result<(), CoreError> {
             self.inner.bind_erasure_gate(gate)
         }
@@ -6419,7 +6427,7 @@ mod tests {
     async fn pending_append_identity_cleanup_forwards_durable_marker(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut store = MemoryStore::new();
-        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new()))?;
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
         let timeline = store.create_timeline("pending-cleanup").test_ok()?.id();
         let scope = AppendDedupScope::from_keyed_hash([201; 32]);
         for key in [202, 203] {

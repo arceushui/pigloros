@@ -516,7 +516,7 @@ mod tests {
         let driver =
             ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
-        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry.register_driver(Box::new(driver));
         DriverFixture {
             registry,

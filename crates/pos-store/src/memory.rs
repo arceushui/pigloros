@@ -2609,7 +2609,7 @@ impl MemoryStore {
 }
 
 impl EventStore for MemoryStore {
-    fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+    fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         if self.erasure_gate_bound {
             return Err(CoreError::Storage(
                 "erasure containment gate is already bound".to_owned(),
@@ -3171,7 +3171,7 @@ mod tests {
 
     fn fixture_store(mut store: MemoryStore) -> MemoryStore {
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         store
     }

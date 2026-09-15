@@ -14,7 +14,7 @@ use pos_store::sqlite::SqliteStore;
 
 fn open_memory() -> Result<MemoryStore, Box<dyn std::error::Error>> {
     let mut store = MemoryStore::new();
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     Ok(store)
 }
 
@@ -61,7 +61,7 @@ fn memory_and_sqlite_share_the_complete_inventory_generation(
     };
     let mut memory = open_memory()?;
     let mut sqlite = SqliteStore::open_in_memory()?;
-    sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+    sqlite.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
 
     for store in [
         &mut memory as &mut dyn EventStore,
@@ -82,6 +82,6 @@ fn memory_and_sqlite_share_the_complete_inventory_generation(
 #[test]
 fn sqlite_proves_complete_empty_inventory() -> Result<(), Box<dyn std::error::Error>> {
     let mut store = SqliteStore::open_in_memory()?;
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     assert_verified_empty_snapshot(store)
 }

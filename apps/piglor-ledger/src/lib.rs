@@ -109,7 +109,7 @@ pub(crate) fn bind_test_store_gate(
     mut store: Box<dyn pos_core::store::EventStore>,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
     store.bind_erasure_gate(std::sync::Arc::new(
-        pos_core::ErasureContainmentGateV1::new(),
+        pos_core::ErasureContainmentGateV1::new_test_open(),
     ))?;
     Ok(store)
 }

@@ -29,6 +29,7 @@ thiserror = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]
+pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
 

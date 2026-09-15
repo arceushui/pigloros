@@ -4,9 +4,9 @@ use pos_core::{
     store::{export_timeline_raw, EventStore, SeqRange},
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, EntityId, ErasureArtifactClassV1,
-    ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, EventDraft, Kind, RegisteredArtifactV1,
-    ReplayClaimEvaluatorV1, SchemaVersion,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, EventDraft, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    SchemaVersion,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -46,11 +46,11 @@ fn draft() -> EventDraft {
 
 fn assert_blocked<S: EventStore>(mut store: S) -> Result<(), Box<dyn std::error::Error>> {
     let timeline = store.create_timeline("erasure-containment")?;
-    let gate = Arc::new(ErasureContainmentGateV1::new());
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     gate.block_timeline(timeline.id());
-    let gate_for_store: Arc<dyn ErasureGate> = gate.clone();
-    store.bind_erasure_gate(gate_for_store)?;
-    let second_binding = store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let second_binding =
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     assert!(second_binding.is_err());
 
     let append_error = store.append(timeline.id(), &[draft()]).err();
@@ -87,43 +87,14 @@ fn assert_blocked<S: EventStore>(mut store: S) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-struct SelectiveGate {
-    blocked: pos_core::TimelineId,
-}
-
-impl ErasureGate for SelectiveGate {
-    fn authorize(
-        &self,
-        timeline: pos_core::TimelineId,
-        _operation: ErasureProtectedOperationV1,
-    ) -> Result<(), ErasureContainmentErrorV1> {
-        if timeline == self.blocked {
-            Err(ErasureContainmentErrorV1::AccessFrozen)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn with_fence(
-        &self,
-        timeline: pos_core::TimelineId,
-        operation: ErasureProtectedOperationV1,
-        effect: &mut dyn FnMut(),
-    ) -> Result<(), ErasureContainmentErrorV1> {
-        self.authorize(timeline, operation)?;
-        effect();
-        Ok(())
-    }
-}
-
 fn assert_listing_filters_frozen_scope<S: EventStore>(
     mut store: S,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let blocked = store.create_timeline("blocked")?;
     let available = store.create_timeline("available")?;
-    store.bind_erasure_gate(Arc::new(SelectiveGate {
-        blocked: blocked.id(),
-    }))?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    gate.block_timeline(blocked.id());
+    store.bind_erasure_gate(gate)?;
 
     let listed = store.list_timelines()?;
     assert!(listed
@@ -206,9 +177,10 @@ fn assert_gate_removal_cannot_rebind<S: RemoveGate>(
     mut store: S,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let timeline = store.create_timeline("bound-then-removed")?;
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let mut removed = store.without_erasure_gate();
-    let replacement = removed.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    let replacement =
+        removed.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     assert!(replacement.is_err());
     assert_eq!(
         removed

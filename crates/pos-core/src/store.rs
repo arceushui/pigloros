@@ -29,7 +29,7 @@ use crate::{
     hasher::Hasher,
     ids::{EventId, TimelineId},
     timeline::{Timeline, TimelineMeta},
-    ErasureContainmentErrorV1, ErasureGate,
+    ErasureContainmentErrorV1, ErasureContainmentGateV1,
 };
 use std::sync::Arc;
 
@@ -339,7 +339,7 @@ pub trait EventStore: Send {
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the adapter rejects the binding.
-    fn bind_erasure_gate(&mut self, _gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+    fn bind_erasure_gate(&mut self, _gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         Err(CoreError::Storage(
             "EventStore does not implement erasure containment binding".to_owned(),
         ))

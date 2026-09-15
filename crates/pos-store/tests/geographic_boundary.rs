@@ -47,7 +47,7 @@ impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
 
 fn bind_test_erasure_gate<S: EventStore + ?Sized>(store: &mut S) {
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
 }
 

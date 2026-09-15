@@ -685,7 +685,7 @@ fn sqlite_migration_preserves_existing_timelines_and_adds_no_authority() {
     let path = directory.path().join("migration.db");
     let timeline_id = {
         let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
         ok(store.create_timeline("existing")).id()
     };
     {
@@ -693,7 +693,7 @@ fn sqlite_migration_preserves_existing_timelines_and_adds_no_authority() {
         ok(connection.execute_batch("DROP TABLE authority_state"));
     }
     let mut migrated = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-    ok(migrated.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    ok(migrated.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     assert_eq!(
         ok(migrated.get_timeline(timeline_id)).map(|timeline| timeline.id()),
         Some(timeline_id)

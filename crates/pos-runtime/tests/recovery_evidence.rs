@@ -53,7 +53,7 @@ impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
 }
 
 fn gated_registry() -> PluginRegistry {
-    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 }
 
 fn event(seq: u64, entity: EntityId, event_type: &str, payload: Vec<u8>) -> Event {

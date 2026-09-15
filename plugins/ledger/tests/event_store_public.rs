@@ -89,7 +89,7 @@ fn destruction_propagates_a_final_commit_failure() -> Result<(), Box<dyn std::er
     ))?;
 
     let mut inner = MemoryStore::new();
-    inner.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+    inner.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let timeline = inner.create_timeline("ledger")?;
     inner.save_key_registry(&registry)?;
     let mut store = EventLedgerStore::new(

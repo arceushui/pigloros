@@ -187,7 +187,7 @@ mod tests {
             )))
         });
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
                     "binding the in-memory erasure gate failed: {error:?}"

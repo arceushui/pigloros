@@ -7,6 +7,9 @@ publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
+
+[dev-dependencies]
+pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-store = { path = "../../crates/pos-store" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -230,7 +230,7 @@ mod tests {
 
     fn make_registry() -> ProjectionRegistry {
         let mut reg =
-            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         reg.register("count", Box::new(CountReducer));
         reg
     }
@@ -256,7 +256,7 @@ mod tests {
     fn open_test_store() -> Box<dyn EventStore> {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         store
     }

@@ -68,7 +68,7 @@ mod coverage_paths {
     use std::sync::{Arc, Mutex};
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     struct RestoreDriver {
@@ -318,7 +318,7 @@ mod coverage_entrypoints {
     use std::sync::Arc;
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     struct NoopDriver;
@@ -2714,7 +2714,7 @@ mod tests {
     };
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     fn gated_store() -> Box<dyn pos_core::store::EventStore> {
@@ -2724,7 +2724,7 @@ mod tests {
             )))
         });
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
                     "binding the in-memory erasure gate failed: {error:?}"
@@ -5182,7 +5182,7 @@ mod tests {
         ));
 
         let replay = PluginRegistry::new_replay()
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert!(matches!(
             replay.submit_action(action_timeline, &valid),
             Err(ActionSubmissionError::Rejected(
@@ -5268,7 +5268,7 @@ mod tests {
         );
         assert!(matches!(
             PluginRegistry::new_replay()
-                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .submit_action(TimelineId::new(), &proposal),
             Err(ActionSubmissionError::Rejected(
                 ActionRejected::UnknownEventType
@@ -5292,7 +5292,7 @@ mod coverage_public_error_paths {
     use std::sync::Arc;
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     struct EmptyDriver;
@@ -5370,7 +5370,7 @@ mod coverage_public_error_paths {
             )))
         });
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
                     "binding the in-memory erasure gate failed: {error:?}"
@@ -5483,7 +5483,7 @@ mod erasure_gate_coverage {
             Err(RuntimeError::ErasureContainment(_))
         ));
         let mut missing =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert!(missing
             .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
@@ -5500,13 +5500,13 @@ mod erasure_gate_coverage {
         ));
 
         let mut rejecting =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         // A second binding is ignored, so a host cannot replace the original
         // gate after composition and reopen the protected path.
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let mut rejecting_store = pos_store::memory::MemoryStore::new();
         rejecting_store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
                     "test store erasure gate binding should succeed: {error:?}"

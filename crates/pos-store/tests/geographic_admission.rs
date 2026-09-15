@@ -395,7 +395,7 @@ where
 fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
     let mut store = MemoryStore::default();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     assert_admission_contract(&mut store);
 }
@@ -404,7 +404,7 @@ fn memory_admission_is_atomic_and_revalidates_before_deduplication() {
 fn sqlite_admission_is_atomic_and_revalidates_before_deduplication() {
     let mut store = SqliteStore::open_in_memory().test_ok();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     assert_admission_contract(&mut store);
 }
@@ -432,7 +432,7 @@ fn sqlite_rejects_a_missing_fence_before_consulting_the_admission_clock() {
 fn sqlite_rejects_a_withdrawn_request_before_writing_an_event() {
     let mut store = SqliteStore::open_in_memory().test_ok();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     let timeline = store.create_timeline("withdrawn-request").test_ok();
     let entity = EntityId::new();
@@ -478,7 +478,7 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
     let path = database.path().to_str().test_ok();
     let mut setup = SqliteStore::open(path).test_ok();
     setup
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     let timeline = setup.create_timeline("recheck-revoked-fence").test_ok();
     let original_timeline = timeline.clone();
@@ -502,7 +502,7 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
     )
     .test_ok();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     let error = store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
@@ -523,7 +523,7 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
     );
     let mut reopened = SqliteStore::open(path).test_ok();
     reopened
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     assert!(matches!(
         reopened.admit_geo_location(request(timeline.id(), entity, ([6; 32], [7; 32]))),
@@ -537,7 +537,7 @@ fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() 
     let path = database.path().to_str().test_ok();
     let mut setup = SqliteStore::open(path).test_ok();
     setup
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     let timeline = setup.create_timeline("recheck-reconsented-fence").test_ok();
     let original_timeline = timeline.clone();
@@ -563,7 +563,7 @@ fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() 
     )
     .test_ok();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     assert!(matches!(
         store.admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32]))),
@@ -671,7 +671,7 @@ fn sqlite_admission_rolls_back_every_artifact_when_link_write_fails() {
     let path = database.path().to_str().test_ok();
     let mut store = SqliteStore::open(path).test_ok();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     let timeline = store.create_timeline("rollback-geo-admission").test_ok();
     let entity = EntityId::new();
