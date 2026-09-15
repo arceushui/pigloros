@@ -287,3 +287,71 @@ fn validate_attempts(ids: &[[u8; 16]]) -> Result<(), SelectorBoundaryError> {
 const fn invalid(_: crate::evaluator_protocol::ProtocolError) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::selector::installation::tests::admitted_state;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn admitted() -> TestResult<AdmittedSelectorProvider> {
+        Ok(admitted_state()?
+            .authenticate_bootstrap()?
+            .admit_provider()?)
+    }
+
+    #[test]
+    fn runtime_and_recovery_snapshot_expose_the_exact_bound_identities() -> TestResult {
+        let admitted = admitted()?;
+        let slot = ProviderRuntimeSlot::allocate(&admitted)?;
+        assert_ne!(slot.runtime_instance_id(), [0; 16]);
+        assert_ne!(slot.lifecycle_scope_id(), [0; 16]);
+        assert_ne!(slot.runtime_instance_id(), slot.lifecycle_scope_id());
+
+        let runtime = slot.bind_observed_process(17, 0)?;
+        assert_eq!(runtime.main_pid(), 17);
+        assert_eq!(runtime.main_start_time_ticks(), 0);
+        let live = vec![[1; 16], [2; 16]];
+        let cancelled = vec![[1; 16]];
+        let snapshot = InstallationRecoverySnapshot::seal(
+            &admitted,
+            &runtime,
+            live.clone(),
+            cancelled.clone(),
+        )?;
+        assert!(matches!(
+            snapshot.previous_provider_value(),
+            Value::Array(_)
+        ));
+        assert_ne!(snapshot.previous_provider_digest()?, [0; 32]);
+        assert!(matches!(snapshot.recovery_slot_value(), Value::Array(_)));
+        assert_eq!(snapshot.previous_live_attempt_ids(), live);
+        assert_eq!(snapshot.required_cancelled_attempt_ids(), cancelled);
+        let (runtime_key_id, runtime_public_key) = snapshot.runtime_key();
+        assert_eq!(
+            runtime_key_id,
+            admitted.provider().manifest().runtime_attestation_key_id
+        );
+        assert_ne!(runtime_public_key, [0; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_snapshot_rejects_a_runtime_bound_to_another_manifest() -> TestResult {
+        let admitted = admitted()?;
+        let mut slot = ProviderRuntimeSlot::allocate(&admitted)?;
+        slot.provider_manifest_digest = [0; 32];
+        let runtime = slot.bind_observed_process(17, 1)?;
+        assert_eq!(
+            InstallationRecoverySnapshot::seal(&admitted, &runtime, Vec::new(), Vec::new()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            invalid(crate::evaluator_protocol::ProtocolError::InvalidEncoding),
+            SelectorBoundaryError::ArtifactInvalid
+        );
+        Ok(())
+    }
+}

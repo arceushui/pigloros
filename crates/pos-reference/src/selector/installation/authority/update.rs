@@ -66,6 +66,11 @@ impl InstallationChallenge {
     pub(crate) fn expire_for_test(&mut self) {
         self.expires_at = Instant::now();
     }
+
+    #[cfg(test)]
+    pub(crate) fn replace_installation_for_test(&mut self, installation: [u8; 32]) {
+        self.installation = installation;
+    }
 }
 
 /// Fully authenticated SIU1 content awaiting an atomic attempt snapshot and SIR1 commit.
@@ -264,6 +269,16 @@ impl ValidatedInstallationUpdate {
     pub const fn record_files(&self) -> [&File; 2] {
         [self.next_policy.file(), self.next_revocation.file()]
     }
+
+    #[cfg(test)]
+    pub(crate) fn replace_previous_manifest_for_test(&mut self, manifest: Vec<u8>) {
+        self.previous_manifest = manifest;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_revocation_update_for_test(&mut self) {
+        self.revocation_update_bytes.clear();
+    }
 }
 
 fn decode_update(
@@ -305,5 +320,38 @@ fn embedded_revocation(bytes: &[u8]) -> Result<Vec<u8>, SelectorBoundaryError> {
     match &fields[4] {
         Value::Bytes(bytes) => Ok(bytes.clone()),
         _ => Err(SelectorBoundaryError::ArtifactInvalid),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_record_extractors_reject_malformed_nested_values() {
+        let malformed = encode(&Value::Array(vec![
+            Value::Array(vec![
+                Value::Text("RCU1".to_owned()),
+                Value::Integer(1_u64.into()),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ]),
+            Value::Bytes(vec![0; 32]),
+            Value::Bytes(vec![0; 64]),
+        ]))
+        .expect("test fixture must encode");
+        assert_eq!(
+            embedded_revocation(&malformed),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(
+            signed_digest(&[0xff]),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
     }
 }

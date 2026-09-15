@@ -10,7 +10,7 @@ use super::*;
 use crate::evaluator_protocol::{array, array_values, decode_canonical, fixed_bytes, text, uint};
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap, InstallationChallenge,
-    InstallationRecoverySnapshot, ProviderRuntimeSlot,
+    InstallationRecoverySnapshot, ProviderRuntimeSlot, ValidatedInstallationUpdate,
 };
 use crate::selector::installation::RECOVERY_NAME;
 
@@ -259,6 +259,23 @@ fn replace_nested_unsigned_field(
     Ok(encode(&Value::Array(wrapper))?)
 }
 
+fn resign_rcu1_field(
+    request: &[u8],
+    index: usize,
+    replacement: Value,
+    signer: &SigningKey,
+) -> TestResult<Vec<u8>> {
+    let mut request_fields = array_values(&decode_canonical(request)?)?.to_vec();
+    let Value::Bytes(rcu1) = &request_fields[4] else {
+        return Err("SIU1 RCU1 is not bytes".into());
+    };
+    let rcu1_document = decode_canonical(rcu1)?;
+    let mut unsigned = array_values(&array(&rcu1_document, 3)?[0])?.to_vec();
+    unsigned[index] = replacement;
+    request_fields[4] = Value::Bytes(sign_record("RCU1", Value::Array(unsigned), signer)?);
+    Ok(encode(&Value::Array(request_fields))?)
+}
+
 fn encode_unbounded(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
@@ -473,6 +490,79 @@ fn update_rejects_forged_or_changed_successor_records() -> TestResult {
 }
 
 #[test]
+fn update_rejects_stale_challenges_and_semantically_invalid_signed_records() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let mut challenge = fixture.bootstrap.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    challenge.replace_installation_for_test([99; 32]);
+    assert!(fixture
+        .bootstrap
+        .validate_update(challenge, &request)
+        .is_err());
+
+    for (index, replacement) in [
+        (3, digest([99; 32])),
+        (5, digest([99; 32])),
+        (7, Value::Text("unknown-policy-key".to_owned())),
+    ] {
+        let fixture = UpdateFixture::new()?;
+        let challenge = fixture.bootstrap.issue_update_challenge()?;
+        let request = fixture.request(&challenge, None)?;
+        let changed = resign_rcu1_field(&request, index, replacement, &fixture.policy_signer)?;
+        assert!(fixture
+            .bootstrap
+            .validate_update(challenge, &changed)
+            .is_err());
+    }
+
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.bootstrap.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let forged = resign_rcu1_field(
+        &request,
+        7,
+        Value::Text("policy".to_owned()),
+        &SigningKey::from_bytes(&[9; 32]),
+    )?;
+    assert!(fixture
+        .bootstrap
+        .validate_update(challenge, &forged)
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn update_rejects_missing_or_changed_successor_artifacts() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.bootstrap.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    fs::rename(
+        fixture.directory.path().join("authority"),
+        fixture.directory.path().join("authority-away"),
+    )?;
+    assert!(fixture
+        .bootstrap
+        .validate_update(challenge, &request)
+        .is_err());
+
+    let fixture = UpdateFixture::new()?;
+    let challenge = fixture.bootstrap.issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let path =
+        fixture.successor_object_path(&request, InstallationObjectKind::ADMINISTRATOR_POLICY)?;
+    let mut changed = fs::read(&path)?;
+    changed[0] ^= 1;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    fs::write(&path, changed)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
+    assert!(fixture
+        .bootstrap
+        .validate_update(challenge, &request)
+        .is_err());
+    Ok(())
+}
+
+#[test]
 fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let admitted = fixture.admitted()?;
@@ -550,6 +640,23 @@ fn committed_update_fixture() -> TestResult<(
     Ok((fixture, committed, SigningKey::from_bytes(&[4; 32])))
 }
 
+fn pending_update_fixture() -> TestResult<(
+    UpdateFixture,
+    AdmittedSelectorProvider,
+    ValidatedInstallationUpdate,
+    InstallationRecoverySnapshot,
+)> {
+    let fixture = UpdateFixture::new()?;
+    let admitted = fixture.admitted()?;
+    let challenge = admitted.bootstrap().issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let update = admitted.bootstrap().validate_update(challenge, &request)?;
+    let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+    let snapshot =
+        InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[41; 16]], vec![[41; 16]])?;
+    Ok((fixture, admitted, update, snapshot))
+}
+
 #[test]
 fn committed_update_rejects_every_malformed_rcc1_field() -> TestResult {
     let (_fixture, committed, _signer) = committed_update_fixture()?;
@@ -594,6 +701,14 @@ fn committed_update_rejects_every_malformed_rca1_field() -> TestResult {
             .is_err());
         wrapper[index] = original;
     }
+    let forged = live_acknowledgement(
+        &committed,
+        &SigningKey::from_bytes(&[9; 32]),
+        vec![[42; 16]],
+    )?;
+    assert!(committed
+        .authenticate_live_acknowledgement(&forged)
+        .is_err());
     Ok(())
 }
 
@@ -646,5 +761,105 @@ fn durable_update_rejects_invalid_snapshots_and_foreign_acknowledgements() -> Te
         .authenticate_live_acknowledgement(&wrong_set)
         .is_err());
     assert!(fixture.directory.path().join(RECOVERY_NAME).exists());
+    Ok(())
+}
+
+#[test]
+fn durable_commit_rejects_changed_inputs_and_successor_descriptors() -> TestResult {
+    let (_fixture, admitted, mut update, snapshot) = pending_update_fixture()?;
+    update.replace_previous_manifest_for_test(vec![0; 1]);
+    assert!(Arc::new(admitted).commit_update(update, snapshot).is_err());
+
+    let (_fixture, admitted, mut update, snapshot) = pending_update_fixture()?;
+    update.clear_revocation_update_for_test();
+    assert!(Arc::new(admitted).commit_update(update, snapshot).is_err());
+
+    let (fixture, admitted, update, snapshot) = pending_update_fixture()?;
+    let manifest = fixture.directory.path().join(MANIFEST_NAME);
+    let mut changed = fs::read(&manifest)?;
+    changed[0] ^= 1;
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600))?;
+    fs::write(&manifest, changed)?;
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o400))?;
+    assert!(Arc::new(admitted).commit_update(update, snapshot).is_err());
+
+    let (fixture, admitted, update, snapshot) = pending_update_fixture()?;
+    let path = fixture.successor_object_path(
+        &fixture.request(&admitted.bootstrap().issue_update_challenge()?, None)?,
+        InstallationObjectKind::ADMINISTRATOR_POLICY,
+    )?;
+    fs::remove_file(path)?;
+    assert!(Arc::new(admitted).commit_update(update, snapshot).is_err());
+
+    let (fixture, admitted, update, snapshot) = pending_update_fixture()?;
+    let object = update.record_files()[0];
+    let identity = update.next_manifest().authority_digests()
+        [usize::from(InstallationObjectKind::ADMINISTRATOR_POLICY.code())];
+    let descriptor = update
+        .next_manifest()
+        .object(InstallationObjectKind::ADMINISTRATOR_POLICY, identity)?;
+    let path = fixture
+        .directory
+        .path()
+        .join(InstallationObjectKind::ADMINISTRATOR_POLICY.directory())
+        .join(hex_name(descriptor.content_digest()));
+    let bytes = fs::read(&path)?;
+    let held = path.with_extension("held");
+    fs::rename(&path, &held)?;
+    fs::write(&path, bytes)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
+    assert_ne!(object.metadata()?.ino(), fs::metadata(&path)?.ino());
+    assert!(Arc::new(admitted).commit_update(update, snapshot).is_err());
+    Ok(())
+}
+
+#[test]
+fn committed_update_rejects_third_state_and_foreign_authenticated_acknowledgement() -> TestResult {
+    let (fixture, committed, _signer) = committed_update_fixture()?;
+    let manifest = fixture.directory.path().join(MANIFEST_NAME);
+    let mut third_state = fs::read(&manifest)?;
+    third_state[0] ^= 1;
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600))?;
+    fs::write(&manifest, third_state)?;
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o400))?;
+    assert!(committed.verify_recovery_floor().is_err());
+
+    let (_fixture_a, committed_a, _signer_a) = committed_update_fixture()?;
+    let (_fixture_b, committed_b, signer_b) = committed_update_fixture()?;
+    let bytes = live_acknowledgement(&committed_b, &signer_b, vec![[42; 16]])?;
+    let acknowledgement = committed_b.authenticate_live_acknowledgement(&bytes)?;
+    let committed_a = Arc::into_inner(committed_a).ok_or("committed update still shared")?;
+    assert!(committed_a.complete_live_update(&acknowledgement).is_err());
+    Ok(())
+}
+
+#[test]
+fn committed_update_accepts_an_already_published_successor_manifest() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let admitted = fixture.admitted()?;
+    let challenge = admitted.bootstrap().issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let request_document = decode_canonical(&request)?;
+    let Value::Bytes(next_manifest) = &array(&request_document, 5)?[3] else {
+        return Err("SIU1 successor manifest is not bytes".into());
+    };
+    let update = admitted.bootstrap().validate_update(challenge, &request)?;
+    let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+    let snapshot =
+        InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[41; 16]], vec![[41; 16]])?;
+    let committed = Arc::new(admitted).commit_update(update, snapshot)?;
+
+    let manifest = fixture.directory.path().join(MANIFEST_NAME);
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600))?;
+    fs::write(&manifest, next_manifest)?;
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o400))?;
+    let bytes = live_acknowledgement(
+        &committed,
+        &SigningKey::from_bytes(&[4; 32]),
+        vec![[41; 16]],
+    )?;
+    let acknowledgement = committed.authenticate_live_acknowledgement(&bytes)?;
+    committed.complete_live_update(&acknowledgement)?;
+    assert!(!fixture.directory.path().join(RECOVERY_NAME).exists());
     Ok(())
 }

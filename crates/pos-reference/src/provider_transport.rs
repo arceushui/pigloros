@@ -1425,6 +1425,16 @@ mod tests {
         let transport = provider_transport(endpoint.clone(), endpoint);
         assert_eq!(transport.execute_endpoint.path, path);
         assert_eq!(transport.control_endpoint.path, path);
+        let observed = provider_process_identity(rustix::process::getpid())?;
+        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
+        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
+        assert_eq!(
+            transport.bind_admitted_process(ProviderProcessIdentity {
+                start_time_ticks: observed.start_time_ticks.saturating_add(1),
+                ..observed
+            }),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
 
         let (descriptor, _peer) = UnixStream::pair()?;
         assert_eq!(

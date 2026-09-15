@@ -512,7 +512,10 @@ mod tests {
 
         let name = temporary_name("coverage")?;
         assert!(name.starts_with("coverage-"));
-        assert!(name.ends_with(".cbor"));
+        assert_eq!(
+            Path::new(&name).extension(),
+            Some(std::ffi::OsStr::new("cbor"))
+        );
         let file = create_staging_file(&staging, &name, owner)?;
         let metadata = file.metadata()?;
         assert!(metadata.is_file());
@@ -539,6 +542,19 @@ mod tests {
         fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
         assert!(matches!(
             open_staging_directory(&root, owner),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        let regular = tempfile::NamedTempFile::new()?;
+        assert!(matches!(
+            open_staging_directory(regular.as_file(), owner),
+            Err(SelectorBoundaryError::Io)
+        ));
+
+        let (_directory, root, owner) = durable_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        assert!(matches!(
+            create_staging_file(&staging, "foreign-owner.cbor", owner.saturating_add(1)),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
         Ok(())
