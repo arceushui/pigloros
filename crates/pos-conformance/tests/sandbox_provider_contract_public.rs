@@ -2227,6 +2227,32 @@ fn invalid_selector_request_preserves_each_decoded_identity_prefix() -> TestResu
 }
 
 #[test]
+fn before_spx1_errors_reject_admission_and_partial_payload_identity() -> TestResult {
+    for (attempt_id, admission_digest, code) in
+        [(Some([2; 16]), Some([3; 32]), 4_u64), (None, None, 6_u64)]
+    {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![
+                Value::Text("SLE1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Integer(0.into()),
+                Value::Integer(1.into()),
+                Value::Bytes(vec![1; 16]),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                admission_digest.map_or(Value::Null, |digest| Value::Bytes(digest.to_vec())),
+                Value::Integer(code.into()),
+                Value::Null,
+            ]),
+            &mut bytes,
+        )?;
+        assert!(SandboxLocalErrorV1::from_canonical_cbor(&bytes).is_err());
+        assert!(independent::SandboxLocalError::from_canonical_cbor(&bytes).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn describe_responses_reject_mismatched_request_bindings() -> TestResult {
     let key = signing_key();
     let describe = SandboxDescribeRequestV1 {
