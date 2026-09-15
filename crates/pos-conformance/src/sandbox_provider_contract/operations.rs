@@ -864,7 +864,7 @@ enum DecodedLocalErrorIdentityV1 {
     Complete,
 }
 
-fn decoded_local_error_identity(
+const fn decoded_local_error_identity(
     error: &SandboxLocalErrorV1,
 ) -> Option<DecodedLocalErrorIdentityV1> {
     match (

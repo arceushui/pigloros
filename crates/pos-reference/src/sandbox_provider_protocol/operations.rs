@@ -170,7 +170,9 @@ enum DecodedLocalErrorIdentity {
     Complete,
 }
 
-fn decoded_local_error_identity(error: &SandboxLocalError) -> Option<DecodedLocalErrorIdentity> {
+const fn decoded_local_error_identity(
+    error: &SandboxLocalError,
+) -> Option<DecodedLocalErrorIdentity> {
     match (
         error.operation,
         error.request_id.is_some(),
