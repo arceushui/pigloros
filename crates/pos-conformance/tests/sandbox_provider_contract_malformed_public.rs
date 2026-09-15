@@ -314,10 +314,14 @@ fn unsigned_local_error_rejects_only_invalid_scalar_boundaries() -> TestResult {
         ),
         (
             vec![2],
-            vec![Value::Integer(4.into()), Value::Text("execute".to_owned())],
+            vec![Value::Integer(3.into()), Value::Text("phase".to_owned())],
         ),
         (
             vec![3],
+            vec![Value::Integer(4.into()), Value::Text("execute".to_owned())],
+        ),
+        (
+            vec![4],
             vec![
                 Value::Bytes(vec![0; 15]),
                 Value::Bytes(vec![0; 16]),
@@ -325,11 +329,27 @@ fn unsigned_local_error_rejects_only_invalid_scalar_boundaries() -> TestResult {
             ],
         ),
         (
-            vec![4],
-            vec![Value::Integer(4.into()), Value::Text("failure".to_owned())],
+            vec![5],
+            vec![
+                Value::Bytes(vec![0; 15]),
+                Value::Bytes(vec![0; 16]),
+                Value::Text("attempt-id".to_owned()),
+            ],
         ),
         (
-            vec![5],
+            vec![6],
+            vec![
+                Value::Bytes(vec![0; 31]),
+                Value::Bytes(vec![0; 32]),
+                Value::Text("agr1-digest".to_owned()),
+            ],
+        ),
+        (
+            vec![7],
+            vec![Value::Integer(9.into()), Value::Text("failure".to_owned())],
+        ),
+        (
+            vec![8],
             vec![
                 Value::Text(String::new()),
                 Value::Text("x".repeat(257)),
@@ -346,10 +366,14 @@ fn unsigned_local_error_rejects_only_invalid_scalar_boundaries() -> TestResult {
     }
 
     let mut nullable = original;
-    for path in [[2_usize], [3], [5]] {
+    *value_at_mut(&mut nullable, &[2]).ok_or("SLE1 phase path must resolve")? =
+        Value::Integer(0.into());
+    for path in [[3_usize], [4], [5], [6]] {
         *value_at_mut(&mut nullable, &path).ok_or("SLE1 nullable field path must resolve")? =
             Value::Null;
     }
+    *value_at_mut(&mut nullable, &[7]).ok_or("SLE1 code path must resolve")? =
+        Value::Integer(4.into());
     let nullable_bytes = encode_value(&nullable)?;
     assert!(record.producer_accepts(&nullable_bytes));
     assert!(record.independent_accepts(&nullable_bytes));
@@ -360,7 +384,7 @@ fn unsigned_local_error_rejects_only_invalid_scalar_boundaries() -> TestResult {
 fn local_error_decoders_reject_nul_safe_detail() -> TestResult {
     let record = Record::Sle1;
     let mut value = decode_value(record.bytes())?;
-    *value_at_mut(&mut value, &[5]).ok_or("SLE1 safe-detail path must resolve")? =
+    *value_at_mut(&mut value, &[8]).ok_or("SLE1 safe-detail path must resolve")? =
         Value::Text("unsafe\0detail".to_owned());
     assert_rejected(record, &value, "NUL safe detail")
 }
@@ -368,7 +392,7 @@ fn local_error_decoders_reject_nul_safe_detail() -> TestResult {
 #[test]
 fn safe_detail_decoders_reject_malformed_utf8() -> TestResult {
     for (record, path, magic) in [
-        (Record::Sle1, vec![5], None),
+        (Record::Sle1, vec![8], None),
         (Record::Spe1, vec![0, 7], Some("SPE1")),
     ] {
         let mut value = decode_value(record.bytes())?;

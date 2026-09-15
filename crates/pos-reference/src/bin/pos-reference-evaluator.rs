@@ -11,8 +11,8 @@ use pos_reference::evaluator_build_identity::{
     verify_evaluator_build_identity, EvaluatorBuildEvidence, EvaluatorBuildIdentityError,
 };
 use pos_reference::evaluator_protocol::{EvaluationRequest, IndependenceEvidence, ProtocolError};
-use pos_reference::process_adapter::ProcessAdapter;
 use pos_reference::profile::{EvaluatorHardCaps, Profile};
+use pos_reference::selector::SelectorAdapter;
 use pos_reference::signed_bundle::preflight_signed_bundle;
 
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -29,8 +29,6 @@ enum CommandError {
     UnsupportedVersion,
     #[error("the evaluator identity is invalid")]
     Identity,
-    #[error("the subject adapter configuration is invalid")]
-    Adapter,
     #[error("independent evaluation failed")]
     Evaluation,
     #[error("bounded output failed")]
@@ -62,8 +60,6 @@ struct Options {
     reviewer_ids: Vec<String>,
     authorship_independent: bool,
     organizational_independent: bool,
-    adapter: PathBuf,
-    adapter_arguments: Vec<OsString>,
 }
 
 #[derive(Default)]
@@ -77,8 +73,6 @@ struct OptionsBuilder {
     reviewer_ids: Vec<String>,
     authorship_independent: bool,
     organizational_independent: bool,
-    adapter: Option<PathBuf>,
-    adapter_arguments: Vec<OsString>,
 }
 
 #[derive(Default)]
@@ -121,13 +115,7 @@ fn run() -> Result<(), CommandError> {
         EvaluatorBuildIdentityError::Invalid => CommandError::Identity,
     })?;
     let archive_bytes = read_bounded_file(&mut archive, MAX_ARCHIVE_BYTES)?;
-    let mut adapter = ProcessAdapter::new(
-        request.subject_adapter,
-        request.subject_artifact_digest,
-        options.adapter,
-        options.adapter_arguments,
-    )
-    .map_err(|_| CommandError::Adapter)?;
+    let mut adapter = SelectorAdapter::new(request).map_evaluation_error()?;
     evaluate(
         &request_bytes,
         &archive_bytes,
@@ -209,8 +197,6 @@ fn parse_option(
         "--organizational-independent" if !builder.organizational_independent => {
             builder.organizational_independent = true;
         }
-        "--adapter" => set_once(&mut builder.adapter, next_path(arguments)?)?,
-        "--adapter-arg" => builder.adapter_arguments.push(next_argument(arguments)?),
         _ => return Err(CommandError::Arguments),
     }
     Ok(())
@@ -256,8 +242,6 @@ impl OptionsBuilder {
             reviewer_ids: self.reviewer_ids,
             authorship_independent: self.authorship_independent,
             organizational_independent: self.organizational_independent,
-            adapter: self.adapter.ok_or(CommandError::Arguments)?,
-            adapter_arguments: self.adapter_arguments,
         })
     }
 }

@@ -21,10 +21,324 @@ pub mod adapter_transport;
 pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
-pub mod process_adapter;
 pub mod profile;
+// Public module reachability keeps crate-only sibling access compatible with
+// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod provider_transport;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod root_selector;
 pub mod sandbox_provider_protocol;
+#[cfg(unix)]
+pub mod selector;
+// Public module reachability keeps crate-only sibling access compatible with
+// both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod selector_protocol;
 pub mod signed_bundle;
+
+// Unit tests reuse the public integration corpus. Keeping this test-only module
+// reachable at the crate boundary preserves the integration helper's ordinary
+// public visibility without suppressing unused-item or reachability lints.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod selector_test_support {
+    use crate as pos_reference;
+
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod selector_transport_test_fixture {
+    use crate as pos_reference;
+
+    macro_rules! public_admission_tests {
+        ($($tokens:tt)*) => {};
+    }
+
+    // Reuse only the independently signed fixture definitions. The public
+    // integration tests remain owned and executed by their integration target.
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/sandbox_admission_fixture.rs"
+    ));
+
+    pub(crate) struct TransportAdmissionFixture {
+        pub(crate) provider: crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        pub(crate) request: crate::sandbox_provider_protocol::SandboxExecuteRequest,
+        pub(crate) commitment: crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        pub(crate) spx1: Vec<u8>,
+        pub(crate) agr1: Vec<u8>,
+        pub(crate) sau1: Vec<Vec<u8>>,
+        pub(crate) spr1: Vec<u8>,
+        pub(crate) output_chunk: Vec<u8>,
+        pub(crate) spy1: Vec<u8>,
+        pub(crate) spe1: Vec<u8>,
+        pub(crate) describe_request_id: [u8; 16],
+        pub(crate) describe_nonce: [u8; 16],
+        pub(crate) sdy1: Vec<u8>,
+        fixture: Fixture,
+        pub(crate) non_output_result:
+            crate::sandbox_provider_protocol::AuthenticatedSandboxProviderResult,
+    }
+
+    impl TransportAdmissionFixture {
+        pub(crate) fn resign_sdy1_field(
+            &self,
+            field: usize,
+            replacement: Value,
+        ) -> TestResult<Vec<u8>> {
+            resign_unsigned_field(
+                &self.sdy1,
+                "SDY1",
+                field,
+                replacement,
+                &self.fixture.authority.runtime,
+            )
+        }
+
+        pub(crate) fn describe_response_for_provider(
+            &self,
+            request: &[u8],
+            provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        ) -> TestResult<Vec<u8>> {
+            let request =
+                crate::sandbox_provider_protocol::SandboxDescribeRequest::from_canonical_cbor(
+                    request,
+                )?;
+            sign_describe_response(
+                &self.fixture.authority.runtime,
+                provider,
+                request.request.request_id,
+                request.request.apt1_digest,
+            )
+        }
+
+        pub(crate) fn execution_response_for(
+            &self,
+            provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+            execute_request_bytes: &[u8],
+            commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            epochs: [u64; 3],
+        ) -> TestResult<Vec<Vec<u8>>> {
+            let request =
+                crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+                    execute_request_bytes,
+                )?;
+            let image = self.provider.admit_image(
+                &self.fixture.sim1,
+                &self.fixture.root_image,
+                &self.fixture.executable,
+            )?;
+            let launch = self
+                .provider
+                .admit_launch_policy(&self.fixture.lps1, &image)?;
+            let agr1 = admission_grant(&self.fixture, &request, &launch, commitment)?;
+            let agr1 = resign_unsigned_fields(
+                &agr1,
+                "AGR1",
+                &[
+                    (17, integer(epochs[0])),
+                    (18, integer(epochs[1])),
+                    (19, integer(epochs[2])),
+                    (
+                        22,
+                        Value::Array(
+                            request
+                                .network_plans
+                                .iter()
+                                .map(|plan| bytes(plan.plan_digest))
+                                .collect(),
+                        ),
+                    ),
+                    (23, bytes(request.authority.lps1_digest)),
+                ],
+                &self.fixture.authority.runtime,
+            )?;
+            let grant = provider.authenticate_selector_grant(&agr1, &request, commitment)?;
+            let audit = audit_chain_for_events(&self.fixture, &grant, &[0])?;
+            let audit_digest = wrapped_digest(audit.last().ok_or("audit chain is empty")?)?;
+            let receipt_bytes =
+                provider_receipt_for_lifecycle(&self.fixture, &grant, audit_digest, None, None)?;
+            let receipt = provider.authenticate_receipt(&receipt_bytes, &grant)?;
+            let terminal_result_bytes =
+                terminal_result_for_outcome(&self.fixture, &request, &grant, &receipt, 4, &[0])?;
+            let result = provider.authenticate_terminal_result(
+                &terminal_result_bytes,
+                &request,
+                &grant,
+                &receipt,
+            )?;
+            provider.authenticate_audit_chain(&audit, &receipt, &result)?;
+            Ok(std::iter::once(agr1)
+                .chain(audit)
+                .chain([receipt_bytes, terminal_result_bytes])
+                .collect())
+        }
+
+        pub(crate) fn request_identity_conflict_for(
+            &self,
+            execute_request_bytes: &[u8],
+        ) -> TestResult<Vec<u8>> {
+            let request =
+                crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+                    execute_request_bytes,
+                )?;
+            sign_record(
+                "SPE1",
+                Value::Array(vec![
+                    Value::Text("SPE1".to_owned()),
+                    integer(1),
+                    integer(1),
+                    Value::Bytes(request.request.request_id.to_vec()),
+                    Value::Bytes(request.request_digest.to_vec()),
+                    Value::Bytes(request.attempt_id.to_vec()),
+                    integer(16),
+                    Value::Null,
+                    Value::Text("runtime".to_owned()),
+                ]),
+                &self.fixture.authority.runtime,
+            )
+        }
+    }
+
+    fn describe_response(
+        fixture: &Fixture,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request_id: [u8; 16],
+    ) -> TestResult<Vec<u8>> {
+        sign_describe_response(
+            &fixture.authority.runtime,
+            provider,
+            request_id,
+            fixture.policy.policy_digest(),
+        )
+    }
+
+    fn sign_describe_response(
+        runtime: &SigningKey,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+        request_id: [u8; 16],
+        active_policy_digest: [u8; 32],
+    ) -> TestResult<Vec<u8>> {
+        sign_record(
+            "SDY1",
+            Value::Array(vec![
+                Value::Text("SDY1".to_owned()),
+                integer(1),
+                Value::Bytes(request_id.to_vec()),
+                bytes(provider.manifest().manifest_digest),
+                bytes(provider.manifest().binary_digest),
+                bytes(provider.host_profile().profile_digest),
+                bytes(active_policy_digest),
+                Value::Text(provider.manifest().runtime_attestation_key_id.clone()),
+            ]),
+            runtime,
+        )
+    }
+
+    pub(crate) fn authenticated_transport_fixture() -> TestResult<TransportAdmissionFixture> {
+        let fixture = Fixture::new()?;
+        let provider = fixture.admit()?;
+        let image =
+            provider.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+        let launch = provider.admit_launch_policy(&fixture.lps1, &image)?;
+        let execute_request_bytes = execute_request(&fixture, &launch, &["execute"])?;
+        let request = crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
+            &execute_request_bytes,
+        )?;
+        let commitment = fixture.selector_grant_commitment(&provider, &image, &launch, &request)?;
+        let agr1 = admission_grant(&fixture, &request, &launch, &commitment)?;
+        let authenticated_grant =
+            provider.authenticate_selector_grant(&agr1, &request, &commitment)?;
+        let grant = AdmissionGrant::from_canonical_cbor(&agr1)?;
+        let sau1 = audit_chain(&fixture, &grant)?;
+        let audit_digest = wrapped_digest(sau1.last().ok_or("audit chain is empty")?)?;
+        let receipt_bytes = provider_receipt(&fixture, &grant, audit_digest)?;
+        let receipt = SandboxProviderReceipt::from_canonical_cbor(&receipt_bytes)?;
+        let terminal_result_bytes = terminal_result(&fixture, &request, &grant, &receipt)?;
+        let denied_events = vec![0];
+        let denied_audit = audit_chain_for_events(&fixture, &authenticated_grant, &denied_events)?;
+        let denied_receipt = provider.authenticate_receipt(
+            &provider_receipt_for_lifecycle(
+                &fixture,
+                &authenticated_grant,
+                wrapped_digest(denied_audit.last().ok_or("denied audit missing")?)?,
+                None,
+                None,
+            )?,
+            &authenticated_grant,
+        )?;
+        let non_output_result = provider.authenticate_terminal_result(
+            &terminal_result_for_outcome(
+                &fixture,
+                &request,
+                &authenticated_grant,
+                &denied_receipt,
+                4,
+                &denied_events,
+            )?,
+            &request,
+            &authenticated_grant,
+            &denied_receipt,
+        )?;
+        let spe1 = sign_record(
+            "SPE1",
+            Value::Array(vec![
+                Value::Text("SPE1".to_owned()),
+                integer(1),
+                integer(1),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.request_digest.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(17),
+                Value::Null,
+                Value::Text("runtime".to_owned()),
+            ]),
+            &fixture.authority.runtime,
+        )?;
+        let describe_request_id = rand::random();
+        let describe_nonce = rand::random();
+        let sdy1 = describe_response(&fixture, &provider, describe_request_id)?;
+        let output = b"output";
+        let output_chunk = self_digested_record(
+            "SBC1",
+            Value::Array(vec![
+                Value::Text("SBC1".to_owned()),
+                integer(1),
+                bytes(wrapped_digest(&terminal_result_bytes)?),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                integer(1),
+                integer(0),
+                integer(0),
+                Value::Bytes(output.to_vec()),
+            ]),
+        )?;
+        Ok(TransportAdmissionFixture {
+            provider,
+            request,
+            commitment,
+            spx1: execute_request_bytes,
+            agr1,
+            sau1,
+            spr1: receipt_bytes,
+            output_chunk,
+            spy1: terminal_result_bytes,
+            spe1,
+            describe_request_id,
+            describe_nonce,
+            sdy1,
+            fixture,
+            non_output_result,
+        })
+    }
+}
 
 /// Divergence classes emitted by the independent JSON evaluator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
