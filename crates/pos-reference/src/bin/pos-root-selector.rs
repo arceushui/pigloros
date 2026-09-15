@@ -9,7 +9,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     #[test]
     fn entrypoint_fails_closed_without_the_fixed_root_installation() {
