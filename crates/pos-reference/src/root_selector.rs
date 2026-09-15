@@ -19,7 +19,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rustix::fs::{fchmod, statat, unlinkat, AtFlags, FileType, Mode};
+use rustix::fs::{chmodat, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
@@ -139,7 +139,13 @@ impl OwnedSelectorListener {
             owner_uid: expected_uid,
             owned: true,
         };
-        fchmod(&owned.listener, Mode::from_raw_mode(SELECTOR_SOCKET_MODE)).map_err(io_error)?;
+        chmodat(
+            &owned.parent,
+            Path::new(&owned.leaf),
+            Mode::from_raw_mode(SELECTOR_SOCKET_MODE),
+            AtFlags::empty(),
+        )
+        .map_err(io_error)?;
         let current = listener_socket_identity(&owned.parent, &owned.leaf, expected_uid)?;
         require_same_socket(current, identity)?;
         validate_listener_parent(parent_path, &owned.parent, expected_uid)?;
