@@ -197,8 +197,7 @@ fn validate_profile_fields(
 }
 
 fn valid_identifier_list(values: &[String]) -> bool {
-    !values.is_empty()
-        && values.iter().all(|value| valid_identifier_text(value))
+    !values.is_empty() && values.iter().all(|value| valid_identifier_text(value))
 }
 
 fn valid_identifier_values(values: &[String]) -> bool {

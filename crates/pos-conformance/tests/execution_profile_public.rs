@@ -468,11 +468,7 @@ fn invalid_profile_cases(
             |value| value.scheduler_driver_order[0] = "x".repeat(129),
             Bounds,
         ),
-        invalid_profile(
-            profile,
-            |value| value.tick_policy.clear(),
-            Bounds,
-        ),
+        invalid_profile(profile, |value| value.tick_policy.clear(), Bounds),
         invalid_profile(
             profile,
             |value| value.schemas_and_upcasters[1] = value.schemas_and_upcasters[0].clone(),
