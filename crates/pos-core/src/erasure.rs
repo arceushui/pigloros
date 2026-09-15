@@ -7341,6 +7341,17 @@ mod coverage_paths {
             }
         }
 
+        struct LegacyCoordinatorPort;
+
+        impl ErasureCoordinatorPortV1 for LegacyCoordinatorPort {
+            fn complete_erasure_inventory_observation(
+                &self,
+                _maximum_requests: usize,
+            ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+                Err(ErasureErrorV1::ScopeInvalid)
+            }
+        }
+
         struct LegacyInventoryQuery(Option<ErasureVerifiedInventoryV1>);
 
         impl ErasureVerifiedInventoryQueryV1 for LegacyInventoryQuery {
@@ -7389,6 +7400,14 @@ mod coverage_paths {
             .is_ok());
         assert_eq!(
             persistence.complete_erasure_inventory_snapshot_with_limits(
+                ErasureRecoveryLimitsV1::new(1, 1, 1)?,
+            ),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+
+        let coordinator = LegacyCoordinatorPort;
+        assert_eq!(
+            coordinator.complete_erasure_inventory_observation_with_limits(
                 ErasureRecoveryLimitsV1::new(1, 1, 1)?,
             ),
             Err(ErasureErrorV1::ScopeInvalid)
