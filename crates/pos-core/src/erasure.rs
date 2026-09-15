@@ -4593,7 +4593,7 @@ impl ErasureVerifiedInventoryV1 {
         mut classifications: Vec<(TimelineId, Vec<ErasureInventoryClassificationV1>)>,
         limits: ErasureRecoveryLimitsV1,
         input: ErasureForkAdmissionInputV1,
-        mut admissions: Vec<PreparedErasureForkAdmissionV1>,
+        admissions: Vec<PreparedErasureForkAdmissionV1>,
         parent_index: usize,
     ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
         let successor_timelines = classifications.len().saturating_add(1);
