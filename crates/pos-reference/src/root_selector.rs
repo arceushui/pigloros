@@ -1542,6 +1542,25 @@ mod tests {
         ExecuteBody,
     }
 
+    fn run_isolated_test(test_name: &str) -> TestResult {
+        let runner =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-isolated-test.sh");
+        let output = Command::new(runner)
+            .arg(std::env::current_exe()?)
+            .arg(test_name)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "isolated test {test_name} failed with {}:\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     fn isolated_composition_role() -> TestResult<IsolatedCompositionRole> {
         if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_some() {
             if rustix::process::geteuid().as_raw() != ROOT_UID {
@@ -1549,21 +1568,9 @@ mod tests {
             }
             return Ok(IsolatedCompositionRole::ExecuteBody);
         }
-        let runner = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/run-isolated-root-selector-test.sh");
-        let output = Command::new(runner)
-            .arg(std::env::current_exe()?)
-            .arg("root_selector::tests::nonactivating_public_composition_authenticates_sly1")
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "isolated selector composition failed with {}:\nstdout:\n{}\nstderr:\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
+        run_isolated_test(
+            "root_selector::tests::nonactivating_public_composition_authenticates_sly1",
+        )?;
         Ok(IsolatedCompositionRole::Delegated)
     }
 

@@ -12,12 +12,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/check_isolated_test_runner_policy.py"
+RUNNERS = tuple(sorted((ROOT / "scripts").glob("run-isolated*-test.sh")))
+if not RUNNERS:
+    raise SystemExit("no delegated isolated test runners were discovered")
+RUNNER_PATHS = tuple(path.relative_to(ROOT) for path in RUNNERS)
+OWNER_PATHS = tuple(
+    source.relative_to(ROOT)
+    for source in sorted((ROOT / "crates").glob("**/*.rs"))
+    if any(runner.name in source.read_text(encoding="utf-8") for runner in RUNNERS)
+)
+if not OWNER_PATHS:
+    raise SystemExit("no Rust owners of delegated isolated test runners were discovered")
 FIXTURES = (
     Path(".github/workflows/ci.yml"),
     Path(".github/workflows/mutation.yml"),
-    Path("crates/pos-reference/src/root_selector.rs"),
-    Path("scripts/run-isolated-root-selector-test.sh"),
+    *OWNER_PATHS,
+    *RUNNER_PATHS,
 )
+PRIMARY_OWNER = OWNER_PATHS[0]
+PRIMARY_RUNNER = RUNNER_PATHS[0]
 
 
 def invoke(root: Path) -> subprocess.CompletedProcess[str]:
@@ -53,27 +66,27 @@ def main() -> None:
             "cargo test",
         ),
         (
-            Path("crates/pos-reference/src/root_selector.rs"),
-            "run-isolated-root-selector-test.sh",
+            PRIMARY_OWNER,
+            PRIMARY_RUNNER.name,
             "missing-isolated-runner.sh",
         ),
         (
-            Path("scripts/run-isolated-root-selector-test.sh"),
+            PRIMARY_RUNNER,
             "unshare --user --map-root-user --mount --fork --propagation private",
             "unshare --mount --fork --propagation private",
         ),
         (
-            Path("scripts/run-isolated-root-selector-test.sh"),
+            PRIMARY_RUNNER,
             "timeout --signal=TERM --kill-after=5s 30s",
             "timeout 30s",
         ),
         (
-            Path("scripts/run-isolated-root-selector-test.sh"),
+            PRIMARY_RUNNER,
             "exec timeout",
             "sudo -n timeout",
         ),
         (
-            Path("scripts/run-isolated-root-selector-test.sh"),
+            PRIMARY_RUNNER,
             "mount --make-rprivate /",
             "rm -rf /run",
         ),

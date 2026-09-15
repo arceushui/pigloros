@@ -35,7 +35,7 @@ def main() -> None:
         require(workflow, fragment, workflow_path)
     require(mutation_workflow, "cargo mutants", mutation_path)
 
-    runners = sorted((root / "scripts").glob("run-isolated-*-test.sh"))
+    runners = sorted((root / "scripts").glob("run-isolated*-test.sh"))
     if not runners:
         raise SystemExit("no delegated isolated test runners were discovered")
     rust_sources = {
