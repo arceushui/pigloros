@@ -985,10 +985,6 @@ impl StoreExecutor {
         mut store: Box<dyn EventStore>,
         permit: ConsentAppendPermit,
     ) -> Self {
-        #[cfg(test)]
-        drop(
-            store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
-        );
         drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::Generic(store), None)
     }
@@ -1023,10 +1019,6 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
-        #[cfg(test)]
-        drop(
-            store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
-        );
         drop(store.bind_consent_authority(permit));
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store))),
@@ -1043,10 +1035,6 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
-        #[cfg(test)]
-        drop(
-            store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open())),
-        );
         drop(store.bind_consent_authority(permit));
         Self::spawn(
             ExecutorStore::Gateway(GatewayExecutorStore::OwnTracks(Box::new(store))),
