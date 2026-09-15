@@ -37,7 +37,8 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::ProviderRuntimeSlot;
 use crate::selector::installation::authority::{
     fresh_selector_id, AdmittedProviderRuntime, AdmittedSelectorProvider,
-    AuthenticatedSelectorBootstrap, InstallationRecoverySnapshot,
+    AuthenticatedSelectorBootstrap, CommittedInstallationUpdate, InstallationChallenge,
+    InstallationRecoverySnapshot,
 };
 use crate::selector::installation::{
     open_directory_chain, InstallationObjectKind, InstalledSelectorState,
@@ -89,6 +90,11 @@ fn map_to_unit_error<T>(_: T) {}
 struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
     updates: Mutex<()>,
+}
+
+struct ReceivedInstallationUpdate {
+    challenge: InstallationChallenge,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -606,47 +612,98 @@ impl RootSelectorComposition {
         if !root_peer(&stream, ROOT_UID) {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        stream
-            .set_read_timeout(Some(INITIAL_IO_TIMEOUT))
-            .map_err(io_error)?;
-        stream
-            .set_write_timeout(Some(INITIAL_IO_TIMEOUT))
-            .map_err(io_error)?;
-        let _serialized = self.updates.lock().map_err(selector_unavailable)?;
-        let current = self.service.admission.current()?;
-        let challenge = current.bootstrap().issue_update_challenge()?;
-        write_control_frame(&mut stream, &challenge.to_canonical_cbor()?)?;
-        let update_bytes = read_control_frame(&mut stream)?;
-        require_stream_eof(&mut stream)?;
-        let closed = self.service.admission.close_and_snapshot()?;
-        let committed = match prepare_live_update(&closed, challenge, &update_bytes) {
-            Ok(committed) => committed,
-            Err(error) => {
-                self.service.admission.reopen_previous(&closed.admitted)?;
-                return Err(error);
-            }
-        };
-        let (successor, acknowledgement) = self
-            .service
-            .transport
-            .complete_committed_update(committed, LIVE_UPDATE_TIMEOUT)?;
-        self.service.evaluation_namespaces.clear()?;
+        configure_update_stream(&stream)
+            .and_then(|()| self.updates.lock().map_err(selector_unavailable))
+            .and_then(|_serialized| self.process_installation_update(&mut stream))
+    }
+
+    fn process_installation_update(
+        &self,
+        stream: &mut UnixStream,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.receive_installation_update(stream)
+            .and_then(|received| {
+                self.service
+                    .admission
+                    .close_and_snapshot()
+                    .map(|closed| (closed, received))
+            })
+            .and_then(|(closed, received)| self.prepare_closed_update(closed, received))
+            .and_then(|(closed, committed)| {
+                self.service
+                    .transport
+                    .complete_committed_update(committed, LIVE_UPDATE_TIMEOUT)
+                    .map(|(successor, acknowledgement)| (closed, successor, acknowledgement))
+            })
+            .and_then(|(closed, successor, acknowledgement)| {
+                self.service
+                    .evaluation_namespaces
+                    .clear()
+                    .map(|()| (closed, successor, acknowledgement))
+            })
+            .and_then(|(closed, successor, acknowledgement)| {
+                self.service
+                    .admission
+                    .admit_successor(&closed.admitted, successor)
+                    .map(|()| acknowledgement)
+            })
+            .and_then(|acknowledgement| write_control_frame(stream, &acknowledgement))
+            .and_then(|()| stream.shutdown(std::net::Shutdown::Write).map_err(io_error))
+    }
+
+    fn receive_installation_update(
+        &self,
+        stream: &mut UnixStream,
+    ) -> Result<ReceivedInstallationUpdate, SelectorBoundaryError> {
         self.service
             .admission
-            .admit_successor(&closed.admitted, successor)?;
-        write_control_frame(&mut stream, &acknowledgement)?;
-        stream.shutdown(std::net::Shutdown::Write).map_err(io_error)
+            .current()
+            .and_then(|current| current.bootstrap().issue_update_challenge())
+            .and_then(|challenge| {
+                challenge
+                    .to_canonical_cbor()
+                    .map(|bytes| (challenge, bytes))
+            })
+            .and_then(|(challenge, bytes)| write_control_frame(stream, &bytes).map(|()| challenge))
+            .and_then(|challenge| {
+                read_control_frame(stream)
+                    .map(|bytes| ReceivedInstallationUpdate { challenge, bytes })
+            })
+            .and_then(|received| require_stream_eof(stream).map(|()| received))
     }
+
+    fn prepare_closed_update(
+        &self,
+        closed: ClosedSelectorAdmission,
+        received: ReceivedInstallationUpdate,
+    ) -> Result<(ClosedSelectorAdmission, CommittedInstallationUpdate), SelectorBoundaryError> {
+        match prepare_live_update(&closed, received.challenge, &received.bytes) {
+            Ok(committed) => Ok((closed, committed)),
+            Err(error) => self
+                .service
+                .admission
+                .reopen_previous(&closed.admitted)
+                .and(Err(error)),
+        }
+    }
+}
+
+fn configure_update_stream(stream: &UnixStream) -> Result<(), SelectorBoundaryError> {
+    stream
+        .set_read_timeout(Some(INITIAL_IO_TIMEOUT))
+        .map_err(io_error)
+        .and_then(|()| {
+            stream
+                .set_write_timeout(Some(INITIAL_IO_TIMEOUT))
+                .map_err(io_error)
+        })
 }
 
 fn prepare_live_update(
     closed: &ClosedSelectorAdmission,
     challenge: crate::selector::installation::authority::InstallationChallenge,
     update_bytes: &[u8],
-) -> Result<
-    crate::selector::installation::authority::CommittedInstallationUpdate,
-    SelectorBoundaryError,
-> {
+) -> Result<CommittedInstallationUpdate, SelectorBoundaryError> {
     closed
         .admitted
         .bootstrap()

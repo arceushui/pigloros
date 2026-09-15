@@ -611,31 +611,69 @@ impl ProviderTransport {
         committed: CommittedInstallationUpdate,
         timeout: Duration,
     ) -> Result<(AdmittedSelectorProvider, Vec<u8>), SelectorBoundaryError> {
-        let context = committed.cancellation_context()?;
-        let context_bytes = context.to_canonical_cbor().map_err(artifact_invalid)?;
-        let mut connected = self.control_endpoint.connect(timeout)?;
-        self.require_admitted_process(connected.process)?;
-        let deadline = Deadline::new(timeout)?;
-        write_frame(&mut connected.stream, &context_bytes, &deadline)
-            .map_err(selector_unavailable)?;
-        write_frame(
-            &mut connected.stream,
-            committed.revocation_update_bytes(),
-            &deadline,
-        )
-        .map_err(selector_unavailable)?;
-        connected
-            .stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(selector_unavailable)?;
-        let response = read_frame(&mut connected.stream, &deadline)
-            .map_err(selector_unavailable)?
-            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
-        ensure_eof(&mut connected.stream, &deadline).map_err(selector_unavailable)?;
-        let acknowledgement = committed.authenticate_live_acknowledgement(&response)?;
         committed
-            .complete_live_update(&acknowledgement)
-            .map(|admitted| (admitted, response))
+            .cancellation_context()
+            .and_then(|context| {
+                context
+                    .to_canonical_cbor()
+                    .map_err(artifact_invalid)
+                    .map(|context_bytes| (committed, context_bytes))
+            })
+            .and_then(|(committed, context_bytes)| {
+                self.control_endpoint
+                    .connect(timeout)
+                    .map(|connected| (committed, context_bytes, connected))
+            })
+            .and_then(|(committed, context_bytes, connected)| {
+                self.require_admitted_process(connected.process)
+                    .map(|()| (committed, context_bytes, connected))
+            })
+            .and_then(|(committed, context_bytes, connected)| {
+                Deadline::new(timeout)
+                    .map(|deadline| (committed, context_bytes, connected, deadline))
+            })
+            .and_then(|(committed, context_bytes, mut connected, deadline)| {
+                write_frame(&mut connected.stream, &context_bytes, &deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (committed, connected, deadline))
+            })
+            .and_then(|(committed, mut connected, deadline)| {
+                write_frame(
+                    &mut connected.stream,
+                    committed.revocation_update_bytes(),
+                    &deadline,
+                )
+                .map_err(selector_unavailable)
+                .map(|()| (committed, connected, deadline))
+            })
+            .and_then(|(committed, connected, deadline)| {
+                connected
+                    .stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(selector_unavailable)
+                    .map(|()| (committed, connected, deadline))
+            })
+            .and_then(|(committed, mut connected, deadline)| {
+                read_frame(&mut connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
+                    .map(|response| (committed, connected, deadline, response))
+            })
+            .and_then(|(committed, mut connected, deadline, response)| {
+                ensure_eof(&mut connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (committed, response))
+            })
+            .and_then(|(committed, response)| {
+                committed
+                    .authenticate_live_acknowledgement(&response)
+                    .map(|acknowledgement| (committed, response, acknowledgement))
+            })
+            .and_then(|(committed, response, acknowledgement)| {
+                committed
+                    .complete_live_update(&acknowledgement)
+                    .map(|admitted| (admitted, response))
+            })
     }
 
     /// Execute exact constructed SPX1/input bytes and authenticate the full reply.

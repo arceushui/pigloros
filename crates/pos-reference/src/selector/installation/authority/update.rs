@@ -421,3 +421,15 @@ fn decode_update(
     }
     Ok((next.clone(), update.clone()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{invalid, io};
+    use crate::selector::SelectorBoundaryError;
+
+    #[test]
+    fn closed_error_mappers_preserve_boundary_classification() {
+        assert_eq!(invalid(()), SelectorBoundaryError::ArtifactInvalid);
+        assert_eq!(io(()), SelectorBoundaryError::Io);
+    }
+}
