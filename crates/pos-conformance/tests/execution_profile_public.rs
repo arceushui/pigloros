@@ -99,6 +99,26 @@ fn public_codec_roundtrips_the_existing_draft_epf1_bytes() -> TestResult {
 }
 
 #[test]
+fn identifier_fields_accept_bounded_utf8_text_from_the_cddl_schema() -> TestResult {
+    let bytes = draft_profile_bytes()?;
+    let mut profile = ExecutionProfileV1::from_canonical_cbor(&bytes)?;
+    profile.profile_id = "Driver_A / Ω".to_owned();
+    profile.architecture_rules = vec!["Architecture rule α".to_owned()];
+    profile.numeric_rules = vec!["Numeric rule β".to_owned()];
+    profile.scheduler_driver_order = vec!["Driver/One".to_owned()];
+    profile.tick_policy = "Tick policy γ".to_owned();
+    profile.schemas_and_upcasters = vec!["Schema:V1".to_owned()];
+    profile.artifact_rules = vec!["Artifact format !".to_owned()];
+    profile.capabilities_and_network.capability_ids = vec!["Capability/AbC".to_owned()];
+    profile.allowed_operational_differences = vec!["Operator difference".to_owned()];
+    profile.profile_digest = profile.digest();
+
+    let encoded = profile.to_canonical_cbor()?;
+    assert_eq!(ExecutionProfileV1::from_canonical_cbor(&encoded)?, profile);
+    Ok(())
+}
+
+#[test]
 fn digest_changes_when_profile_semantics_or_predecessor_changes() -> TestResult {
     let draft = draft_profile_bytes()?;
     let original = ExecutionProfileV1::from_canonical_cbor(&draft)?;
@@ -410,7 +430,7 @@ fn invalid_profile_cases(
     vec![
         invalid_profile(
             profile,
-            |value| "Uppercase-ID".clone_into(&mut value.profile_id),
+            |value| "x".repeat(129).clone_into(&mut value.profile_id),
             Bounds,
         ),
         invalid_profile(
@@ -435,17 +455,22 @@ fn invalid_profile_cases(
         ),
         invalid_profile(
             profile,
+            |value| value.numeric_rules[1] = value.numeric_rules[0].clone(),
+            Order,
+        ),
+        invalid_profile(
+            profile,
             |value| value.scheduler_driver_order.clear(),
             Bounds,
         ),
         invalid_profile(
             profile,
-            |value| "BAD-ID".clone_into(&mut value.scheduler_driver_order[0]),
+            |value| value.scheduler_driver_order[0] = "x".repeat(129),
             Bounds,
         ),
         invalid_profile(
             profile,
-            |value| "bad policy".clone_into(&mut value.tick_policy),
+            |value| value.tick_policy.clear(),
             Bounds,
         ),
         invalid_profile(
@@ -530,7 +555,7 @@ fn assert_overlarge_profile_lists(profile: &ExecutionProfileV1) {
 }
 
 #[test]
-fn public_validation_rejects_bounds_order_invalid_identifiers_and_bad_digests() -> TestResult {
+fn public_validation_rejects_bounds_order_and_bad_digests() -> TestResult {
     let bytes = draft_profile_bytes()?;
     let profile = ExecutionProfileV1::from_canonical_cbor(&bytes)?;
     for (invalid, expected) in invalid_profile_cases(&profile) {

@@ -155,7 +155,7 @@ fn validate_profile_fields(
     profile: &ExecutionProfileV1,
 ) -> Result<(), ExecutionProfileContractErrorV1> {
     let invalid_bounds = ExecutionProfileContractErrorV1::FieldOutOfBounds;
-    if !crate::identifier(&profile.profile_id, MAX_IDENTIFIER_BYTES)
+    if !valid_identifier_text(&profile.profile_id)
         || !valid_semantic_version(&profile.semantic_version)
         || profile.reproducibility_classes.is_empty()
         || profile.reproducibility_classes.len() > MAX_REPRODUCIBILITY_CLASSES
@@ -166,8 +166,8 @@ fn validate_profile_fields(
         || !profile
             .scheduler_driver_order
             .iter()
-            .all(|value| crate::identifier(value, MAX_IDENTIFIER_BYTES))
-        || !crate::identifier(&profile.tick_policy, MAX_IDENTIFIER_BYTES)
+            .all(|value| valid_identifier_text(value))
+        || !valid_identifier_text(&profile.tick_policy)
         || profile.schemas_and_upcasters.is_empty()
         || profile.schemas_and_upcasters.len() > MAX_SCHEMAS_AND_UPCASTERS
         || !valid_identifier_list(&profile.schemas_and_upcasters)
@@ -198,15 +198,15 @@ fn validate_profile_fields(
 
 fn valid_identifier_list(values: &[String]) -> bool {
     !values.is_empty()
-        && values
-            .iter()
-            .all(|value| crate::identifier(value, MAX_IDENTIFIER_BYTES))
+        && values.iter().all(|value| valid_identifier_text(value))
 }
 
 fn valid_identifier_values(values: &[String]) -> bool {
-    values
-        .iter()
-        .all(|value| crate::identifier(value, MAX_IDENTIFIER_BYTES))
+    values.iter().all(|value| valid_identifier_text(value))
+}
+
+fn valid_identifier_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_IDENTIFIER_BYTES
 }
 
 fn valid_semantic_version(value: &str) -> bool {
