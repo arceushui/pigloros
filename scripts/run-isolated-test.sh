@@ -27,9 +27,11 @@ docker_arguments=(
   --cap-drop ALL
   --security-opt no-new-privileges
   --pids-limit 256
-  --tmpfs /tmp:rw,nosuid,nodev,mode=1777
-  --tmpfs /var/lib:rw,nosuid,nodev,mode=0755
-  --tmpfs /run:rw,nosuid,nodev,mode=0755
+  --memory 2g
+  --memory-swap 2g
+  --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m
+  --tmpfs /var/lib:rw,nosuid,nodev,mode=0755,size=64m
+  --tmpfs /run:rw,nosuid,nodev,mode=0755,size=64m
   --mount "type=bind,source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT,readonly"
   --workdir "$REPOSITORY_ROOT"
   --env PIGLOROS_PRIVILEGED_COMPOSITION_TEST=1

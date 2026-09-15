@@ -58,7 +58,9 @@ const MAX_RETAINED_EVALUATION_NAMESPACES: usize = 256;
 const ROOT_UID: u32 = 0;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const SELECTOR_SOCKET_MODE: u32 = 0o600;
+#[cfg(test)]
 const SELECTOR_PARENT_MODE: u32 = 0o700;
+const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const SANDBOX_SELECTOR_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-provider.sock";
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
@@ -309,7 +311,7 @@ fn validate_listener_parent_with(
     if !held.is_dir()
         || !named.is_dir()
         || held.uid() != expected_uid
-        || held.mode() & 0o777 != SELECTOR_PARENT_MODE
+        || held.mode() & GROUP_OR_OTHER_WRITE != 0
         || held.dev() != named.dev()
         || held.ino() != named.ino()
     {
@@ -1349,7 +1351,7 @@ mod tests {
     #[test]
     fn owned_selector_listener_rejects_unsafe_or_occupied_parents() -> TestResult {
         let fixture = ListenerTestDirectory::create()?;
-        fs::set_permissions(fixture.directory.path(), fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(fixture.directory.path(), fs::Permissions::from_mode(0o775))?;
         assert!(matches!(
             OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid),
             Err(SelectorBoundaryError::ArtifactInvalid)
@@ -1588,6 +1590,8 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        validate_listener_parent(&path, &held, uid)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o775))?;
         assert!(matches!(
             validate_listener_parent(&path, &held, uid),
             Err(SelectorBoundaryError::ArtifactInvalid)

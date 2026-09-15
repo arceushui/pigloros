@@ -87,8 +87,23 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
-            "--tmpfs /run:rw,nosuid,nodev,mode=0755",
+            "--tmpfs /run:rw,nosuid,nodev,mode=0755,size=64m",
             "rm -rf /run",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "--memory 2g",
+            "--memory 0",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "--memory-swap 2g",
+            "--memory-swap -1",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m",
+            "--tmpfs /tmp:rw,nosuid,nodev,mode=1777",
         ),
         (
             PRIMARY_RUNNER,
