@@ -482,3 +482,127 @@ fn invalid<T>(_: T) -> SelectorBoundaryError {
 fn io<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::Io
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn durable_root() -> Result<(tempfile::TempDir, File, u32), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let root = File::open(directory.path())?;
+        let owner = root.metadata()?.uid();
+        Ok((directory, root, owner))
+    }
+
+    #[test]
+    fn staging_directory_and_files_are_private_and_exclusive() -> TestResult {
+        let (_directory, root, owner) = durable_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        let metadata = staging.metadata()?;
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        verify_file_identity(&staging, &open_staging_directory(&root, owner)?)?;
+
+        let name = temporary_name("coverage")?;
+        assert!(name.starts_with("coverage-"));
+        assert!(name.ends_with(".cbor"));
+        let file = create_staging_file(&staging, &name, owner)?;
+        let metadata = file.metadata()?;
+        assert!(metadata.is_file());
+        assert_eq!(metadata.mode() & 0o7777, 0o400);
+        assert!(matches!(
+            create_staging_file(&staging, &name, owner),
+            Err(SelectorBoundaryError::Io)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn staging_directory_rejects_occupied_and_unsafe_entries() -> TestResult {
+        let (occupied, root, owner) = durable_root()?;
+        fs::write(occupied.path().join(STAGING_NAME), b"occupied")?;
+        assert!(matches!(
+            open_staging_directory(&root, owner),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        let (unsafe_directory, root, owner) = durable_root()?;
+        let staging = unsafe_directory.path().join(STAGING_NAME);
+        fs::create_dir(&staging)?;
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
+        assert!(matches!(
+            open_staging_directory(&root, owner),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_immutable_reads_reject_missing_empty_and_oversized_files() -> TestResult {
+        let (directory, root, owner) = durable_root()?;
+        assert!(matches!(
+            read_bounded_immutable(&root, "missing", owner, 8),
+            Err(SelectorBoundaryError::Io)
+        ));
+
+        let empty = directory.path().join("empty");
+        fs::write(&empty, [])?;
+        fs::set_permissions(&empty, fs::Permissions::from_mode(0o400))?;
+        assert!(matches!(
+            read_bounded_immutable(&root, "empty", owner, 8),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        let record = directory.path().join("record");
+        fs::write(&record, b"record")?;
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o400))?;
+        assert_eq!(
+            read_bounded_immutable(&root, "record", owner, 8)?,
+            b"record"
+        );
+        assert!(matches!(
+            read_bounded_immutable(&root, "record", owner, 5),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_write_and_identity_checks_fail_closed() -> TestResult {
+        let (directory, root, owner) = durable_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        let recovery = write_recovery(&staging, &root, owner, b"recovery")?;
+        verify_recovery_identity(&root, owner, &recovery, b"recovery")?;
+        assert!(write_recovery(&staging, &root, owner, b"second").is_err());
+
+        fs::set_permissions(
+            directory.path().join(RECOVERY_NAME),
+            fs::Permissions::from_mode(0o600),
+        )?;
+        fs::write(directory.path().join(RECOVERY_NAME), b"changed!")?;
+        fs::set_permissions(
+            directory.path().join(RECOVERY_NAME),
+            fs::Permissions::from_mode(0o400),
+        )?;
+        assert!(matches!(
+            verify_recovery_identity(&root, owner, &recovery, b"recovery"),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        let other_path = directory.path().join("other");
+        fs::write(&other_path, b"other")?;
+        let other = File::open(other_path)?;
+        assert!(matches!(
+            verify_file_identity(&recovery, &other),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+}

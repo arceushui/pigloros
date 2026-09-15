@@ -259,6 +259,12 @@ fn replace_nested_unsigned_field(
     Ok(encode(&Value::Array(wrapper))?)
 }
 
+fn encode_unbounded(value: &Value) -> TestResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
 pub(crate) fn acknowledgement_for_control_frames(
     context_bytes: &[u8],
     update_bytes: &[u8],
@@ -407,7 +413,7 @@ fn update_rejects_expired_challenge_and_empty_or_oversized_records() -> TestResu
         fields[field] = Value::Bytes(bytes);
         assert!(fixture
             .bootstrap
-            .validate_update(challenge, &encode(&Value::Array(fields))?)
+            .validate_update(challenge, &encode_unbounded(&Value::Array(fields))?,)
             .is_err());
     }
     Ok(())
