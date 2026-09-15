@@ -6307,7 +6307,22 @@ mod tests {
             CanonicalBytes::from_static(b"blocked"),
             Kind::new("world.action.submit"),
         );
-        let missing = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let consent_authority = ConsentAuthority::new();
+        let missing = Gateway {
+            store: executor::StoreExecutor::new_with_consent_authority(
+                open_store(StoreConfig::Memory).test_ok(),
+                consent_authority.append_permit(),
+            ),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            action_principal: None,
+        };
         assert!(matches!(
             missing.submit_action_draft(timeline, &proposal),
             Err(GatewayError::Store(
