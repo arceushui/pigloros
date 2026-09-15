@@ -204,7 +204,7 @@ fn valid_identifier_values(values: &[String]) -> bool {
     values.iter().all(|value| valid_identifier_text(value))
 }
 
-fn valid_identifier_text(value: &str) -> bool {
+const fn valid_identifier_text(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_IDENTIFIER_BYTES
 }
 
