@@ -637,10 +637,7 @@ fn decode_local_reply(
     if trailing_length != 0 {
         return Err(AdapterError::ProtocolFailure);
     }
-    let local = SandboxLocalError::from_canonical_cbor(control)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
-    require_matching_local_identity(local.request_id, request.provider_request_id)?;
-    require_matching_local_identity(local.attempt_id, request.attempt_id)?;
+    let local = decode_request_bound_local_error(control, request)?;
     let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
         AdapterError::AuthenticatedEvidenceFailure
     } else {
@@ -650,6 +647,17 @@ fn decode_local_reply(
         observation: Err(error),
         provenance: None,
     })
+}
+
+fn decode_request_bound_local_error(
+    control: &[u8],
+    request: &EncodedSelectorRequest,
+) -> Result<SandboxLocalError, AdapterError> {
+    let local = SandboxLocalError::from_canonical_cbor(control)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+    require_matching_local_identity(local.request_id, request.provider_request_id)?;
+    require_matching_local_identity(local.attempt_id, request.attempt_id)?;
+    Ok(local)
 }
 
 fn require_matching_local_identity(
