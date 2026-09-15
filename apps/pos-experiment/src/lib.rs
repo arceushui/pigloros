@@ -1330,7 +1330,7 @@ impl Experiment {
     fn resume_bound_store_and_recipe(
         mut self,
         timeline_id: pos_core::ids::TimelineId,
-        mut store: Box<dyn pos_core::store::EventStore>,
+        store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
