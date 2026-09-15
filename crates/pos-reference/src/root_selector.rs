@@ -2264,36 +2264,6 @@ mod tests {
         })
     }
 
-    fn evaluate_composition_request(
-        composition: &RootSelectorComposition,
-        request: &crate::evaluator_protocol::EvaluationRequest,
-        attempt: &crate::evaluator::CaseAttempt,
-    ) -> TestResult<(
-        crate::selector_protocol::EncodedSelectorRequest,
-        crate::selector_protocol::DecodedSelectorReply,
-    )> {
-        let encoded = encoded_request(request, attempt)?;
-        let (mut client, server) = UnixStream::pair()?;
-        write_frame(&mut client, &encoded.control)?;
-        client.write_all(&encoded.attempt_stream)?;
-        client.shutdown(std::net::Shutdown::Write)?;
-        composition.evaluate_root_connection(server)?;
-        let control = read_frame(&mut client)?;
-        let mut trailing = Vec::new();
-        client.read_to_end(&mut trailing)?;
-        if let Ok(local) = SandboxLocalError::from_canonical_cbor(&control) {
-            return Err(format!("composition returned local selector failure: {local:?}").into());
-        }
-        let reply = crate::selector_protocol::decode_reply(
-            &control,
-            &trailing,
-            &encoded,
-            request.request_digest,
-            SELECTOR_INPUT_LIMIT,
-        )?;
-        Ok((encoded, reply))
-    }
-
     fn serve_execution_responses(
         listener: &UnixListener,
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
