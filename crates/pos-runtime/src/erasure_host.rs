@@ -1287,7 +1287,7 @@ impl ErasureExecutionHostV1 {
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
         host.install_inventory_from_coordinator_with_limits(limits)
-            .map(|()| host)
+            .map(|_| host)
     }
 
     /// Clone the host's read-only containment view for consumers sequenced by
