@@ -1,4 +1,7 @@
-//! Stateful selector validation for RCU1 revocation updates and RCA1 acknowledgements.
+//! Authentication of RCC1, RCU1, and RCA1 revocation-update records.
+//!
+//! The root selector owns durable update state and lifecycle transitions; this
+//! module validates the exact records and authority context crossing that seam.
 
 use ciborium::value::Value;
 

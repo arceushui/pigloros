@@ -65,6 +65,7 @@ const SELECTOR_SOCKET_MODE: u32 = 0o600;
 const SELECTOR_PARENT_MODE: u32 = 0o700;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const SANDBOX_SELECTOR_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-provider.sock";
+const SANDBOX_ADMIN_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-selector-admin.sock";
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
@@ -180,11 +181,11 @@ impl OwnedSelectorListener {
     /// unsafe, the endpoint already exists, or the bound socket cannot be
     /// authenticated through the retained parent directory.
     fn bind() -> Result<Self, SelectorBoundaryError> {
-        Self::bind_beneath(
-            Path::new("/"),
-            Path::new(SANDBOX_SELECTOR_SOCKET_RELATIVE),
-            ROOT_UID,
-        )
+        Self::bind_fixed(Path::new(SANDBOX_SELECTOR_SOCKET_RELATIVE))
+    }
+
+    fn bind_fixed(relative_path: &Path) -> Result<Self, SelectorBoundaryError> {
+        Self::bind_beneath(Path::new("/"), relative_path, ROOT_UID)
     }
 
     #[cfg(test)]
@@ -317,11 +318,8 @@ impl OwnedSelectorListener {
 
 impl OwnedAdministratorListener {
     fn bind() -> Result<Self, SelectorBoundaryError> {
-        OwnedSelectorListener::bind_path(
-            Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET),
-            ROOT_UID,
-        )
-        .map(|inner| Self { inner })
+        OwnedSelectorListener::bind_fixed(Path::new(SANDBOX_ADMIN_SOCKET_RELATIVE))
+            .map(|inner| Self { inner })
     }
 
     fn set_nonblocking(&self) -> Result<(), SelectorBoundaryError> {
