@@ -510,15 +510,17 @@ impl ProviderTransport {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn from_path_for_test(path: &Path) -> Result<Self, SelectorBoundaryError> {
-        let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
-        let endpoint = SelectedProviderEndpoint::from_identity(path, &metadata, metadata.uid());
-        Ok(Self {
-            execute_endpoint: endpoint.clone(),
-            control_endpoint: endpoint,
-            admitted_process: Mutex::new(Some(provider_process_identity(
-                rustix::process::getpid(),
-            )?)),
-        })
+        std::fs::symlink_metadata(path)
+            .map_err(io_error)
+            .and_then(|metadata| {
+                let endpoint =
+                    SelectedProviderEndpoint::from_identity(path, &metadata, metadata.uid());
+                provider_process_identity(rustix::process::getpid()).map(|process| Self {
+                    execute_endpoint: endpoint.clone(),
+                    control_endpoint: endpoint,
+                    admitted_process: Mutex::new(Some(process)),
+                })
+            })
     }
 
     fn bind_admitted_process(

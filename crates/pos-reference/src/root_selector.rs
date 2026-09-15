@@ -752,14 +752,17 @@ fn require_stream_eof(stream: &mut impl Read) -> Result<(), SelectorBoundaryErro
 fn connect_fixed_provider(
     admitted: &AdmittedSelectorProvider,
 ) -> Result<(ProviderTransport, AdmittedProviderRuntime), SelectorBoundaryError> {
-    let transport = connect_and_synchronize(
+    connect_and_synchronize(
         admitted,
         ProviderTransport::from_admitted,
         fresh_selector_id,
         synchronize_fixed_provider,
-    )?;
-    let runtime = transport.admit_runtime(admitted)?;
-    Ok((transport, runtime))
+    )
+    .and_then(|transport| {
+        transport
+            .admit_runtime(admitted)
+            .map(|runtime| (transport, runtime))
+    })
 }
 
 fn synchronize_fixed_provider(

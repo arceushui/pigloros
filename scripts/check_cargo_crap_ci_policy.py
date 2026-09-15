@@ -27,7 +27,8 @@ GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
     "--missing pessimistic --jobs 2 "
-    "--exclude 'tests/**' --exclude 'benches/**' --exclude 'examples/**' "
+    "--exclude '**/tests/**' --exclude '**/benches/**' "
+    "--exclude '**/examples/**' --exclude '**/*_tests.rs' "
     "--format json "
     '--output "${{ runner.temp }}/cargo-crap-baseline.json"\n'
 )
@@ -35,7 +36,8 @@ ANALYZE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
     "--missing pessimistic --jobs 2 "
-    "--exclude 'tests/**' --exclude 'benches/**' --exclude 'examples/**' "
+    "--exclude '**/tests/**' --exclude '**/benches/**' "
+    "--exclude '**/examples/**' --exclude '**/*_tests.rs' "
     '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'
