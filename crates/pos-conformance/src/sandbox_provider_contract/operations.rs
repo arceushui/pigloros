@@ -866,7 +866,8 @@ fn local_error_before_spx1_is_valid(error: &SandboxLocalErrorV1) -> bool {
             SandboxLocalErrorCodeV1::PolicyUnavailable
             | SandboxLocalErrorCodeV1::RequestAuthorityMismatch => execute && request && attempt,
             SandboxLocalErrorCodeV1::InvalidSelectorRequest => {
-                error.operation.is_none() && !request && !attempt
+                (error.operation.is_none() || execute)
+                    && ((!request && !attempt) || (execute && request))
             }
             SandboxLocalErrorCodeV1::PayloadLimitExceeded => {
                 (!request && !attempt && error.operation.is_none())

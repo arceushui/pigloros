@@ -184,7 +184,8 @@ fn validate_local_error_shape(
                         execute && request && attempt
                     }
                     SandboxLocalErrorCode::InvalidSelectorRequest => {
-                        error.operation.is_none() && !request && !attempt
+                        (error.operation.is_none() || execute)
+                            && ((!request && !attempt) || (execute && request))
                     }
                     SandboxLocalErrorCode::PayloadLimitExceeded => {
                         (!request && !attempt && error.operation.is_none())

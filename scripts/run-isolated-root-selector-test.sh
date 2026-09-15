@@ -6,11 +6,12 @@ if [[ $# -ne 2 ]]; then
   exit 2
 fi
 
-sudo -n env \
-  "PIGLOROS_TEST_BINARY=$1" \
-  "PIGLOROS_TEST_NAME=$2" \
-  "LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE:-}" \
-  unshare --mount --fork --propagation private \
+export PIGLOROS_TEST_BINARY=$1
+export PIGLOROS_TEST_NAME=$2
+export LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE:-}
+
+exec timeout --signal=TERM --kill-after=5s 30s \
+  unshare --user --map-root-user --mount --fork --propagation private \
   bash -ceu '
     mount --make-rprivate /
     mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /var/lib

@@ -2149,6 +2149,37 @@ fn complete_selector_policy_errors_require_both_derived_identities() -> TestResu
 }
 
 #[test]
+fn invalid_selector_request_preserves_each_decoded_identity_prefix() -> TestResult {
+    for (operation, request_id, attempt_id) in [
+        (None, None, None),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            Some([1; 16]),
+            None,
+        ),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            Some([1; 16]),
+            Some([2; 16]),
+        ),
+    ] {
+        let error = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
+            operation,
+            request_id,
+            attempt_id,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::InvalidSelectorRequest,
+            safe_detail: None,
+        };
+        let bytes = error.to_canonical_cbor()?;
+        assert_eq!(SandboxLocalErrorV1::from_canonical_cbor(&bytes)?, error);
+        independent::SandboxLocalError::from_canonical_cbor(&bytes)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn describe_responses_reject_mismatched_request_bindings() -> TestResult {
     let key = signing_key();
     let describe = SandboxDescribeRequestV1 {
