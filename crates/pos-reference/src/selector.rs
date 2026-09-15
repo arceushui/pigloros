@@ -523,8 +523,8 @@ mod tests {
         }
     }
 
-    fn local_unavailable() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let encoded = encode_request(&selector_request()?, b"evr1", &selector_attempt(), 0)?;
+    fn local_unavailable(ordinal: u16) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let encoded = encode_request(&selector_request()?, b"evr1", &selector_attempt(), ordinal)?;
         let value = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Text("SLE1".to_owned()),
             ciborium::value::Value::Integer(1_u64.into()),
@@ -829,7 +829,7 @@ mod tests {
             std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
         )?;
         let uid = std::fs::metadata(&socket)?.uid();
-        let control = local_unavailable()?;
+        let control = local_unavailable(0)?;
         let control_length = u32::try_from(control.len())?;
         let server = thread::spawn(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
@@ -1064,7 +1064,7 @@ mod tests {
     #[test]
     fn selector_transport_exchanges_a_bounded_local_failure(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let control = local_unavailable()?;
+        let control = local_unavailable(0)?;
         let reply = invoke_with_reply(control.clone(), Vec::new())?;
         assert_eq!(reply.observation, Err(AdapterError::Unavailable));
         assert_eq!(reply.provenance, None);
@@ -1096,7 +1096,7 @@ mod tests {
             std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
         )?;
         let uid = std::fs::metadata(&socket)?.uid();
-        let control = local_unavailable()?;
+        let control = local_unavailable(7)?;
         let control_length = u32::try_from(control.len())?;
         let server = thread::spawn(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
@@ -1130,7 +1130,7 @@ mod tests {
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
-            invoke_with_reply(local_unavailable()?, vec![1]),
+            invoke_with_reply(local_unavailable(0)?, vec![1]),
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
@@ -1148,7 +1148,7 @@ mod tests {
     fn selector_transport_classifies_streamed_oversize_replies_by_admission(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for (control, expected) in [
-            (local_unavailable()?, AdapterError::ProtocolFailure),
+            (local_unavailable(0)?, AdapterError::ProtocolFailure),
             (
                 evidence_bearing_reply_marker()?,
                 AdapterError::AuthenticatedEvidenceFailure,
