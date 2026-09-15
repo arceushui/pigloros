@@ -639,15 +639,8 @@ fn decode_local_reply(
     }
     let local = SandboxLocalError::from_canonical_cbor(control)
         .map_err(|_| AdapterError::ProtocolFailure)?;
-    match (local.request_id, local.attempt_id) {
-        (Some(request_id), _) if request_id != request.provider_request_id => {
-            return Err(AdapterError::ProtocolFailure);
-        }
-        (_, Some(attempt_id)) if attempt_id != request.attempt_id => {
-            return Err(AdapterError::ProtocolFailure);
-        }
-        _ => {}
-    }
+    require_matching_local_identity(local.request_id, request.provider_request_id)?;
+    require_matching_local_identity(local.attempt_id, request.attempt_id)?;
     let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
         AdapterError::AuthenticatedEvidenceFailure
     } else {
@@ -657,6 +650,17 @@ fn decode_local_reply(
         observation: Err(error),
         provenance: None,
     })
+}
+
+fn require_matching_local_identity(
+    actual: Option<[u8; 16]>,
+    expected: [u8; 16],
+) -> Result<(), AdapterError> {
+    if actual.is_none_or(|actual| actual == expected) {
+        Ok(())
+    } else {
+        Err(AdapterError::ProtocolFailure)
+    }
 }
 
 fn decode_authenticated_reply(
