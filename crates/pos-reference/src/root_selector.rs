@@ -37,7 +37,9 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
-use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
+use crate::selector::installation::{
+    open_directory_chain, InstallationObjectKind, InstalledSelectorState,
+};
 use crate::selector::SelectorBoundaryError;
 #[cfg(test)]
 use crate::selector_protocol::decode_request;
@@ -148,12 +150,12 @@ impl OwnedSelectorListener {
     /// unsafe, the endpoint already exists, or the bound socket cannot be
     /// authenticated through the retained parent directory.
     pub fn bind() -> Result<Self, SelectorBoundaryError> {
-        Self::bind_path(
-            Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET),
-            ROOT_UID,
-        )
+        let path = Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET);
+        let relative = path.strip_prefix("/").map_err(artifact_invalid)?;
+        Self::bind_beneath(Path::new("/"), relative, ROOT_UID)
     }
 
+    #[cfg(test)]
     fn bind_path(path: &Path, expected_uid: u32) -> Result<Self, SelectorBoundaryError> {
         let parent_path = path
             .parent()
@@ -163,6 +165,36 @@ impl OwnedSelectorListener {
             .map(OsString::from)
             .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
         let parent = File::open(parent_path).map_err(io_error)?;
+        Self::bind_in_parent(path, parent, leaf, expected_uid)
+    }
+
+    fn bind_beneath(
+        ancestry_root: &Path,
+        relative_path: &Path,
+        expected_uid: u32,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let parent_relative = relative_path
+            .parent()
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let leaf = relative_path
+            .file_name()
+            .map(OsString::from)
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let root = File::open(ancestry_root).map_err(io_error)?;
+        let parent = open_directory_chain(root, parent_relative, expected_uid)?;
+        let path = ancestry_root.join(relative_path);
+        Self::bind_in_parent(&path, parent, leaf, expected_uid)
+    }
+
+    fn bind_in_parent(
+        path: &Path,
+        parent: File,
+        leaf: OsString,
+        expected_uid: u32,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let parent_path = path
+            .parent()
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
         validate_listener_parent(parent_path, &parent, expected_uid)?;
         match statat(&parent, Path::new(&leaf), AtFlags::SYMLINK_NOFOLLOW) {
             Err(rustix::io::Errno::NOENT) => {}
@@ -1217,6 +1249,36 @@ mod tests {
         drop(client);
         listener.close()?;
         assert!(!fixture.socket.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn owned_selector_listener_rejects_a_symlink_ancestor() -> TestResult {
+        let root = tempfile::tempdir()?;
+        fs::set_permissions(
+            root.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        let uid = fs::metadata(root.path())?.uid();
+        let parent = root.path().join("runtime");
+        fs::create_dir(&parent)?;
+        fs::set_permissions(&parent, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+
+        let relative = Path::new("runtime/selector.sock");
+        OwnedSelectorListener::bind_beneath(root.path(), relative, uid)?.close()?;
+
+        fs::remove_dir(&parent)?;
+        let replacement = root.path().join("replacement");
+        fs::create_dir(&replacement)?;
+        fs::set_permissions(
+            &replacement,
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        std::os::unix::fs::symlink("replacement", &parent)?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_beneath(root.path(), relative, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
         Ok(())
     }
 
