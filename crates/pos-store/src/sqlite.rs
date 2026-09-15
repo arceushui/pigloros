@@ -4850,37 +4850,49 @@ fn sqlite_erasure_inventory_snapshot(
         let mut request_heads = Vec::new();
         request_heads
             .try_reserve(limits.maximum_requests().saturating_add(1))
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        for row in rows {
-            let (request, manifest) = row.map_err(map_erasure_receipt_failure)?;
-            request_heads.push((reference_from_sql(request)?, reference_from_sql(manifest)?));
-        }
-        request_heads
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+            .and_then(|()| {
+                for row in rows {
+                    let (request, manifest) = row.map_err(map_erasure_receipt_failure)?;
+                    request_heads
+                        .push((reference_from_sql(request)?, reference_from_sql(manifest)?));
+                }
+                Ok(request_heads)
+            })
     };
-    if request_heads.len() > limits.maximum_requests() {
-        return Err(ErasureErrorV1::ScopeInvalid);
-    }
-    let topology = {
-        let mut statement = conn
-            .prepare("SELECT id FROM timelines ORDER BY id LIMIT ?1")
-            .map_err(map_erasure_receipt_failure)?;
-        let rows = statement
-            .query_map(params![topology_limit], |row| row.get::<_, String>(0))
-            .map_err(map_erasure_receipt_failure)?;
-        let mut topology = Vec::new();
-        topology
-            .try_reserve(limits.maximum_timelines().saturating_add(1))
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        for row in rows {
-            let id = row.map_err(map_erasure_receipt_failure)?;
-            topology.push(parse_timeline_id(&id).map_err(|_| ErasureErrorV1::ProvenanceMissing)?);
+    request_heads.and_then(|request_heads| {
+        if request_heads.len() > limits.maximum_requests() {
+            return Err(ErasureErrorV1::ScopeInvalid);
         }
-        topology
-    };
-    if !limits.admits(request_heads.len(), topology.len()) {
-        return Err(ErasureErrorV1::ScopeInvalid);
-    }
-    ErasurePersistenceInventorySnapshotV1::new_with_limits(request_heads, topology, limits)
+        let topology = {
+            let mut statement = conn
+                .prepare("SELECT id FROM timelines ORDER BY id LIMIT ?1")
+                .map_err(map_erasure_receipt_failure)?;
+            let rows = statement
+                .query_map(params![topology_limit], |row| row.get::<_, String>(0))
+                .map_err(map_erasure_receipt_failure)?;
+            let mut topology = Vec::new();
+            topology
+                .try_reserve(limits.maximum_timelines().saturating_add(1))
+                .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                .and_then(|()| {
+                    for row in rows {
+                        let id = row.map_err(map_erasure_receipt_failure)?;
+                        topology.push(
+                            parse_timeline_id(&id)
+                                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?,
+                        );
+                    }
+                    Ok(topology)
+                })
+        };
+        topology.and_then(|topology| {
+            if !limits.admits(request_heads.len(), topology.len()) {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
+            ErasurePersistenceInventorySnapshotV1::new_with_limits(request_heads, topology, limits)
+        })
+    })
 }
 
 impl ErasureForkPersistencePortV1 for SqliteStore {

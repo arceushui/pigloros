@@ -1420,19 +1420,27 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         let mut request_heads = Vec::new();
         request_heads
             .try_reserve(self.erasure_records.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        request_heads.extend(
-            self.erasure_records
-                .iter()
-                .map(|(request, (manifest, _))| (*request, *manifest)),
-        );
-        let mut topology = Vec::new();
-        topology
-            .try_reserve(self.timelines.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        topology.extend(self.timelines.keys().copied());
-        topology.sort_unstable();
-        ErasurePersistenceInventorySnapshotV1::new_with_limits(request_heads, topology, limits)
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+            .and_then(|()| {
+                request_heads.extend(
+                    self.erasure_records
+                        .iter()
+                        .map(|(request, (manifest, _))| (*request, *manifest)),
+                );
+                let mut topology = Vec::new();
+                topology
+                    .try_reserve(self.timelines.len())
+                    .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                    .and_then(|()| {
+                        topology.extend(self.timelines.keys().copied());
+                        topology.sort_unstable();
+                        ErasurePersistenceInventorySnapshotV1::new_with_limits(
+                            request_heads,
+                            topology,
+                            limits,
+                        )
+                    })
+            })
     }
 }
 

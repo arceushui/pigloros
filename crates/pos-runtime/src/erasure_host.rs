@@ -594,9 +594,8 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         &self,
         maximum_requests: usize,
     ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
-        self.complete_erasure_inventory_observation_with_limits(
-            ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)?,
-        )
+        ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)
+            .and_then(|limits| self.complete_erasure_inventory_observation_with_limits(limits))
     }
 
     fn complete_erasure_inventory_observation_with_limits(
@@ -610,37 +609,43 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         let mut request_heads = Vec::new();
         request_heads
             .try_reserve(snapshot.request_heads().len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        request_heads.extend_from_slice(snapshot.request_heads());
-        let mut topology = Vec::new();
-        topology
-            .try_reserve(snapshot.topology().len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        topology.extend_from_slice(snapshot.topology());
-        let mut request_topology = Vec::new();
-        request_topology
-            .try_reserve(request_heads.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        for (request, manifest) in &request_heads {
-            let topology_observation = self
-                .authority
-                .verified_topology_observation(*request, *manifest)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            if topology_observation
-                .bindings()
-                .len()
-                .checked_add(topology_observation.unaffected().len())
-                != Some(topology.len())
-            {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            request_topology.push((*request, topology_observation));
-        }
-        Ok(ErasureInventoryObservationV1::new(
-            request_heads,
-            topology,
-            request_topology,
-        ))
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+            .and_then(|()| {
+                request_heads.extend_from_slice(snapshot.request_heads());
+                let mut topology = Vec::new();
+                topology
+                    .try_reserve(snapshot.topology().len())
+                    .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                    .and_then(|()| {
+                        topology.extend_from_slice(snapshot.topology());
+                        let mut request_topology = Vec::new();
+                        request_topology
+                            .try_reserve(request_heads.len())
+                            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                            .and_then(|()| {
+                                for (request, manifest) in &request_heads {
+                                    let topology_observation = self
+                                        .authority
+                                        .verified_topology_observation(*request, *manifest)?
+                                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                                    if topology_observation
+                                        .bindings()
+                                        .len()
+                                        .checked_add(topology_observation.unaffected().len())
+                                        != Some(topology.len())
+                                    {
+                                        return Err(ErasureErrorV1::ProvenanceMissing);
+                                    }
+                                    request_topology.push((*request, topology_observation));
+                                }
+                                Ok(ErasureInventoryObservationV1::new(
+                                    request_heads,
+                                    topology,
+                                    request_topology,
+                                ))
+                            })
+                    })
+            })
     }
 
     fn verified_topology_observation(
@@ -1122,10 +1127,10 @@ impl ErasureExecutionHostV1 {
         path: &str,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
+        pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
-            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_verified_empty_with_limits(store, limits)
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)
+            .and_then(|store| Self::recover_verified_empty_with_limits(store, limits))
     }
 
     /// Open one store with an explicit authority composition.
@@ -1142,11 +1147,8 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_with_authority_and_limits(
-            config,
-            composition,
-            Self::legacy_recovery_limits(maximum_requests)?,
-        )
+        Self::legacy_recovery_limits(maximum_requests)
+            .and_then(|limits| Self::open_with_authority_and_limits(config, composition, limits))
     }
 
     /// Open one store with explicit authority and deployment recovery ceilings.
@@ -1207,10 +1209,10 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        let store = pos_store::sqlite::SqliteStore::open_read_only(path)
+        pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
-            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-        Self::recover_with_composition(store, composition, limits)
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)
+            .and_then(|store| Self::recover_with_composition(store, composition, limits))
     }
 
     /// Open and recover a Gateway-capable exclusively owned store only when
@@ -1284,8 +1286,8 @@ impl ErasureExecutionHostV1 {
         let mut host = Self::new_gateway_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
-        host.install_inventory_from_coordinator_with_limits(limits)?;
-        Ok(host)
+        host.install_inventory_from_coordinator_with_limits(limits)
+            .map(|()| host)
     }
 
     /// Clone the host's read-only containment view for consumers sequenced by

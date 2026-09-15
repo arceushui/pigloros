@@ -4397,45 +4397,57 @@ impl ErasureVerifiedInventoryV1 {
         let mut request_heads = Vec::new();
         request_heads
             .try_reserve(recovered.len())
-            .map_err(allocation_failure)?;
-        let mut classifications = Vec::new();
-        classifications
-            .try_reserve(topology.len())
-            .map_err(allocation_failure)?;
-        for timeline in &topology {
-            let mut timeline_classifications = Vec::new();
-            timeline_classifications
-                .try_reserve(recovered.len())
-                .map_err(allocation_failure)?;
-            classifications.push((*timeline, timeline_classifications));
-        }
-        for (state, proof) in &recovered {
-            Self::validate_member(state, proof, &topology)?;
-            let request = state.request().reference();
-            request_heads.push((request, state.manifest_digest()));
-            for (timeline, timeline_classifications) in &mut classifications {
-                let membership = proof
-                    .bindings
-                    .iter()
-                    .find_map(|(candidate, scope)| (*candidate == *timeline).then_some(*scope))
-                    .map_or(ErasureInventoryMembershipV1::Excluded, |scope| {
-                        ErasureInventoryMembershipV1::Included(scope)
-                    });
-                timeline_classifications.push(ErasureInventoryClassificationV1 {
-                    request,
-                    membership,
-                    frozen: ErasureContainmentGateV1::containment_rank(state.lifecycle()) >= 2,
-                });
-            }
-        }
-        let generation = erasure_inventory_generation(&request_heads, &topology);
-        Ok(Self {
-            generation,
-            limits,
-            request_heads,
-            members: recovered,
-            classifications,
-        })
+            .map_err(allocation_failure)
+            .and_then(|()| {
+                let mut classifications = Vec::new();
+                classifications
+                    .try_reserve(topology.len())
+                    .map_err(allocation_failure)
+                    .and_then(|()| {
+                        topology.iter().try_for_each(|timeline| {
+                            let mut timeline_classifications = Vec::new();
+                            timeline_classifications
+                                .try_reserve(recovered.len())
+                                .map_err(allocation_failure)
+                                .map(|()| {
+                                    classifications.push((*timeline, timeline_classifications));
+                                })
+                        })
+                    })
+                    .and_then(|()| {
+                        for (state, proof) in &recovered {
+                            Self::validate_member(state, proof, &topology)?;
+                            let request = state.request().reference();
+                            request_heads.push((request, state.manifest_digest()));
+                            for (timeline, timeline_classifications) in &mut classifications {
+                                let membership = proof
+                                    .bindings
+                                    .iter()
+                                    .find_map(|(candidate, scope)| {
+                                        (*candidate == *timeline).then_some(*scope)
+                                    })
+                                    .map_or(ErasureInventoryMembershipV1::Excluded, |scope| {
+                                        ErasureInventoryMembershipV1::Included(scope)
+                                    });
+                                timeline_classifications.push(ErasureInventoryClassificationV1 {
+                                    request,
+                                    membership,
+                                    frozen: ErasureContainmentGateV1::containment_rank(
+                                        state.lifecycle(),
+                                    ) >= 2,
+                                });
+                            }
+                        }
+                        let generation = erasure_inventory_generation(&request_heads, &topology);
+                        Ok(Self {
+                            generation,
+                            limits,
+                            request_heads,
+                            members: recovered,
+                            classifications,
+                        })
+                    })
+            })
     }
 
     fn validate_member(
@@ -4455,14 +4467,16 @@ impl ErasureVerifiedInventoryV1 {
         let mut observed = Vec::new();
         observed
             .try_reserve(topology.len())
-            .map_err(allocation_failure)?;
-        observed.extend(proof.bindings.iter().map(|(timeline, _)| *timeline));
-        observed.extend(proof.unaffected.iter().copied());
-        observed.sort_unstable();
-        (observed.windows(2).all(|pair| pair[0] != pair[1])
-            && observed.iter().copied().eq(topology.iter().copied()))
-        .then_some(())
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .map_err(allocation_failure)
+            .and_then(|()| {
+                observed.extend(proof.bindings.iter().map(|(timeline, _)| *timeline));
+                observed.extend(proof.unaffected.iter().copied());
+                observed.sort_unstable();
+                (observed.windows(2).all(|pair| pair[0] != pair[1])
+                    && observed.iter().copied().eq(topology.iter().copied()))
+                .then_some(())
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
     }
 
     /// Return the complete-inventory generation bound to cache and cursor use.
@@ -4548,11 +4562,7 @@ impl ErasureVerifiedInventoryV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let successor_timelines = self
-            .classifications
-            .len()
-            .checked_add(1)
-            .ok_or(ErasureErrorV1::ScopeInvalid)?;
+        let successor_timelines = self.classifications.len().saturating_add(1);
         if !self.limits.admits(self.members.len(), successor_timelines) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
@@ -4568,9 +4578,6 @@ impl ErasureVerifiedInventoryV1 {
             limits,
             ..
         } = self;
-        if parent_index >= classifications.len() {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
         let (parent_timeline, parent_classifications) = classifications.swap_remove(parent_index);
 
         let mut successor_members = Vec::new();
@@ -4757,9 +4764,8 @@ impl ErasureVerifiedInventoryQueryV1 for ErasureVerifiedEmptyInventoryQueryV1 {
         &mut self,
         maximum_requests: usize,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
-        self.verified_inventory_with_limits(ErasureRecoveryLimitsV1::from_maximum_requests(
-            maximum_requests,
-        )?)
+        ErasureRecoveryLimitsV1::from_maximum_requests(maximum_requests)
+            .and_then(|limits| self.verified_inventory_with_limits(limits))
     }
 
     fn verified_inventory_with_limits(

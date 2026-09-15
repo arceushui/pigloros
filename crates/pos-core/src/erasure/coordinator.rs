@@ -1347,46 +1347,64 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedInventoryQueryV1
         let mut recovered = Vec::new();
         recovered
             .try_reserve(request_heads.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        for ((request, expected_head), (topology_request, topology_observation)) in
-            request_heads.into_iter().zip(request_topology)
-        {
-            if request != topology_request
-                || topology_observation.manifest_digest() != expected_head
-                || topology_observation
-                    .bindings()
-                    .len()
-                    .checked_add(topology_observation.unaffected().len())
-                    != Some(topology.len())
-            {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            let record = self
-                .recover(request)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let state = record.verified_state();
-            if state.manifest_digest() != expected_head {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            let mut bindings = Vec::new();
-            bindings
-                .try_reserve(topology_observation.bindings().len())
-                .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-            bindings.extend_from_slice(topology_observation.bindings());
-            let mut unaffected = Vec::new();
-            unaffected
-                .try_reserve(topology_observation.unaffected().len())
-                .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-            unaffected.extend_from_slice(topology_observation.unaffected());
-            let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
-                expected_head,
-                bindings,
-                unaffected,
-            );
-            self.cache(record);
-            recovered.push((state, proof));
-        }
-        ErasureVerifiedInventoryV1::from_verified_recovery_with_limits(recovered, topology, limits)
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+            .and_then(|()| {
+                request_heads
+                    .into_iter()
+                    .zip(request_topology)
+                    .try_for_each(
+                        |((request, expected_head), (topology_request, topology_observation))| {
+                            if request != topology_request
+                                || topology_observation.manifest_digest() != expected_head
+                                || topology_observation
+                                    .bindings()
+                                    .len()
+                                    .checked_add(topology_observation.unaffected().len())
+                                    != Some(topology.len())
+                            {
+                                return Err(ErasureErrorV1::ProvenanceMissing);
+                            }
+                            let record = self
+                                .recover(request)?
+                                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                            let state = record.verified_state();
+                            if state.manifest_digest() != expected_head {
+                                return Err(ErasureErrorV1::ProvenanceMissing);
+                            }
+                            let mut bindings = Vec::new();
+                            bindings
+                                .try_reserve(topology_observation.bindings().len())
+                                .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                                .and_then(|()| {
+                                    bindings.extend_from_slice(topology_observation.bindings());
+                                    let mut unaffected = Vec::new();
+                                    unaffected
+                                        .try_reserve(
+                                            topology_observation.unaffected().len(),
+                                        )
+                                        .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                                        .map(|()| {
+                                            unaffected.extend_from_slice(
+                                                topology_observation.unaffected(),
+                                            );
+                                            let proof =
+                                                ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                                                    expected_head,
+                                                    bindings,
+                                                    unaffected,
+                                                );
+                                            self.cache(record);
+                                            recovered.push((state, proof));
+                                        })
+                                })
+                        },
+                    )
+                    .and_then(|()| {
+                        ErasureVerifiedInventoryV1::from_verified_recovery_with_limits(
+                            recovered, topology, limits,
+                        )
+                    })
+            })
     }
 }
 
