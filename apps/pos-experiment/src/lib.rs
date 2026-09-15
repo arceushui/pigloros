@@ -121,6 +121,14 @@ fn bind_registry_erasure_gate(
     registry: &PluginRegistry,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<(), pos_core::CoreError> {
+    bind_registry_erasure_gate_inner(store, registry, gate)
+}
+
+fn bind_registry_erasure_gate_inner(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &PluginRegistry,
+    gate: Arc<ErasureContainmentGateV1>,
+) -> Result<(), pos_core::CoreError> {
     if !registry.erasure_gate_is_bound() {
         return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     }
@@ -1310,13 +1318,22 @@ impl Experiment {
     }
 
     fn resume_with_store_and_recipe(
+        self,
+        timeline_id: pos_core::ids::TimelineId,
+        mut store: Box<dyn pos_core::store::EventStore>,
+        recovery_store_config: Option<StoreConfig>,
+    ) -> Result<ExperimentSession, ExperimentError> {
+        bind_store_to_experiment_gate(store.as_mut(), &self.registry, self.erasure_gate.clone())?;
+        self.resume_bound_store_and_recipe(timeline_id, store, recovery_store_config)
+    }
+
+    fn resume_bound_store_and_recipe(
         mut self,
         timeline_id: pos_core::ids::TimelineId,
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
-        bind_store_to_experiment_gate(store.as_mut(), &self.registry, self.erasure_gate)?;
         let timeline = store.get_timeline(timeline_id).and_then(|timeline| {
             timeline.ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))
         })?;

@@ -921,6 +921,14 @@ impl ErasureContainmentGateV1 {
         authority: &ErasureGateStateV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
         Self::reject_frozen_timeline(authority, timeline)?;
+        self.authorize_unfrozen_state(timeline, authority)
+    }
+
+    fn authorize_unfrozen_state(
+        &self,
+        timeline: TimelineId,
+        authority: &ErasureGateStateV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
         if let Some(inventory) = authority.inventory.as_ref() {
             return inventory.authorize(timeline);
         }
