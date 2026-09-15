@@ -75,6 +75,10 @@ impl ResolvedInstalledCase {
 pub struct InstallationObjectKind(u8);
 
 impl InstallationObjectKind {
+    /// Installed RVS1 revocation-snapshot role.
+    pub(crate) const REVOCATION_SNAPSHOT: Self = Self(1);
+    /// Installed APT1 administrator-policy role.
+    pub(crate) const ADMINISTRATOR_POLICY: Self = Self(2);
     /// Installed LPS1 launch-policy role.
     pub(crate) const LAUNCH_POLICY: Self = Self(8);
     /// Installed SIM1 image-manifest role.

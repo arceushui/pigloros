@@ -145,7 +145,7 @@ fn policy_signer_rotation_requires_old_signer_revocation_and_dual_authorization(
             &trust,
         )?;
         let changed = policy_record(&trust, &next, 8, |fields| {
-            fields[15] = Value::Text("next".to_owned())
+            fields[15] = Value::Text("next".to_owned());
         })?;
         let result = SandboxAdministratorPolicy::validate_revocation_successor(
             &old, &changed, &trust, &previous, &next,
@@ -170,7 +170,7 @@ fn policy_signer_rotation_requires_old_signer_revocation_and_dual_authorization(
     )?;
     let old = policy_record(&trust, &previous, 7, |_| {})?;
     let changed = policy_record(&trust, &next, 8, |fields| {
-        fields[15] = Value::Text("next".to_owned())
+        fields[15] = Value::Text("next".to_owned());
     })?;
     assert!(SandboxAdministratorPolicy::validate_revocation_successor(
         &old, &changed, &trust, &previous, &next

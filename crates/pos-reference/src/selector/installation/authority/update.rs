@@ -5,10 +5,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ciborium::value::Value;
-use rustix::rand::{getrandom, GetRandomFlags};
-
-use super::AuthenticatedSelectorBootstrap;
+use super::{fresh_selector_id, AuthenticatedSelectorBootstrap};
 use crate::evaluator_protocol::{array, decode_canonical, encode, fixed_bytes, text, uint};
 use crate::sandbox_provider_protocol::{
     RevocationUpdateRequest, SandboxAdministratorPolicy, SandboxRevocationSnapshot,
@@ -18,6 +15,7 @@ use crate::selector::installation::{
     HeldInstallationArtifact, InstallationManifest, InstallationObjectKind, MANIFEST_LIMIT,
 };
 use crate::selector::SelectorBoundaryError;
+use ciborium::value::Value;
 
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(30);
 
@@ -87,7 +85,7 @@ impl AuthenticatedSelectorBootstrap {
             .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
         Ok(InstallationChallenge {
             installation: self.installed.manifest().digest(),
-            nonce: random_nonzero_id()?,
+            nonce: fresh_selector_id()?,
             expires_at,
         })
     }
@@ -116,8 +114,10 @@ impl AuthenticatedSelectorBootstrap {
             .manifest()
             .validate_revocation_successor(&next_manifest)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let next_revocation = self.open_updated_record(&next_manifest, 1)?;
-        let next_policy = self.open_updated_record(&next_manifest, 2)?;
+        let next_revocation =
+            self.open_updated_record(&next_manifest, InstallationObjectKind::REVOCATION_SNAPSHOT)?;
+        let next_policy =
+            self.open_updated_record(&next_manifest, InstallationObjectKind::ADMINISTRATOR_POLICY)?;
         let next_revocation_bytes = next_revocation.read_control(MANIFEST_LIMIT)?;
         let next_policy_bytes = next_policy.read_control(MANIFEST_LIMIT)?;
         let revocation_update = self.authenticate_update_records(
@@ -152,8 +152,7 @@ impl AuthenticatedSelectorBootstrap {
                 .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
         SandboxAdministratorPolicy::validate_revocation_successor(
             &self.installed.control_record(
-                InstallationObjectKind::from_code(2)
-                    .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?,
+                InstallationObjectKind::ADMINISTRATOR_POLICY,
                 self.policy.policy_digest(),
             )?,
             next_policy_bytes,
@@ -182,11 +181,9 @@ impl AuthenticatedSelectorBootstrap {
     fn open_updated_record(
         &self,
         manifest: &InstallationManifest,
-        code: u8,
+        kind: InstallationObjectKind,
     ) -> Result<HeldInstallationArtifact, SelectorBoundaryError> {
-        let kind = InstallationObjectKind::from_code(code)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let identity = manifest.authority_digests()[usize::from(code)];
+        let identity = manifest.authority_digests()[usize::from(kind.code())];
         let object = manifest
             .object(kind, identity)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?
@@ -258,22 +255,6 @@ impl ValidatedInstallationUpdate {
     pub const fn record_files(&self) -> [&File; 2] {
         [self.next_policy.file(), self.next_revocation.file()]
     }
-}
-
-fn random_nonzero_id() -> Result<[u8; 16], SelectorBoundaryError> {
-    let mut id = [0_u8; 16];
-    let mut remaining = id.as_mut_slice();
-    while !remaining.is_empty() {
-        let read = getrandom(&mut *remaining, GetRandomFlags::empty())
-            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-        if read == 0 {
-            return Err(SelectorBoundaryError::SelectorUnavailable);
-        }
-        remaining = &mut remaining[read..];
-    }
-    (id != [0; 16])
-        .then_some(id)
-        .ok_or(SelectorBoundaryError::SelectorUnavailable)
 }
 
 fn decode_update(

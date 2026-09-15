@@ -5,6 +5,7 @@ mod update;
 pub use update::{InstallationChallenge, ValidatedInstallationUpdate};
 
 use ed25519_dalek::VerifyingKey;
+use rustix::rand::{getrandom, GetRandomFlags};
 
 use super::{InstallationObjectKind, InstalledSelectorState, MANIFEST_LIMIT};
 use crate::sandbox_provider_protocol::{
@@ -12,6 +13,30 @@ use crate::sandbox_provider_protocol::{
     SandboxProviderAdmissionInputs, SandboxRevocationSnapshot, SandboxTrustSnapshot,
 };
 use crate::selector::SelectorBoundaryError;
+
+pub(crate) fn fresh_selector_id() -> Result<[u8; 16], SelectorBoundaryError> {
+    fill_nonzero_id(|remaining| {
+        getrandom(remaining, GetRandomFlags::empty())
+            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)
+    })
+}
+
+fn fill_nonzero_id(
+    mut fill: impl FnMut(&mut [u8]) -> Result<usize, SelectorBoundaryError>,
+) -> Result<[u8; 16], SelectorBoundaryError> {
+    let mut id = [0_u8; 16];
+    let mut remaining = id.as_mut_slice();
+    while !remaining.is_empty() {
+        let read = fill(&mut *remaining)?;
+        if read == 0 || read > remaining.len() {
+            return Err(SelectorBoundaryError::SelectorUnavailable);
+        }
+        remaining = &mut remaining[read..];
+    }
+    (id != [0; 16])
+        .then_some(id)
+        .ok_or(SelectorBoundaryError::SelectorUnavailable)
+}
 
 /// Root-authenticated installation state ready for provider admission.
 ///
@@ -231,6 +256,44 @@ mod tests {
 
     fn bootstrap() -> Result<AuthenticatedSelectorBootstrap, Box<dyn std::error::Error>> {
         Ok(admitted_state()?.authenticate_bootstrap()?)
+    }
+
+    #[test]
+    fn selector_ids_reject_failed_short_and_zero_entropy() {
+        assert_eq!(
+            fill_nonzero_id(|_| Err(SelectorBoundaryError::Io)),
+            Err(SelectorBoundaryError::Io)
+        );
+        assert_eq!(
+            fill_nonzero_id(|_| Ok(0)),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            fill_nonzero_id(|remaining| Ok(remaining.len() + 1)),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            fill_nonzero_id(|remaining| {
+                remaining.fill(0);
+                Ok(remaining.len())
+            }),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+    }
+
+    #[test]
+    fn selector_ids_accept_partial_nonzero_entropy() -> TestResult {
+        let mut value = 0_u8;
+        let id = fill_nonzero_id(|remaining| {
+            value = value.saturating_add(1);
+            let written = remaining.len().min(3);
+            remaining[..written].fill(value);
+            Ok(written)
+        })?;
+        assert_ne!(id, [0; 16]);
+        assert_eq!(&id[..3], &[1; 3]);
+        assert_eq!(&id[15..], &[6]);
+        Ok(())
     }
 
     #[test]

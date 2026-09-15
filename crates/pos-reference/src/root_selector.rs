@@ -23,7 +23,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustix::fs::{chmodat, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
-use rustix::rand::{getrandom, GetRandomFlags};
 
 use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
@@ -35,7 +34,7 @@ use crate::sandbox_provider_protocol::{
     SandboxProviderErrorCode, SandboxProviderOperation, SignedImageManifest,
 };
 use crate::selector::installation::authority::{
-    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
+    fresh_selector_id, AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
 use crate::selector::installation::{
     open_directory_chain, InstallationObjectKind, InstalledSelectorState,
@@ -432,7 +431,7 @@ fn connect_fixed_provider(
     connect_and_synchronize(
         admitted,
         ProviderTransport::from_admitted,
-        fresh_nonce,
+        fresh_selector_id,
         synchronize_fixed_provider,
     )
 }
@@ -911,7 +910,7 @@ fn selector_execute_bytes(
             request_id: decoded.provider_request_id,
             apt1_digest: requirement.apt1_digest,
             policy_epoch: requirement.policy_epoch,
-            nonce: fresh_nonce()?,
+            nonce: fresh_selector_id()?,
         },
         decoded.attempt_id,
         authority,
@@ -921,30 +920,6 @@ fn selector_execute_bytes(
     )
     .map_err(artifact_invalid)?;
     request.to_canonical_cbor().map_err(artifact_invalid)
-}
-
-fn fresh_nonce() -> Result<[u8; 16], SelectorBoundaryError> {
-    let mut nonce = <[u8; 16]>::default();
-    let mut remaining = nonce.as_mut_slice();
-    while !remaining.is_empty() {
-        let received =
-            getrandom(&mut *remaining, GetRandomFlags::empty()).map_err(selector_unavailable)?;
-        let received = nonzero_random_count(received)?;
-        remaining = &mut remaining[received..];
-    }
-    validate_nonce(nonce)
-}
-
-fn nonzero_random_count(received: usize) -> Result<usize, SelectorBoundaryError> {
-    (received != 0)
-        .then_some(received)
-        .ok_or(SelectorBoundaryError::SelectorUnavailable)
-}
-
-fn validate_nonce(nonce: [u8; 16]) -> Result<[u8; 16], SelectorBoundaryError> {
-    (nonce != [0; 16])
-        .then_some(nonce)
-        .ok_or(SelectorBoundaryError::SelectorUnavailable)
 }
 
 fn write_authenticated_execution(
@@ -2011,17 +1986,6 @@ mod tests {
         );
         assert_eq!(io_error(()), SelectorBoundaryError::Io);
         map_to_unit_error(());
-        assert_eq!(
-            nonzero_random_count(0),
-            Err(SelectorBoundaryError::SelectorUnavailable)
-        );
-        assert_eq!(nonzero_random_count(1), Ok(1));
-        assert_eq!(
-            validate_nonce(<[u8; 16]>::default()),
-            Err(SelectorBoundaryError::SelectorUnavailable)
-        );
-        let nonzero = std::array::from_fn(|_| 1);
-        assert_eq!(validate_nonce(nonzero), Ok(nonzero));
         assert_eq!(checked_staged_input_length(0, 0), Ok(0));
         assert_eq!(framed_control_length(1), Ok(1));
         assert_eq!(
@@ -2396,7 +2360,7 @@ mod tests {
             selected.0.manifest().manifest_digest,
             requirement.sim1_digest
         );
-        assert_ne!(fresh_nonce()?, [0; 16]);
+        assert_ne!(fresh_selector_id()?, [0; 16]);
 
         let mut missing_image = requirement.clone();
         missing_image.sim1_digest = [0; 32];
