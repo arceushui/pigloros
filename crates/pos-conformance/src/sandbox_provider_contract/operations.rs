@@ -856,25 +856,53 @@ fn local_error_phase_shape_is_valid(error: &SandboxLocalErrorV1) -> bool {
     }
 }
 
-fn local_error_before_spx1_is_valid(error: &SandboxLocalErrorV1) -> bool {
-    let execute = error.operation == Some(SandboxProviderOperationV1::Execute);
-    let request = error.request_id.is_some();
-    let attempt = error.attempt_id.is_some();
-    let admission = error.agr1_digest.is_some();
-    !admission
-        && match error.code {
-            SandboxLocalErrorCodeV1::PolicyUnavailable
-            | SandboxLocalErrorCodeV1::RequestAuthorityMismatch => execute && request && attempt,
-            SandboxLocalErrorCodeV1::InvalidSelectorRequest => {
-                (error.operation.is_none() || execute)
-                    && ((!request && !attempt) || (execute && request))
-            }
-            SandboxLocalErrorCodeV1::PayloadLimitExceeded => {
-                (!request && !attempt && error.operation.is_none())
-                    || (execute && request && attempt)
-            }
-            _ => false,
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DecodedLocalErrorIdentityV1 {
+    Unidentified,
+    Operation,
+    Request,
+    Complete,
+}
+
+fn decoded_local_error_identity(
+    error: &SandboxLocalErrorV1,
+) -> Option<DecodedLocalErrorIdentityV1> {
+    match (
+        error.operation,
+        error.request_id.is_some(),
+        error.attempt_id.is_some(),
+    ) {
+        (None, false, false) => Some(DecodedLocalErrorIdentityV1::Unidentified),
+        (Some(SandboxProviderOperationV1::Execute), false, false) => {
+            Some(DecodedLocalErrorIdentityV1::Operation)
         }
+        (Some(SandboxProviderOperationV1::Execute), true, false) => {
+            Some(DecodedLocalErrorIdentityV1::Request)
+        }
+        (Some(SandboxProviderOperationV1::Execute), true, true) => {
+            Some(DecodedLocalErrorIdentityV1::Complete)
+        }
+        _ => None,
+    }
+}
+
+fn local_error_before_spx1_is_valid(error: &SandboxLocalErrorV1) -> bool {
+    if error.agr1_digest.is_some() {
+        return false;
+    }
+    let identity = decoded_local_error_identity(error);
+    match error.code {
+        SandboxLocalErrorCodeV1::PolicyUnavailable
+        | SandboxLocalErrorCodeV1::RequestAuthorityMismatch => {
+            identity == Some(DecodedLocalErrorIdentityV1::Complete)
+        }
+        SandboxLocalErrorCodeV1::InvalidSelectorRequest => identity.is_some(),
+        SandboxLocalErrorCodeV1::PayloadLimitExceeded => matches!(
+            identity,
+            Some(DecodedLocalErrorIdentityV1::Unidentified | DecodedLocalErrorIdentityV1::Complete)
+        ),
+        _ => false,
+    }
 }
 
 fn local_error_before_admission_is_valid(error: &SandboxLocalErrorV1) -> bool {

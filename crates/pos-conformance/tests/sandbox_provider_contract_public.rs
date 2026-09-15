@@ -2152,6 +2152,7 @@ fn complete_selector_policy_errors_require_both_derived_identities() -> TestResu
 fn invalid_selector_request_preserves_each_decoded_identity_prefix() -> TestResult {
     for (operation, request_id, attempt_id) in [
         (None, None, None),
+        (Some(SandboxProviderOperationV1::Execute), None, None),
         (
             Some(SandboxProviderOperationV1::Execute),
             Some([1; 16]),
@@ -2175,6 +2176,52 @@ fn invalid_selector_request_preserves_each_decoded_identity_prefix() -> TestResu
         let bytes = error.to_canonical_cbor()?;
         assert_eq!(SandboxLocalErrorV1::from_canonical_cbor(&bytes)?, error);
         independent::SandboxLocalError::from_canonical_cbor(&bytes)?;
+    }
+
+    for (operation, request_id, attempt_id) in [
+        (None, Some([1; 16]), None),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            None,
+            Some([2; 16]),
+        ),
+        (Some(SandboxProviderOperationV1::Describe), None, None),
+    ] {
+        let error = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
+            operation,
+            request_id,
+            attempt_id,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::InvalidSelectorRequest,
+            safe_detail: None,
+        };
+        assert_eq!(
+            error.validate(),
+            Err(SandboxContractErrorV1::FieldOutOfBounds)
+        );
+        let operation = match operation {
+            None => Value::Null,
+            Some(SandboxProviderOperationV1::Describe) => Value::Integer(0.into()),
+            Some(SandboxProviderOperationV1::Execute) => Value::Integer(1.into()),
+            Some(_) => return Err("unexpected local-error operation fixture".into()),
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![
+                Value::Text("SLE1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Integer(0.into()),
+                operation,
+                request_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                Value::Null,
+                Value::Integer(4.into()),
+                Value::Null,
+            ]),
+            &mut bytes,
+        )?;
+        assert!(independent::SandboxLocalError::from_canonical_cbor(&bytes).is_err());
     }
     Ok(())
 }
