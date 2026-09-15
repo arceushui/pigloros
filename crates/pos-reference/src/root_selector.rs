@@ -403,17 +403,11 @@ impl RootSelectorRuntime {
             });
             drop(completed);
 
-            let first = completion
-                .recv()
-                .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+            let first = completion.recv().map_err(selector_unavailable)?;
             composition.service.admission.close()?;
             stopped.store(true, Ordering::Release);
-            let admin = admin
-                .join()
-                .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
-            let evaluator = evaluator_thread
-                .join()
-                .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+            let admin = admin.join().map_err(selector_unavailable)?;
+            let evaluator = evaluator_thread.join().map_err(selector_unavailable)?;
             first.and(admin).and(evaluator)
         })
     }
@@ -653,17 +647,20 @@ fn prepare_live_update(
     crate::selector::installation::authority::CommittedInstallationUpdate,
     SelectorBoundaryError,
 > {
-    let update = closed
+    closed
         .admitted
         .bootstrap()
-        .validate_update(challenge, update_bytes)?;
-    let snapshot = InstallationRecoverySnapshot::seal(
-        &closed.admitted,
-        &closed.runtime,
-        closed.live_attempt_ids.clone(),
-        closed.live_attempt_ids.clone(),
-    )?;
-    Arc::clone(&closed.admitted).commit_update(update, snapshot)
+        .validate_update(challenge, update_bytes)
+        .and_then(|update| {
+            InstallationRecoverySnapshot::seal(
+                &closed.admitted,
+                &closed.runtime,
+                closed.live_attempt_ids.clone(),
+                closed.live_attempt_ids.clone(),
+            )
+            .map(|snapshot| (update, snapshot))
+        })
+        .and_then(|(update, snapshot)| Arc::clone(&closed.admitted).commit_update(update, snapshot))
 }
 
 fn write_control_frame(stream: &mut impl Write, bytes: &[u8]) -> Result<(), SelectorBoundaryError> {
@@ -723,11 +720,13 @@ fn connect_and_synchronize<Admitted, Transport, Error>(
     mut nonce: impl FnMut() -> Result<[u8; 16], Error>,
     synchronize: impl FnOnce(&Transport, &Admitted, [u8; 16], [u8; 16]) -> Result<(), Error>,
 ) -> Result<Transport, Error> {
-    let transport = connect(admitted)?;
-    let request_id = nonce()?;
-    let challenge = nonce()?;
-    synchronize(&transport, admitted, request_id, challenge)?;
-    Ok(transport)
+    connect(admitted).and_then(|transport| {
+        nonce().and_then(|request_id| {
+            nonce().and_then(|challenge| {
+                synchronize(&transport, admitted, request_id, challenge).map(|()| transport)
+            })
+        })
+    })
 }
 
 trait ProviderExecutor {
@@ -1387,21 +1386,24 @@ fn selector_execute_bytes(
         pcr1_digest: provider.conformance_report().report_digest,
         hcp1_digest: provider.host_profile().profile_digest,
     };
-    let request = SandboxExecuteRequest::for_selector(
-        RequestAuthority {
-            request_id: decoded.provider_request_id,
-            apt1_digest: requirement.apt1_digest,
-            policy_epoch: requirement.policy_epoch,
-            nonce: fresh_selector_id()?,
-        },
-        decoded.attempt_id,
-        authority,
-        resolved.attempt().capability_ids.clone(),
-        decoded.input_descriptor(),
-        Vec::new(),
-    )
-    .map_err(artifact_invalid)?;
-    request.to_canonical_cbor().map_err(artifact_invalid)
+    fresh_selector_id()
+        .and_then(|nonce| {
+            SandboxExecuteRequest::for_selector(
+                RequestAuthority {
+                    request_id: decoded.provider_request_id,
+                    apt1_digest: requirement.apt1_digest,
+                    policy_epoch: requirement.policy_epoch,
+                    nonce,
+                },
+                decoded.attempt_id,
+                authority,
+                resolved.attempt().capability_ids.clone(),
+                decoded.input_descriptor(),
+                Vec::new(),
+            )
+            .map_err(artifact_invalid)
+        })
+        .and_then(|request| request.to_canonical_cbor().map_err(artifact_invalid))
 }
 
 fn write_authenticated_execution(

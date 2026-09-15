@@ -23,6 +23,14 @@ use ciborium::value::Value;
 
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(30);
 
+fn invalid<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::ArtifactInvalid
+}
+
+fn io<T>(_: T) -> SelectorBoundaryError {
+    SelectorBoundaryError::Io
+}
+
 /// One fresh selector-issued challenge owned by one administrative connection.
 ///
 /// The value cannot be cloned. Validation consumes it, which prevents replay
@@ -88,15 +96,29 @@ pub struct ValidatedInstallationUpdate {
     next_revocation: HeldInstallationArtifact,
 }
 
+struct DecodedInstallationUpdate {
+    nonce: [u8; 16],
+    expires_at: Instant,
+    next_manifest_bytes: Vec<u8>,
+    revocation_update_bytes: Vec<u8>,
+}
+
+struct OpenedInstallationUpdate {
+    decoded: DecodedInstallationUpdate,
+    next_manifest: InstallationManifest,
+    next_policy: HeldInstallationArtifact,
+    next_revocation: HeldInstallationArtifact,
+}
+
 impl AuthenticatedSelectorBootstrap {
     /// Issue a cryptographically random fresh-mode challenge.
     ///
     /// # Errors
     /// Returns a closed boundary error if secure randomness is unavailable.
     pub fn issue_update_challenge(&self) -> Result<InstallationChallenge, SelectorBoundaryError> {
-        Ok(InstallationChallenge {
+        fresh_selector_id().map(|nonce| InstallationChallenge {
             installation: self.installed.manifest().digest(),
-            nonce: fresh_selector_id()?,
+            nonce,
             expires_at: Instant::now() + CHALLENGE_LIFETIME,
         })
     }
@@ -114,41 +136,103 @@ impl AuthenticatedSelectorBootstrap {
         challenge: InstallationChallenge,
         bytes: &[u8],
     ) -> Result<ValidatedInstallationUpdate, SelectorBoundaryError> {
-        let (installation, nonce, expires_at) = challenge.consume()?;
+        challenge
+            .consume()
+            .and_then(|parts| self.decode_challenged_update(parts, bytes))
+            .and_then(|decoded| self.open_challenged_update(decoded))
+            .and_then(|opened| self.authenticate_challenged_update(opened))
+    }
+
+    fn decode_challenged_update(
+        &self,
+        (installation, nonce, expires_at): ([u8; 32], [u8; 16], Instant),
+        bytes: &[u8],
+    ) -> Result<DecodedInstallationUpdate, SelectorBoundaryError> {
         if installation != self.installed.manifest().digest() {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
-        let (next_manifest_bytes, revocation_update_bytes) = decode_update(bytes, installation)?;
-        let next_manifest = InstallationManifest::from_canonical_cbor(&next_manifest_bytes)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        self.installed
-            .manifest()
-            .validate_revocation_successor(&next_manifest)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let next_revocation =
-            self.open_updated_record(&next_manifest, InstallationObjectKind::REVOCATION_SNAPSHOT)?;
-        let next_policy =
-            self.open_updated_record(&next_manifest, InstallationObjectKind::ADMINISTRATOR_POLICY)?;
-        let next_revocation_bytes = next_revocation.read_control(MANIFEST_LIMIT)?;
-        let next_policy_bytes = next_policy.read_control(MANIFEST_LIMIT)?;
-        let revocation_update = self.authenticate_update_records(
-            &next_manifest,
-            &next_policy_bytes,
-            &next_revocation_bytes,
-            &revocation_update_bytes,
-        )?;
-        if revocation_update.selector_nonce != nonce || Instant::now() >= expires_at {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        Ok(ValidatedInstallationUpdate {
-            previous_manifest: self.installed.manifest_bytes().to_vec(),
-            next_manifest_bytes,
-            next_manifest,
-            revocation_update_bytes,
-            revocation_update,
-            next_policy,
-            next_revocation,
+        decode_update(bytes, installation).map(|(next_manifest_bytes, revocation_update_bytes)| {
+            DecodedInstallationUpdate {
+                nonce,
+                expires_at,
+                next_manifest_bytes,
+                revocation_update_bytes,
+            }
         })
+    }
+
+    fn open_challenged_update(
+        &self,
+        decoded: DecodedInstallationUpdate,
+    ) -> Result<OpenedInstallationUpdate, SelectorBoundaryError> {
+        InstallationManifest::from_canonical_cbor(&decoded.next_manifest_bytes)
+            .map_err(invalid)
+            .and_then(|next_manifest| {
+                self.installed
+                    .manifest()
+                    .validate_revocation_successor(&next_manifest)
+                    .map_err(invalid)
+                    .map(|()| next_manifest)
+            })
+            .and_then(|next_manifest| {
+                self.open_updated_record(
+                    &next_manifest,
+                    InstallationObjectKind::REVOCATION_SNAPSHOT,
+                )
+                .map(|next_revocation| (next_manifest, next_revocation))
+            })
+            .and_then(|(next_manifest, next_revocation)| {
+                self.open_updated_record(
+                    &next_manifest,
+                    InstallationObjectKind::ADMINISTRATOR_POLICY,
+                )
+                .map(|next_policy| OpenedInstallationUpdate {
+                    decoded,
+                    next_manifest,
+                    next_policy,
+                    next_revocation,
+                })
+            })
+    }
+
+    fn authenticate_challenged_update(
+        &self,
+        opened: OpenedInstallationUpdate,
+    ) -> Result<ValidatedInstallationUpdate, SelectorBoundaryError> {
+        opened
+            .next_revocation
+            .read_control(MANIFEST_LIMIT)
+            .and_then(|next_revocation_bytes| {
+                opened
+                    .next_policy
+                    .read_control(MANIFEST_LIMIT)
+                    .map(|next_policy_bytes| (next_policy_bytes, next_revocation_bytes))
+            })
+            .and_then(|(next_policy_bytes, next_revocation_bytes)| {
+                self.authenticate_update_records(
+                    &opened.next_manifest,
+                    &next_policy_bytes,
+                    &next_revocation_bytes,
+                    &opened.decoded.revocation_update_bytes,
+                )
+            })
+            .and_then(|revocation_update| {
+                if revocation_update.selector_nonce == opened.decoded.nonce
+                    && Instant::now() < opened.decoded.expires_at
+                {
+                    Ok(ValidatedInstallationUpdate {
+                        previous_manifest: self.installed.manifest_bytes().to_vec(),
+                        next_manifest_bytes: opened.decoded.next_manifest_bytes,
+                        next_manifest: opened.next_manifest,
+                        revocation_update_bytes: opened.decoded.revocation_update_bytes,
+                        revocation_update,
+                        next_policy: opened.next_policy,
+                        next_revocation: opened.next_revocation,
+                    })
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
     }
 
     fn authenticate_update_records(
@@ -158,34 +242,46 @@ impl AuthenticatedSelectorBootstrap {
         next_revocation_bytes: &[u8],
         revocation_update_bytes: &[u8],
     ) -> Result<RevocationUpdateRequest, SelectorBoundaryError> {
-        let next_revocation =
-            SandboxRevocationSnapshot::authenticate(next_revocation_bytes, &self.trust)
-                .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let next_policy = SandboxAdministratorPolicy::validate_revocation_successor(
-            &self.installed.control_record(
-                InstallationObjectKind::ADMINISTRATOR_POLICY,
-                self.policy.policy_digest(),
-            )?,
-            next_policy_bytes,
-            &self.trust,
-            &self.revocation,
-            &next_revocation,
-        )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let update = RevocationUpdateRequest::authenticate(
-            revocation_update_bytes,
-            &self.trust,
-            &self.revocation,
-        )
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        let [_, expected_revocation, expected_policy] = next_manifest.authority_digests();
-        if next_revocation.snapshot_digest() != expected_revocation
-            || update.next_revocation != next_revocation
-            || next_policy.policy_digest() != expected_policy
-        {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        Ok(update)
+        SandboxRevocationSnapshot::authenticate(next_revocation_bytes, &self.trust)
+            .map_err(invalid)
+            .and_then(|next_revocation| {
+                self.installed
+                    .control_record(
+                        InstallationObjectKind::ADMINISTRATOR_POLICY,
+                        self.policy.policy_digest(),
+                    )
+                    .and_then(|current_policy| {
+                        SandboxAdministratorPolicy::validate_revocation_successor(
+                            &current_policy,
+                            next_policy_bytes,
+                            &self.trust,
+                            &self.revocation,
+                            &next_revocation,
+                        )
+                        .map_err(invalid)
+                    })
+                    .map(|next_policy| (next_revocation, next_policy))
+            })
+            .and_then(|(next_revocation, next_policy)| {
+                RevocationUpdateRequest::authenticate(
+                    revocation_update_bytes,
+                    &self.trust,
+                    &self.revocation,
+                )
+                .map_err(invalid)
+                .map(|update| (next_revocation, next_policy, update))
+            })
+            .and_then(|(next_revocation, next_policy, update)| {
+                let [_, expected_revocation, expected_policy] = next_manifest.authority_digests();
+                if next_revocation.snapshot_digest() == expected_revocation
+                    && update.next_revocation == next_revocation
+                    && next_policy.policy_digest() == expected_policy
+                {
+                    Ok(update)
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
     }
 
     fn open_updated_record(
@@ -194,38 +290,51 @@ impl AuthenticatedSelectorBootstrap {
         kind: InstallationObjectKind,
     ) -> Result<HeldInstallationArtifact, SelectorBoundaryError> {
         let identity = manifest.authority_digests()[usize::from(kind.code())];
-        let object = manifest
+        manifest
             .object(kind, identity)
-            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?
-            .clone();
-        if object.byte_length() > MANIFEST_LIMIT {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        let owner = self
-            .installed
-            .root
-            .metadata()
-            .map_err(|_| SelectorBoundaryError::Io)?
-            .uid();
-        let directory = open_directory_chain(
-            self.installed
-                .root
-                .try_clone()
-                .map_err(|_| SelectorBoundaryError::Io)?,
-            Path::new(kind.directory()),
-            owner,
-        )?;
-        let file = open_immutable_file(
-            &directory,
-            &hex_name(object.content_digest()),
-            kind.required_mode(),
-            object.byte_length(),
-            owner,
-        )?;
-        if digest_complete_file(&file, object.byte_length())? != object.content_digest() {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
-        }
-        Ok(HeldInstallationArtifact { file, object })
+            .map_err(invalid)
+            .cloned()
+            .and_then(|object| {
+                if object.byte_length() <= MANIFEST_LIMIT {
+                    Ok(object)
+                } else {
+                    Err(SelectorBoundaryError::ArtifactInvalid)
+                }
+            })
+            .and_then(|object| {
+                self.installed
+                    .root
+                    .metadata()
+                    .map_err(io)
+                    .map(|metadata| (object, metadata.uid()))
+            })
+            .and_then(|(object, owner)| {
+                self.installed
+                    .root
+                    .try_clone()
+                    .map_err(io)
+                    .and_then(|root| open_directory_chain(root, Path::new(kind.directory()), owner))
+                    .map(|directory| (object, owner, directory))
+            })
+            .and_then(|(object, owner, directory)| {
+                open_immutable_file(
+                    &directory,
+                    &hex_name(object.content_digest()),
+                    kind.required_mode(),
+                    object.byte_length(),
+                    owner,
+                )
+                .map(|file| (object, file))
+            })
+            .and_then(|(object, file)| {
+                digest_complete_file(&file, object.byte_length()).and_then(|digest| {
+                    if digest == object.content_digest() {
+                        Ok(HeldInstallationArtifact { file, object })
+                    } else {
+                        Err(SelectorBoundaryError::ArtifactInvalid)
+                    }
+                })
+            })
     }
 }
 

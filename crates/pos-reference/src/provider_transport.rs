@@ -421,30 +421,39 @@ fn provider_process_identity(
     pid: rustix::process::Pid,
 ) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
     let raw_pid = pid.as_raw_nonzero().get();
-    let stat =
-        std::fs::read_to_string(format!("/proc/{raw_pid}/stat")).map_err(artifact_invalid)?;
-    parse_provider_process_identity(raw_pid, &stat)
+    std::fs::read_to_string(format!("/proc/{raw_pid}/stat"))
+        .map_err(artifact_invalid)
+        .and_then(|stat| parse_provider_process_identity(raw_pid, &stat))
 }
 
 fn parse_provider_process_identity(
     raw_pid: i32,
     stat: &str,
 ) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
-    let pid = u64::try_from(raw_pid).map_err(artifact_invalid)?;
-    let fields = stat
-        .rsplit_once(") ")
-        .map(|(_, fields)| fields)
-        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-    let start_time_ticks = fields
-        .split_ascii_whitespace()
-        .nth(19)
-        .ok_or(SelectorBoundaryError::ArtifactInvalid)?
-        .parse()
-        .map_err(artifact_invalid)?;
-    Ok(ProviderProcessIdentity {
-        pid,
-        start_time_ticks,
-    })
+    u64::try_from(raw_pid)
+        .map_err(artifact_invalid)
+        .and_then(|pid| {
+            stat.rsplit_once(") ")
+                .map(|(_, fields)| fields)
+                .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                .map(|fields| (pid, fields))
+        })
+        .and_then(|(pid, fields)| {
+            fields
+                .split_ascii_whitespace()
+                .nth(19)
+                .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                .map(|start_time| (pid, start_time))
+        })
+        .and_then(|(pid, start_time)| {
+            start_time
+                .parse()
+                .map_err(artifact_invalid)
+                .map(|start_time_ticks| ProviderProcessIdentity {
+                    pid,
+                    start_time_ticks,
+                })
+        })
 }
 
 fn require_root_owned_endpoint(path: &Path) -> Result<&Path, SelectorBoundaryError> {
@@ -516,28 +525,36 @@ impl ProviderTransport {
         &self,
         observed: ProviderProcessIdentity,
     ) -> Result<(), SelectorBoundaryError> {
-        let mut admitted = self.admitted_process.lock().map_err(selector_unavailable)?;
-        let result = match *admitted {
-            None => {
-                *admitted = Some(observed);
-                Ok(())
-            }
-            Some(expected) if expected == observed => Ok(()),
-            Some(_) => Err(SelectorBoundaryError::ArtifactInvalid),
-        };
-        drop(admitted);
-        result
+        self.admitted_process
+            .lock()
+            .map_err(selector_unavailable)
+            .and_then(|mut admitted| {
+                let result = match *admitted {
+                    None => {
+                        *admitted = Some(observed);
+                        Ok(())
+                    }
+                    Some(expected) if expected == observed => Ok(()),
+                    Some(_) => Err(SelectorBoundaryError::ArtifactInvalid),
+                };
+                drop(admitted);
+                result
+            })
     }
 
     fn require_admitted_process(
         &self,
         observed: ProviderProcessIdentity,
     ) -> Result<(), SelectorBoundaryError> {
-        let expected = *self.admitted_process.lock().map_err(selector_unavailable)?;
-        expected
-            .filter(|expected| *expected == observed)
-            .map(|_| ())
-            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+        self.admitted_process
+            .lock()
+            .map_err(selector_unavailable)
+            .and_then(|admitted| {
+                (*admitted)
+                    .filter(|expected| *expected == observed)
+                    .map(|_| ())
+                    .ok_or(SelectorBoundaryError::ArtifactInvalid)
+            })
     }
 
     /// Seal the root-generated runtime identities around the synchronized provider process.
@@ -545,13 +562,15 @@ impl ProviderTransport {
         &self,
         admitted: &AdmittedSelectorProvider,
     ) -> Result<AdmittedProviderRuntime, SelectorBoundaryError> {
-        let process = self
-            .admitted_process
+        self.admitted_process
             .lock()
-            .map_err(selector_unavailable)?
-            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
-        ProviderRuntimeSlot::allocate(admitted)?
-            .bind_observed_process(process.pid, process.start_time_ticks)
+            .map_err(selector_unavailable)
+            .and_then(|process| process.ok_or(SelectorBoundaryError::ArtifactInvalid))
+            .and_then(|process| {
+                ProviderRuntimeSlot::allocate(admitted).and_then(|runtime| {
+                    runtime.bind_observed_process(process.pid, process.start_time_ticks)
+                })
+            })
     }
 
     /// Prove that the selected provider has activated the exact admitted policy.
