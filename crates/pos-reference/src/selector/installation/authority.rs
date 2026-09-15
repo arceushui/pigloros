@@ -128,7 +128,7 @@ impl InstalledSelectorState {
             })
     }
 
-    fn control_record(
+    pub(super) fn control_record(
         &self,
         kind: InstallationObjectKind,
         identity: [u8; 32],

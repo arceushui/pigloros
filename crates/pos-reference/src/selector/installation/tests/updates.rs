@@ -10,6 +10,7 @@ use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap, InstallationChallenge,
     InstallationRecoverySnapshot, ProviderRuntimeSlot,
 };
+use crate::selector::installation::RECOVERY_NAME;
 
 struct UpdateFixture {
     directory: tempfile::TempDir,
