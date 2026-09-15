@@ -19,7 +19,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rustix::fs::{fchmod, fstat, statat, unlinkat, AtFlags, FileType, Mode};
+use rustix::fs::{fchmod, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
@@ -130,7 +130,7 @@ impl OwnedSelectorListener {
             _ => return Err(SelectorBoundaryError::ArtifactInvalid),
         }
         let listener = UnixListener::bind(path).map_err(io_error)?;
-        let identity = held_socket_identity(&listener, expected_uid)?;
+        let (identity, _) = named_socket(&parent, &leaf, expected_uid)?;
         let owned = Self {
             listener,
             parent,
@@ -212,34 +212,32 @@ fn listener_socket_identity(
     leaf: &OsString,
     expected_uid: u32,
 ) -> Result<SocketIdentity, SelectorBoundaryError> {
+    let (identity, mode) = named_socket(parent, leaf, expected_uid)?;
+    if mode != SELECTOR_SOCKET_MODE {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(identity)
+}
+
+fn named_socket(
+    parent: &File,
+    leaf: &OsString,
+    expected_uid: u32,
+) -> Result<(SocketIdentity, u32), SelectorBoundaryError> {
     let metadata =
         statat(parent, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW).map_err(artifact_invalid)?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
         || metadata.st_uid != expected_uid
-        || metadata.st_mode & 0o777 != SELECTOR_SOCKET_MODE
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    Ok(SocketIdentity {
-        device: metadata.st_dev,
-        inode: metadata.st_ino,
-    })
-}
-
-fn held_socket_identity(
-    listener: &UnixListener,
-    expected_uid: u32,
-) -> Result<SocketIdentity, SelectorBoundaryError> {
-    let metadata = fstat(listener).map_err(artifact_invalid)?;
-    if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
-        || metadata.st_uid != expected_uid
-    {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    Ok(SocketIdentity {
-        device: metadata.st_dev,
-        inode: metadata.st_ino,
-    })
+    Ok((
+        SocketIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        },
+        metadata.st_mode & 0o777,
+    ))
 }
 
 fn require_same_socket(
@@ -1257,11 +1255,7 @@ mod tests {
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
         let identity = listener_socket_identity(&parent, &leaf, uid)?;
-        assert_eq!(held_socket_identity(&listener, uid)?, identity);
-        assert!(matches!(
-            held_socket_identity(&listener, foreign_uid),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        ));
+        assert_eq!(named_socket(&parent, &leaf, uid)?.0, identity);
         assert_eq!(require_same_socket(identity, identity), Ok(()));
         assert!(matches!(
             require_same_socket(
