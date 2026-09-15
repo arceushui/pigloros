@@ -26,8 +26,15 @@ pub(crate) fn fresh_selector_id() -> Result<[u8; 16], SelectorBoundaryError> {
 }
 
 fn fresh_distinct_selector_id(excluded: &[[u8; 16]]) -> Result<[u8; 16], SelectorBoundaryError> {
+    fresh_distinct_selector_id_with(excluded, fresh_selector_id)
+}
+
+fn fresh_distinct_selector_id_with(
+    excluded: &[[u8; 16]],
+    mut generate: impl FnMut() -> Result<[u8; 16], SelectorBoundaryError>,
+) -> Result<[u8; 16], SelectorBoundaryError> {
     loop {
-        let candidate = fresh_selector_id()?;
+        let candidate = generate()?;
         if !excluded.contains(&candidate) {
             return Ok(candidate);
         }
@@ -307,6 +314,23 @@ mod tests {
         assert_eq!(&id[..3], &[1; 3]);
         assert_eq!(&id[15..], &[6]);
         Ok(())
+    }
+
+    #[test]
+    fn distinct_selector_ids_retry_collisions_and_propagate_entropy_failure() {
+        assert_eq!(
+            fresh_distinct_selector_id_with(&[], || Err(SelectorBoundaryError::Io)),
+            Err(SelectorBoundaryError::Io)
+        );
+        let mut candidates = [[7; 16], [8; 16]].into_iter();
+        assert_eq!(
+            fresh_distinct_selector_id_with(&[[7; 16]], || {
+                candidates
+                    .next()
+                    .ok_or(SelectorBoundaryError::SelectorUnavailable)
+            }),
+            Ok([8; 16])
+        );
     }
 
     #[test]

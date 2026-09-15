@@ -266,6 +266,11 @@ impl InstallationRecoverySnapshot {
             self.previous_provider.runtime_public_key,
         )
     }
+
+    #[cfg(test)]
+    pub(crate) const fn replace_runtime_public_key_for_test(&mut self, key: [u8; 32]) {
+        self.previous_provider.runtime_public_key = key;
+    }
 }
 
 fn runtime_key<'a>(
@@ -355,6 +360,12 @@ mod tests {
         let runtime = slot.bind_observed_process(17, 1)?;
         assert_eq!(
             InstallationRecoverySnapshot::seal(&admitted, &runtime, Vec::new(), Vec::new()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(17, 1)?;
+        assert_eq!(
+            InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[1; 16]], vec![[0; 16]],),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
         assert_eq!(

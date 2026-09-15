@@ -1424,65 +1424,6 @@ mod tests {
         assert_eq!(receive_incomplete(()), ReceiveFailure::Incomplete);
         assert_eq!(invalid_errno(()), rustix::io::Errno::INVAL);
 
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("constructor.sock");
-        let _listener = UnixListener::bind(&path)?;
-        let metadata = std::fs::symlink_metadata(&path)?;
-        let endpoint = SelectedProviderEndpoint::from_identity(&path, &metadata, metadata.uid());
-        let transport = provider_transport(endpoint.clone(), endpoint);
-        assert_eq!(transport.execute_endpoint.path, path);
-        assert_eq!(transport.control_endpoint.path, path);
-        let observed = provider_process_identity(rustix::process::getpid())?;
-        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
-        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
-        assert_eq!(
-            transport.bind_admitted_process(ProviderProcessIdentity {
-                start_time_ticks: observed.start_time_ticks.saturating_add(1),
-                ..observed
-            }),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        let stat = std::fs::read_to_string(format!(
-            "/proc/{}/stat",
-            rustix::process::getpid().as_raw_nonzero()
-        ))?;
-        assert_eq!(
-            parse_provider_process_identity(
-                rustix::process::getpid().as_raw_nonzero().get(),
-                &stat
-            )?,
-            observed
-        );
-        for (pid, stat) in [
-            (-1, stat.as_str()),
-            (1, "missing-delimiter"),
-            (1, "1 (name) too few fields"),
-            (1, "1 (name) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 invalid"),
-        ] {
-            assert_eq!(
-                parse_provider_process_identity(pid, stat),
-                Err(SelectorBoundaryError::ArtifactInvalid)
-            );
-        }
-
-        let poisoned = provider_transport(transport.execute_endpoint, transport.control_endpoint);
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = poisoned
-                .admitted_process
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::panic::resume_unwind(Box::new(()));
-        }))
-        .is_err());
-        assert_eq!(
-            poisoned.bind_admitted_process(observed),
-            Err(SelectorBoundaryError::SelectorUnavailable)
-        );
-        assert_eq!(
-            poisoned.require_admitted_process(observed),
-            Err(SelectorBoundaryError::SelectorUnavailable)
-        );
-
         let (descriptor, _peer) = UnixStream::pair()?;
         assert_eq!(
             complete_nonblocking_connect(Ok(()), &descriptor, Duration::from_secs(1)),
@@ -1513,6 +1454,76 @@ mod tests {
             Err(rustix::io::Errno::TIMEDOUT)
         );
         assert_eq!(ensure_connected_poll(1, Ok(())), Ok(()));
+        Ok(())
+    }
+
+    #[test]
+    fn provider_process_identity_is_bound_once_and_fails_closed() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("constructor.sock");
+        let _listener = UnixListener::bind(&path)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let endpoint = SelectedProviderEndpoint::from_identity(&path, &metadata, metadata.uid());
+        let transport = provider_transport(endpoint.clone(), endpoint);
+        assert_eq!(transport.execute_endpoint.path, path);
+        assert_eq!(transport.control_endpoint.path, path);
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        assert!(transport.admit_runtime(&admitted).is_err());
+        let observed = provider_process_identity(rustix::process::getpid())?;
+        assert_eq!(
+            transport.require_admitted_process(observed),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
+        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
+        assert_eq!(
+            transport.bind_admitted_process(ProviderProcessIdentity {
+                start_time_ticks: observed.start_time_ticks.saturating_add(1),
+                ..observed
+            }),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_process_stat_boundaries(observed)?;
+
+        let poisoned = provider_transport(transport.execute_endpoint, transport.control_endpoint);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned
+                .admitted_process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert_eq!(
+            poisoned.bind_admitted_process(observed),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            poisoned.require_admitted_process(observed),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            poisoned.admit_runtime(&admitted),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        Ok(())
+    }
+
+    fn assert_process_stat_boundaries(observed: ProviderProcessIdentity) -> TestResult {
+        let raw_pid = rustix::process::getpid().as_raw_nonzero().get();
+        let stat = std::fs::read_to_string(format!("/proc/{raw_pid}/stat"))?;
+        assert_eq!(parse_provider_process_identity(raw_pid, &stat)?, observed);
+        for (pid, stat) in [
+            (-1, stat.as_str()),
+            (1, "missing-delimiter"),
+            (1, "1 (name) too few fields"),
+            (1, "1 (name) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 invalid"),
+        ] {
+            assert_eq!(
+                parse_provider_process_identity(pid, stat),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
         Ok(())
     }
 

@@ -2398,7 +2398,9 @@ mod tests {
         }
 
         let _paths = FixedCompositionFixture::create()?;
-        assert!(RootSelectorComposition::open().is_err());
+        assert!(RootSelectorRuntime::activate().is_err());
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
         let admitted = crate::selector::installation::tests::materialize_root_selector_state(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
@@ -2619,7 +2621,18 @@ mod tests {
             assert!(read_control_frame(&mut std::io::Cursor::new(length.to_be_bytes())).is_err());
         }
         assert!(read_control_frame(&mut std::io::Cursor::new([0, 0, 0, 1])).is_err());
+        let mut truncated = std::io::Cursor::new(1_u32.to_be_bytes()).chain(FailingReader);
+        assert!(read_control_frame(&mut truncated).is_err());
         assert!(require_stream_eof(&mut std::io::Cursor::new([1])).is_err());
+        assert!(write_control_frame(&mut FailingWriter, b"update").is_err());
+        assert!(write_control_frame(
+            &mut NthFailWriter {
+                writes: 0,
+                fail_at: 2,
+            },
+            b"update",
+        )
+        .is_err());
         Ok(())
     }
 
@@ -2637,6 +2650,7 @@ mod tests {
         assert!(admission.current().is_err());
         assert!(admission.acquire([3; 16]).is_err());
         assert!(second.begin_provider_execution().is_err());
+        assert!(admission.retain_provider_state([3; 16]).is_err());
         assert!(admission.close_and_snapshot().is_err());
 
         drop(second);

@@ -809,6 +809,13 @@ fn durable_update_rejects_invalid_snapshots_and_foreign_acknowledgements() -> Te
         .authenticate_live_acknowledgement(&wrong_set)
         .is_err());
     assert!(fixture.directory.path().join(RECOVERY_NAME).exists());
+
+    let (_fixture, admitted, update, mut snapshot) = pending_update_fixture()?;
+    snapshot.replace_runtime_public_key_for_test([0xff; 32]);
+    let committed = Arc::new(admitted).commit_update(update, snapshot)?;
+    assert!(committed
+        .authenticate_live_acknowledgement(&[0xff])
+        .is_err());
     Ok(())
 }
 
