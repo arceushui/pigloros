@@ -7828,8 +7828,8 @@ mod coverage_entrypoints {
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut registry = PluginRegistry::new();
-        ok(bind_registry_to_host_gate(&mut registry, gate));
         ok(bind_registry_to_host_gate(&mut registry, gate.clone()));
+        ok(bind_registry_to_host_gate(&mut registry, gate));
         assert!(bind_registry_to_host_gate(
             &mut registry,
             Arc::new(ErasureContainmentGateV1::new_test_open())
