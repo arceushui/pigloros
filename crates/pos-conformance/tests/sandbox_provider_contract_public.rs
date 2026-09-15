@@ -1060,9 +1060,9 @@ fn safe_detail_uses_a_strict_utf8_byte_bound_in_both_decoders() -> TestResult {
     for detail in [None, Some("x".to_owned()), Some("é".repeat(128))] {
         let local = SandboxLocalErrorV1 {
             phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
-            operation: None,
-            request_id: None,
-            attempt_id: None,
+            operation: Some(SandboxProviderOperationV1::Execute),
+            request_id: Some([1; 16]),
+            attempt_id: Some([2; 16]),
             agr1_digest: None,
             code: SandboxLocalErrorCodeV1::PolicyUnavailable,
             safe_detail: detail.clone(),
@@ -1098,9 +1098,9 @@ fn safe_detail_uses_a_strict_utf8_byte_bound_in_both_decoders() -> TestResult {
     ] {
         let local = SandboxLocalErrorV1 {
             phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
-            operation: None,
-            request_id: None,
-            attempt_id: None,
+            operation: Some(SandboxProviderOperationV1::Execute),
+            request_id: Some([1; 16]),
+            attempt_id: Some([2; 16]),
             agr1_digest: None,
             code: SandboxLocalErrorCodeV1::PolicyUnavailable,
             safe_detail: Some(detail.clone()),
@@ -2121,7 +2121,7 @@ fn complete_selector_policy_errors_require_both_derived_identities() -> TestResu
         };
         assert_eq!(
             error.validate(),
-            Err(SandboxContractErrorV1::InconsistentFields)
+            Err(SandboxContractErrorV1::FieldOutOfBounds)
         );
         let mut bytes = Vec::new();
         ciborium::into_writer(
