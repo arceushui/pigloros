@@ -71,7 +71,7 @@ mod lifecycle_coverage_tests {
         host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
         CommandEnvelope, CommandLifecycle, ExecutorStore, GatewayExecutorStore, LifecycleState,
     };
-    use pos_core::{CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_core::{CoreError, ErasureHostErrorV1};
     use pos_runtime::ErasureExecutionHostV1;
     use pos_store::{memory::MemoryStore, StoreConfig};
     use std::sync::{Arc, Mutex};
@@ -3008,7 +3008,6 @@ mod tests {
         timeline::Timeline,
         CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
         CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, ProposedAction, TimelineId,
-        ERASURE_MAX_INVENTORY_REQUESTS,
     };
     use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
     use pos_store::memory::MemoryStore;
