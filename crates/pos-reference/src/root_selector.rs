@@ -14,7 +14,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -91,6 +91,7 @@ struct SocketIdentity {
 
 struct OwnedSocketPath {
     parent: File,
+    parent_path: PathBuf,
     leaf: OsString,
     identity: SocketIdentity,
     owner_uid: u32,
@@ -99,12 +100,14 @@ struct OwnedSocketPath {
 impl OwnedSocketPath {
     fn capture(
         parent: File,
+        parent_path: PathBuf,
         leaf: OsString,
         owner_uid: u32,
     ) -> Result<Self, SelectorBoundaryError> {
         let (identity, _) = named_socket(&parent, &leaf, owner_uid)?;
         Ok(Self {
             parent,
+            parent_path,
             leaf,
             identity,
             owner_uid,
@@ -112,6 +115,9 @@ impl OwnedSocketPath {
     }
 
     fn finish_setup(&self, parent_path: &Path) -> Result<(), SelectorBoundaryError> {
+        if parent_path != self.parent_path {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
         chmodat(
             &self.parent,
             Path::new(&self.leaf),
@@ -119,12 +125,17 @@ impl OwnedSocketPath {
             AtFlags::empty(),
         )
         .map_err(io_error)?;
+        self.verify()
+    }
+
+    fn verify(&self) -> Result<(), SelectorBoundaryError> {
+        validate_listener_parent(&self.parent_path, &self.parent, self.owner_uid)?;
         let current = listener_socket_identity(&self.parent, &self.leaf, self.owner_uid)?;
-        require_same_socket(current, self.identity)?;
-        validate_listener_parent(parent_path, &self.parent, self.owner_uid)
+        require_same_socket(current, self.identity)
     }
 
     fn remove(&self) -> Result<(), SelectorBoundaryError> {
+        self.verify()?;
         remove_matching_socket(&self.parent, &self.leaf, self.identity, self.owner_uid)
     }
 }
@@ -201,20 +212,27 @@ impl OwnedSelectorListener {
             _ => return Err(SelectorBoundaryError::ArtifactInvalid),
         }
         let listener = UnixListener::bind(path).map_err(io_error)?;
-        Self::from_bound(listener, parent, leaf, expected_uid)
-            .and_then(|owned| owned.finish_setup(parent_path))
+        Self::from_bound(
+            listener,
+            parent,
+            parent_path.to_path_buf(),
+            leaf,
+            expected_uid,
+        )
+        .and_then(|owned| owned.finish_setup(parent_path))
     }
 
     fn from_bound(
         listener: UnixListener,
         parent: File,
+        parent_path: PathBuf,
         leaf: OsString,
         expected_uid: u32,
     ) -> Result<Self, SelectorBoundaryError> {
         // Without a captured pathname identity there is no safe basis for
         // unlinking after an observation failure. Retaining a fail-closed stale
         // node is preferable to removing a possible replacement.
-        let path = OwnedSocketPath::capture(parent, leaf, expected_uid)?;
+        let path = OwnedSocketPath::capture(parent, parent_path, leaf, expected_uid)?;
         Ok(Self {
             listener,
             path,
@@ -236,6 +254,7 @@ impl OwnedSelectorListener {
     /// # Errors
     /// Returns a closed I/O error when the listener cannot accept a stream.
     pub fn accept(&self) -> Result<UnixStream, SelectorBoundaryError> {
+        self.path.verify()?;
         self.listener
             .accept()
             .map(|(stream, _)| stream)
@@ -1307,6 +1326,10 @@ mod tests {
             &fixture.socket,
             fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
         )?;
+        assert!(matches!(
+            listener.accept(),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
         drop(listener);
         assert!(fs::symlink_metadata(&fixture.socket)?
             .file_type()
@@ -1435,7 +1458,16 @@ mod tests {
             .file_name()
             .ok_or("listener leaf missing")?
             .to_os_string();
-        OwnedSelectorListener::from_bound(listener, parent, leaf, uid).map_err(Into::into)
+        OwnedSelectorListener::from_bound(
+            listener,
+            parent,
+            path.parent()
+                .ok_or("listener parent missing")?
+                .to_path_buf(),
+            leaf,
+            uid,
+        )
+        .map_err(Into::into)
     }
 
     #[test]
@@ -1448,6 +1480,7 @@ mod tests {
             OwnedSelectorListener::from_bound(
                 listener,
                 parent,
+                fixture.directory.path().to_path_buf(),
                 OsString::from("missing.sock"),
                 fixture.uid,
             ),
@@ -1493,6 +1526,7 @@ mod tests {
             owned.finish_setup(fixture.directory.path()),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
+        fs::remove_file(moved_parent.join("selector.sock"))?;
         fs::remove_dir(moved_parent)?;
 
         let listener = OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid)?;
