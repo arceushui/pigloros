@@ -470,12 +470,13 @@ impl ErasureContainmentGateV1 {
     pub fn new_test_open() -> Self {
         let request_heads = Vec::new();
         let topology = Vec::new();
-        let inventory = ErasureVerifiedInventoryV1 {
+        let inventory = Arc::new(ErasureVerifiedInventoryV1 {
             generation: erasure_inventory_generation(&request_heads, &topology),
+            limits: ErasureRecoveryLimitsV1::compiled_maximum(),
             request_heads,
             members: Vec::new(),
-            classifications: BTreeMap::new(),
-        };
+            classifications: Vec::new(),
+        });
         Self {
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: Some(inventory),
