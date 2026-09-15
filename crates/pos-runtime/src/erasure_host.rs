@@ -1084,17 +1084,6 @@ impl ErasureExecutionHostV1 {
         config: StoreConfig,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_verified_empty_with_limits(config, limits)
-    }
-
-    /// Open and recover an exclusively owned store with deployment recovery ceilings.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_verified_empty_with_limits(
-        config: StoreConfig,
-        limits: ErasureRecoveryLimitsV1,
-    ) -> Result<Self, ErasureHostErrorV1> {
         let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         Self::recover_verified_empty_with_limits(store, limits)
     }
@@ -1105,17 +1094,6 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before any sender is issued.
     pub fn open_read_only_verified_empty(
-        path: &str,
-        limits: ErasureRecoveryLimitsV1,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_read_only_verified_empty_with_limits(path, limits)
-    }
-
-    /// Open a read-only `SQLite` store with deployment recovery ceilings.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_read_only_verified_empty_with_limits(
         path: &str,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -1135,18 +1113,6 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before any sender is issued.
     pub fn open_with_authority(
-        config: StoreConfig,
-        composition: &ErasureCoordinatorCompositionV1,
-        limits: ErasureRecoveryLimitsV1,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_with_authority_and_limits(config, composition, limits)
-    }
-
-    /// Open one store with explicit authority and deployment recovery ceilings.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_with_authority_and_limits(
         config: StoreConfig,
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
@@ -1181,18 +1147,6 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_read_only_with_authority_and_limits(path, composition, limits)
-    }
-
-    /// Open a read-only `SQLite` store with authority and deployment recovery ceilings.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_read_only_with_authority_and_limits(
-        path: &str,
-        composition: &ErasureCoordinatorCompositionV1,
-        limits: ErasureRecoveryLimitsV1,
-    ) -> Result<Self, ErasureHostErrorV1> {
         pos_store::sqlite::SqliteStore::open_read_only(path)
             .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)
@@ -1208,17 +1162,6 @@ impl ErasureExecutionHostV1 {
         config: StoreConfig,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_gateway_verified_empty_with_limits(config, limits)
-    }
-
-    /// Open a Gateway-capable store with deployment recovery ceilings.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_gateway_verified_empty_with_limits(
-        config: StoreConfig,
-        limits: ErasureRecoveryLimitsV1,
-    ) -> Result<Self, ErasureHostErrorV1> {
         let store =
             open_gateway_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         Self::recover_verified_empty_gateway_with_limits(store, limits)
@@ -1230,18 +1173,6 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before any sender is issued.
     pub fn open_gateway_with_authority(
-        config: StoreConfig,
-        composition: &ErasureCoordinatorCompositionV1,
-        limits: ErasureRecoveryLimitsV1,
-    ) -> Result<Self, ErasureHostErrorV1> {
-        Self::open_gateway_with_authority_and_limits(config, composition, limits)
-    }
-
-    /// Open a Gateway-capable store with authority and deployment recovery ceilings.
-    ///
-    /// # Errors
-    /// Returns a closed adapter or recovery error before any sender is issued.
-    pub fn open_gateway_with_authority_and_limits(
         config: StoreConfig,
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
@@ -4252,17 +4183,10 @@ mod tests {
         let limits = ErasureRecoveryLimitsV1::new(1, 1, 1)?;
         let composition = ErasureCoordinatorCompositionV1::closed();
 
-        ErasureExecutionHostV1::open_verified_empty_with_limits(StoreConfig::Memory, limits)?;
-        ErasureExecutionHostV1::open_with_authority_and_limits(
-            StoreConfig::Memory,
-            &composition,
-            limits,
-        )?;
-        ErasureExecutionHostV1::open_gateway_verified_empty_with_limits(
-            StoreConfig::Memory,
-            limits,
-        )?;
-        ErasureExecutionHostV1::open_gateway_with_authority_and_limits(
+        ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, limits)?;
+        ErasureExecutionHostV1::open_with_authority(StoreConfig::Memory, &composition, limits)?;
+        ErasureExecutionHostV1::open_gateway_verified_empty(StoreConfig::Memory, limits)?;
+        ErasureExecutionHostV1::open_gateway_with_authority(
             StoreConfig::Memory,
             &composition,
             limits,
@@ -4293,18 +4217,11 @@ mod tests {
             ErasureRecoveryLimitsV1::new(0, 1, 1),
             Err(ErasureErrorV1::ScopeInvalid)
         );
-        ErasureExecutionHostV1::open_read_only_verified_empty_with_limits(&path, limits)?;
         ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, limits)?;
         assert_eq!(
             ErasureRecoveryLimitsV1::new(0, 1, 1),
             Err(ErasureErrorV1::ScopeInvalid)
         );
-        ErasureExecutionHostV1::open_read_only_with_authority_and_limits(
-            &path,
-            &composition,
-            limits,
-        )?;
-
         let missing_path = std::env::temp_dir().join(format!(
             "pigloros-erasure-host-missing-{}.sqlite",
             std::process::id()
