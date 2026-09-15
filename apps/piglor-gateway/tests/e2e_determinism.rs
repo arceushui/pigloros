@@ -310,7 +310,7 @@ impl Drop for FixtureGuard {
     }
 }
 
-fn replay_registry(erasure_gate: Arc<dyn pos_core::ErasureGate>) -> ProjectionRegistry {
+fn replay_registry(erasure_gate: Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistry {
     let mut registry = ProjectionRegistry::new().with_erasure_gate(erasure_gate);
     registry.register("observation", Box::new(EntityStateProjection));
     registry.register("society", Box::new(SocietyReducer));

@@ -59,7 +59,7 @@ impl HostedCliStore {
             })
     }
 
-    fn containment_gate(&self) -> std::sync::Arc<dyn pos_core::ErasureGate> {
+    fn containment_gate(&self) -> std::sync::Arc<pos_core::ErasureContainmentGateV1> {
         self.gate.clone()
     }
 }

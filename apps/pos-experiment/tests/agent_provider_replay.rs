@@ -730,7 +730,7 @@ fn backtest_runner_rejects_a_caller_supplied_gate() {
 
 #[test]
 fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
-    let foreign: Arc<dyn pos_core::ErasureGate> =
+    let foreign: Arc<pos_core::ErasureContainmentGateV1> =
         Arc::new(ErasureContainmentGateV1::new_test_open());
     let error = BacktestRunner::new(
         BacktestConfig {
@@ -752,7 +752,7 @@ fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
 
 #[test]
 fn backtest_runner_rejects_a_removed_bound_train_gate() {
-    let removed: Arc<dyn pos_core::ErasureGate> =
+    let removed: Arc<pos_core::ErasureContainmentGateV1> =
         Arc::new(ErasureContainmentGateV1::new_test_open());
     let error = BacktestRunner::new(
         BacktestConfig {
@@ -779,7 +779,7 @@ fn backtest_runner_rejects_a_removed_bound_train_gate() {
 #[test]
 fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
     let calls = Arc::new(AtomicU64::new(0));
-    let foreign: Arc<dyn pos_core::ErasureGate> =
+    let foreign: Arc<pos_core::ErasureContainmentGateV1> =
         Arc::new(ErasureContainmentGateV1::new_test_open());
     let error = BacktestRunner::new(
         BacktestConfig {

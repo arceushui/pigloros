@@ -62,7 +62,7 @@ const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 100
 
 struct OpenedCliStore {
     store: HostedCliStore,
-    erasure_gate: std::sync::Arc<dyn pos_core::ErasureGate>,
+    erasure_gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
 }
 
 /// Open a store through the CLI composition seam.
