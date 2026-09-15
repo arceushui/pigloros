@@ -4596,6 +4596,7 @@ impl ErasureVerifiedInventoryV1 {
         mut admissions: Vec<PreparedErasureForkAdmissionV1>,
         parent_index: usize,
     ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
+        let successor_timelines = classifications.len().saturating_add(1);
         let (parent_timeline, parent_classifications) = classifications.swap_remove(parent_index);
 
         let mut successor_members = Vec::new();
