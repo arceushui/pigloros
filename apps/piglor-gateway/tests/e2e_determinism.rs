@@ -9,8 +9,8 @@ use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Hash, Plugin, PluginId,
-    PrincipalRefV1, Seq, TimelineId, WallTime,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Hash,
+    Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -415,7 +415,7 @@ struct MultiRateScenario {
     society_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
-    erasure_gate: Arc<dyn pos_core::ErasureGate>,
+    erasure_gate: Arc<ErasureContainmentGateV1>,
     fast_decisions: Arc<AtomicUsize>,
     slow_decisions: Arc<AtomicUsize>,
     probe_log: Arc<Mutex<Vec<u64>>>,
@@ -618,7 +618,7 @@ async fn run_tick_boundaries(
     .test_ok()
     .map_err(|error| std::io::Error::other(format!("open pending store: {error}")))?;
     pending_store
-        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
+        .bind_erasure_gate(scenario.erasure_gate.clone())
         .test_ok()
         .map_err(|error| std::io::Error::other(format!("bind pending gate: {error}")))?;
     let pending = pending_store
@@ -851,7 +851,7 @@ fn assert_projection_state(
         Some(EVENT_TYPE_ACTION)
     );
     let events = session.source_events().test_ok()?;
-    let mut replayed = replay_registry(Arc::clone(&scenario.erasure_gate));
+    let mut replayed = replay_registry(scenario.erasure_gate.clone());
     replayed.fold_events(&events);
     snapshot_json(&replayed, scenario.timeline)
 }
@@ -867,7 +867,7 @@ fn assert_replay(
     .test_ok()?;
     let mut first_store = first_store;
     first_store
-        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
+        .bind_erasure_gate(scenario.erasure_gate.clone())
         .test_ok()?;
     let stored = first_store
         .read(scenario.timeline, SeqRange::all())
@@ -880,7 +880,7 @@ fn assert_replay(
         stored[1].wall_time > stored[2].wall_time,
         "sequence order must deliberately conflict with wall-clock order"
     );
-    let mut first_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
+    let mut first_replay = replay_registry(scenario.erasure_gate.clone());
     first_replay.fold_events(&stored);
     let second_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
@@ -888,9 +888,9 @@ fn assert_replay(
     .test_ok()?;
     let mut second_store = second_store;
     second_store
-        .bind_erasure_gate(Arc::clone(&scenario.erasure_gate))
+        .bind_erasure_gate(scenario.erasure_gate.clone())
         .test_ok()?;
-    let mut second_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
+    let mut second_replay = replay_registry(scenario.erasure_gate.clone());
     let second_events = second_store
         .read(scenario.timeline, SeqRange::all())
         .test_ok()?;

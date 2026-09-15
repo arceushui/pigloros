@@ -10,12 +10,13 @@ use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
-    ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1,
-    ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureForkPersistencePortV1,
-    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
-    ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1, ErasureInventoryResultV1,
-    ErasureLifecycleV1, ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasureContainmentGateV1, ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1,
+    ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
+    ErasureForkPersistencePortV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryObservationV1,
+    ErasureInventoryPersistencePortV1, ErasureInventoryResultV1, ErasureLifecycleV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
     ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
@@ -36,28 +37,6 @@ use erasure_support::{
     persistence_target as target, reference, retry_admission as fixture_retry_admission,
     FreezeEvidenceFixtureInput, RequestFixtureInput, RetryAdmissionFixture,
 };
-
-struct PermitErasureGate;
-
-impl pos_core::ErasureGate for PermitErasureGate {
-    fn authorize(
-        &self,
-        _timeline: TimelineId,
-        _operation: pos_core::ErasureProtectedOperationV1,
-    ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-        Ok(())
-    }
-
-    fn with_fence(
-        &self,
-        _timeline: TimelineId,
-        _operation: pos_core::ErasureProtectedOperationV1,
-        effect: &mut dyn FnMut(),
-    ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-        effect();
-        Ok(())
-    }
-}
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
@@ -579,7 +558,7 @@ where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
     let mut store = store;
-    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     for (id, name) in [(1_u128, "first"), (2_u128, "second")] {
         store.create_timeline_with_meta(TimelineMeta {
             id: TimelineId::from_ulid(Ulid::from(id)),
@@ -606,7 +585,7 @@ fn prepared_fork<S>(mut store: S) -> Result<PreparedFork<S>, Box<dyn std::error:
 where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
-    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let parent = store.create_timeline("fork-parent")?.id();
     store.append(
         parent,
@@ -775,7 +754,7 @@ where
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1,
 {
-    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let parent = store.create_timeline("overlap-parent")?.id();
     store.append(
         parent,
@@ -867,7 +846,7 @@ where
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1,
 {
-    store.bind_erasure_gate(Arc::new(PermitErasureGate))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let first = store.create_timeline("first")?.id();
     let second = store.create_timeline("second")?.id();
     let parent = first.max(second);
