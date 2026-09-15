@@ -264,7 +264,7 @@ fn random_nonzero_id() -> Result<[u8; 16], SelectorBoundaryError> {
     let mut id = [0_u8; 16];
     let mut remaining = id.as_mut_slice();
     while !remaining.is_empty() {
-        let read = getrandom(remaining, GetRandomFlags::empty())
+        let read = getrandom(&mut *remaining, GetRandomFlags::empty())
             .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
         if read == 0 {
             return Err(SelectorBoundaryError::SelectorUnavailable);
