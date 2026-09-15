@@ -39,9 +39,7 @@ use pos_core::{
     ProposedAction,
 };
 #[cfg(test)]
-use pos_core::{
-    geo_admission::GeoLocationAdmissionStore, store::EventStore, ErasureContainmentGateV1,
-};
+use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
 use pos_runtime::{
