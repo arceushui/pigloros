@@ -107,8 +107,8 @@ def main() -> None:
         ),
         (
             PRIMARY_RUNNER,
-            'compgen -G "$profile_directory/$profile_prefix-*.profraw"',
-            "true",
+            'chmod 0666 "$profile_output"',
+            'chmod 0600 "$profile_output"',
         ),
         (
             PRIMARY_RUNNER,
