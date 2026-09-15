@@ -499,7 +499,9 @@ impl ProviderTransport {
         Ok(Self {
             execute_endpoint: endpoint.clone(),
             control_endpoint: endpoint,
-            admitted_process: Mutex::new(None),
+            admitted_process: Mutex::new(Some(provider_process_identity(
+                rustix::process::getpid(),
+            )?)),
         })
     }
 

@@ -167,8 +167,14 @@ impl UpdateFixture {
             .path()
             .join(kind.directory())
             .join(hex_name(content));
-        fs::write(&path, encoded)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(kind.required_mode()))?;
+        if path.exists() {
+            if fs::read(&path)? != encoded {
+                return Err("successor object identity collision".into());
+            }
+        } else {
+            fs::write(&path, encoded)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(kind.required_mode()))?;
+        }
 
         let mut objects = array_values(&manifest_fields[10])?.to_vec();
         objects.push(Value::Array(vec![

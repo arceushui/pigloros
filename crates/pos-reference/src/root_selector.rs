@@ -85,7 +85,7 @@ fn map_to_unit_error<T>(_: T) {}
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
 /// rejects it before any capability can be returned. [`RootSelectorRuntime`]
 /// owns the only production activation path.
-pub struct RootSelectorComposition {
+struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
     updates: Mutex<()>,
 }
@@ -153,14 +153,14 @@ impl OwnedSocketPath {
 /// [`RootSelectorComposition`] never binds the fixed endpoint. Cleanup retains
 /// the root-owned parent directory and removes the pathname only while it still
 /// names the socket inode created by this owner.
-pub struct OwnedSelectorListener {
+struct OwnedSelectorListener {
     listener: UnixListener,
     path: OwnedSocketPath,
     owned: bool,
 }
 
 /// Identity-bound owner of the fixed root-administrator listener.
-pub struct OwnedAdministratorListener {
+struct OwnedAdministratorListener {
     inner: OwnedSelectorListener,
 }
 
@@ -179,7 +179,7 @@ impl OwnedSelectorListener {
     /// Returns a closed boundary error if the root-owned runtime directory is
     /// unsafe, the endpoint already exists, or the bound socket cannot be
     /// authenticated through the retained parent directory.
-    pub fn bind() -> Result<Self, SelectorBoundaryError> {
+    fn bind() -> Result<Self, SelectorBoundaryError> {
         Self::bind_beneath(
             Path::new("/"),
             Path::new(SANDBOX_SELECTOR_SOCKET_RELATIVE),
@@ -274,7 +274,8 @@ impl OwnedSelectorListener {
     ///
     /// # Errors
     /// Returns a closed I/O error when the listener cannot accept a stream.
-    pub fn accept(&self) -> Result<UnixStream, SelectorBoundaryError> {
+    #[cfg(test)]
+    fn accept(&self) -> Result<UnixStream, SelectorBoundaryError> {
         self.path.verify()?;
         self.listener
             .accept()
@@ -300,7 +301,8 @@ impl OwnedSelectorListener {
     /// # Errors
     /// Returns a closed identity error if the pathname is absent or has been
     /// replaced. A replacement is never removed.
-    pub fn close(mut self) -> Result<(), SelectorBoundaryError> {
+    #[cfg(test)]
+    fn close(mut self) -> Result<(), SelectorBoundaryError> {
         let result = self.remove_owned_socket();
         if result.is_ok() {
             self.owned = false;
@@ -329,6 +331,10 @@ impl OwnedAdministratorListener {
     fn try_accept(&self) -> Result<Option<UnixStream>, SelectorBoundaryError> {
         self.inner.try_accept()
     }
+
+    fn verify(&self) -> Result<(), SelectorBoundaryError> {
+        self.inner.path.verify()
+    }
 }
 
 impl RootSelectorRuntime {
@@ -339,14 +345,11 @@ impl RootSelectorRuntime {
     /// the administrative listener is valid first, and the evaluator listener
     /// can then be bound without replacing any existing node.
     pub fn activate() -> Result<Self, SelectorBoundaryError> {
-        RootSelectorComposition::open().and_then(Self::from_composition)
-    }
-
-    fn from_composition(
-        composition: RootSelectorComposition,
-    ) -> Result<Self, SelectorBoundaryError> {
         let administrator = OwnedAdministratorListener::bind()?;
+        let composition = RootSelectorComposition::open()?;
+        administrator.verify()?;
         let evaluator = OwnedSelectorListener::bind()?;
+        administrator.verify()?;
         administrator.set_nonblocking()?;
         evaluator.set_nonblocking()?;
         Ok(Self {
@@ -371,26 +374,33 @@ impl RootSelectorRuntime {
             evaluator,
         } = self;
         let composition = Arc::new(composition);
+        let administrator = Arc::new(administrator);
         let stopped = Arc::new(AtomicBool::new(false));
         let (completed, completion) = std::sync::mpsc::channel();
         thread::scope(|scope| {
             let admin_composition = Arc::clone(&composition);
+            let admin_listener = Arc::clone(&administrator);
             let admin_stopped = Arc::clone(&stopped);
             let admin_completed = completed.clone();
             let admin = scope.spawn(move || {
                 let result =
-                    serve_administrator(&administrator, &admin_composition, &admin_stopped);
-                drop(admin_completed.send(result));
+                    serve_administrator(&admin_listener, &admin_composition, &admin_stopped);
+                let _send_result = admin_completed.send(result);
                 result
             });
 
             let evaluator_composition = Arc::clone(&composition);
+            let evaluator_administrator = Arc::clone(&administrator);
             let evaluator_stopped = Arc::clone(&stopped);
             let evaluator_completed = completed.clone();
             let evaluator_thread = scope.spawn(move || {
-                let result =
-                    serve_evaluator(&evaluator, &evaluator_composition, &evaluator_stopped);
-                drop(evaluator_completed.send(result));
+                let result = serve_evaluator(
+                    &evaluator,
+                    &evaluator_administrator,
+                    &evaluator_composition,
+                    &evaluator_stopped,
+                );
+                let _send_result = evaluator_completed.send(result);
                 result
             });
             drop(completed);
@@ -417,10 +427,11 @@ fn serve_administrator(
     stopped: &AtomicBool,
 ) -> Result<(), SelectorBoundaryError> {
     while !stopped.load(Ordering::Acquire) {
-        if let Some(stream) = listener.try_accept()? {
-            drop(composition.update_installation(stream));
-        } else {
-            thread::sleep(Duration::from_millis(10));
+        match listener.try_accept()? {
+            Some(stream) => {
+                let _update_result = composition.update_installation(stream);
+            }
+            None => thread::sleep(Duration::from_millis(10)),
         }
     }
     Ok(())
@@ -428,17 +439,20 @@ fn serve_administrator(
 
 fn serve_evaluator(
     listener: &OwnedSelectorListener,
+    administrator: &OwnedAdministratorListener,
     composition: &Arc<RootSelectorComposition>,
     stopped: &AtomicBool,
 ) -> Result<(), SelectorBoundaryError> {
     while !stopped.load(Ordering::Acquire) {
-        if let Some(stream) = listener.try_accept()? {
-            let composition = Arc::clone(composition);
-            drop(thread::spawn(move || {
-                drop(composition.evaluate_root_connection(stream));
-            }));
-        } else {
-            thread::sleep(Duration::from_millis(10));
+        administrator.verify()?;
+        match listener.try_accept()? {
+            Some(stream) => {
+                let composition = Arc::clone(composition);
+                let _connection = thread::spawn(move || {
+                    let _evaluation_result = composition.evaluate_root_connection(stream);
+                });
+            }
+            None => thread::sleep(Duration::from_millis(10)),
         }
     }
     Ok(())
@@ -555,7 +569,7 @@ impl RootSelectorComposition {
     ///
     /// Returns a closed boundary error for missing, invalid, pending-recovery,
     /// or unavailable installation/provider state.
-    pub fn open() -> Result<Self, SelectorBoundaryError> {
+    fn open() -> Result<Self, SelectorBoundaryError> {
         InstalledSelectorState::open()
             .and_then(InstalledSelectorState::authenticate_bootstrap)
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
@@ -579,10 +593,7 @@ impl RootSelectorComposition {
     /// Returns a closed boundary error when the stream cannot be authenticated,
     /// decoded, executed, or answered. Protocol-level failures are encoded in
     /// the selector reply where the request identity permits one.
-    pub fn evaluate_root_connection(
-        &self,
-        stream: UnixStream,
-    ) -> Result<(), SelectorBoundaryError> {
+    fn evaluate_root_connection(&self, stream: UnixStream) -> Result<(), SelectorBoundaryError> {
         self.service.handle_connection(stream)
     }
 
@@ -623,6 +634,7 @@ impl RootSelectorComposition {
             .service
             .transport
             .complete_committed_update(committed, LIVE_UPDATE_TIMEOUT)?;
+        self.service.evaluation_namespaces.clear()?;
         self.service
             .admission
             .admit_successor(&closed.admitted, successor)?;
@@ -755,7 +767,13 @@ struct SelectorAdmissionState {
     admitted: Arc<AdmittedSelectorProvider>,
     runtime: AdmittedProviderRuntime,
     open: bool,
-    live_attempts: BTreeMap<[u8; 16], usize>,
+    attempts: BTreeMap<[u8; 16], AttemptAdmissionState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AttemptAdmissionState {
+    active_requests: usize,
+    provider_retained: bool,
 }
 
 struct SelectorAdmissionLease<'a> {
@@ -777,7 +795,7 @@ impl SelectorAdmission {
                 admitted: Arc::new(admitted),
                 runtime,
                 open: true,
-                live_attempts: BTreeMap::new(),
+                attempts: BTreeMap::new(),
             }),
         }
     }
@@ -800,12 +818,16 @@ impl SelectorAdmission {
         if !state.open {
             return Err(SelectorBoundaryError::SelectorUnavailable);
         }
-        if !state.live_attempts.contains_key(&attempt_id)
-            && state.live_attempts.len() >= MAX_RETAINED_EVALUATION_NAMESPACES
+        if !state.attempts.contains_key(&attempt_id)
+            && state.attempts.len() >= MAX_RETAINED_EVALUATION_NAMESPACES
         {
             return Err(SelectorBoundaryError::SelectorUnavailable);
         }
-        *state.live_attempts.entry(attempt_id).or_default() += 1;
+        state
+            .attempts
+            .entry(attempt_id)
+            .or_default()
+            .active_requests += 1;
         let admitted = Arc::clone(&state.admitted);
         drop(state);
         Ok(SelectorAdmissionLease {
@@ -826,6 +848,7 @@ impl SelectorAdmission {
     fn close(&self) -> Result<(), SelectorBoundaryError> {
         let mut state = self.state.lock().map_err(selector_unavailable)?;
         state.open = false;
+        drop(state);
         Ok(())
     }
 
@@ -838,7 +861,7 @@ impl SelectorAdmission {
         Ok(ClosedSelectorAdmission {
             admitted: Arc::clone(&state.admitted),
             runtime: state.runtime.clone(),
-            live_attempt_ids: state.live_attempts.keys().copied().collect(),
+            live_attempt_ids: state.attempts.keys().copied().collect(),
         })
     }
 
@@ -865,6 +888,7 @@ impl SelectorAdmission {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         state.admitted = Arc::new(successor);
+        state.attempts.clear();
         state.open = true;
         drop(state);
         Ok(())
@@ -875,20 +899,55 @@ impl SelectorAdmission {
             return;
         };
         if let std::collections::btree_map::Entry::Occupied(mut entry) =
-            state.live_attempts.entry(attempt_id)
+            state.attempts.entry(attempt_id)
         {
-            if *entry.get() > 1 {
-                *entry.get_mut() -= 1;
-            } else {
+            if entry.get().active_requests == 0 {
+                return;
+            }
+            entry.get_mut().active_requests -= 1;
+            if entry.get().active_requests == 0 && !entry.get().provider_retained {
                 entry.remove();
             }
         }
+    }
+
+    fn begin_provider_execution(&self, attempt_id: [u8; 16]) -> Result<(), ProviderTransportError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+        if !state.open || !state.attempts.contains_key(&attempt_id) {
+            return Err(ProviderTransportError::BeforeAdmission);
+        }
+        drop(state);
+        Ok(())
+    }
+
+    fn retain_provider_state(&self, attempt_id: [u8; 16]) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        state
+            .attempts
+            .get_mut(&attempt_id)
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?
+            .provider_retained = true;
+        drop(state);
+        Ok(())
     }
 }
 
 impl Drop for SelectorAdmissionLease<'_> {
     fn drop(&mut self) {
         self.owner.release(self.attempt_id);
+    }
+}
+
+impl SelectorAdmissionLease<'_> {
+    fn begin_provider_execution(&self) -> Result<(), ProviderTransportError> {
+        self.owner.begin_provider_execution(self.attempt_id)
+    }
+
+    fn retain_provider_state(&self) -> Result<(), SelectorBoundaryError> {
+        self.owner.retain_provider_state(self.attempt_id)
     }
 }
 
@@ -927,6 +986,14 @@ struct EvaluationNamespaceLease {
 }
 
 impl EvaluationNamespaceBindings {
+    fn clear(&self) -> Result<(), SelectorBoundaryError> {
+        let mut states = self.states.lock().map_err(selector_unavailable)?;
+        states.clear();
+        drop(states);
+        self.changed.notify_all();
+        Ok(())
+    }
+
     fn execute_ordered(
         &self,
         request: &crate::evaluator_protocol::EvaluationRequest,
@@ -1105,17 +1172,25 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         // The same EVR1 legitimately derives one ID per selected case and exact
         // retries remain provider-idempotent. Only a namespace bound to another
         // EVR1 digest is a conflict.
-        let namespace_execution =
-            self.evaluation_namespaces
-                .execute_ordered(&decoded.request, || {
-                    self.transport.execute(
-                        admitted.provider(),
-                        &commitment,
-                        &spx1,
-                        input,
-                        Duration::from_millis(resolved.attempt().watchdog_ms),
-                    )
-                })?;
+        let namespace_execution = self
+            .evaluation_namespaces
+            .execute_ordered(&decoded.request, || {
+                admission.begin_provider_execution()?;
+                self.transport.execute(
+                    admitted.provider(),
+                    &commitment,
+                    &spx1,
+                    input,
+                    Duration::from_millis(resolved.attempt().watchdog_ms),
+                )
+            })
+            .and_then(|execution| {
+                if provider_retains_namespace(&execution.result) {
+                    admission.retain_provider_state()?;
+                }
+                Ok(execution)
+            })?;
+        drop(admission);
         let terminal = match namespace_execution.result {
             Ok(terminal) => terminal,
             Err(ProviderTransportError::BeforeAdmission) => {
@@ -2220,9 +2295,9 @@ mod tests {
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
-        epochs: [u64; 3],
+        responses: &[([u64; 3], bool)],
     ) -> TestResult {
-        for identity_conflict in [false, true] {
+        for &(epochs, identity_conflict) in responses {
             let mut stream = accept_test_connection(listener)?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -2280,7 +2355,12 @@ mod tests {
             resolved.attempt(),
             &[],
         )?;
-        let epochs = [
+        let current_epochs = [
+            admitted.bootstrap().trust().trust_epoch(),
+            admitted.bootstrap().revocation().revocation_epoch(),
+            admitted.bootstrap().policy().policy_epoch(),
+        ];
+        let successor_epochs = [
             admitted.bootstrap().trust().trust_epoch(),
             admitted.bootstrap().revocation().revocation_epoch() + 1,
             admitted.bootstrap().policy().policy_epoch() + 1,
@@ -2307,40 +2387,83 @@ mod tests {
                 &execute_fixture,
                 &execute_provider_identity,
                 &commitment,
-                epochs,
+                &[
+                    (current_epochs, false),
+                    (successor_epochs, false),
+                    (successor_epochs, true),
+                ],
             )
             .map_err(|error| error.to_string())
         });
-        let composition = RootSelectorComposition::open()?;
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
-        let runtime = RootSelectorRuntime::from_composition(composition)?;
+        let runtime = RootSelectorRuntime::activate()?;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
+        let runtime = std::thread::spawn(move || runtime.serve());
 
-        let (mut administrator, selector) = UnixStream::pair()?;
-        std::thread::scope(|scope| -> TestResult {
-            let update = scope.spawn(|| {
-                runtime
-                    .composition
-                    .update_installation(selector)
-                    .map_err(|error| error.to_string())
-            });
-            let challenge = read_frame(&mut administrator)?;
-            let siu1 = update_fixture.request_from_challenge(&challenge, None)?;
-            write_frame(&mut administrator, &siu1)?;
-            administrator.shutdown(std::net::Shutdown::Write)?;
-            let acknowledgement = read_frame(&mut administrator)?;
-            let mut trailing = Vec::new();
-            administrator.read_to_end(&mut trailing)?;
-            assert!(!acknowledgement.is_empty());
-            assert!(trailing.is_empty());
-            update.join().map_err(|_| "selector update panicked")??;
-            Ok(())
-        })?;
+        let manifest_path = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)
+            .join(crate::selector::installation::MANIFEST_NAME);
+        let original_manifest = fs::read(&manifest_path)?;
+        let mut abandoned =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        abandoned.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let abandoned_challenge = read_frame(&mut abandoned)?;
+        drop(abandoned);
 
-        let (_, reply) =
-            evaluate_composition_request(&runtime.composition, &request, resolved.attempt())?;
+        let mut cross_connection =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        cross_connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let cross_challenge = read_frame(&mut cross_connection)?;
+        assert_ne!(cross_challenge, abandoned_challenge);
+        let cross_update = update_fixture.request_from_challenge(&abandoned_challenge, None)?;
+        write_frame(&mut cross_connection, &cross_update)?;
+        cross_connection.shutdown(std::net::Shutdown::Write)?;
+        let mut rejected = Vec::new();
+        cross_connection.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+
+        let mut extra_frame =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        extra_frame.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let extra_frame_challenge = read_frame(&mut extra_frame)?;
+        let extra_frame_update =
+            update_fixture.request_from_challenge(&extra_frame_challenge, None)?;
+        write_frame(&mut extra_frame, &extra_frame_update)?;
+        extra_frame.write_all(&[0])?;
+        extra_frame.shutdown(std::net::Shutdown::Write)?;
+        rejected.clear();
+        extra_frame.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+        assert_eq!(fs::read(&manifest_path)?, original_manifest);
+
+        let reply = evaluate_fixed_runtime_request(&request, resolved.attempt())?;
+        assert!(reply.observation.is_ok());
+
+        let mut administrator =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        administrator.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let challenge = read_frame(&mut administrator)?;
+        let siu1 = update_fixture.request_from_challenge(&challenge, None)?;
+        write_frame(&mut administrator, &siu1)?;
+        administrator.shutdown(std::net::Shutdown::Write)?;
+        let acknowledgement = read_frame(&mut administrator)?;
+        let mut trailing = Vec::new();
+        administrator.read_to_end(&mut trailing)?;
+        assert!(!acknowledgement.is_empty());
+        assert!(trailing.is_empty());
+
+        let mut stale = UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        stale.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let successor_challenge = read_frame(&mut stale)?;
+        assert_ne!(successor_challenge, challenge);
+        write_frame(&mut stale, &siu1)?;
+        stale.shutdown(std::net::Shutdown::Write)?;
+        rejected.clear();
+        stale.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+
+        let reply = evaluate_fixed_runtime_request(&request, resolved.attempt())?;
         assert_eq!(
             reply.observation,
             Ok(crate::evaluator::SubjectObservation {
@@ -2353,11 +2476,7 @@ mod tests {
         let mut conflicting_request = request.clone();
         conflicting_request.implementation.organization_id = Some("conflicting-owner".to_owned());
         refresh_request_digest(&mut conflicting_request)?;
-        let (_, reply) = evaluate_composition_request(
-            &runtime.composition,
-            &conflicting_request,
-            resolved.attempt(),
-        )?;
+        let reply = evaluate_fixed_runtime_request(&conflicting_request, resolved.attempt())?;
         assert_eq!(
             reply.observation,
             Err(crate::evaluator::AdapterError::ProtocolFailure)
@@ -2369,10 +2488,36 @@ mod tests {
         execute_provider
             .join()
             .map_err(|_| "provider execute thread panicked")??;
-        drop(runtime);
+        fs::remove_file(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        assert!(runtime
+            .join()
+            .map_err(|_| "root selector runtime panicked")?
+            .is_err());
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         Ok(())
+    }
+
+    fn evaluate_fixed_runtime_request(
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        attempt: &crate::evaluator::CaseAttempt,
+    ) -> TestResult<crate::selector_protocol::DecodedSelectorReply> {
+        let encoded = encoded_request(request, attempt)?;
+        let mut client = UnixStream::connect(crate::selector::SANDBOX_SELECTOR_SOCKET)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        write_frame(&mut client, &encoded.control)?;
+        client.write_all(&encoded.attempt_stream)?;
+        client.shutdown(std::net::Shutdown::Write)?;
+        let control = read_frame(&mut client)?;
+        let mut trailing = Vec::new();
+        client.read_to_end(&mut trailing)?;
+        Ok(crate::selector_protocol::decode_reply(
+            &control,
+            &trailing,
+            &encoded,
+            request.request_digest,
+            SELECTOR_INPUT_LIMIT,
+        )?)
     }
 
     #[test]
@@ -2497,13 +2642,15 @@ mod tests {
         let second = admission.acquire([2; 16])?;
         let first = admission.acquire([1; 16])?;
         let duplicate = admission.acquire([2; 16])?;
+        first.retain_provider_state()?;
+        drop(first);
         let closed = admission.close_and_snapshot()?;
         assert_eq!(closed.live_attempt_ids, vec![[1; 16], [2; 16]]);
         assert!(admission.current().is_err());
         assert!(admission.acquire([3; 16]).is_err());
+        assert!(second.begin_provider_execution().is_err());
         assert!(admission.close_and_snapshot().is_err());
 
-        drop(first);
         drop(second);
         drop(duplicate);
         admission.reopen_previous(&closed.admitted)?;
