@@ -146,12 +146,8 @@ impl OwnedSelectorListener {
             Ok(()) => {}
             Err(error) => {
                 drop(listener);
-                drop(remove_matching_socket(
-                    &parent,
-                    &leaf,
-                    identity,
-                    expected_uid,
-                ));
+                let _cleanup_result =
+                    remove_matching_socket(&parent, &leaf, identity, expected_uid);
                 return Err(error);
             }
         }
@@ -201,7 +197,7 @@ impl OwnedSelectorListener {
 impl Drop for OwnedSelectorListener {
     fn drop(&mut self) {
         if self.owned {
-            drop(self.remove_owned_socket());
+            let _cleanup_result = self.remove_owned_socket();
         }
     }
 }
