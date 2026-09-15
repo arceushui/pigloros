@@ -1260,6 +1260,21 @@ mod tests {
             fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
         )?;
         let uid = fs::metadata(root.path())?.uid();
+        assert!(OwnedSelectorListener::bind_beneath(root.path(), Path::new(""), uid).is_err());
+        assert!(OwnedSelectorListener::bind_beneath(root.path(), Path::new("."), uid).is_err());
+        assert!(OwnedSelectorListener::bind_beneath(
+            &root.path().join("missing"),
+            Path::new("runtime/selector.sock"),
+            uid,
+        )
+        .is_err());
+        assert!(OwnedSelectorListener::bind_in_parent(
+            Path::new("/"),
+            File::open(root.path())?,
+            OsString::from("selector.sock"),
+            uid,
+        )
+        .is_err());
         let parent = root.path().join("runtime");
         fs::create_dir(&parent)?;
         fs::set_permissions(&parent, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
