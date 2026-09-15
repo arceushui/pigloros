@@ -862,23 +862,17 @@ fn local_error_before_spx1_is_valid(error: &SandboxLocalErrorV1) -> bool {
     let attempt = error.attempt_id.is_some();
     let admission = error.agr1_digest.is_some();
     !admission
-        && (error.operation.is_none() || execute)
-        && matches!(
-            error.code,
+        && match error.code {
             SandboxLocalErrorCodeV1::PolicyUnavailable
-                | SandboxLocalErrorCodeV1::InvalidSelectorRequest
-                | SandboxLocalErrorCodeV1::RequestAuthorityMismatch
-                | SandboxLocalErrorCodeV1::PayloadLimitExceeded
-        )
-        && if matches!(
-            error.code,
-            SandboxLocalErrorCodeV1::RequestAuthorityMismatch
-        ) {
-            execute && request && attempt
-        } else if error.code == SandboxLocalErrorCodeV1::PayloadLimitExceeded {
-            (!request && !attempt) || (execute && request && attempt)
-        } else {
-            (!request && !attempt) || (request && execute)
+            | SandboxLocalErrorCodeV1::RequestAuthorityMismatch => execute && request && attempt,
+            SandboxLocalErrorCodeV1::InvalidSelectorRequest => {
+                error.operation.is_none() && !request && !attempt
+            }
+            SandboxLocalErrorCodeV1::PayloadLimitExceeded => {
+                (!request && !attempt && error.operation.is_none())
+                    || (execute && request && attempt)
+            }
+            _ => false,
         }
 }
 

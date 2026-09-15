@@ -178,20 +178,19 @@ fn validate_local_error_shape(
     let valid = match error.phase {
         SandboxLocalErrorPhase::BeforeSpx1 => {
             !admission
-                && (error.operation.is_none() || execute)
-                && matches!(
-                    error.code,
+                && match error.code {
                     SandboxLocalErrorCode::PolicyUnavailable
-                        | SandboxLocalErrorCode::InvalidSelectorRequest
-                        | SandboxLocalErrorCode::RequestAuthorityMismatch
-                        | SandboxLocalErrorCode::PayloadLimitExceeded
-                )
-                && if matches!(error.code, SandboxLocalErrorCode::RequestAuthorityMismatch) {
-                    execute && request && attempt
-                } else if error.code == SandboxLocalErrorCode::PayloadLimitExceeded {
-                    (!request && !attempt) || (execute && request && attempt)
-                } else {
-                    (!request && !attempt) || (request && execute)
+                    | SandboxLocalErrorCode::RequestAuthorityMismatch => {
+                        execute && request && attempt
+                    }
+                    SandboxLocalErrorCode::InvalidSelectorRequest => {
+                        error.operation.is_none() && !request && !attempt
+                    }
+                    SandboxLocalErrorCode::PayloadLimitExceeded => {
+                        (!request && !attempt && error.operation.is_none())
+                            || (execute && request && attempt)
+                    }
+                    _ => false,
                 }
         }
         SandboxLocalErrorPhase::AfterSpx1BeforeAdmission => {

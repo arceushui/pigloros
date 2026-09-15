@@ -201,6 +201,8 @@ jobs:
       - name: Prove reference evaluator implementation independence
         run: bash scripts/check-reference-evaluator-independence.sh
       - name: cargo test (all features, no ignored skip)
+        env:
+          PIGLOROS_PRIVILEGED_COMPOSITION_RUNNER: ${{ github.workspace }}/scripts/run-isolated-root-selector-test.sh
         run: |
           set -euo pipefail
           cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
@@ -429,6 +431,8 @@ jobs:
       # Generate one complete report, then let covgate check the changed
       # production diff before spending time on the repository-wide floor.
       - name: Generate coverage report for changed-code gate
+        env:
+          PIGLOROS_PRIVILEGED_COMPOSITION_RUNNER: ${{ github.workspace }}/scripts/run-isolated-root-selector-test.sh
         run: >
           cargo llvm-cov --workspace --all-features --locked
           --json --output-path "${{ runner.temp }}/coverage.json"

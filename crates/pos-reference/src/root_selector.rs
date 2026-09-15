@@ -6,15 +6,20 @@
 //! deliberately exposes no runtime socket by itself.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rustix::fs::{statat, unlinkat, AtFlags, FileType};
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
@@ -48,6 +53,8 @@ const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_RETAINED_EVALUATION_NAMESPACES: usize = 256;
 const ROOT_UID: u32 = 0;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const SELECTOR_SOCKET_MODE: u32 = 0o600;
+const SELECTOR_PARENT_MODE: u32 = 0o700;
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
@@ -70,6 +77,203 @@ fn map_to_unit_error<T>(_: T) {}
 /// only after composing the mandatory administrative and evaluator listeners.
 pub struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
+}
+
+#[derive(Clone, Copy)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+/// Identity-bound owner of the fixed evaluator listener.
+///
+/// Constructing this type is the activation step owned by #359. Merely opening
+/// [`RootSelectorComposition`] never binds the fixed endpoint. Cleanup retains
+/// the root-owned parent directory and removes the pathname only while it still
+/// names the socket inode created by this owner.
+pub struct OwnedSelectorListener {
+    listener: UnixListener,
+    parent: File,
+    leaf: OsString,
+    identity: SocketIdentity,
+    owner_uid: u32,
+    owned: bool,
+}
+
+impl OwnedSelectorListener {
+    /// Bind and own the fixed evaluator listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed boundary error if the root-owned runtime directory is
+    /// unsafe, the endpoint already exists, or the bound socket cannot be
+    /// authenticated through the retained parent directory.
+    pub fn bind() -> Result<Self, SelectorBoundaryError> {
+        Self::bind_path(
+            Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET),
+            ROOT_UID,
+        )
+    }
+
+    fn bind_path(path: &Path, expected_uid: u32) -> Result<Self, SelectorBoundaryError> {
+        let parent_path = path
+            .parent()
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let leaf = path
+            .file_name()
+            .map(OsString::from)
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let parent = File::open(parent_path).map_err(io_error)?;
+        validate_listener_parent(parent_path, &parent, expected_uid)?;
+        match statat(&parent, Path::new(&leaf), AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {}
+            _ => return Err(SelectorBoundaryError::ArtifactInvalid),
+        }
+        let listener = UnixListener::bind(path).map_err(io_error)?;
+        let identity = bound_socket_identity(&parent, &leaf, expected_uid)?;
+        let setup =
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE))
+                .map_err(io_error)
+                .and_then(|()| listener_socket_identity(&parent, &leaf, expected_uid))
+                .and_then(|current| {
+                    if current.device == identity.device && current.inode == identity.inode {
+                        validate_listener_parent(parent_path, &parent, expected_uid)
+                    } else {
+                        Err(SelectorBoundaryError::ArtifactInvalid)
+                    }
+                });
+        match setup {
+            Ok(()) => {}
+            Err(error) => {
+                drop(listener);
+                drop(remove_matching_socket(
+                    &parent,
+                    &leaf,
+                    identity,
+                    expected_uid,
+                ));
+                return Err(error);
+            }
+        }
+        Ok(Self {
+            listener,
+            parent,
+            leaf,
+            identity,
+            owner_uid: expected_uid,
+            owned: true,
+        })
+    }
+
+    /// Accept one evaluator connection without interpreting its authority.
+    ///
+    /// The returned stream is passed to
+    /// [`RootSelectorComposition::evaluate_root_connection`], which performs
+    /// the required peer authentication and protocol handling.
+    ///
+    /// # Errors
+    /// Returns a closed I/O error when the listener cannot accept a stream.
+    pub fn accept(&self) -> Result<UnixStream, SelectorBoundaryError> {
+        self.listener
+            .accept()
+            .map(|(stream, _)| stream)
+            .map_err(io_error)
+    }
+
+    /// Remove the exact owned socket and consume the listener.
+    ///
+    /// # Errors
+    /// Returns a closed identity error if the pathname is absent or has been
+    /// replaced. A replacement is never removed.
+    pub fn close(mut self) -> Result<(), SelectorBoundaryError> {
+        let result = self.remove_owned_socket();
+        if result.is_ok() {
+            self.owned = false;
+        }
+        result
+    }
+
+    fn remove_owned_socket(&self) -> Result<(), SelectorBoundaryError> {
+        remove_matching_socket(&self.parent, &self.leaf, self.identity, self.owner_uid)
+    }
+}
+
+impl Drop for OwnedSelectorListener {
+    fn drop(&mut self) {
+        if self.owned {
+            drop(self.remove_owned_socket());
+        }
+    }
+}
+
+fn validate_listener_parent(
+    path: &Path,
+    parent: &File,
+    expected_uid: u32,
+) -> Result<(), SelectorBoundaryError> {
+    let held = parent.metadata().map_err(io_error)?;
+    let named = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if !held.is_dir()
+        || !named.is_dir()
+        || held.uid() != expected_uid
+        || held.mode() & 0o777 != SELECTOR_PARENT_MODE
+        || held.dev() != named.dev()
+        || held.ino() != named.ino()
+    {
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn listener_socket_identity(
+    parent: &File,
+    leaf: &OsString,
+    expected_uid: u32,
+) -> Result<SocketIdentity, SelectorBoundaryError> {
+    let metadata =
+        statat(parent, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW).map_err(artifact_invalid)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
+        || metadata.st_uid != expected_uid
+        || metadata.st_mode & 0o777 != SELECTOR_SOCKET_MODE
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(SocketIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn bound_socket_identity(
+    parent: &File,
+    leaf: &OsString,
+    expected_uid: u32,
+) -> Result<SocketIdentity, SelectorBoundaryError> {
+    let metadata =
+        statat(parent, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW).map_err(artifact_invalid)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
+        || metadata.st_uid != expected_uid
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(SocketIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn remove_matching_socket(
+    parent: &File,
+    leaf: &OsString,
+    expected: SocketIdentity,
+    expected_uid: u32,
+) -> Result<(), SelectorBoundaryError> {
+    let current = listener_socket_identity(parent, leaf, expected_uid)?;
+    if current.device != expected.device || current.inode != expected.inode {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    unlinkat(parent, Path::new(leaf), AtFlags::empty()).map_err(io_error)
 }
 
 impl RootSelectorComposition {
@@ -720,7 +924,7 @@ fn write_policy_error(
             phase: SandboxLocalErrorPhase::BeforeSpx1,
             operation: Some(SandboxProviderOperation::Execute),
             request_id: Some(decoded.provider_request_id),
-            attempt_id: None,
+            attempt_id: Some(decoded.attempt_id),
             agr1_digest: None,
             code: SandboxLocalErrorCode::PolicyUnavailable,
             safe_detail: None,
@@ -920,11 +1124,80 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
     const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
+    const PRIVILEGED_COMPOSITION_RUNNER: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_RUNNER";
     const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
     const RUNTIME_DIRECTORY: &str = "/run/pigloros";
     const SOCKET_MODE: u32 = 0o600;
 
-    struct FixedCompositionFixture;
+    #[test]
+    fn owned_selector_listener_accepts_and_removes_only_its_socket() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        fs::set_permissions(
+            temporary.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        let socket = temporary.path().join("selector.sock");
+        let uid = fs::metadata(temporary.path())?.uid();
+        let listener = OwnedSelectorListener::bind_path(&socket, uid)?;
+        let client = std::thread::spawn({
+            let socket = socket.clone();
+            move || UnixStream::connect(socket).map_err(|error| error.to_string())
+        });
+        let accepted = listener.accept()?;
+        drop(accepted);
+        drop(client.join().map_err(|_| "selector client panicked")??);
+        listener.close()?;
+        assert!(!socket.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn owned_selector_listener_preserves_a_replacement_socket() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        fs::set_permissions(
+            temporary.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        let socket = temporary.path().join("selector.sock");
+        let uid = fs::metadata(temporary.path())?.uid();
+        let listener = OwnedSelectorListener::bind_path(&socket, uid)?;
+        fs::remove_file(&socket)?;
+        let replacement = UnixListener::bind(&socket)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(SELECTOR_SOCKET_MODE))?;
+        drop(listener);
+        assert!(fs::symlink_metadata(&socket)?.file_type().is_socket());
+        drop(replacement);
+        fs::remove_file(socket)?;
+        Ok(())
+    }
+
+    #[test]
+    fn owned_selector_listener_rejects_unsafe_or_occupied_parents() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let socket = temporary.path().join("selector.sock");
+        let uid = fs::metadata(temporary.path())?.uid();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o755))?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&socket, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        fs::set_permissions(
+            temporary.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        fs::write(&socket, b"occupied")?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&socket, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+
+    struct FixedCompositionFixture {
+        installation: Option<SocketIdentity>,
+        runtime: Option<SocketIdentity>,
+    }
 
     impl FixedCompositionFixture {
         fn create() -> TestResult<Self> {
@@ -932,7 +1205,10 @@ mod tests {
                 return Err("fixed selector test paths already exist".into());
             }
             fs::create_dir(INSTALLATION_PARENT)?;
-            let fixture = Self;
+            let mut fixture = Self {
+                installation: Some(path_identity(Path::new(INSTALLATION_PARENT))?),
+                runtime: None,
+            };
             fs::set_permissions(INSTALLATION_PARENT, fs::Permissions::from_mode(0o700))?;
             fs::create_dir(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)?;
             fs::set_permissions(
@@ -940,6 +1216,7 @@ mod tests {
                 fs::Permissions::from_mode(0o700),
             )?;
             fs::create_dir(RUNTIME_DIRECTORY)?;
+            fixture.runtime = Some(path_identity(Path::new(RUNTIME_DIRECTORY))?);
             fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
             Ok(fixture)
         }
@@ -947,34 +1224,45 @@ mod tests {
 
     impl Drop for FixedCompositionFixture {
         fn drop(&mut self) {
-            for socket in [
-                "/run/pigloros/provider-execute.sock",
-                "/run/pigloros/provider-control.sock",
-            ] {
-                drop(fs::remove_file(socket));
-            }
-            drop(fs::remove_dir_all(INSTALLATION_PARENT));
-            drop(fs::remove_dir_all(RUNTIME_DIRECTORY));
+            remove_owned_test_tree(Path::new(RUNTIME_DIRECTORY), self.runtime);
+            remove_owned_test_tree(Path::new(INSTALLATION_PARENT), self.installation);
         }
     }
 
-    fn privileged_composition_child() -> TestResult<bool> {
-        if rustix::process::geteuid().as_raw() == ROOT_UID {
+    fn path_identity(path: &Path) -> TestResult<SocketIdentity> {
+        let metadata = fs::symlink_metadata(path)?;
+        Ok(SocketIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn remove_owned_test_tree(path: &Path, expected: Option<SocketIdentity>) {
+        let matches = expected.is_some_and(|expected| {
+            fs::symlink_metadata(path).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && metadata.dev() == expected.device
+                    && metadata.ino() == expected.inode
+            })
+        });
+        if matches {
+            drop(fs::remove_dir_all(path));
+        }
+    }
+
+    fn isolated_composition_child() -> TestResult<bool> {
+        if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_some() {
+            if rustix::process::geteuid().as_raw() != ROOT_UID {
+                return Err("isolated selector composition child is not root".into());
+            }
             return Ok(false);
         }
-        let mut command = Command::new("sudo");
-        command.args(["-n", "env"]);
-        command.arg(format!("{PRIVILEGED_COMPOSITION_TEST}=1"));
-        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
-            command.arg(format!("LLVM_PROFILE_FILE={}", profile.to_string_lossy()));
-        }
-        let output = command
+        let Some(runner) = std::env::var_os(PRIVILEGED_COMPOSITION_RUNNER) else {
+            return Ok(true);
+        };
+        let output = Command::new(runner)
             .arg(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "root_selector::tests::nonactivating_public_composition_authenticates_sly1",
-                "--nocapture",
-            ])
+            .arg("root_selector::tests::nonactivating_public_composition_authenticates_sly1")
             .output()?;
         if !output.status.success() {
             return Err(format!(
@@ -1101,13 +1389,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn nonactivating_public_composition_authenticates_sly1() -> TestResult {
-        if privileged_composition_child()? {
+        if isolated_composition_child()? {
             return Ok(());
-        }
-        if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none()
-            && rustix::process::geteuid().as_raw() != ROOT_UID
-        {
-            return Err("privileged selector composition did not start".into());
         }
 
         let _paths = FixedCompositionFixture::create()?;
@@ -1166,6 +1449,10 @@ mod tests {
         let composition = RootSelectorComposition::open()?;
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
+        let evaluator_listener = OwnedSelectorListener::bind()?;
+        assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        evaluator_listener.close()?;
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
 
         let (_, reply) = evaluate_composition_request(&composition, &request, resolved.attempt())?;
         assert_eq!(
@@ -2400,7 +2687,12 @@ mod tests {
         client.write_all(&encoded.attempt_stream)?;
         client.shutdown(std::net::Shutdown::Write)?;
         service.handle_connection(server)?;
-        assert_eq!(read_local_error(&mut client)?.code, expected);
+        let error = read_local_error(&mut client)?;
+        assert_eq!(error.code, expected);
+        if expected == SandboxLocalErrorCode::PolicyUnavailable {
+            assert_eq!(error.request_id, Some(encoded.provider_request_id));
+            assert_eq!(error.attempt_id, Some(encoded.attempt_id));
+        }
         Ok(())
     }
 
@@ -2410,7 +2702,12 @@ mod tests {
     ) -> TestResult {
         let (mut root, mut client) = UnixStream::pair()?;
         write(&mut root)?;
-        assert_eq!(read_local_error(&mut client)?.code, expected);
+        let error = read_local_error(&mut client)?;
+        assert_eq!(error.code, expected);
+        if expected == SandboxLocalErrorCode::PolicyUnavailable {
+            assert!(error.request_id.is_some());
+            assert!(error.attempt_id.is_some());
+        }
         Ok(())
     }
 

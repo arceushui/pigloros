@@ -2005,11 +2005,6 @@ fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
         (
             SandboxLocalErrorPhaseV1::BeforeSpx1,
             SandboxLocalErrorCodeV1::PolicyUnavailable,
-            false,
-        ),
-        (
-            SandboxLocalErrorPhaseV1::BeforeSpx1,
-            SandboxLocalErrorCodeV1::PolicyUnavailable,
             true,
         ),
         (
@@ -2110,6 +2105,42 @@ fn local_errors_reject_codes_from_another_phase() {
         };
         assert!(error.validate().is_err());
     }
+}
+
+#[test]
+fn complete_selector_policy_errors_require_both_derived_identities() -> TestResult {
+    for (request_id, attempt_id) in [(Some([1; 16]), None), (None, Some([2; 16])), (None, None)] {
+        let error = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
+            operation: Some(SandboxProviderOperationV1::Execute),
+            request_id,
+            attempt_id,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::PolicyUnavailable,
+            safe_detail: None,
+        };
+        assert_eq!(
+            error.validate(),
+            Err(SandboxContractErrorV1::InconsistentFields)
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![
+                Value::Text("SLE1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Integer(0.into()),
+                Value::Integer(1.into()),
+                request_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                Value::Null,
+                Value::Integer(2.into()),
+                Value::Null,
+            ]),
+            &mut bytes,
+        )?;
+        assert!(independent::SandboxLocalError::from_canonical_cbor(&bytes).is_err());
+    }
+    Ok(())
 }
 
 #[test]
