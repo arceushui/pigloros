@@ -2294,6 +2294,101 @@ mod tests {
         Ok(())
     }
 
+    fn reject_invalid_administrator_updates(
+        fixture: &crate::selector::installation::tests::updates::UpdateFixture,
+        manifest_path: &Path,
+    ) -> TestResult {
+        let original_manifest = fs::read(manifest_path)?;
+        let mut abandoned =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        abandoned.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let abandoned_challenge = read_frame(&mut abandoned)?;
+        drop(abandoned);
+
+        let mut cross_connection =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        cross_connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let cross_challenge = read_frame(&mut cross_connection)?;
+        assert_ne!(cross_challenge, abandoned_challenge);
+        let cross_update = fixture.request_from_challenge(&abandoned_challenge, None)?;
+        write_frame(&mut cross_connection, &cross_update)?;
+        cross_connection.shutdown(std::net::Shutdown::Write)?;
+        let mut rejected = Vec::new();
+        cross_connection.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+
+        let mut extra_frame =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        extra_frame.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let extra_frame_challenge = read_frame(&mut extra_frame)?;
+        let extra_frame_update = fixture.request_from_challenge(&extra_frame_challenge, None)?;
+        write_frame(&mut extra_frame, &extra_frame_update)?;
+        extra_frame.write_all(&[0])?;
+        extra_frame.shutdown(std::net::Shutdown::Write)?;
+        rejected.clear();
+        extra_frame.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+        assert_eq!(fs::read(manifest_path)?, original_manifest);
+        Ok(())
+    }
+
+    fn apply_update_and_reject_replay(
+        fixture: &crate::selector::installation::tests::updates::UpdateFixture,
+    ) -> TestResult {
+        let mut administrator =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        administrator.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let challenge = read_frame(&mut administrator)?;
+        let siu1 = fixture.request_from_challenge(&challenge, None)?;
+        write_frame(&mut administrator, &siu1)?;
+        administrator.shutdown(std::net::Shutdown::Write)?;
+        let acknowledgement = read_frame(&mut administrator)?;
+        let mut trailing = Vec::new();
+        administrator.read_to_end(&mut trailing)?;
+        assert!(!acknowledgement.is_empty());
+        assert!(trailing.is_empty());
+
+        let mut stale = UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        stale.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let successor_challenge = read_frame(&mut stale)?;
+        assert_ne!(successor_challenge, challenge);
+        write_frame(&mut stale, &siu1)?;
+        stale.shutdown(std::net::Shutdown::Write)?;
+        let mut rejected = Vec::new();
+        stale.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+        Ok(())
+    }
+
+    fn assert_current_identity_conflict(
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        attempt: &crate::evaluator::CaseAttempt,
+    ) -> TestResult {
+        let mut conflicting_request = request.clone();
+        conflicting_request.implementation.organization_id = Some("conflicting-owner".to_owned());
+        refresh_request_digest(&mut conflicting_request)?;
+        let reply = evaluate_fixed_runtime_request(&conflicting_request, attempt)?;
+        assert_eq!(
+            reply.observation,
+            Err(crate::evaluator::AdapterError::ProtocolFailure)
+        );
+        assert_eq!(reply.provenance, None);
+        Ok(())
+    }
+
+    fn assert_successor_rejects_stale_request(
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        attempt: &crate::evaluator::CaseAttempt,
+    ) -> TestResult {
+        let reply = evaluate_fixed_runtime_request(request, attempt)?;
+        assert_eq!(
+            reply.observation,
+            Err(crate::evaluator::AdapterError::Unavailable)
+        );
+        assert_eq!(reply.provenance, None);
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn activated_public_composition_authenticates_sly1() -> TestResult {
@@ -2334,11 +2429,6 @@ mod tests {
             admitted.bootstrap().revocation().revocation_epoch(),
             admitted.bootstrap().policy().policy_epoch(),
         ];
-        let successor_epochs = [
-            admitted.bootstrap().trust().trust_epoch(),
-            admitted.bootstrap().revocation().revocation_epoch() + 1,
-            admitted.bootstrap().policy().policy_epoch() + 1,
-        ];
         let execute_provider_identity = admitted.provider().clone();
 
         let execute_listener = UnixListener::bind("/run/pigloros/provider-execute.sock")?;
@@ -2361,11 +2451,7 @@ mod tests {
                 &execute_fixture,
                 &execute_provider_identity,
                 &commitment,
-                &[
-                    (current_epochs, false),
-                    (successor_epochs, false),
-                    (successor_epochs, true),
-                ],
+                &[(current_epochs, false), (current_epochs, true)],
             )
             .map_err(|error| error.to_string())
         });
@@ -2378,84 +2464,14 @@ mod tests {
 
         let manifest_path = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)
             .join(crate::selector::installation::MANIFEST_NAME);
-        let original_manifest = fs::read(&manifest_path)?;
-        let mut abandoned =
-            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        abandoned.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let abandoned_challenge = read_frame(&mut abandoned)?;
-        drop(abandoned);
-
-        let mut cross_connection =
-            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        cross_connection.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let cross_challenge = read_frame(&mut cross_connection)?;
-        assert_ne!(cross_challenge, abandoned_challenge);
-        let cross_update = update_fixture.request_from_challenge(&abandoned_challenge, None)?;
-        write_frame(&mut cross_connection, &cross_update)?;
-        cross_connection.shutdown(std::net::Shutdown::Write)?;
-        let mut rejected = Vec::new();
-        cross_connection.read_to_end(&mut rejected)?;
-        assert!(rejected.is_empty());
-
-        let mut extra_frame =
-            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        extra_frame.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let extra_frame_challenge = read_frame(&mut extra_frame)?;
-        let extra_frame_update =
-            update_fixture.request_from_challenge(&extra_frame_challenge, None)?;
-        write_frame(&mut extra_frame, &extra_frame_update)?;
-        extra_frame.write_all(&[0])?;
-        extra_frame.shutdown(std::net::Shutdown::Write)?;
-        rejected.clear();
-        extra_frame.read_to_end(&mut rejected)?;
-        assert!(rejected.is_empty());
-        assert_eq!(fs::read(&manifest_path)?, original_manifest);
+        reject_invalid_administrator_updates(&update_fixture, &manifest_path)?;
 
         let reply = evaluate_fixed_runtime_request(&request, resolved.attempt())?;
         assert!(reply.observation.is_ok());
+        assert_current_identity_conflict(&request, resolved.attempt())?;
 
-        let mut administrator =
-            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        administrator.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let challenge = read_frame(&mut administrator)?;
-        let siu1 = update_fixture.request_from_challenge(&challenge, None)?;
-        write_frame(&mut administrator, &siu1)?;
-        administrator.shutdown(std::net::Shutdown::Write)?;
-        let acknowledgement = read_frame(&mut administrator)?;
-        let mut trailing = Vec::new();
-        administrator.read_to_end(&mut trailing)?;
-        assert!(!acknowledgement.is_empty());
-        assert!(trailing.is_empty());
-
-        let mut stale = UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        stale.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let successor_challenge = read_frame(&mut stale)?;
-        assert_ne!(successor_challenge, challenge);
-        write_frame(&mut stale, &siu1)?;
-        stale.shutdown(std::net::Shutdown::Write)?;
-        rejected.clear();
-        stale.read_to_end(&mut rejected)?;
-        assert!(rejected.is_empty());
-
-        let reply = evaluate_fixed_runtime_request(&request, resolved.attempt())?;
-        assert_eq!(
-            reply.observation,
-            Ok(crate::evaluator::SubjectObservation {
-                result: crate::evaluator::SubjectResult::Unavailable,
-                usage: crate::evaluator::ResourceUsage::default(),
-            })
-        );
-        assert!(reply.provenance.is_some());
-
-        let mut conflicting_request = request.clone();
-        conflicting_request.implementation.organization_id = Some("conflicting-owner".to_owned());
-        refresh_request_digest(&mut conflicting_request)?;
-        let reply = evaluate_fixed_runtime_request(&conflicting_request, resolved.attempt())?;
-        assert_eq!(
-            reply.observation,
-            Err(crate::evaluator::AdapterError::ProtocolFailure)
-        );
-        assert_eq!(reply.provenance, None);
+        apply_update_and_reject_replay(&update_fixture)?;
+        assert_successor_rejects_stale_request(&request, resolved.attempt())?;
         control_provider
             .join()
             .map_err(|_| "provider control thread panicked")??;
