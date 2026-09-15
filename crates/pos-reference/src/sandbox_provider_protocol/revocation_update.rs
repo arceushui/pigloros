@@ -329,6 +329,7 @@ impl RevocationAcknowledgement {
                     runtime_key,
                 )
                 .map(|()| acknowledgement)
+                .map_err(SandboxRevocationUpdateError::from)
             })
     }
 

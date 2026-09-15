@@ -567,7 +567,8 @@ fn manifest_successor_validation_rejects_each_forbidden_change_class() -> TestRe
     let fixture = UpdateFixture::new()?;
     let challenge = fixture.bootstrap.issue_update_challenge()?;
     let request = fixture.request(&challenge, None)?;
-    let fields = array(&decode_canonical(&request)?, 5)?;
+    let document = decode_canonical(&request)?;
+    let fields = array(&document, 5)?;
     let Value::Bytes(next_bytes) = &fields[3] else {
         return Err("SIU1 successor manifest is not bytes".into());
     };
