@@ -24,7 +24,7 @@ use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_core::{ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+use pos_core::ErasureHostErrorV1;
 use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
 use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
@@ -216,7 +216,7 @@ fn gateway_for_startup_with_recovery(
                     path: path.to_owned(),
                 },
                 composition,
-                ERASURE_MAX_INVENTORY_REQUESTS,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
             )
             .map_err(erasure_host_recovery_error)?;
             Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
@@ -225,7 +225,7 @@ fn gateway_for_startup_with_recovery(
             let host = ErasureExecutionHostV1::open_with_authority(
                 config,
                 composition,
-                ERASURE_MAX_INVENTORY_REQUESTS,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
             )
             .map_err(erasure_host_recovery_error)?;
             Gateway::new_with_erasure_host(host).map_err(Into::into)

@@ -58,7 +58,7 @@ impl HostedLedgerStore {
         pos_runtime::ErasureExecutionHostV1::open_with_authority(
             config,
             composition,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .map(Self::from_host)
     }
@@ -75,7 +75,7 @@ impl HostedLedgerStore {
         pos_runtime::ErasureExecutionHostV1::open_read_only_with_authority(
             path,
             composition,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .map(Self::from_host)
     }

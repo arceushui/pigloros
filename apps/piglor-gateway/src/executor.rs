@@ -71,7 +71,7 @@ mod lifecycle_coverage_tests {
         host_error_to_core, worker_loop, worker_loop_with_runtime, Command, CommandClass,
         CommandEnvelope, CommandLifecycle, ExecutorStore, GatewayExecutorStore, LifecycleState,
     };
-    use pos_core::{CoreError, ErasureHostErrorV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_core::{CoreError, ErasureHostErrorV1};
     use pos_runtime::ErasureExecutionHostV1;
     use pos_store::{memory::MemoryStore, StoreConfig};
     use std::sync::{Arc, Mutex};
@@ -107,7 +107,7 @@ mod lifecycle_coverage_tests {
         );
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let host = ExecutorStore::Host(Box::new(host));
@@ -143,7 +143,7 @@ mod lifecycle_coverage_tests {
     ) -> Result<(), ErasureHostErrorV1> {
         let host = ErasureExecutionHostV1::open_verified_empty(
             pos_store::StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
         for mut store in [
             ExecutorStore::Host(Box::new(host)),
@@ -182,14 +182,7 @@ mod lifecycle_coverage_tests {
             );
         }
 
-        assert!(
-            ErasureExecutionHostV1::open_verified_empty(pos_store::StoreConfig::Memory, 0).is_err()
-        );
-        assert!(ErasureExecutionHostV1::open_gateway_verified_empty(
-            pos_store::StoreConfig::Memory,
-            0,
-        )
-        .is_err());
+        assert!(pos_core::ErasureRecoveryLimitsV1::new(0, 1, 1).is_err());
         Ok(())
     }
 
@@ -3015,7 +3008,6 @@ mod tests {
         timeline::Timeline,
         CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
         CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, ProposedAction, TimelineId,
-        ERASURE_MAX_INVENTORY_REQUESTS,
     };
     use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
     use pos_store::memory::MemoryStore;
@@ -3195,7 +3187,7 @@ mod tests {
 
         let mut host = ErasureExecutionHostV1::open_verified_empty(
             pos_store::StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
         let hosted_timeline = host
             .command_sender()?
@@ -6528,7 +6520,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let host = ErasureExecutionHostV1::open_gateway_verified_empty(
             pos_store::StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
         let executor = super::StoreExecutor::new_with_owntracks_erasure_host(
             host,

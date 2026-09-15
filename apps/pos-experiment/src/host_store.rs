@@ -21,7 +21,7 @@ impl HostedExperimentStore {
         pos_runtime::ErasureExecutionHostV1::open_with_authority(
             config,
             composition,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .map(|host| {
             let gate = host.containment_gate();

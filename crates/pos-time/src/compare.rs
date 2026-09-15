@@ -312,7 +312,7 @@ mod tests {
     fn public_compare_holds_one_host_generation_across_both_forks() {
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gate = host.containment_gate();

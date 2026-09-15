@@ -2902,7 +2902,7 @@ mod tests {
     fn host_gateway_constructors_fail_closed_when_containment_is_unavailable() {
         let mut host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
@@ -2914,7 +2914,7 @@ mod tests {
 
         let mut host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
@@ -2930,7 +2930,7 @@ mod tests {
 
         let mut host = ErasureExecutionHostV1::open_gateway_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         host.bind_consent_authority(ConsentAuthority::new().append_permit())
@@ -3433,7 +3433,7 @@ mod tests {
         let audit_host = authorization.clone();
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gateway =
@@ -3555,7 +3555,7 @@ mod tests {
         let audit_host = authorization.clone();
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gateway =
@@ -6720,7 +6720,7 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::{ErasureContainmentGateV1, ERASURE_MAX_INVENTORY_REQUESTS};
+    use pos_core::ErasureContainmentGateV1;
     use pos_runtime::ErasureExecutionHostV1;
     use pos_store::{open_store, StoreConfig};
     use std::error::Error;
@@ -6754,7 +6754,7 @@ mod coverage_entrypoints {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
         let gateway = Gateway::new_with_erasure_host(host)?;
         assert_eq!(gateway.erasure_status().await?, ErasureHostStatusV1::Ready);

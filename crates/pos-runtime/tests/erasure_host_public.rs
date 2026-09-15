@@ -1,14 +1,16 @@
 use pos_core::{
     CanonicalBytes, EntityId, ErasureHostErrorV1, ErasureProtectedOperationV1, EventDraft,
-    EventReadBounds, Kind, SeqRange, ERASURE_MAX_INVENTORY_REQUESTS,
+    EventReadBounds, Kind, SeqRange,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::StoreConfig;
 use std::error::Error;
 
 fn assert_hosted_store_parity(config: StoreConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut host =
-        ErasureExecutionHostV1::open_verified_empty(config, ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        config,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
     let (timeline, event) = {
         let mut commands = host.command_sender()?;
         let timeline = commands.create_timeline("public-host-parity")?;

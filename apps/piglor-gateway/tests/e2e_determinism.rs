@@ -10,7 +10,7 @@ use pos_core::{
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Hash, Plugin, PluginId,
-    PrincipalRefV1, Seq, TimelineId, WallTime, ERASURE_MAX_INVENTORY_REQUESTS,
+    PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -436,7 +436,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let human_entity = EntityId::new();
     let host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Sqlite { path: path.clone() },
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
     let erasure_gate = host.containment_gate();
@@ -975,7 +975,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
     let path = database.path().to_str().test_ok()?.to_owned();
     let first_host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Sqlite { path: path.clone() },
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
     let first_gateway = Gateway::new_with_erasure_host(first_host)?;
@@ -1004,7 +1004,7 @@ async fn gateway_reloads_durable_consent_before_revocation(
 
     let recovered_host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Sqlite { path },
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
     let recovered_gateway = Gateway::new_with_erasure_host(recovered_host)?;
@@ -1050,7 +1050,7 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = ErasureExecutionHostV1::open_gateway_verified_empty(
         StoreConfig::Memory,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
     let gateway = Gateway::new_with_erasure_host(host)?;
@@ -1112,7 +1112,7 @@ async fn gateway_shutdown_drains_an_empty_executor(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Memory,
-        ERASURE_MAX_INVENTORY_REQUESTS,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
     let gateway = Gateway::new_with_erasure_host(host)?;

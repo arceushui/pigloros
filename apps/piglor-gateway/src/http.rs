@@ -599,7 +599,7 @@ mod tests {
     fn spectator_test_app() -> Router {
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gw = Gateway::new_with_erasure_host(host).test_ok();
@@ -855,7 +855,7 @@ mod tests {
     async fn health_ok() {
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gateway = Gateway::new_with_erasure_host(host).test_ok();
@@ -898,7 +898,7 @@ mod tests {
     async fn health_reports_executor_unready_after_shutdown() {
         let host = ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
-            pos_core::ERASURE_MAX_INVENTORY_REQUESTS,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gateway = Gateway::new_with_erasure_host(host).test_ok();
