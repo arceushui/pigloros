@@ -7828,7 +7828,7 @@ mod coverage_entrypoints {
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut registry = PluginRegistry::new();
-        ok(bind_registry_to_host_gate(&mut registry, gate.clone()));
+        ok(bind_registry_to_host_gate(&mut registry, gate));
         ok(bind_registry_to_host_gate(&mut registry, gate.clone()));
         assert!(bind_registry_to_host_gate(
             &mut registry,
@@ -7845,7 +7845,7 @@ mod coverage_entrypoints {
             bind_registry_erasure_gate(&mut store, &missing_bound_gate, gate.clone()),
             Err(pos_core::CoreError::ErasureContainmentUnavailable)
         ));
-        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, gate.clone()).is_err());
+        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, gate).is_err());
 
         let mut fork_registry = PluginRegistry::new();
         ok(bind_fork_registry_erasure_gate(

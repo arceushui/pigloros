@@ -3016,27 +3016,6 @@ mod tests {
     };
     use tokio::sync::broadcast;
 
-    struct RejectingErasureGate(pos_core::ErasureContainmentErrorV1);
-
-    impl ErasureGate for RejectingErasureGate {
-        fn authorize(
-            &self,
-            _: TimelineId,
-            _: pos_core::ErasureProtectedOperationV1,
-        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-            Err(self.0)
-        }
-
-        fn with_fence(
-            &self,
-            timeline: TimelineId,
-            operation: pos_core::ErasureProtectedOperationV1,
-            _: &mut dyn FnMut(),
-        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-            self.authorize(timeline, operation)
-        }
-    }
-
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
     }
