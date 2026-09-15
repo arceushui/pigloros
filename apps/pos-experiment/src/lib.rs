@@ -5676,7 +5676,7 @@ mod tests {
         })
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .with_fork_registry_factory(move || {
-            let mut registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&foreign_gate));
+            let mut registry = PluginRegistry::new().with_erasure_gate(foreign_gate.clone());
             registry.register(&CompositionPlugin(plugin), None, None)?;
             Ok(registry)
         });
@@ -7816,7 +7816,7 @@ mod coverage_entrypoints {
 
         let foreign_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let rejected = Experiment::new(config("foreign-gate", StopCondition::MaxTicks(0)))
-            .with_erasure_gate(Arc::clone(&foreign_gate))
+            .with_erasure_gate(foreign_gate.clone())
             .start();
         assert!(matches!(
             rejected,

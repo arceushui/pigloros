@@ -716,7 +716,7 @@ fn backtest_runner_rejects_a_caller_supplied_gate() {
             eval_ticks: 0,
             store_config: StoreConfig::Memory,
         },
-        move || PluginRegistry::new().with_erasure_gate(Arc::clone(&factory_gate)),
+        move || PluginRegistry::new().with_erasure_gate(factory_gate.clone()),
     )
     .with_erasure_gate(host)
     .run()
