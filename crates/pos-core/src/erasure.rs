@@ -408,6 +408,7 @@ struct ErasureGateStateV1 {
     verified_unaffected: BTreeMap<TimelineId, ErasureReferenceV1>,
     states: BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
     blocked_timelines: BTreeSet<TimelineId>,
+    frozen_timelines: BTreeSet<TimelineId>,
 }
 
 thread_local! {
@@ -453,6 +454,7 @@ impl ErasureContainmentGateV1 {
                 verified_unaffected: BTreeMap::new(),
                 states: BTreeMap::new(),
                 blocked_timelines: BTreeSet::new(),
+                frozen_timelines: BTreeSet::new(),
             })),
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: true,
@@ -475,6 +477,7 @@ impl ErasureContainmentGateV1 {
                 verified_unaffected: BTreeMap::new(),
                 states: BTreeMap::new(),
                 blocked_timelines: BTreeSet::new(),
+                frozen_timelines: BTreeSet::new(),
             })),
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: false,
@@ -892,12 +895,34 @@ impl ErasureContainmentGateV1 {
         drop(fence);
     }
 
+    /// Mark one Timeline access-frozen in a concrete containment fixture.
+    ///
+    /// This is available only to test targets. Production hosts derive frozen
+    /// scope from verified recovery state instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn freeze_timeline_for_test(&self, timeline: TimelineId) {
+        let Ok(fence) = self.fence_lock.lock() else {
+            return;
+        };
+        let Ok(mut authority) = self.authority.write() else {
+            return;
+        };
+        let mut candidate = (**authority).clone();
+        candidate.frozen_timelines.insert(timeline);
+        *authority = Arc::new(candidate);
+        drop(authority);
+        drop(fence);
+    }
+
     fn authorize_state(
         &self,
         timeline: TimelineId,
         _operation: ErasureProtectedOperationV1,
         authority: &ErasureGateStateV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
+        if authority.frozen_timelines.contains(&timeline) {
+            return Err(ErasureContainmentErrorV1::AccessFrozen);
+        }
         if let Some(inventory) = authority.inventory.as_ref() {
             return inventory.authorize(timeline);
         }

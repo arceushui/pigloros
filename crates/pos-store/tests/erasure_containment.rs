@@ -93,7 +93,7 @@ fn assert_listing_filters_frozen_scope<S: EventStore>(
     let blocked = store.create_timeline("blocked")?;
     let available = store.create_timeline("available")?;
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-    gate.block_timeline(blocked.id());
+    gate.freeze_timeline_for_test(blocked.id());
     store.bind_erasure_gate(gate)?;
 
     let listed = store.list_timelines()?;
