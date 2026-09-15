@@ -1,5 +1,8 @@
 //! Public trust-root authentication and malformed-snapshot tests.
 
+#[path = "sandbox_trust_public/policy_transition.rs"]
+mod policy_transition;
+
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
