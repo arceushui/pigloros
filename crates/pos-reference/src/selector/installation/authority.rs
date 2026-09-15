@@ -18,6 +18,14 @@ use crate::sandbox_provider_protocol::{
 };
 use crate::selector::SelectorBoundaryError;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InstallationUpdateCommitError {
+    #[error(transparent)]
+    BeforeRecovery(SelectorBoundaryError),
+    #[error(transparent)]
+    RecoveryPending(SelectorBoundaryError),
+}
+
 pub(crate) fn fresh_selector_id() -> Result<[u8; 16], SelectorBoundaryError> {
     fill_nonzero_id(|remaining| {
         getrandom(remaining, GetRandomFlags::empty())

@@ -40,6 +40,15 @@ pub use revocation_update::{
     AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, RevocationAcknowledgement,
     RevocationUpdateRequest, SandboxRevocationUpdateError,
 };
+
+pub(crate) fn attempt_values(attempts: &[[u8; 16]]) -> ciborium::value::Value {
+    ciborium::value::Value::Array(
+        attempts
+            .iter()
+            .map(|attempt| ciborium::value::Value::Bytes(attempt.to_vec()))
+            .collect(),
+    )
+}
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use admission::{

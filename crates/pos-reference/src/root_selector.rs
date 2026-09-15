@@ -26,7 +26,7 @@ use rustix::net::sockopt::socket_peercred;
 
 use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
-    ProviderTransport, ProviderTransportError, ReadSeek,
+    ProviderRequestAdmission, ProviderTransport, ProviderTransportError, ReadSeek,
 };
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
@@ -38,7 +38,7 @@ use crate::selector::installation::authority::ProviderRuntimeSlot;
 use crate::selector::installation::authority::{
     fresh_selector_id, AdmittedProviderRuntime, AdmittedSelectorProvider,
     AuthenticatedSelectorBootstrap, CommittedInstallationUpdate, InstallationChallenge,
-    InstallationRecoverySnapshot,
+    InstallationRecoverySnapshot, InstallationUpdateCommitError,
 };
 use crate::selector::installation::{
     open_directory_chain, InstallationObjectKind, InstalledSelectorState,
@@ -95,6 +95,23 @@ struct RootSelectorComposition {
 struct ReceivedInstallationUpdate {
     challenge: InstallationChallenge,
     bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+enum PrepareLiveUpdateError {
+    #[error(transparent)]
+    BeforeRecovery(SelectorBoundaryError),
+    #[error(transparent)]
+    RecoveryPending(SelectorBoundaryError),
+}
+
+impl From<InstallationUpdateCommitError> for PrepareLiveUpdateError {
+    fn from(error: InstallationUpdateCommitError) -> Self {
+        match error {
+            InstallationUpdateCommitError::BeforeRecovery(error) => Self::BeforeRecovery(error),
+            InstallationUpdateCommitError::RecoveryPending(error) => Self::RecoveryPending(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -636,6 +653,10 @@ impl RootSelectorComposition {
                     .map(|(successor, acknowledgement)| (closed, successor, acknowledgement))
             })
             .and_then(|(closed, successor, acknowledgement)| {
+                synchronize_successor_provider(&self.service.transport, &successor)
+                    .map(|()| (closed, successor, acknowledgement))
+            })
+            .and_then(|(closed, successor, acknowledgement)| {
                 self.service
                     .evaluation_namespaces
                     .clear()
@@ -679,12 +700,21 @@ impl RootSelectorComposition {
     ) -> Result<(ClosedSelectorAdmission, CommittedInstallationUpdate), SelectorBoundaryError> {
         match prepare_live_update(&closed, received.challenge, &received.bytes) {
             Ok(committed) => Ok((closed, committed)),
-            Err(error) => self
-                .service
-                .admission
-                .reopen_previous(&closed.admitted)
-                .and(Err(error)),
+            Err(error) => finish_failed_preparation(&self.service.admission, &closed, error),
         }
+    }
+}
+
+fn finish_failed_preparation(
+    admission: &SelectorAdmission,
+    closed: &ClosedSelectorAdmission,
+    error: PrepareLiveUpdateError,
+) -> Result<(ClosedSelectorAdmission, CommittedInstallationUpdate), SelectorBoundaryError> {
+    match error {
+        PrepareLiveUpdateError::BeforeRecovery(error) => {
+            admission.reopen_previous(&closed.admitted).and(Err(error))
+        }
+        PrepareLiveUpdateError::RecoveryPending(error) => Err(error),
     }
 }
 
@@ -703,11 +733,12 @@ fn prepare_live_update(
     closed: &ClosedSelectorAdmission,
     challenge: crate::selector::installation::authority::InstallationChallenge,
     update_bytes: &[u8],
-) -> Result<CommittedInstallationUpdate, SelectorBoundaryError> {
+) -> Result<CommittedInstallationUpdate, PrepareLiveUpdateError> {
     closed
         .admitted
         .bootstrap()
         .validate_update(challenge, update_bytes)
+        .map_err(PrepareLiveUpdateError::BeforeRecovery)
         .and_then(|update| {
             InstallationRecoverySnapshot::seal(
                 &closed.admitted,
@@ -716,8 +747,13 @@ fn prepare_live_update(
                 closed.live_attempt_ids.clone(),
             )
             .map(|snapshot| (update, snapshot))
+            .map_err(PrepareLiveUpdateError::BeforeRecovery)
         })
-        .and_then(|(update, snapshot)| Arc::clone(&closed.admitted).commit_update(update, snapshot))
+        .and_then(|(update, snapshot)| {
+            Arc::clone(&closed.admitted)
+                .commit_update(update, snapshot)
+                .map_err(PrepareLiveUpdateError::from)
+        })
 }
 
 fn write_control_frame(stream: &mut impl Write, bytes: &[u8]) -> Result<(), SelectorBoundaryError> {
@@ -774,6 +810,22 @@ fn synchronize_fixed_provider(
     transport.synchronize_revocation(admitted.provider(), request_id, nonce, INITIAL_IO_TIMEOUT)
 }
 
+fn synchronize_successor_provider(
+    transport: &ProviderTransport,
+    admitted: &AdmittedSelectorProvider,
+) -> Result<(), SelectorBoundaryError> {
+    fresh_selector_id().and_then(|request_id| {
+        fresh_selector_id().and_then(|nonce| {
+            transport.synchronize_revocation(
+                admitted.provider(),
+                request_id,
+                nonce,
+                INITIAL_IO_TIMEOUT,
+            )
+        })
+    })
+}
+
 fn connect_and_synchronize<Admitted, Transport, Error>(
     admitted: &Admitted,
     connect: impl FnOnce(&Admitted) -> Result<Transport, Error>,
@@ -797,6 +849,7 @@ trait ProviderExecutor {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
+        admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError>;
 }
 
@@ -808,8 +861,9 @@ impl ProviderExecutor for ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
+        admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        Self::execute_staged(self, admitted, commitment, spx1, input, watchdog)
+        Self::execute_staged(self, admitted, commitment, spx1, input, watchdog, admission)
     }
 }
 
@@ -822,6 +876,7 @@ struct RootSelectorService<T = ProviderTransport> {
 
 struct SelectorAdmission {
     state: Mutex<SelectorAdmissionState>,
+    provider_entry_changed: Condvar,
 }
 
 struct SelectorAdmissionState {
@@ -835,12 +890,25 @@ struct SelectorAdmissionState {
 struct AttemptAdmissionState {
     active_requests: usize,
     provider_retained: bool,
+    provider_entries_in_progress: usize,
 }
 
 struct SelectorAdmissionLease<'a> {
     owner: &'a SelectorAdmission,
     admitted: Arc<AdmittedSelectorProvider>,
     attempt_id: [u8; 16],
+}
+
+#[cfg(test)]
+struct ProviderEntryPermit<'a> {
+    owner: &'a SelectorAdmission,
+    attempt_id: [u8; 16],
+}
+
+struct SelectorProviderRequestAdmission<'a> {
+    owner: &'a SelectorAdmission,
+    attempt_id: [u8; 16],
+    entry_active: bool,
 }
 
 struct ClosedSelectorAdmission {
@@ -858,6 +926,7 @@ impl SelectorAdmission {
                 open: true,
                 attempts: BTreeMap::new(),
             }),
+            provider_entry_changed: Condvar::new(),
         }
     }
 
@@ -919,6 +988,16 @@ impl SelectorAdmission {
             return Err(SelectorBoundaryError::SelectorUnavailable);
         }
         state.open = false;
+        while state
+            .attempts
+            .values()
+            .any(|attempt| attempt.provider_entries_in_progress != 0)
+        {
+            state = self
+                .provider_entry_changed
+                .wait(state)
+                .map_err(selector_unavailable)?;
+        }
         Ok(ClosedSelectorAdmission {
             admitted: Arc::clone(&state.admitted),
             runtime: state.runtime.clone(),
@@ -972,16 +1051,44 @@ impl SelectorAdmission {
         }
     }
 
-    fn begin_provider_execution(&self, attempt_id: [u8; 16]) -> Result<(), ProviderTransportError> {
-        let state = self
+    #[cfg(test)]
+    fn begin_provider_execution(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<ProviderEntryPermit<'_>, ProviderTransportError> {
+        self.start_provider_entry(attempt_id)?;
+        Ok(ProviderEntryPermit {
+            owner: self,
+            attempt_id,
+        })
+    }
+
+    fn start_provider_entry(&self, attempt_id: [u8; 16]) -> Result<(), ProviderTransportError> {
+        let mut state = self
             .state
             .lock()
             .map_err(|_| ProviderTransportError::BeforeAdmission)?;
-        if !state.open || !state.attempts.contains_key(&attempt_id) {
+        if !state.open {
             return Err(ProviderTransportError::BeforeAdmission);
         }
+        let attempt = state
+            .attempts
+            .get_mut(&attempt_id)
+            .ok_or(ProviderTransportError::BeforeAdmission)?;
+        attempt.provider_entries_in_progress += 1;
         drop(state);
         Ok(())
+    }
+
+    fn finish_provider_entry(&self, attempt_id: [u8; 16]) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(attempt) = state.attempts.get_mut(&attempt_id) {
+            attempt.provider_entries_in_progress -= 1;
+        }
+        drop(state);
+        self.provider_entry_changed.notify_all();
     }
 
     fn retain_provider_state(&self, attempt_id: [u8; 16]) -> Result<(), SelectorBoundaryError> {
@@ -1002,13 +1109,55 @@ impl Drop for SelectorAdmissionLease<'_> {
     }
 }
 
+#[cfg(test)]
+impl Drop for ProviderEntryPermit<'_> {
+    fn drop(&mut self) {
+        self.owner.finish_provider_entry(self.attempt_id);
+    }
+}
+
 impl SelectorAdmissionLease<'_> {
-    fn begin_provider_execution(&self) -> Result<(), ProviderTransportError> {
+    #[cfg(test)]
+    fn begin_provider_execution(&self) -> Result<ProviderEntryPermit<'_>, ProviderTransportError> {
         self.owner.begin_provider_execution(self.attempt_id)
     }
 
     fn retain_provider_state(&self) -> Result<(), SelectorBoundaryError> {
         self.owner.retain_provider_state(self.attempt_id)
+    }
+}
+
+impl<'a> SelectorProviderRequestAdmission<'a> {
+    const fn new(admission: &SelectorAdmissionLease<'a>) -> Self {
+        Self {
+            owner: admission.owner,
+            attempt_id: admission.attempt_id,
+            entry_active: false,
+        }
+    }
+}
+
+impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
+    fn begin(&mut self) -> Result<(), ProviderTransportError> {
+        if self.entry_active {
+            return Err(ProviderTransportError::BeforeAdmission);
+        }
+        self.owner.start_provider_entry(self.attempt_id)?;
+        self.entry_active = true;
+        Ok(())
+    }
+
+    fn entered(&mut self) {
+        if self.entry_active {
+            self.owner.finish_provider_entry(self.attempt_id);
+            self.entry_active = false;
+        }
+    }
+}
+
+impl Drop for SelectorProviderRequestAdmission<'_> {
+    fn drop(&mut self) {
+        self.entered();
     }
 }
 
@@ -1236,14 +1385,16 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         let namespace_execution = self
             .evaluation_namespaces
             .execute_ordered(&decoded.request, || {
-                admission.begin_provider_execution()?;
-                self.transport.execute(
+                let mut provider_requests = SelectorProviderRequestAdmission::new(&admission);
+                let result = self.transport.execute(
                     admitted.provider(),
                     &commitment,
                     &spx1,
                     input,
                     Duration::from_millis(resolved.attempt().watchdog_ms),
-                )
+                    &mut provider_requests,
+                );
+                result
             })
             .and_then(|execution| {
                 if provider_retains_namespace(&execution.result) {
@@ -2239,12 +2390,19 @@ mod tests {
         Ok(IsolatedCompositionRole::Delegated)
     }
 
-    fn serve_control_responses(
+    fn serve_describe_response(
         listener: &UnixListener,
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
     ) -> TestResult {
-        let mut stream = accept_test_connection(listener)?;
+        respond_to_describe(accept_test_connection(listener)?, fixture, provider)
+    }
+
+    fn respond_to_describe(
+        mut stream: UnixStream,
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+    ) -> TestResult {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut prefix = [0; 4];
@@ -2262,6 +2420,22 @@ mod tests {
         stream.write_all(&response)?;
         stream.shutdown(std::net::Shutdown::Write)?;
 
+        Ok(())
+    }
+
+    fn serve_installed_describe_response(
+        listener: &UnixListener,
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+    ) -> TestResult {
+        let stream = accept_test_connection(listener)?;
+        let root = File::open(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)?;
+        let admitted = InstalledSelectorState::open_at_for_test(&root)?
+            .authenticate_bootstrap()?
+            .admit_provider()?;
+        respond_to_describe(stream, fixture, admitted.provider())
+    }
+
+    fn serve_control_response(listener: &UnixListener) -> TestResult {
         let mut stream = accept_test_connection(listener)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -2504,10 +2678,15 @@ mod tests {
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
         let control_provider = std::thread::spawn(move || {
-            serve_control_responses(&control_listener, &control_fixture, admitted.provider())
-                .map_err(|error| error.to_string())
+            serve_control_response(&control_listener).map_err(|error| error.to_string())
         });
         let execute_provider = std::thread::spawn(move || {
+            serve_describe_response(
+                &execute_listener,
+                &control_fixture,
+                &execute_provider_identity,
+            )
+            .map_err(|error| error.to_string())?;
             serve_execution_responses(
                 &execute_listener,
                 &execute_fixture,
@@ -2515,7 +2694,9 @@ mod tests {
                 &commitment,
                 &[(current_epochs, false), (current_epochs, true)],
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            serve_installed_describe_response(&execute_listener, &control_fixture)
+                .map_err(|error| error.to_string())
         });
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
@@ -2736,6 +2917,140 @@ mod tests {
         admission.reopen_previous(&closed.admitted)?;
         assert!(Arc::ptr_eq(&admission.current()?, &closed.admitted));
         assert!(admission.acquire([0; 16]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selector_snapshot_waits_for_authorized_provider_entry() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = Arc::new(SelectorAdmission::for_test(admitted)?);
+        let lease = admission.acquire([1; 16])?;
+        let provider_entry = lease
+            .begin_provider_execution()
+            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+
+        thread::scope(|scope| -> TestResult {
+            let closing = Arc::clone(&admission);
+            scope.spawn(move || {
+                drop(closed_tx.send(closing.close_and_snapshot()));
+            });
+            loop {
+                let state = admission.state.lock().map_err(selector_unavailable)?;
+                if !state.open {
+                    break;
+                }
+                drop(state);
+                thread::yield_now();
+            }
+            assert!(closed_rx.try_recv().is_err());
+            drop(provider_entry);
+            let closed = closed_rx.recv_timeout(Duration::from_secs(1))??;
+            assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn transport_retry_cannot_cross_a_closed_selector_snapshot() -> TestResult {
+        let transport_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = Arc::new(SelectorAdmission::for_test(admitted)?);
+        let lease = admission.acquire([1; 16])?;
+        let (request_entered_tx, request_entered_rx) = std::sync::mpsc::channel();
+        let (release_provider_tx, release_provider_rx) = std::sync::mpsc::channel();
+        let (execution_tx, execution_rx) = std::sync::mpsc::channel();
+
+        thread::scope(|scope| -> TestResult {
+            let provider = scope.spawn(|| -> TestResult {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                let _spx1 = read_frame(&mut stream)?;
+                let mut input = Vec::new();
+                stream.read_to_end(&mut input)?;
+                request_entered_tx.send(())?;
+                release_provider_rx.recv_timeout(Duration::from_secs(1))?;
+                Ok(())
+            });
+            scope.spawn(|| {
+                let mut request_admission = SelectorProviderRequestAdmission::new(&lease);
+                let result = transport
+                    .execute_staged(
+                        &transport_fixture.provider,
+                        &transport_fixture.commitment,
+                        &transport_fixture.spx1,
+                        &mut std::io::Cursor::new(b"input"),
+                        Duration::from_secs(1),
+                        &mut request_admission,
+                    )
+                    .map(|_| ());
+                drop(execution_tx.send(result));
+            });
+            request_entered_rx.recv_timeout(Duration::from_secs(1))?;
+            let closed = admission.close_and_snapshot()?;
+            assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+            release_provider_tx.send(())?;
+            assert!(matches!(
+                execution_rx.recv_timeout(Duration::from_secs(1))?,
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+            provider.join().map_err(|_| "provider thread panicked")??;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn pending_recovery_failure_never_reopens_previous_admission() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let closed = admission.close_and_snapshot()?;
+        let result = finish_failed_preparation(
+            &admission,
+            &closed,
+            PrepareLiveUpdateError::RecoveryPending(SelectorBoundaryError::Io),
+        );
+        assert!(matches!(result, Err(SelectorBoundaryError::Io)));
+        assert!(admission.current().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn commit_phase_mapping_and_impossible_entry_state_fail_closed() -> TestResult {
+        assert!(matches!(
+            PrepareLiveUpdateError::from(InstallationUpdateCommitError::BeforeRecovery(
+                SelectorBoundaryError::ArtifactInvalid,
+            )),
+            PrepareLiveUpdateError::BeforeRecovery(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(matches!(
+            PrepareLiveUpdateError::from(InstallationUpdateCommitError::RecoveryPending(
+                SelectorBoundaryError::Io,
+            )),
+            PrepareLiveUpdateError::RecoveryPending(SelectorBoundaryError::Io)
+        ));
+
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        assert!(admission.begin_provider_execution([1; 16]).is_err());
+        admission.finish_provider_entry([1; 16]);
+        let lease = admission.acquire([1; 16])?;
+        let mut provider_requests = SelectorProviderRequestAdmission::new(&lease);
+        assert!(provider_requests.begin().is_ok());
+        assert!(provider_requests.begin().is_err());
+        provider_requests.entered();
+        provider_requests.entered();
+        assert!(provider_requests.begin().is_ok());
+        drop(provider_requests);
+        let closed = admission.close_and_snapshot()?;
+        assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
         Ok(())
     }
 
@@ -3005,7 +3320,10 @@ mod tests {
             _spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            admission.begin()?;
+            admission.entered();
             self.0
                 .borrow_mut()
                 .take()
@@ -3025,7 +3343,10 @@ mod tests {
             _spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            admission.begin()?;
+            admission.entered();
             self.0
                 .lock()
                 .map_err(|_| ProviderTransportError::BeforeAdmission)?
@@ -3048,7 +3369,10 @@ mod tests {
             spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            admission.begin()?;
+            admission.entered();
             let request = SandboxExecuteRequest::from_canonical_cbor(spx1)
                 .map_err(|_| ProviderTransportError::BeforeAdmission)?;
             let digest = request.authority.evr1_digest;

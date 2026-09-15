@@ -194,6 +194,15 @@ fn revocation_update(
     )
 }
 
+fn random_nonzero_nonce() -> [u8; 16] {
+    loop {
+        let nonce = rand::random();
+        if nonce != [0; 16] {
+            return nonce;
+        }
+    }
+}
+
 fn revocation_acknowledgement(
     next: &SandboxRevocationSnapshot,
     signer: &SigningKey,
@@ -742,7 +751,8 @@ fn revocation_update_authenticates_the_immediate_successor_and_selector_nonce() 
     )?;
     let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
     let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
-    let update = revocation_update(&current, &next_bytes, &next, &signer, [22; 16])?;
+    let selector_nonce = random_nonzero_nonce();
+    let update = revocation_update(&current, &next_bytes, &next, &signer, selector_nonce)?;
     let authenticated = RevocationUpdateRequest::authenticate(&update, &trust, &current)?;
     assert_eq!(authenticated.request_id, [21; 16]);
     assert_eq!(
@@ -750,7 +760,7 @@ fn revocation_update_authenticates_the_immediate_successor_and_selector_nonce() 
         current.snapshot_digest()
     );
     assert_eq!(authenticated.next_revocation, next);
-    assert_eq!(authenticated.selector_nonce, [22; 16]);
+    assert_eq!(authenticated.selector_nonce, selector_nonce);
     assert_eq!(authenticated.policy_signer_key_id, "policy");
     assert_ne!(authenticated.request_digest, [0; 32]);
     Ok(())
@@ -797,7 +807,13 @@ fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() ->
     )?;
     let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
     let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
-    let rcu1 = revocation_update(&current, &next_bytes, &next, &signer, [22; 16])?;
+    let rcu1 = revocation_update(
+        &current,
+        &next_bytes,
+        &next,
+        &signer,
+        random_nonzero_nonce(),
+    )?;
     let context = RecoveryCancellationContext::for_committed_recovery(
         [31; 32],
         [32; 32],

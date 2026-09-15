@@ -134,6 +134,32 @@ struct RetainedGrant {
     digest: [u8; 32],
 }
 
+struct ProviderRequestProgress<'a> {
+    retained_grant: &'a mut Option<RetainedGrant>,
+    admission: &'a mut dyn ProviderRequestAdmission,
+}
+
+/// Admission fence applied independently to every outbound provider request.
+pub(crate) trait ProviderRequestAdmission {
+    /// Acquire permission immediately before opening an execute connection.
+    fn begin(&mut self) -> Result<(), ProviderTransportError>;
+
+    /// Release the pre-entry fence after request bytes and write EOF are sent.
+    fn entered(&mut self);
+}
+
+#[cfg(test)]
+struct UnfencedProviderRequest;
+
+#[cfg(test)]
+impl ProviderRequestAdmission for UnfencedProviderRequest {
+    fn begin(&mut self) -> Result<(), ProviderTransportError> {
+        Ok(())
+    }
+
+    fn entered(&mut self) {}
+}
+
 impl AuthenticatedProviderExecution {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -473,6 +499,16 @@ const fn provider_transport(
     }
 }
 
+fn connect_before_deadline(
+    endpoint: &SelectedProviderEndpoint,
+    deadline: &Deadline,
+) -> Result<ConnectedProviderStream, SelectorBoundaryError> {
+    deadline
+        .remaining()
+        .map_err(selector_unavailable)
+        .and_then(|remaining| endpoint.connect(remaining))
+}
+
 fn complete_nonblocking_connect(
     result: rustix::io::Result<()>,
     descriptor: &impl AsFd,
@@ -579,7 +615,7 @@ impl ProviderTransport {
     ///
     /// The runtime-signed SDY1 binds the active APT1, whose authenticated fields
     /// in turn bind the current RVS1 digest and epoch. Evaluator admission remains
-    /// closed until this control-channel exchange completes.
+    /// closed until this execution-channel exchange completes.
     pub(crate) fn synchronize_revocation(
         &self,
         admitted: &AdmittedSandboxProvider,
@@ -594,8 +630,7 @@ impl ProviderTransport {
                 Deadline::new(timeout).map(|deadline| (request, bytes, deadline))
             })
             .and_then(|(request, bytes, deadline)| {
-                self.control_endpoint
-                    .connect(timeout)
+                connect_before_deadline(&self.execute_endpoint, &deadline)
                     .map(|connected| (request, bytes, deadline, connected))
             })
             .and_then(|(request, bytes, deadline, mut connected)| {
@@ -645,17 +680,15 @@ impl ProviderTransport {
                     .map(|context_bytes| (committed, context_bytes))
             })
             .and_then(|(committed, context_bytes)| {
-                self.control_endpoint
-                    .connect(timeout)
-                    .map(|connected| (committed, context_bytes, connected))
+                Deadline::new(timeout).map(|deadline| (committed, context_bytes, deadline))
             })
-            .and_then(|(committed, context_bytes, connected)| {
+            .and_then(|(committed, context_bytes, deadline)| {
+                connect_before_deadline(&self.control_endpoint, &deadline)
+                    .map(|connected| (committed, context_bytes, connected, deadline))
+            })
+            .and_then(|(committed, context_bytes, connected, deadline)| {
                 self.require_admitted_process(connected.process)
-                    .map(|()| (committed, context_bytes, connected))
-            })
-            .and_then(|(committed, context_bytes, connected)| {
-                Deadline::new(timeout)
-                    .map(|deadline| (committed, context_bytes, connected, deadline))
+                    .map(|()| (committed, context_bytes, connected, deadline))
             })
             .and_then(|(committed, context_bytes, mut connected, deadline)| {
                 write_frame(&mut connected.stream, &context_bytes, &deadline)
@@ -716,46 +749,101 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
+        admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
         let request =
             SandboxExecuteRequest::from_canonical_cbor(spx1).map_err(transport_before_admission)?;
         validate_staged_input(&request.adapter_input, input).map_err(transport_before_admission)?;
         let deadline = Deadline::new(watchdog).map_err(transport_before_admission)?;
         let mut retained_grant = None;
-        match self.execute_once(
+        if let Some(execution) = self.execute_initial_attempt(
             admitted,
             commitment,
             &request,
             spx1,
             input,
             &deadline,
-            &mut retained_grant,
-        ) {
-            Ok(execution) => return Ok(execution),
-            Err(ReceiveFailure::Invalid) => {
-                return Err(classify_receive_failure(
-                    retained_grant.as_ref(),
-                    PostAdmissionProviderFailure::EvidenceInvalid,
-                ));
-            }
-            Err(ReceiveFailure::Incomplete) => {}
+            ProviderRequestProgress {
+                retained_grant: &mut retained_grant,
+                admission,
+            },
+        )? {
+            return Ok(execution);
         }
-        match self.execute_once(
+        self.execute_retry_attempt(
             admitted,
             commitment,
             &request,
             spx1,
             input,
             &deadline,
-            &mut retained_grant,
-        ) {
+            ProviderRequestProgress {
+                retained_grant: &mut retained_grant,
+                admission,
+            },
+        )
+    }
+
+    fn execute_initial_attempt(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        request: &SandboxExecuteRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        deadline: &Deadline,
+        mut progress: ProviderRequestProgress<'_>,
+    ) -> Result<Option<AuthenticatedProviderTerminal>, ProviderTransportError> {
+        progress.admission.begin()?;
+        let first = self.execute_once(
+            admitted,
+            commitment,
+            request,
+            spx1,
+            input,
+            deadline,
+            &mut progress,
+        );
+        progress.admission.entered();
+        match first {
+            Ok(execution) => Ok(Some(execution)),
+            Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
+                progress.retained_grant.as_ref(),
+                PostAdmissionProviderFailure::EvidenceInvalid,
+            )),
+            Err(ReceiveFailure::Incomplete) => Ok(None),
+        }
+    }
+
+    fn execute_retry_attempt(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        request: &SandboxExecuteRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        deadline: &Deadline,
+        mut progress: ProviderRequestProgress<'_>,
+    ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+        progress.admission.begin()?;
+        let retry = self.execute_once(
+            admitted,
+            commitment,
+            request,
+            spx1,
+            input,
+            deadline,
+            &mut progress,
+        );
+        progress.admission.entered();
+        match retry {
             Ok(execution) => Ok(execution),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
-                retained_grant.as_ref(),
+                progress.retained_grant.as_ref(),
                 PostAdmissionProviderFailure::EvidenceInvalid,
             )),
             Err(ReceiveFailure::Incomplete) => Err(classify_receive_failure(
-                retained_grant.as_ref(),
+                progress.retained_grant.as_ref(),
                 PostAdmissionProviderFailure::TerminalUnavailable,
             )),
         }
@@ -777,6 +865,7 @@ impl ProviderTransport {
             spx1,
             &mut std::io::Cursor::new(input),
             watchdog,
+            &mut UnfencedProviderRequest,
         )
     }
 
@@ -788,7 +877,7 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
-        retained_grant: &mut Option<RetainedGrant>,
+        progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
         deadline
             .remaining()
@@ -810,13 +899,14 @@ impl ProviderTransport {
                             .map_err(receive_incomplete)
                     })
                     .and_then(|()| {
+                        progress.admission.entered();
                         read_response(
                             &mut stream,
                             admitted,
                             commitment,
                             request,
                             deadline,
-                            retained_grant,
+                            &mut *progress.retained_grant,
                         )
                     })
             })
@@ -2615,6 +2705,72 @@ mod tests {
             ),
             Ok(AuthenticatedProviderTerminal::Execution(_))
         ));
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn retry_rechecks_provider_request_admission_before_reconnecting() -> TestResult {
+        struct DenyRetryAdmission {
+            begin_calls: usize,
+            entry_active: bool,
+            completed_entries: usize,
+        }
+
+        impl ProviderRequestAdmission for DenyRetryAdmission {
+            fn begin(&mut self) -> Result<(), ProviderTransportError> {
+                self.begin_calls += 1;
+                if self.begin_calls == 2 {
+                    return Err(ProviderTransportError::BeforeAdmission);
+                }
+                self.entry_active = true;
+                Ok(())
+            }
+
+            fn entered(&mut self) {
+                if self.entry_active {
+                    self.entry_active = false;
+                    self.completed_entries += 1;
+                }
+            }
+        }
+
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("provider deadline failed: {error}"))?;
+            let (mut first, _) = listener
+                .accept()
+                .map_err(|error| format!("provider accept failed: {error}"))?;
+            read_expected_attempt(&mut first, &expected_spx1, &deadline)?;
+            Ok(())
+        });
+        let mut admission = DenyRetryAdmission {
+            begin_calls: 0,
+            entry_active: false,
+            completed_entries: 0,
+        };
+        let result = transport.execute_staged(
+            &fixture.provider,
+            &fixture.commitment,
+            &fixture.spx1,
+            &mut std::io::Cursor::new(b"input"),
+            Duration::from_secs(5),
+            &mut admission,
+        );
+        assert!(matches!(
+            result,
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
+        assert_eq!(admission.begin_calls, 2);
+        assert_eq!(admission.completed_entries, 1);
+        assert!(!admission.entry_active);
         provider.join().map_err(|_| "provider thread panicked")??;
         Ok(())
     }

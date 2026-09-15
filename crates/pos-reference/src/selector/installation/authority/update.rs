@@ -3,7 +3,6 @@
 mod durability;
 
 pub use durability::CommittedInstallationUpdate;
-
 use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;

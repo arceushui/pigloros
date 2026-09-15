@@ -11,8 +11,8 @@ use super::codec::{
     verify_signature,
 };
 use super::{
-    SandboxProviderProtocolError, SandboxRevocationSnapshot, SandboxTrustError, SandboxTrustRole,
-    SandboxTrustSnapshot,
+    attempt_values, SandboxProviderProtocolError, SandboxRevocationSnapshot, SandboxTrustError,
+    SandboxTrustRole, SandboxTrustSnapshot,
 };
 
 /// Closed selector-side revocation-update failures.
@@ -430,15 +430,6 @@ fn decode_attempts(value: &Value) -> Result<Vec<[u8; 16]>, SandboxProviderProtoc
                 .and_then(|attempts| validate_attempts(&attempts).map(|()| attempts))
         })
     })
-}
-
-fn attempt_values(attempts: &[[u8; 16]]) -> Value {
-    Value::Array(
-        attempts
-            .iter()
-            .map(|attempt| bytes_value(attempt))
-            .collect(),
-    )
 }
 
 fn wire_digest(bytes: &[u8]) -> [u8; 32] {

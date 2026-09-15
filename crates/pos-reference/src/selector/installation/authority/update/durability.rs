@@ -16,10 +16,12 @@ use rustix::fs::{
 use super::ValidatedInstallationUpdate;
 use crate::evaluator_protocol::encode_with_limit;
 use crate::sandbox_provider_protocol::{
-    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, RevocationAcknowledgement,
+    attempt_values, AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext,
+    RevocationAcknowledgement,
 };
 use crate::selector::installation::authority::{
     fresh_selector_id, AdmittedSelectorProvider, InstallationRecoverySnapshot,
+    InstallationUpdateCommitError,
 };
 use crate::selector::installation::{
     ensure_no_pending_recovery, hex_name, open_directory_chain, open_immutable_file,
@@ -193,15 +195,17 @@ impl AdmittedSelectorProvider {
     /// # Errors
     /// Rejects stale authority, pending recovery, unsafe staging state,
     /// changed successor records, oversized SIR1, or synchronization failure.
-    pub fn commit_update(
+    pub(crate) fn commit_update(
         self: Arc<Self>,
         update: ValidatedInstallationUpdate,
         snapshot: InstallationRecoverySnapshot,
-    ) -> Result<CommittedInstallationUpdate, SelectorBoundaryError> {
+    ) -> Result<CommittedInstallationUpdate, InstallationUpdateCommitError> {
         let admitted = Arc::clone(&self);
         let installed = self.bootstrap().installed();
         if installed.manifest_bytes() != update.previous_manifest_bytes() {
-            return Err(SelectorBoundaryError::ArtifactInvalid);
+            return Err(InstallationUpdateCommitError::BeforeRecovery(
+                SelectorBoundaryError::ArtifactInvalid,
+            ));
         }
         installed
             .root
@@ -230,6 +234,7 @@ impl AdmittedSelectorProvider {
                 open_staging_directory(&installed.root, owner)
                     .map(|staging| (owner, bytes, digest, staging))
             })
+            .map_err(InstallationUpdateCommitError::BeforeRecovery)
             .and_then(|(owner, bytes, digest, staging)| {
                 write_recovery(&staging, &installed.root, owner, &bytes)
                     .map(|file| (bytes, digest, file))
@@ -287,15 +292,6 @@ fn recovery_bytes(
             .map_err(invalid)
             .map(|encoded| (encoded, sir1_digest))
         })
-}
-
-fn attempt_values(attempts: &[[u8; 16]]) -> Value {
-    Value::Array(
-        attempts
-            .iter()
-            .map(|attempt| Value::Bytes(attempt.to_vec()))
-            .collect(),
-    )
 }
 
 fn synchronize_successor_records(
@@ -407,7 +403,7 @@ fn write_recovery(
     root: &File,
     owner: u32,
     bytes: &[u8],
-) -> Result<File, SelectorBoundaryError> {
+) -> Result<File, InstallationUpdateCommitError> {
     temporary_name("sir1")
         .and_then(|name| create_staging_file(staging, &name, owner).map(|file| (name, file)))
         .and_then(|(name, mut temporary)| {
@@ -417,21 +413,31 @@ fn write_recovery(
                 .and_then(|()| fsync(&temporary).map_err(io))
                 .map(|()| (name, temporary))
         })
+        .map_err(InstallationUpdateCommitError::BeforeRecovery)
         .and_then(|(name, temporary)| {
             renameat_with(staging, &name, root, RECOVERY_NAME, RenameFlags::NOREPLACE)
                 .map_err(invalid)
+                .map_err(InstallationUpdateCommitError::RecoveryPending)
                 .map(|()| temporary)
         })
         .and_then(|temporary| {
             u64::try_from(bytes.len())
                 .map_err(invalid)
                 .and_then(|length| open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner))
+                .map_err(InstallationUpdateCommitError::RecoveryPending)
                 .map(|recovery| (temporary, recovery))
         })
         .and_then(|(temporary, recovery)| {
-            verify_file_identity(&temporary, &recovery).map(|()| recovery)
+            verify_file_identity(&temporary, &recovery)
+                .map_err(InstallationUpdateCommitError::RecoveryPending)
+                .map(|()| recovery)
         })
-        .and_then(|recovery| fsync(root).map_err(io).map(|()| recovery))
+        .and_then(|recovery| {
+            fsync(root)
+                .map_err(io)
+                .map_err(InstallationUpdateCommitError::RecoveryPending)
+                .map(|()| recovery)
+        })
 }
 
 fn publish_successor(
@@ -604,7 +610,7 @@ fn io<T>(_: T) -> SelectorBoundaryError {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
     use crate::selector::installation::tests::updates::pending_update_fixture;
@@ -727,7 +733,10 @@ mod tests {
         let staging = open_staging_directory(&root, owner)?;
         let recovery = write_recovery(&staging, &root, owner, b"recovery")?;
         verify_recovery_identity(&root, owner, &recovery, b"recovery")?;
-        assert!(write_recovery(&staging, &root, owner, b"second").is_err());
+        assert!(matches!(
+            write_recovery(&staging, &root, owner, b"second"),
+            Err(InstallationUpdateCommitError::RecoveryPending(_))
+        ));
 
         fs::set_permissions(
             directory.path().join(RECOVERY_NAME),
