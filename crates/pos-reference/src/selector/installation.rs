@@ -27,7 +27,8 @@ pub const SANDBOX_ARTIFACT_ROOT: &str = "/var/lib/pigloros/sandbox";
 /// Root-only endpoint for the separate revocation transaction.
 pub const SANDBOX_ADMIN_SOCKET: &str = "/run/pigloros/sandbox-selector-admin.sock";
 
-const MANIFEST_NAME: &str = "installation.cbor";
+pub(crate) const MANIFEST_NAME: &str = "installation.cbor";
+pub(super) const RECOVERY_NAME: &str = "installation-update.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
@@ -75,6 +76,10 @@ impl ResolvedInstalledCase {
 pub struct InstallationObjectKind(u8);
 
 impl InstallationObjectKind {
+    /// Installed RVS1 revocation-snapshot role.
+    pub(crate) const REVOCATION_SNAPSHOT: Self = Self(1);
+    /// Installed APT1 administrator-policy role.
+    pub(crate) const ADMINISTRATOR_POLICY: Self = Self(2);
     /// Installed LPS1 launch-policy role.
     pub(crate) const LAUNCH_POLICY: Self = Self(8);
     /// Installed SIM1 image-manifest role.
@@ -278,6 +283,41 @@ impl InstallationManifest {
         &self.objects
     }
 
+    /// Check the SIC1 portion of a revocation-only installation transition.
+    /// Signed APT1/RVS1/RCU1 verification remains a separate mandatory step.
+    ///
+    /// # Errors
+    /// Rejects changes to fixed installation authority or existing objects,
+    /// and additions other than the exact successor APT1 and RVS1 records.
+    pub fn validate_revocation_successor(&self, next: &Self) -> Result<(), ProtocolError> {
+        if self.root_key_id != next.root_key_id
+            || self.root_public_key != next.root_public_key
+            || self.trust_digest != next.trust_digest
+            || self.execute_socket != next.execute_socket
+            || self.control_socket != next.control_socket
+            || self.required_features != next.required_features
+            || self.revocation_digest == next.revocation_digest
+            || self.policy_digest == next.policy_digest
+        {
+            return Err(ProtocolError::InvalidEncoding);
+        }
+        for previous in &self.objects {
+            if next.object(previous.kind, previous.identity)? != previous {
+                return Err(ProtocolError::InvalidEncoding);
+            }
+        }
+        for entry in &next.objects {
+            if self.object(entry.kind, entry.identity).is_ok() {
+                continue;
+            }
+            let key = (entry.kind.code(), entry.identity);
+            if key != (1, next.revocation_digest) && key != (2, next.policy_digest) {
+                return Err(ProtocolError::InvalidEncoding);
+            }
+        }
+        Ok(())
+    }
+
     /// Returns SIC1's self-digest.
     #[must_use]
     pub const fn digest(&self) -> [u8; 32] {
@@ -358,6 +398,7 @@ impl HeldInstallationArtifact {
 /// Retained root-owned SIC1 and all of its verified immutable descriptors.
 #[derive(Debug)]
 pub struct InstalledSelectorState {
+    root: File,
     manifest_file: File,
     manifest_bytes: Vec<u8>,
     manifest: InstallationManifest,
@@ -397,12 +438,17 @@ impl InstalledSelectorState {
                     InstallationManifest::from_canonical_cbor(&manifest_bytes)
                         .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
                         .and_then(|manifest| {
-                            open_indexed_artifacts(root, &manifest, expected_owner).map(
-                                |artifacts| Self {
-                                    manifest_file,
-                                    manifest_bytes,
-                                    manifest,
-                                    artifacts,
+                            open_indexed_artifacts(root, &manifest, expected_owner).and_then(
+                                |artifacts| {
+                                    root.try_clone().map_err(|_| SelectorBoundaryError::Io).map(
+                                        |root| Self {
+                                            root,
+                                            manifest_file,
+                                            manifest_bytes,
+                                            manifest,
+                                            artifacts,
+                                        },
+                                    )
                                 },
                             )
                         })
@@ -411,7 +457,7 @@ impl InstalledSelectorState {
     }
 
     #[cfg(test)]
-    fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
+    pub(crate) fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
         root.metadata()
             .map_err(|_| SelectorBoundaryError::Io)
             .and_then(|metadata| Self::open_at_for_owner(root, metadata.uid()))
@@ -500,7 +546,7 @@ fn open_indexed_artifacts(
 }
 
 fn ensure_no_pending_recovery(root: &File) -> Result<(), SelectorBoundaryError> {
-    match statat(root, "installation-update.cbor", AtFlags::SYMLINK_NOFOLLOW) {
+    match statat(root, RECOVERY_NAME, AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => Ok(()),
         _ => Err(SelectorBoundaryError::ArtifactInvalid),
     }
@@ -743,6 +789,8 @@ fn hex_name(digest: [u8; 32]) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod tests {
+    pub mod updates;
+
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Seek, Write};
@@ -759,7 +807,7 @@ pub mod tests {
     use super::authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap};
     use super::*;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     const ROOT_SELECTOR_CAPABILITY: &str = "read-public-bundle";
 
@@ -946,6 +994,7 @@ pub mod tests {
             .map(|artifact| artifact.object.clone())
             .collect();
         Ok(InstalledSelectorState {
+            root: tempfile::tempdir().and_then(|directory| File::open(directory.path()))?,
             manifest_file: tempfile::NamedTempFile::new()?.into_file(),
             manifest_bytes: Vec::new(),
             manifest: InstallationManifest {
@@ -1403,6 +1452,7 @@ pub mod tests {
             .map(|artifact| artifact.object.clone())
             .collect();
         Ok(InstalledSelectorState {
+            root: tempfile::tempdir().and_then(|directory| File::open(directory.path()))?,
             manifest_file: tempfile::NamedTempFile::new()?.into_file(),
             manifest_bytes: Vec::new(),
             manifest: InstallationManifest {

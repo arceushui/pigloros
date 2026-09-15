@@ -12,6 +12,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
@@ -24,7 +25,10 @@ use crate::sandbox_provider_protocol::{
     PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
     SelectorGrantCommitment,
 };
-use crate::selector::installation::authority::AdmittedSelectorProvider;
+use crate::selector::installation::authority::{
+    AdmittedProviderRuntime, AdmittedSelectorProvider, CommittedInstallationUpdate,
+    ProviderRuntimeSlot,
+};
 use crate::selector::installation::open_directory_chain;
 use crate::selector::SelectorBoundaryError;
 
@@ -72,6 +76,24 @@ fn invalid_errno<T>(_: T) -> rustix::io::Errno {
 pub(crate) struct ProviderTransport {
     execute_endpoint: SelectedProviderEndpoint,
     control_endpoint: SelectedProviderEndpoint,
+    admitted_process: Mutex<Option<ProviderProcessIdentity>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProviderProcessIdentity {
+    pid: u64,
+    start_time_ticks: u64,
+}
+
+struct ConnectedProviderStream {
+    stream: UnixStream,
+    process: ProviderProcessIdentity,
+}
+
+struct ConnectedInstallationUpdate {
+    committed: CommittedInstallationUpdate,
+    context_bytes: Vec<u8>,
+    connected: ConnectedProviderStream,
 }
 
 /// Complete provider evidence authenticated against an admitted selector provider.
@@ -116,6 +138,32 @@ pub(crate) enum PostAdmissionProviderFailure {
 struct RetainedGrant {
     bytes: Vec<u8>,
     digest: [u8; 32],
+}
+
+struct ProviderRequestProgress<'a> {
+    retained_grant: &'a mut Option<RetainedGrant>,
+    admission: &'a mut dyn ProviderRequestAdmission,
+}
+
+/// Admission fence applied independently to every outbound provider request.
+pub(crate) trait ProviderRequestAdmission {
+    /// Acquire permission immediately before opening an execute connection.
+    fn begin(&mut self) -> Result<(), ProviderTransportError>;
+
+    /// Release the pre-entry fence after request bytes and write EOF are sent.
+    fn entered(&mut self);
+}
+
+#[cfg(test)]
+struct UnfencedProviderRequest;
+
+#[cfg(test)]
+impl ProviderRequestAdmission for UnfencedProviderRequest {
+    fn begin(&mut self) -> Result<(), ProviderTransportError> {
+        Ok(())
+    }
+
+    fn entered(&mut self) {}
 }
 
 impl AuthenticatedProviderExecution {
@@ -348,7 +396,7 @@ impl SelectedProviderEndpoint {
         }
     }
 
-    fn connect(&self, timeout: Duration) -> Result<UnixStream, SelectorBoundaryError> {
+    fn connect(&self, timeout: Duration) -> Result<ConnectedProviderStream, SelectorBoundaryError> {
         endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)
             .and_then(|before| {
                 SocketAddrUnix::new(&self.path)
@@ -393,9 +441,51 @@ impl SelectedProviderEndpoint {
                     peer.uid.as_raw(),
                     self.owner,
                 )
-                .map(|()| stream)
+                .and_then(|()| {
+                    provider_process_identity(peer.pid)
+                        .map(|process| ConnectedProviderStream { stream, process })
+                })
             })
     }
+}
+
+fn provider_process_identity(
+    pid: rustix::process::Pid,
+) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
+    let raw_pid = pid.as_raw_nonzero().get();
+    std::fs::read_to_string(format!("/proc/{raw_pid}/stat"))
+        .map_err(artifact_invalid)
+        .and_then(|stat| parse_provider_process_identity(raw_pid, &stat))
+}
+
+fn parse_provider_process_identity(
+    raw_pid: i32,
+    stat: &str,
+) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
+    u64::try_from(raw_pid)
+        .map_err(artifact_invalid)
+        .and_then(|pid| {
+            stat.rsplit_once(") ")
+                .map(|(_, fields)| fields)
+                .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                .map(|fields| (pid, fields))
+        })
+        .and_then(|(pid, fields)| {
+            fields
+                .split_ascii_whitespace()
+                .nth(19)
+                .ok_or(SelectorBoundaryError::ArtifactInvalid)
+                .map(|start_time| (pid, start_time))
+        })
+        .and_then(|(pid, start_time)| {
+            start_time
+                .parse()
+                .map_err(artifact_invalid)
+                .map(|start_time_ticks| ProviderProcessIdentity {
+                    pid,
+                    start_time_ticks,
+                })
+        })
 }
 
 fn require_root_owned_endpoint(path: &Path) -> Result<&Path, SelectorBoundaryError> {
@@ -411,7 +501,18 @@ const fn provider_transport(
     ProviderTransport {
         execute_endpoint,
         control_endpoint,
+        admitted_process: Mutex::new(None),
     }
+}
+
+fn connect_before_deadline(
+    endpoint: &SelectedProviderEndpoint,
+    deadline: &Deadline,
+) -> Result<ConnectedProviderStream, SelectorBoundaryError> {
+    deadline
+        .remaining()
+        .map_err(selector_unavailable)
+        .and_then(|remaining| endpoint.connect(remaining))
 }
 
 fn complete_nonblocking_connect(
@@ -451,19 +552,76 @@ impl ProviderTransport {
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn from_path_for_test(path: &Path) -> Result<Self, SelectorBoundaryError> {
-        let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
-        let endpoint = SelectedProviderEndpoint::from_identity(path, &metadata, metadata.uid());
-        Ok(Self {
-            execute_endpoint: endpoint.clone(),
-            control_endpoint: endpoint,
-        })
+        std::fs::symlink_metadata(path)
+            .map_err(io_error)
+            .and_then(|metadata| {
+                let endpoint =
+                    SelectedProviderEndpoint::from_identity(path, &metadata, metadata.uid());
+                provider_process_identity(rustix::process::getpid()).map(|process| Self {
+                    execute_endpoint: endpoint.clone(),
+                    control_endpoint: endpoint,
+                    admitted_process: Mutex::new(Some(process)),
+                })
+            })
+    }
+
+    fn bind_admitted_process(
+        &self,
+        observed: ProviderProcessIdentity,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.admitted_process
+            .lock()
+            .map_err(selector_unavailable)
+            .and_then(|mut admitted| {
+                let result = match *admitted {
+                    None => {
+                        *admitted = Some(observed);
+                        Ok(())
+                    }
+                    Some(expected) if expected == observed => Ok(()),
+                    Some(_) => Err(SelectorBoundaryError::ArtifactInvalid),
+                };
+                drop(admitted);
+                result
+            })
+    }
+
+    fn require_admitted_process(
+        &self,
+        observed: ProviderProcessIdentity,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.admitted_process
+            .lock()
+            .map_err(selector_unavailable)
+            .and_then(|admitted| {
+                (*admitted)
+                    .filter(|expected| *expected == observed)
+                    .map(|_| ())
+                    .ok_or(SelectorBoundaryError::ArtifactInvalid)
+            })
+    }
+
+    /// Seal the root-generated runtime identities around the synchronized provider process.
+    pub(crate) fn admit_runtime(
+        &self,
+        admitted: &AdmittedSelectorProvider,
+    ) -> Result<AdmittedProviderRuntime, SelectorBoundaryError> {
+        self.admitted_process
+            .lock()
+            .map_err(selector_unavailable)
+            .and_then(|process| process.ok_or(SelectorBoundaryError::ArtifactInvalid))
+            .and_then(|process| {
+                ProviderRuntimeSlot::allocate(admitted).and_then(|runtime| {
+                    runtime.bind_observed_process(process.pid, process.start_time_ticks)
+                })
+            })
     }
 
     /// Prove that the selected provider has activated the exact admitted policy.
     ///
     /// The runtime-signed SDY1 binds the active APT1, whose authenticated fields
     /// in turn bind the current RVS1 digest and epoch. Evaluator admission remains
-    /// closed until this control-channel exchange completes.
+    /// closed until this execution-channel exchange completes.
     pub(crate) fn synchronize_revocation(
         &self,
         admitted: &AdmittedSandboxProvider,
@@ -471,22 +629,140 @@ impl ProviderTransport {
         nonce: [u8; 16],
         timeout: Duration,
     ) -> Result<(), SelectorBoundaryError> {
-        let (request, bytes) = admitted
-            .describe_request(request_id, nonce)
-            .map_err(artifact_invalid)?;
-        let deadline = Deadline::new(timeout)?;
-        let mut stream = self.control_endpoint.connect(timeout)?;
-        write_frame(&mut stream, &bytes, &deadline).map_err(selector_unavailable)?;
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(selector_unavailable)?;
-        let response = read_frame(&mut stream, &deadline)
-            .map_err(selector_unavailable)?
-            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
-        ensure_eof(&mut stream, &deadline).map_err(selector_unavailable)?;
         admitted
-            .authenticate_describe_response(&response, &request)
+            .describe_request(request_id, nonce)
             .map_err(artifact_invalid)
+            .and_then(|(request, bytes)| {
+                Deadline::new(timeout).map(|deadline| (request, bytes, deadline))
+            })
+            .and_then(|(request, bytes, deadline)| {
+                connect_before_deadline(&self.execute_endpoint, &deadline)
+                    .map(|connected| (request, bytes, deadline, connected))
+            })
+            .and_then(|(request, bytes, deadline, mut connected)| {
+                write_frame(&mut connected.stream, &bytes, &deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (request, deadline, connected))
+            })
+            .and_then(|(request, deadline, connected)| {
+                connected
+                    .stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(selector_unavailable)
+                    .map(|()| (request, deadline, connected))
+            })
+            .and_then(|(request, deadline, mut connected)| {
+                read_frame(&mut connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
+                    .map(|response| (request, deadline, connected, response))
+            })
+            .and_then(|(request, deadline, mut connected, response)| {
+                ensure_eof(&mut connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (request, connected, response))
+            })
+            .and_then(|(request, connected, response)| {
+                admitted
+                    .authenticate_describe_response(&response, &request)
+                    .map_err(artifact_invalid)
+                    .map(|()| connected)
+            })
+            .and_then(|connected| self.bind_admitted_process(connected.process))
+    }
+
+    /// Complete one committed live update over the exact admitted control process.
+    pub(crate) fn complete_committed_update(
+        &self,
+        committed: CommittedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<(AdmittedSelectorProvider, Vec<u8>), SelectorBoundaryError> {
+        self.connect_committed_update(committed, timeout)
+            .and_then(|connected| Self::exchange_committed_update(connected, timeout))
+    }
+
+    fn connect_committed_update(
+        &self,
+        committed: CommittedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<ConnectedInstallationUpdate, SelectorBoundaryError> {
+        committed
+            .cancellation_context()
+            .and_then(|context| {
+                context
+                    .to_canonical_cbor()
+                    .map_err(artifact_invalid)
+                    .map(|context_bytes| (committed, context_bytes))
+            })
+            .and_then(|(committed, context_bytes)| {
+                self.control_endpoint
+                    .connect(timeout)
+                    .map(|connected| (committed, context_bytes, connected))
+            })
+            .and_then(|(committed, context_bytes, connected)| {
+                self.require_admitted_process(connected.process).map(|()| {
+                    ConnectedInstallationUpdate {
+                        committed,
+                        context_bytes,
+                        connected,
+                    }
+                })
+            })
+    }
+
+    fn exchange_committed_update(
+        connected: ConnectedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<(AdmittedSelectorProvider, Vec<u8>), SelectorBoundaryError> {
+        Deadline::new(timeout)
+            .map(|deadline| (connected, deadline))
+            .and_then(|(mut connected, deadline)| {
+                write_frame(
+                    &mut connected.connected.stream,
+                    &connected.context_bytes,
+                    &deadline,
+                )
+                .map_err(selector_unavailable)
+                .map(|()| (connected, deadline))
+            })
+            .and_then(|(mut connected, deadline)| {
+                write_frame(
+                    &mut connected.connected.stream,
+                    connected.committed.revocation_update_bytes(),
+                    &deadline,
+                )
+                .map_err(selector_unavailable)
+                .map(|()| (connected, deadline))
+            })
+            .and_then(|(connected, deadline)| {
+                connected
+                    .connected
+                    .stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(selector_unavailable)
+                    .map(|()| (connected, deadline))
+            })
+            .and_then(|(mut connected, deadline)| {
+                read_frame(&mut connected.connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
+                    .map(|response| (connected, deadline, response))
+            })
+            .and_then(|(mut connected, deadline, response)| {
+                ensure_eof(&mut connected.connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (connected.committed, response))
+            })
+            .and_then(|(committed, response)| {
+                committed
+                    .authenticate_live_acknowledgement(&response)
+                    .map(|acknowledgement| (committed, response, acknowledgement))
+            })
+            .and_then(|(committed, response, acknowledgement)| {
+                committed
+                    .complete_live_update(&acknowledgement)
+                    .map(|admitted| (admitted, response))
+            })
     }
 
     /// Execute exact constructed SPX1/input bytes and authenticate the full reply.
@@ -504,49 +780,104 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
+        admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
         let request =
             SandboxExecuteRequest::from_canonical_cbor(spx1).map_err(transport_before_admission)?;
         validate_staged_input(&request.adapter_input, input).map_err(transport_before_admission)?;
         let deadline = Deadline::new(watchdog).map_err(transport_before_admission)?;
         let mut retained_grant = None;
-        match self.execute_once(
+        let mut progress = ProviderRequestProgress {
+            retained_grant: &mut retained_grant,
+            admission,
+        };
+        if let Some(execution) = self.execute_initial_attempt(
             admitted,
             commitment,
             &request,
             spx1,
             input,
             &deadline,
-            &mut retained_grant,
-        ) {
-            Ok(execution) => return Ok(execution),
-            Err(ReceiveFailure::Invalid) => {
-                return Err(classify_receive_failure(
-                    retained_grant.as_ref(),
-                    PostAdmissionProviderFailure::EvidenceInvalid,
-                ));
-            }
-            Err(ReceiveFailure::Incomplete) => {}
+            &mut progress,
+        )? {
+            return Ok(execution);
         }
-        match self.execute_once(
+        self.execute_retry_attempt(
             admitted,
             commitment,
             &request,
             spx1,
             input,
             &deadline,
-            &mut retained_grant,
-        ) {
+            &mut progress,
+        )
+    }
+
+    fn execute_initial_attempt(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        request: &SandboxExecuteRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        deadline: &Deadline,
+        progress: &mut ProviderRequestProgress<'_>,
+    ) -> Result<Option<AuthenticatedProviderTerminal>, ProviderTransportError> {
+        let first = self.execute_admitted_attempt(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        )?;
+        match first {
+            Ok(execution) => Ok(Some(execution)),
+            Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
+                progress.retained_grant.as_ref(),
+                PostAdmissionProviderFailure::EvidenceInvalid,
+            )),
+            Err(ReceiveFailure::Incomplete) => Ok(None),
+        }
+    }
+
+    fn execute_retry_attempt(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        request: &SandboxExecuteRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        deadline: &Deadline,
+        progress: &mut ProviderRequestProgress<'_>,
+    ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+        let retry = self.execute_admitted_attempt(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        )?;
+        match retry {
             Ok(execution) => Ok(execution),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
-                retained_grant.as_ref(),
+                progress.retained_grant.as_ref(),
                 PostAdmissionProviderFailure::EvidenceInvalid,
             )),
             Err(ReceiveFailure::Incomplete) => Err(classify_receive_failure(
-                retained_grant.as_ref(),
+                progress.retained_grant.as_ref(),
                 PostAdmissionProviderFailure::TerminalUnavailable,
             )),
         }
+    }
+
+    fn execute_admitted_attempt(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        request: &SandboxExecuteRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        deadline: &Deadline,
+        progress: &mut ProviderRequestProgress<'_>,
+    ) -> Result<Result<AuthenticatedProviderTerminal, ReceiveFailure>, ProviderTransportError> {
+        progress.admission.begin()?;
+        let result = self.execute_once(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        );
+        progress.admission.entered();
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -565,6 +896,7 @@ impl ProviderTransport {
             spx1,
             &mut std::io::Cursor::new(input),
             watchdog,
+            &mut UnfencedProviderRequest,
         )
     }
 
@@ -576,13 +908,17 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
-        retained_grant: &mut Option<RetainedGrant>,
+        progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
         deadline
             .remaining()
             .and_then(|remaining| {
                 self.execute_endpoint
                     .connect(remaining)
+                    .and_then(|connected| {
+                        self.require_admitted_process(connected.process)
+                            .map(|()| connected.stream)
+                    })
                     .map_err(receive_incomplete)
             })
             .and_then(|mut stream| {
@@ -594,13 +930,14 @@ impl ProviderTransport {
                             .map_err(receive_incomplete)
                     })
                     .and_then(|()| {
+                        progress.admission.entered();
                         read_response(
                             &mut stream,
                             admitted,
                             commitment,
                             request,
                             deadline,
-                            retained_grant,
+                            &mut *progress.retained_grant,
                         )
                     })
             })
@@ -1274,6 +1611,113 @@ mod tests {
         Ok(result)
     }
 
+    struct CommittedUpdateControl {
+        transport: ProviderTransport,
+        _directory: tempfile::TempDir,
+        _fixture: crate::selector::installation::tests::updates::UpdateFixture,
+        committed: crate::selector::installation::authority::CommittedInstallationUpdate,
+        provider: std::thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    fn committed_update_control_reply(
+        response_trailing: Vec<u8>,
+    ) -> TestResult<CommittedUpdateControl> {
+        let (fixture, committed, _signer) =
+            crate::selector::installation::tests::updates::committed_update_fixture()?;
+        let committed =
+            std::sync::Arc::into_inner(committed).ok_or("committed update still shared")?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let provider = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let context = read_test_frame(&mut stream)?;
+            let update = read_test_frame(&mut stream)?;
+            let mut trailing = Vec::new();
+            stream.read_to_end(&mut trailing)?;
+            if !trailing.is_empty() {
+                return Err(std::io::Error::other("unexpected request trailing bytes"));
+            }
+            let response =
+                crate::selector::installation::tests::updates::acknowledgement_for_control_frames(
+                    &context, &update,
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let length = u32::try_from(response.len()).map_err(std::io::Error::other)?;
+            stream.write_all(&length.to_be_bytes())?;
+            stream.write_all(&response)?;
+            stream.write_all(&response_trailing)?;
+            stream.shutdown(std::net::Shutdown::Write)
+        });
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        Ok(CommittedUpdateControl {
+            transport,
+            _directory: directory,
+            _fixture: fixture,
+            committed,
+            provider,
+        })
+    }
+
+    fn read_test_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix)?;
+        let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(std::io::Error::other)?;
+        let mut frame = vec![0; length];
+        stream.read_exact(&mut frame)?;
+        Ok(frame)
+    }
+
+    #[test]
+    fn committed_update_transport_publishes_only_an_exact_terminal_reply() -> TestResult {
+        let valid = committed_update_control_reply(Vec::new())?;
+        let (successor, acknowledgement) = valid
+            .transport
+            .complete_committed_update(valid.committed, Duration::from_secs(1))?;
+        assert!(!acknowledgement.is_empty());
+        assert_ne!(
+            successor.bootstrap().installed().manifest().digest(),
+            [0; 32]
+        );
+        valid
+            .provider
+            .join()
+            .map_err(|_| "provider thread panicked")??;
+
+        let trailing = committed_update_control_reply(vec![1])?;
+        assert!(trailing
+            .transport
+            .complete_committed_update(trailing.committed, Duration::from_secs(1))
+            .is_err());
+        trailing
+            .provider
+            .join()
+            .map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn committed_update_exchange_budget_starts_after_control_connect() -> TestResult {
+        let valid = committed_update_control_reply(Vec::new())?;
+        let connected = valid
+            .transport
+            .connect_committed_update(valid.committed, Duration::from_secs(1))?;
+        std::thread::sleep(Duration::from_millis(150));
+        let (successor, acknowledgement) =
+            ProviderTransport::exchange_committed_update(connected, Duration::from_millis(100))?;
+        assert!(!acknowledgement.is_empty());
+        assert_ne!(
+            successor.bootstrap().installed().manifest().digest(),
+            [0; 32]
+        );
+        valid
+            .provider
+            .join()
+            .map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
     #[test]
     fn closed_error_mappers_and_connect_completion_preserve_failure_classes() -> TestResult {
         assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
@@ -1289,15 +1733,6 @@ mod tests {
         assert_eq!(receive_invalid(()), ReceiveFailure::Invalid);
         assert_eq!(receive_incomplete(()), ReceiveFailure::Incomplete);
         assert_eq!(invalid_errno(()), rustix::io::Errno::INVAL);
-
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("constructor.sock");
-        let _listener = UnixListener::bind(&path)?;
-        let metadata = std::fs::symlink_metadata(&path)?;
-        let endpoint = SelectedProviderEndpoint::from_identity(&path, &metadata, metadata.uid());
-        let transport = provider_transport(endpoint.clone(), endpoint);
-        assert_eq!(transport.execute_endpoint.path, path);
-        assert_eq!(transport.control_endpoint.path, path);
 
         let (descriptor, _peer) = UnixStream::pair()?;
         assert_eq!(
@@ -1333,6 +1768,76 @@ mod tests {
     }
 
     #[test]
+    fn provider_process_identity_is_bound_once_and_fails_closed() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("constructor.sock");
+        let _listener = UnixListener::bind(&path)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let endpoint = SelectedProviderEndpoint::from_identity(&path, &metadata, metadata.uid());
+        let transport = provider_transport(endpoint.clone(), endpoint);
+        assert_eq!(transport.execute_endpoint.path, path);
+        assert_eq!(transport.control_endpoint.path, path);
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        assert!(transport.admit_runtime(&admitted).is_err());
+        let observed = provider_process_identity(rustix::process::getpid())?;
+        assert_eq!(
+            transport.require_admitted_process(observed),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
+        assert_eq!(transport.bind_admitted_process(observed), Ok(()));
+        assert_eq!(
+            transport.bind_admitted_process(ProviderProcessIdentity {
+                start_time_ticks: observed.start_time_ticks.saturating_add(1),
+                ..observed
+            }),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        assert_process_stat_boundaries(observed)?;
+
+        let poisoned = provider_transport(transport.execute_endpoint, transport.control_endpoint);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned
+                .admitted_process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert_eq!(
+            poisoned.bind_admitted_process(observed),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            poisoned.require_admitted_process(observed),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            poisoned.admit_runtime(&admitted),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        Ok(())
+    }
+
+    fn assert_process_stat_boundaries(observed: ProviderProcessIdentity) -> TestResult {
+        let raw_pid = rustix::process::getpid().as_raw_nonzero().get();
+        let stat = std::fs::read_to_string(format!("/proc/{raw_pid}/stat"))?;
+        assert_eq!(parse_provider_process_identity(raw_pid, &stat)?, observed);
+        for (pid, stat) in [
+            (-1, stat.as_str()),
+            (1, "missing-delimiter"),
+            (1, "1 (name) too few fields"),
+            (1, "1 (name) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 invalid"),
+        ] {
+            assert_eq!(
+                parse_provider_process_identity(pid, stat),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn control_transport_requires_the_runtime_signed_active_policy() -> TestResult {
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let (unrelated_request, _) = fixture
@@ -1356,6 +1861,22 @@ mod tests {
         );
         assert_eq!(
             synchronize_control_reply(&fixture, None)?,
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("closed-control.sock");
+        let listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        drop(listener);
+        assert_eq!(
+            transport.synchronize_revocation(
+                &fixture.provider,
+                fixture.describe_request_id,
+                fixture.describe_nonce,
+                Duration::from_secs(1),
+            ),
             Err(SelectorBoundaryError::SelectorUnavailable)
         );
 
@@ -2236,6 +2757,72 @@ mod tests {
             ),
             Ok(AuthenticatedProviderTerminal::Execution(_))
         ));
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn retry_rechecks_provider_request_admission_before_reconnecting() -> TestResult {
+        struct DenyRetryAdmission {
+            begin_calls: usize,
+            entry_active: bool,
+            completed_entries: usize,
+        }
+
+        impl ProviderRequestAdmission for DenyRetryAdmission {
+            fn begin(&mut self) -> Result<(), ProviderTransportError> {
+                self.begin_calls += 1;
+                if self.begin_calls == 2 {
+                    return Err(ProviderTransportError::BeforeAdmission);
+                }
+                self.entry_active = true;
+                Ok(())
+            }
+
+            fn entered(&mut self) {
+                if self.entry_active {
+                    self.entry_active = false;
+                    self.completed_entries += 1;
+                }
+            }
+        }
+
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let expected_spx1 = fixture.spx1.clone();
+        let provider = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = Deadline::new(Duration::from_secs(5))
+                .map_err(|error| format!("provider deadline failed: {error}"))?;
+            let (mut first, _) = listener
+                .accept()
+                .map_err(|error| format!("provider accept failed: {error}"))?;
+            read_expected_attempt(&mut first, &expected_spx1, &deadline)?;
+            Ok(())
+        });
+        let mut admission = DenyRetryAdmission {
+            begin_calls: 0,
+            entry_active: false,
+            completed_entries: 0,
+        };
+        let result = transport.execute_staged(
+            &fixture.provider,
+            &fixture.commitment,
+            &fixture.spx1,
+            &mut std::io::Cursor::new(b"input"),
+            Duration::from_secs(5),
+            &mut admission,
+        );
+        assert!(matches!(
+            result,
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
+        assert_eq!(admission.begin_calls, 2);
+        assert_eq!(admission.completed_entries, 1);
+        assert!(!admission.entry_active);
         provider.join().map_err(|_| "provider thread panicked")??;
         Ok(())
     }
