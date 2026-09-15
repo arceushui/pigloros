@@ -7890,6 +7890,32 @@ mod coverage_entrypoints {
             ));
         }
     }
+
+    #[test]
+    fn resume_rejects_missing_or_foreign_host_gate() {
+        let hosted_store = ok(HostedExperimentStore::open(StoreConfig::Memory));
+        let foreign_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        assert!(matches!(
+            Experiment::new(config("foreign-resume-gate", StopCondition::MaxTicks(0)))
+                .with_erasure_gate(foreign_gate)
+                .resume_with_hosted_store(TimelineId::new(), hosted_store, StoreConfig::Memory),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        assert!(matches!(
+            Experiment::new(config("unbound-resume-gate", StopCondition::MaxTicks(0)))
+                .resume_with_store_and_recipe(
+                    TimelineId::new(),
+                    Box::new(test_memory_store()),
+                    None,
+                ),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+    }
 }
 
 #[cfg(test)]
