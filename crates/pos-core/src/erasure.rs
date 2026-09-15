@@ -920,9 +920,7 @@ impl ErasureContainmentGateV1 {
         _operation: ErasureProtectedOperationV1,
         authority: &ErasureGateStateV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
-        if authority.frozen_timelines.contains(&timeline) {
-            return Err(ErasureContainmentErrorV1::AccessFrozen);
-        }
+        Self::reject_frozen_timeline(authority, timeline)?;
         if let Some(inventory) = authority.inventory.as_ref() {
             return inventory.authorize(timeline);
         }
@@ -961,6 +959,17 @@ impl ErasureContainmentGateV1 {
             Ok(())
         } else {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+
+    fn reject_frozen_timeline(
+        authority: &ErasureGateStateV1,
+        timeline: TimelineId,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if authority.frozen_timelines.contains(&timeline) {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        } else {
+            Ok(())
         }
     }
 }

@@ -134,6 +134,29 @@ fn bind_registry_erasure_gate(
     store.bind_erasure_gate(gate)
 }
 
+fn bind_store_to_experiment_gate(
+    store: &mut dyn pos_core::store::EventStore,
+    registry: &PluginRegistry,
+    gate: Option<Arc<ErasureContainmentGateV1>>,
+) -> Result<(), pos_core::CoreError> {
+    let gate = gate.ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+    bind_registry_erasure_gate(store, registry, gate)
+}
+
+fn map_action_submission_error(error: pos_runtime::ActionSubmissionError) -> ExperimentError {
+    match error {
+        pos_runtime::ActionSubmissionError::Rejected(error) => {
+            ExperimentError::ActionRejected(error)
+        }
+        pos_runtime::ActionSubmissionError::ErasureOperationUnavailable => {
+            ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureOperationUnavailable)
+        }
+        pos_runtime::ActionSubmissionError::ErasureContainment(error) => {
+            ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureContainment(error))
+        }
+    }
+}
+
 fn bind_registry_to_host_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
@@ -1192,11 +1215,8 @@ impl Experiment {
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let registry = self.registry;
-        let gate = self
-            .erasure_gate
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
         let parent_composition = registry.composition();
-        let timeline = bind_registry_erasure_gate(store.as_mut(), &registry, gate)
+        let timeline = bind_store_to_experiment_gate(store.as_mut(), &registry, self.erasure_gate)
             .and_then(|()| store.create_timeline(&self.config.name))?;
         Ok(ExperimentSession {
             config: self.config,
@@ -1296,14 +1316,10 @@ impl Experiment {
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
-        let gate = self
-            .erasure_gate
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-        let timeline = bind_registry_erasure_gate(store.as_mut(), &self.registry, gate)
-            .and_then(|()| store.get_timeline(timeline_id))
-            .and_then(|timeline| {
-                timeline.ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))
-            })?;
+        bind_store_to_experiment_gate(store.as_mut(), &self.registry, self.erasure_gate)?;
+        let timeline = store.get_timeline(timeline_id).and_then(|timeline| {
+            timeline.ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))
+        })?;
         if timeline.id() != timeline_id {
             return Err(pos_core::CoreError::Storage(
                 "EventStore returned mismatched resume Timeline metadata".to_owned(),
@@ -1679,17 +1695,7 @@ impl ExperimentSession {
         let draft = self
             .registry
             .submit_action(self.timeline.id(), proposal)
-            .map_err(|error| match error {
-                pos_runtime::ActionSubmissionError::Rejected(error) => {
-                    ExperimentError::ActionRejected(error)
-                }
-                pos_runtime::ActionSubmissionError::ErasureOperationUnavailable => {
-                    ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureOperationUnavailable)
-                }
-                pos_runtime::ActionSubmissionError::ErasureContainment(error) => {
-                    ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureContainment(error))
-                }
-            })?;
+            .map_err(map_action_submission_error)?;
         let Some(token) = self.operation_token.clone() else {
             return self.append_events(std::slice::from_ref(&draft));
         };
