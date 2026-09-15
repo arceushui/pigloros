@@ -8,10 +8,10 @@ publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../pos-core" }
+pos-store = { path = "../pos-store" }
 
 [dev-dependencies]
 pos-core = { path = "../pos-core", features = ["test-support"] }
-pos-store = { path = "../pos-store" }
 
 [lints]
 workspace = true
