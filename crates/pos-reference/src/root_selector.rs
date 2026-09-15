@@ -1502,6 +1502,7 @@ mod tests {
             owned.path.finish_setup(Path::new("/different-parent")),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
+        owned.path.finish_setup(fixture.directory.path())?;
         owned.close()?;
 
         let listener = UnixListener::bind(&fixture.socket)?;
