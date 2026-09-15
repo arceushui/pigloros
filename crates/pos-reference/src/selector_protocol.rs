@@ -601,7 +601,7 @@ pub(crate) fn decode_staged_reply(
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
         .map_err(|_| AdapterError::ProtocolFailure)?;
     if is_magic(&value, "SLE1") {
-        return decode_local_reply(control, trailing_length);
+        return decode_local_reply(control, trailing_length, request);
     }
     decode_authenticated_reply(
         &value,
@@ -632,12 +632,22 @@ pub(crate) fn reply_carries_admission_evidence(control: &[u8]) -> bool {
 fn decode_local_reply(
     control: &[u8],
     trailing_length: u64,
+    request: &EncodedSelectorRequest,
 ) -> Result<DecodedSelectorReply, AdapterError> {
     if trailing_length != 0 {
         return Err(AdapterError::ProtocolFailure);
     }
     let local = SandboxLocalError::from_canonical_cbor(control)
         .map_err(|_| AdapterError::ProtocolFailure)?;
+    match (local.request_id, local.attempt_id) {
+        (Some(request_id), _) if request_id != request.provider_request_id => {
+            return Err(AdapterError::ProtocolFailure);
+        }
+        (_, Some(attempt_id)) if attempt_id != request.attempt_id => {
+            return Err(AdapterError::ProtocolFailure);
+        }
+        _ => {}
+    }
     let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
         AdapterError::AuthenticatedEvidenceFailure
     } else {

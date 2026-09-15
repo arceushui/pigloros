@@ -1064,9 +1064,24 @@ mod tests {
     #[test]
     fn selector_transport_exchanges_a_bounded_local_failure(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let reply = invoke_with_reply(local_unavailable()?, Vec::new())?;
+        let control = local_unavailable()?;
+        let reply = invoke_with_reply(control.clone(), Vec::new())?;
         assert_eq!(reply.observation, Err(AdapterError::Unavailable));
         assert_eq!(reply.provenance, None);
+
+        for index in [4, 5] {
+            let mut foreign: ciborium::value::Value = ciborium::from_reader(control.as_slice())?;
+            foreign
+                .as_array_mut()
+                .ok_or("SLE1 fixture must be an array")?[index] =
+                ciborium::value::Value::Bytes(vec![99; 16]);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&foreign, &mut bytes)?;
+            assert_eq!(
+                invoke_with_reply(bytes, Vec::new()),
+                Err(AdapterError::ProtocolFailure)
+            );
+        }
         Ok(())
     }
 
