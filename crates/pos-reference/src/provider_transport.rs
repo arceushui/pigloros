@@ -1698,6 +1698,22 @@ mod tests {
         );
 
         let directory = tempfile::tempdir()?;
+        let path = directory.path().join("closed-control.sock");
+        let listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        drop(listener);
+        assert_eq!(
+            transport.synchronize_revocation(
+                &fixture.provider,
+                fixture.describe_request_id,
+                fixture.describe_nonce,
+                Duration::from_secs(1),
+            ),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+
+        let directory = tempfile::tempdir()?;
         let path = directory.path().join("unused-control.sock");
         let _listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;

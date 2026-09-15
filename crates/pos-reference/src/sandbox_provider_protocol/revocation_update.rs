@@ -194,16 +194,20 @@ impl RevocationUpdateRequest {
             .and_then(|document| {
                 let (fields, request_digest, signature) = signed::<8>(&document, "RCU1")?;
                 let next_bytes = byte_string(&fields[4])?;
-                let request = Self {
-                    request_id: id16(&fields[2])?,
-                    previous_revocation_digest: digest32(&fields[3])?,
-                    next_revocation: SandboxRevocationSnapshot::authenticate(next_bytes, trust)?,
-                    selector_nonce: id16(&fields[6])?,
-                    policy_signer_key_id: key_id(&fields[7])?,
-                    request_digest,
-                    signature,
-                };
-                request.validate(fields, trust, current).map(|()| request)
+                SandboxRevocationSnapshot::authenticate(next_bytes, trust)
+                    .map_err(SandboxRevocationUpdateError::from)
+                    .and_then(|next_revocation| {
+                        let request = Self {
+                            request_id: id16(&fields[2])?,
+                            previous_revocation_digest: digest32(&fields[3])?,
+                            next_revocation,
+                            selector_nonce: id16(&fields[6])?,
+                            policy_signer_key_id: key_id(&fields[7])?,
+                            request_digest,
+                            signature,
+                        };
+                        request.validate(fields, trust, current).map(|()| request)
+                    })
             })
     }
 
@@ -213,19 +217,39 @@ impl RevocationUpdateRequest {
         trust: &SandboxTrustSnapshot,
         current: &SandboxRevocationSnapshot,
     ) -> Result<(), SandboxRevocationUpdateError> {
-        if self.previous_revocation_digest != current.snapshot_digest()
-            || digest32(&unsigned[5])? != self.next_revocation.snapshot_digest()
-        {
-            return Err(SandboxTrustError::AuthorityMismatch.into());
-        }
-        current.validate_immediate_epoch_for_same_registry(&self.next_revocation)?;
-        verify_digest("RCU1", unsigned, self.request_digest)?;
-        let key = current.active_key(
-            trust,
-            &self.policy_signer_key_id,
-            SandboxTrustRole::AdministratorPolicy,
-        )?;
-        verify_signature("RCU1", &self.request_digest, &self.signature, &key).map_err(Into::into)
+        digest32(&unsigned[5])
+            .map_err(SandboxRevocationUpdateError::from)
+            .and_then(|next_digest| {
+                if self.previous_revocation_digest == current.snapshot_digest()
+                    && next_digest == self.next_revocation.snapshot_digest()
+                {
+                    Ok(())
+                } else {
+                    Err(SandboxTrustError::AuthorityMismatch.into())
+                }
+            })
+            .and_then(|()| {
+                current
+                    .validate_immediate_epoch_for_same_registry(&self.next_revocation)
+                    .map_err(SandboxRevocationUpdateError::from)
+            })
+            .and_then(|()| {
+                verify_digest("RCU1", unsigned, self.request_digest)
+                    .map_err(SandboxRevocationUpdateError::from)
+            })
+            .and_then(|()| {
+                current
+                    .active_key(
+                        trust,
+                        &self.policy_signer_key_id,
+                        SandboxTrustRole::AdministratorPolicy,
+                    )
+                    .map_err(SandboxRevocationUpdateError::from)
+            })
+            .and_then(|key| {
+                verify_signature("RCU1", &self.request_digest, &self.signature, &key)
+                    .map_err(SandboxRevocationUpdateError::from)
+            })
     }
 }
 
@@ -302,34 +326,56 @@ impl RevocationAcknowledgement {
                 if uint(&fields[7])? != 0 {
                     return Err(SandboxProviderProtocolError::InconsistentFields.into());
                 }
-                let cancelled_values = bounded_array(&fields[6], 0)?;
-                require_canonical_order(cancelled_values)?;
-                let acknowledgement = Self {
-                    request_id: id16(&fields[2])?,
-                    revocation_digest: digest32(&fields[3])?,
-                    sir1_digest: digest32(&fields[4])?,
-                    previous_provider_binding_digest: digest32(&fields[5])?,
-                    cancelled_attempt_ids: cancelled_values
-                        .iter()
-                        .map(id16)
-                        .collect::<Result<Vec<_>, _>>()?,
-                    runtime_attestation_key_id: key_id(&fields[8])?,
-                    acknowledgement_digest,
-                    signature,
-                };
-                validate_attempts(&acknowledgement.cancelled_attempt_ids)?;
-                verify_digest("RCA1", fields, acknowledgement.acknowledgement_digest)?;
-                if acknowledgement.runtime_attestation_key_id != runtime_key_id {
-                    return Err(SandboxRevocationUpdateError::AcknowledgementMismatch);
-                }
-                verify_signature(
-                    "RCA1",
-                    &acknowledgement.acknowledgement_digest,
-                    &acknowledgement.signature,
-                    runtime_key,
-                )
-                .map(|()| acknowledgement)
-                .map_err(SandboxRevocationUpdateError::from)
+                bounded_array(&fields[6], 0)
+                    .and_then(|cancelled_values| {
+                        require_canonical_order(cancelled_values).map(|()| cancelled_values)
+                    })
+                    .and_then(|cancelled_values| {
+                        cancelled_values
+                            .iter()
+                            .map(id16)
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .and_then(|cancelled_attempt_ids| {
+                        Ok(Self {
+                            request_id: id16(&fields[2])?,
+                            revocation_digest: digest32(&fields[3])?,
+                            sir1_digest: digest32(&fields[4])?,
+                            previous_provider_binding_digest: digest32(&fields[5])?,
+                            cancelled_attempt_ids,
+                            runtime_attestation_key_id: key_id(&fields[8])?,
+                            acknowledgement_digest,
+                            signature,
+                        })
+                    })
+                    .map_err(SandboxRevocationUpdateError::from)
+                    .and_then(|acknowledgement| {
+                        validate_attempts(&acknowledgement.cancelled_attempt_ids)
+                            .map_err(SandboxRevocationUpdateError::from)
+                            .map(|()| acknowledgement)
+                    })
+                    .and_then(|acknowledgement| {
+                        verify_digest("RCA1", fields, acknowledgement.acknowledgement_digest)
+                            .map_err(SandboxRevocationUpdateError::from)
+                            .map(|()| acknowledgement)
+                    })
+                    .and_then(|acknowledgement| {
+                        if acknowledgement.runtime_attestation_key_id == runtime_key_id {
+                            Ok(acknowledgement)
+                        } else {
+                            Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+                        }
+                    })
+                    .and_then(|acknowledgement| {
+                        verify_signature(
+                            "RCA1",
+                            &acknowledgement.acknowledgement_digest,
+                            &acknowledgement.signature,
+                            runtime_key,
+                        )
+                        .map(|()| acknowledgement)
+                        .map_err(SandboxRevocationUpdateError::from)
+                    })
             })
     }
 
