@@ -7922,6 +7922,18 @@ mod coverage_entrypoints {
             ))
         ));
     }
+
+    #[test]
+    fn action_submission_maps_erasure_containment_failure() {
+        assert!(matches!(
+            map_action_submission_error(pos_runtime::ActionSubmissionError::ErasureContainment(
+                pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
+            )),
+            ExperimentError::Runtime(pos_runtime::RuntimeError::ErasureContainment(
+                pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
+            ))
+        ));
+    }
 }
 
 #[cfg(test)]
