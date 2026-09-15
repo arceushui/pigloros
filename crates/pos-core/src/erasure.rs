@@ -7715,14 +7715,6 @@ mod coverage_paths {
         poison_authority(&block_authority);
         block_authority.block_timeline(TimelineId::new());
 
-        let freeze_fence = Arc::new(ErasureContainmentGateV1::new_test_open());
-        poison_fence(&freeze_fence);
-        freeze_fence.freeze_timeline_for_test(TimelineId::new());
-
-        let freeze_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
-        poison_authority(&freeze_authority);
-        freeze_authority.freeze_timeline_for_test(TimelineId::new());
-
         let state = coverage_state(reference(6));
         let timeline = TimelineId::new();
         let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
@@ -7791,6 +7783,33 @@ mod coverage_paths {
                 .with_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect,),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
+    }
+
+    #[test]
+    fn frozen_fixture_ignores_poisoned_lock_mutations() {
+        let fence_poisoned = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let fence_owner = Arc::clone(&fence_poisoned);
+        assert!(std::thread::spawn(move || {
+            let _guard = fence_owner.fence_lock.lock().unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+            });
+            std::panic::resume_unwind(Box::new("poison erasure fence"));
+        })
+        .join()
+        .is_err());
+        fence_poisoned.freeze_timeline_for_test(TimelineId::new());
+
+        let authority_poisoned = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let authority_owner = Arc::clone(&authority_poisoned);
+        assert!(std::thread::spawn(move || {
+            let _guard = authority_owner.authority.write().unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+            });
+            std::panic::resume_unwind(Box::new("poison erasure authority"));
+        })
+        .join()
+        .is_err());
+        authority_poisoned.freeze_timeline_for_test(TimelineId::new());
     }
 
     #[test]
