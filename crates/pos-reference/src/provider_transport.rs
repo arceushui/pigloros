@@ -421,9 +421,16 @@ fn provider_process_identity(
     pid: rustix::process::Pid,
 ) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
     let raw_pid = pid.as_raw_nonzero().get();
-    let pid = u64::try_from(raw_pid).map_err(artifact_invalid)?;
     let stat =
         std::fs::read_to_string(format!("/proc/{raw_pid}/stat")).map_err(artifact_invalid)?;
+    parse_provider_process_identity(raw_pid, &stat)
+}
+
+fn parse_provider_process_identity(
+    raw_pid: i32,
+    stat: &str,
+) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
+    let pid = u64::try_from(raw_pid).map_err(artifact_invalid)?;
     let fields = stat
         .rsplit_once(") ")
         .map(|(_, fields)| fields)
@@ -1434,6 +1441,46 @@ mod tests {
                 ..observed
             }),
             Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        let stat = std::fs::read_to_string(format!(
+            "/proc/{}/stat",
+            rustix::process::getpid().as_raw_nonzero()
+        ))?;
+        assert_eq!(
+            parse_provider_process_identity(
+                rustix::process::getpid().as_raw_nonzero().get(),
+                &stat
+            )?,
+            observed
+        );
+        for (pid, stat) in [
+            (-1, stat.as_str()),
+            (1, "missing-delimiter"),
+            (1, "1 (name) too few fields"),
+            (1, "1 (name) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 invalid"),
+        ] {
+            assert_eq!(
+                parse_provider_process_identity(pid, stat),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+
+        let poisoned = provider_transport(transport.execute_endpoint, transport.control_endpoint);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned
+                .admitted_process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert_eq!(
+            poisoned.bind_admitted_process(observed),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            poisoned.require_admitted_process(observed),
+            Err(SelectorBoundaryError::SelectorUnavailable)
         );
 
         let (descriptor, _peer) = UnixStream::pair()?;

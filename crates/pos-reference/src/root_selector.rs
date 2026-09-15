@@ -2865,6 +2865,8 @@ mod tests {
 
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let poisoned = SelectorAdmission::for_test(admitted)?;
+        let previous = poisoned.current()?;
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = poisoned
                 .state
@@ -2873,7 +2875,29 @@ mod tests {
             std::panic::resume_unwind(Box::new(()));
         }))
         .is_err());
+        assert!(poisoned.acquire([1; 16]).is_err());
+        assert!(poisoned.current().is_err());
+        assert!(poisoned.close().is_err());
+        assert!(poisoned.close_and_snapshot().is_err());
+        assert!(poisoned.reopen_previous(&previous).is_err());
+        assert!(poisoned.admit_successor(&previous, successor).is_err());
+        assert!(matches!(
+            poisoned.begin_provider_execution([1; 16]),
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
+        assert!(poisoned.retain_provider_state([1; 16]).is_err());
         poisoned.release([1; 16]);
+
+        let poisoned_namespaces = EvaluationNamespaceBindings::default();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned_namespaces
+                .states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert!(poisoned_namespaces.clear().is_err());
         Ok(())
     }
 

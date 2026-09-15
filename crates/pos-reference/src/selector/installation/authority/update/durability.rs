@@ -557,6 +557,19 @@ mod tests {
             create_staging_file(&staging, "foreign-owner.cbor", owner.saturating_add(1)),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
+
+        let ordinary_file = tempfile::NamedTempFile::new()?;
+        assert!(matches!(
+            create_staging_file(ordinary_file.as_file(), "child", owner),
+            Err(SelectorBoundaryError::Io)
+        ));
+
+        let (symlink_root, root, owner) = durable_root()?;
+        std::os::unix::fs::symlink("missing", symlink_root.path().join(STAGING_NAME))?;
+        assert!(matches!(
+            open_staging_directory(&root, owner),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
         Ok(())
     }
 

@@ -353,6 +353,30 @@ mod tests {
             signed_digest(&[0xff]),
             Err(SelectorBoundaryError::ArtifactInvalid)
         );
+        for value in [
+            Value::Null,
+            Value::Array(Vec::new()),
+            Value::Array(vec![Value::Null, Value::Null, Value::Null]),
+        ] {
+            let bytes = encode(&value)?;
+            assert_eq!(
+                signed_digest(&bytes),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+            assert_eq!(
+                embedded_revocation(&bytes),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+        let malformed_unsigned = encode(&Value::Array(vec![
+            Value::Array(Vec::new()),
+            Value::Bytes(vec![0; 32]),
+            Value::Bytes(vec![0; 64]),
+        ]))?;
+        assert_eq!(
+            embedded_revocation(&malformed_unsigned),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
         Ok(())
     }
 }
