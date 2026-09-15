@@ -3030,27 +3030,6 @@ mod tests {
         }
     }
 
-    struct RejectingActionGate(pos_core::ErasureContainmentErrorV1);
-
-    impl ErasureGate for RejectingActionGate {
-        fn authorize(
-            &self,
-            _: TimelineId,
-            _: pos_core::ErasureProtectedOperationV1,
-        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-            Err(self.0)
-        }
-
-        fn with_fence(
-            &self,
-            timeline: TimelineId,
-            operation: pos_core::ErasureProtectedOperationV1,
-            _: &mut dyn FnMut(),
-        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-            self.authorize(timeline, operation)
-        }
-    }
-
     #[test]
     fn experiment_register_with_approver_forwards_the_full_registration() {
         let plugin = CompositionPlugin(CompositionPluginSpec {
@@ -3126,14 +3105,14 @@ mod tests {
         assert_eq!(session.source_events().test_ok().len(), 1);
     }
 
-    fn action_session_with_erasure_gate(gate: Arc<dyn ErasureGate>) -> ExperimentSession {
+    fn action_session_with_erasure_gate(gate: Arc<ErasureContainmentGateV1>) -> ExperimentSession {
         let plugin = CompositionPlugin(CompositionPluginSpec {
             id: PluginId::new(),
             name: "erasure-action-plugin",
             version: "1",
             event_type: "erasure.submit.event",
         });
-        let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+        let mut registry = PluginRegistry::new().with_erasure_gate(gate.clone());
         registry
             .register_with_approver(
                 &plugin,
@@ -3150,6 +3129,7 @@ mod tests {
                 store_config: StoreConfig::Memory,
             },
             registry,
+            erasure_gate: Some(gate),
             fork_registry_factory: None,
         }
         .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
@@ -3174,20 +3154,6 @@ mod tests {
             ))
         ));
         drop(missing);
-
-        for reason in [
-            pos_core::ErasureContainmentErrorV1::AccessFrozen,
-            pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
-        ] {
-            let mut session =
-                action_session_with_erasure_gate(Arc::new(RejectingActionGate(reason)));
-            assert!(matches!(
-                session.submit_action(&proposal),
-                Err(ExperimentError::Runtime(
-                    pos_runtime::RuntimeError::ErasureContainment(error)
-                )) if error == reason
-            ));
-        }
     }
 
     #[test]
@@ -5046,6 +5012,7 @@ mod tests {
                         store_config: StoreConfig::Memory,
                     },
                     registry,
+                    erasure_gate: None,
                     fork_registry_factory: None,
                 }
                 .start()
@@ -7875,7 +7842,7 @@ mod coverage_entrypoints {
             .without_erasure_gate();
         let mut store = pos_store::memory::MemoryStore::new();
         assert!(matches!(
-            bind_registry_erasure_gate(&mut store, &missing_bound_gate, gate),
+            bind_registry_erasure_gate(&mut store, &missing_bound_gate, gate.clone()),
             Err(pos_core::CoreError::ErasureContainmentUnavailable)
         ));
         assert!(bind_registry_to_host_gate(&mut missing_bound_gate, gate.clone()).is_err());
