@@ -595,7 +595,7 @@ mod tests {
 
     fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
         let mut store = open_unbound_store(config)?;
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         Ok(store)
     }
 

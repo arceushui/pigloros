@@ -69,7 +69,7 @@ fn destroy_store<S: EventStore>(
 }
 
 fn bind_test_erasure_gate<S: EventStore + ?Sized>(store: &mut S) -> Result<(), CoreError> {
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 }
 
 fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, CoreError> {

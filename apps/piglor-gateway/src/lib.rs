@@ -35,13 +35,11 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, Plugin,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1, Plugin,
     ProposedAction,
 };
 #[cfg(test)]
-use pos_core::{
-    geo_admission::GeoLocationAdmissionStore, store::EventStore, ErasureContainmentGateV1,
-};
+use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
 use pos_runtime::{
@@ -664,7 +662,7 @@ fn gateway_action_registry_builder(
 fn gateway_action_registry_with_authority_and_erasure_gate(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    gate: Arc<dyn ErasureGate>,
+    gate: Arc<ErasureContainmentGateV1>,
 ) -> Arc<PluginRegistry> {
     let mut registry = gateway_action_registry_builder(bodies, authority);
     registry.bind_erasure_gate(gate);
@@ -984,8 +982,10 @@ fn checked_event_coordinates(
 
 impl Gateway {
     #[cfg(test)]
-    fn bind_test_erasure_gate(store: &mut dyn EventStore) {
-        drop(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    fn bind_test_erasure_gate(store: &mut dyn EventStore) -> Arc<ErasureContainmentGateV1> {
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        drop(store.bind_erasure_gate(Arc::clone(&gate)));
+        gate
     }
 
     async fn enqueue_consent_cleanup(&self, scope: AppendDedupScope) {
@@ -1130,10 +1130,8 @@ impl Gateway {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
-        #[cfg(test)]
         let mut store = store;
-        #[cfg(test)]
-        Self::bind_test_erasure_gate(store.as_mut());
+        let gate = Self::bind_test_erasure_gate(store.as_mut());
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1144,9 +1142,10 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
+                gate,
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
@@ -1170,7 +1169,7 @@ impl Gateway {
     #[cfg(test)]
     pub(crate) fn new_with_erasure_gate(
         mut store: Box<dyn EventStore>,
-        gate: Arc<dyn ErasureGate>,
+        gate: Arc<ErasureContainmentGateV1>,
     ) -> Result<Self, GatewayError> {
         store.bind_erasure_gate(Arc::clone(&gate))?;
         let consent_authority = ConsentAuthority::new();
@@ -1319,10 +1318,8 @@ impl Gateway {
         store: Box<dyn EventStore>,
         bodies: impl IntoIterator<Item = EntityId>,
     ) -> Self {
-        #[cfg(test)]
         let mut store = store;
-        #[cfg(test)]
-        Self::bind_test_erasure_gate(store.as_mut());
+        let gate = Self::bind_test_erasure_gate(store.as_mut());
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1333,9 +1330,10 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
                 bodies,
                 Some(consent_authority.clone()),
+                gate,
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
@@ -1353,7 +1351,7 @@ impl Gateway {
         bodies: impl IntoIterator<Item = EntityId>,
         principal: ActionPrincipal,
     ) -> Self {
-        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         drop(store.bind_erasure_gate(Arc::clone(&gate)));
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
@@ -1395,7 +1393,7 @@ impl Gateway {
         #[cfg(test)]
         let mut store = store;
         #[cfg(test)]
-        let test_gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+        let test_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         #[cfg(test)]
         drop(store.bind_erasure_gate(Arc::clone(&test_gate)));
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
@@ -1438,10 +1436,8 @@ impl Gateway {
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
-        #[cfg(test)]
         let mut store = store;
-        #[cfg(test)]
-        Self::bind_test_erasure_gate(&mut store);
+        let gate = Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1452,9 +1448,10 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
+                gate,
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
@@ -1476,10 +1473,8 @@ impl Gateway {
         store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
     ) -> Self {
-        #[cfg(test)]
         let mut store = store;
-        #[cfg(test)]
-        Self::bind_test_erasure_gate(&mut store);
+        let gate = Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1491,9 +1486,10 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
-            action_registry: gateway_action_registry_with_authority(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
+                gate,
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
@@ -1516,7 +1512,7 @@ impl Gateway {
     pub(crate) fn new_with_owntracks_ingress_and_erasure_gate(
         mut store: pos_store::sqlite::SqliteStore,
         owner_key: &OwnTracksOwnerKey,
-        gate: Arc<dyn ErasureGate>,
+        gate: Arc<ErasureContainmentGateV1>,
     ) -> Result<Self, GatewayError> {
         store.bind_erasure_gate(Arc::clone(&gate))?;
         let consent_authority = ConsentAuthority::new();
@@ -1550,7 +1546,7 @@ impl Gateway {
         S: EventStore + GeoLocationAdmissionStore + pos_core::OwnTracksIngressStore + 'static,
     {
         let mut store = store;
-        Self::bind_test_erasure_gate(&mut store);
+        let gate = Self::bind_test_erasure_gate(&mut store);
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
@@ -1562,9 +1558,10 @@ impl Gateway {
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
-            action_registry: gateway_action_registry_with_authority(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
+                gate,
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
@@ -2568,7 +2565,7 @@ impl Gateway {
 
     #[cfg(test)]
     fn with_bus_capacity(mut store: Box<dyn EventStore>, capacity: usize) -> Self {
-        Self::bind_test_erasure_gate(store.as_mut());
+        let gate = Self::bind_test_erasure_gate(store.as_mut());
         let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
@@ -2581,7 +2578,11 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                None,
+                gate,
+            ),
             authorization: None,
             action_principal: None,
         }
@@ -2605,7 +2606,7 @@ impl Gateway {
 
     #[cfg(test)]
     fn with_limits(mut store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
-        Self::bind_test_erasure_gate(store.as_mut());
+        let gate = Self::bind_test_erasure_gate(store.as_mut());
         let consent_authority = ConsentAuthority::new();
         Self {
             store: executor::StoreExecutor::new_with_consent_authority(
@@ -2618,7 +2619,11 @@ impl Gateway {
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+                std::iter::empty(),
+                None,
+                gate,
+            ),
             authorization: None,
             action_principal: None,
         }
@@ -3015,27 +3020,6 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::broadcast;
-
-    struct RejectingErasureGate(pos_core::ErasureContainmentErrorV1);
-
-    impl ErasureGate for RejectingErasureGate {
-        fn authorize(
-            &self,
-            _: TimelineId,
-            _: pos_core::ErasureProtectedOperationV1,
-        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-            Err(self.0)
-        }
-
-        fn with_fence(
-            &self,
-            timeline: TimelineId,
-            operation: pos_core::ErasureProtectedOperationV1,
-            _: &mut dyn FnMut(),
-        ) -> Result<(), pos_core::ErasureContainmentErrorV1> {
-            self.authorize(timeline, operation)
-        }
-    }
 
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
@@ -4427,7 +4411,10 @@ mod tests {
     }
 
     impl EventStore for BlockFirstRootCount {
-        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<ErasureContainmentGateV1>,
+        ) -> Result<(), CoreError> {
             self.inner.bind_erasure_gate(gate)
         }
 
@@ -6318,7 +6305,22 @@ mod tests {
             CanonicalBytes::from_static(b"blocked"),
             Kind::new("world.action.submit"),
         );
-        let missing = Gateway::new(open_store(StoreConfig::Memory).test_ok());
+        let consent_authority = ConsentAuthority::new();
+        let missing = Gateway {
+            store: executor::StoreExecutor::new_with_consent_authority(
+                open_store(StoreConfig::Memory).test_ok(),
+                consent_authority.append_permit(),
+            ),
+            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
+            limits: GatewayLimits::LOCAL_DEFAULT,
+            owntracks_enabled: false,
+            action_registry: gateway_action_registry(),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization: None,
+            action_principal: None,
+        };
         assert!(matches!(
             missing.submit_action_draft(timeline, &proposal),
             Err(GatewayError::Store(
@@ -6327,24 +6329,9 @@ mod tests {
         ));
         drop(missing);
 
-        let frozen = Gateway::new_with_erasure_gate(
-            open_store(StoreConfig::Memory).test_ok(),
-            Arc::new(RejectingErasureGate(
-                pos_core::ErasureContainmentErrorV1::AccessFrozen,
-            )),
-        )
-        .test_ok();
-        assert!(matches!(
-            frozen.submit_action_draft(timeline, &proposal),
-            Err(GatewayError::Store(CoreError::ErasureAccessFrozen))
-        ));
-        drop(frozen);
-
         let unavailable = Gateway::new_with_erasure_gate(
             open_store(StoreConfig::Memory).test_ok(),
-            Arc::new(RejectingErasureGate(
-                pos_core::ErasureContainmentErrorV1::RecoveryUnavailable,
-            )),
+            Arc::new(ErasureContainmentGateV1::new_fail_closed()),
         )
         .test_ok();
         assert!(matches!(
@@ -6734,7 +6721,7 @@ mod coverage_entrypoints {
     #[test]
     fn erasure_gate_constructors_cover_binding_success_and_rejection(
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let gateway =
             Gateway::new_with_erasure_gate(open_store(StoreConfig::Memory)?, Arc::clone(&gate))?;
         drop(gateway);

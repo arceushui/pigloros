@@ -868,7 +868,7 @@ mod tests {
 
         let mut store = open_store(StoreConfig::Memory).test_ok();
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         let tl = store.create_timeline("persona-eval").test_ok();
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
@@ -896,7 +896,7 @@ mod tests {
 
         let mut store = open_store(StoreConfig::Memory).test_ok();
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         let tl = store.create_timeline("loop").test_ok();
         let authority = pos_core::ConsentAuthority::new();
@@ -915,7 +915,7 @@ mod tests {
         let token = authority.record_grant_on_timeline(tl.id(), &grant);
         let mut registry = PluginRegistry::new()
             .with_consent_authority(authority)
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         let persona = PersonaPlugin::new();
         registry
             .register(

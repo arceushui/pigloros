@@ -14,5 +14,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
 
+[dev-dependencies]
+pos-core = { path = "../pos-core", features = ["test-support"] }
+
 [lints]
 workspace = true

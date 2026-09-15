@@ -681,7 +681,7 @@ fn sqlite_geo_cell_identical_admissions_are_unique_across_store_handles() {
 fn generic_event_append_cannot_admit_geo_cell() {
     let mut store = MemoryStore::new();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     let timeline = store.create_timeline("generic-boundary").test_ok();
     let result = store.append(

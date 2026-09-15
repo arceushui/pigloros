@@ -4,7 +4,7 @@
 /// authority never escape `ErasureExecutionHostV1`.
 struct HostedCliStore {
     host: std::sync::Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: std::sync::Arc<dyn pos_core::ErasureGate>,
+    gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
 }
 
 impl HostedCliStore {
@@ -59,15 +59,15 @@ impl HostedCliStore {
             })
     }
 
-    fn containment_gate(&self) -> std::sync::Arc<dyn pos_core::ErasureGate> {
-        std::sync::Arc::clone(&self.gate)
+    fn containment_gate(&self) -> std::sync::Arc<pos_core::ErasureContainmentGateV1> {
+        self.gate.clone()
     }
 }
 
 impl pos_core::store::EventStore for HostedCliStore {
     fn bind_erasure_gate(
         &mut self,
-        gate: std::sync::Arc<dyn pos_core::ErasureGate>,
+        gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
     ) -> Result<(), pos_core::CoreError> {
         if std::sync::Arc::ptr_eq(&self.gate, &gate) {
             Ok(())
@@ -190,7 +190,7 @@ mod hosted_cli_store_tests {
         store.bind_erasure_gate(gate)?;
         assert!(store
             .bind_erasure_gate(std::sync::Arc::new(
-                pos_core::ErasureContainmentGateV1::new()
+                pos_core::ErasureContainmentGateV1::new_test_open()
             ))
             .is_err());
 

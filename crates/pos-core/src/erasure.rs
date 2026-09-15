@@ -408,6 +408,7 @@ struct ErasureGateStateV1 {
     verified_unaffected: BTreeMap<TimelineId, ErasureReferenceV1>,
     states: BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
     blocked_timelines: BTreeSet<TimelineId>,
+    frozen_timelines: BTreeSet<TimelineId>,
 }
 
 thread_local! {
@@ -431,23 +432,15 @@ impl Default for ErasureContainmentGateV1 {
 }
 
 impl ErasureContainmentGateV1 {
-    /// Construct an empty gate. Unbound Timelines have no erasure evidence and
-    /// remain available; a failed recovery can be made explicit with
-    /// [`Self::block_timeline`].
+    /// Construct a gate that refuses protected operations until its host
+    /// installs verified evidence and topology bindings.
+    ///
+    /// This is the only public constructor. It deliberately fails closed so a
+    /// caller cannot mint a permissive store-containment authority outside a
+    /// host-owned composition.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            authority: RwLock::new(Arc::new(ErasureGateStateV1 {
-                inventory: None,
-                timeline_scopes: BTreeMap::new(),
-                verified_unaffected: BTreeMap::new(),
-                states: BTreeMap::new(),
-                blocked_timelines: BTreeSet::new(),
-            })),
-            fence_lock: std::sync::Mutex::new(()),
-            fail_closed_unbound: false,
-            poisoned: AtomicBool::new(false),
-        }
+        Self::new_fail_closed()
     }
 
     /// Construct a gate that refuses protected operations for every Timeline
@@ -461,9 +454,33 @@ impl ErasureContainmentGateV1 {
                 verified_unaffected: BTreeMap::new(),
                 states: BTreeMap::new(),
                 blocked_timelines: BTreeSet::new(),
+                frozen_timelines: BTreeSet::new(),
             })),
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: true,
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Construct an open containment fixture for tests only.
+    ///
+    /// Production composition must obtain its gate from
+    /// `ErasureExecutionHostV1`; this constructor is not present in a normal
+    /// dependency graph.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn new_test_open() -> Self {
+        Self {
+            authority: RwLock::new(Arc::new(ErasureGateStateV1 {
+                inventory: None,
+                timeline_scopes: BTreeMap::new(),
+                verified_unaffected: BTreeMap::new(),
+                states: BTreeMap::new(),
+                blocked_timelines: BTreeSet::new(),
+                frozen_timelines: BTreeSet::new(),
+            })),
+            fence_lock: std::sync::Mutex::new(()),
+            fail_closed_unbound: false,
             poisoned: AtomicBool::new(false),
         }
     }
@@ -878,10 +895,38 @@ impl ErasureContainmentGateV1 {
         drop(fence);
     }
 
+    /// Mark one Timeline access-frozen in a concrete containment fixture.
+    ///
+    /// This is available only to test targets. Production hosts derive frozen
+    /// scope from verified recovery state instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn freeze_timeline_for_test(&self, timeline: TimelineId) {
+        let Ok(fence) = self.fence_lock.lock() else {
+            return;
+        };
+        let Ok(mut authority) = self.authority.write() else {
+            return;
+        };
+        let mut candidate = (**authority).clone();
+        candidate.frozen_timelines.insert(timeline);
+        *authority = Arc::new(candidate);
+        drop(authority);
+        drop(fence);
+    }
+
     fn authorize_state(
         &self,
         timeline: TimelineId,
         _operation: ErasureProtectedOperationV1,
+        authority: &ErasureGateStateV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        Self::reject_frozen_timeline(authority, timeline)?;
+        self.authorize_unfrozen_state(timeline, authority)
+    }
+
+    fn authorize_unfrozen_state(
+        &self,
+        timeline: TimelineId,
         authority: &ErasureGateStateV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
         if let Some(inventory) = authority.inventory.as_ref() {
@@ -922,6 +967,17 @@ impl ErasureContainmentGateV1 {
             Ok(())
         } else {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+
+    fn reject_frozen_timeline(
+        authority: &ErasureGateStateV1,
+        timeline: TimelineId,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if authority.frozen_timelines.contains(&timeline) {
+            Err(ErasureContainmentErrorV1::AccessFrozen)
+        } else {
+            Ok(())
         }
     }
 }
@@ -6909,7 +6965,7 @@ mod coverage_paths {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
 
-        let nested_gate = Arc::new(ErasureContainmentGateV1::new());
+        let nested_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut nested_result = None;
         let mut outer_effect = || {
             nested_gate.poison();
@@ -7489,7 +7545,7 @@ mod coverage_paths {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(on))]
     fn frozen_scope_calls_the_verified_state_permission_check() {
-        let gate = ErasureContainmentGateV1::new();
+        let gate = ErasureContainmentGateV1::new_test_open();
         let timeline = TimelineId::new();
         gate.publish_verified_state(coverage_state(reference(6)));
         assert!(gate.bind_timeline(timeline, reference(7)).is_ok());
@@ -7660,19 +7716,19 @@ mod coverage_paths {
             assert!(result.is_err());
         }
 
-        let publish_fence = Arc::new(ErasureContainmentGateV1::new());
+        let publish_fence = Arc::new(ErasureContainmentGateV1::new_test_open());
         poison_fence(&publish_fence);
         publish_fence.publish_verified_state(coverage_state(reference(6)));
 
-        let publish_authority = Arc::new(ErasureContainmentGateV1::new());
+        let publish_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
         poison_authority(&publish_authority);
         publish_authority.publish_verified_state(coverage_state(reference(6)));
 
-        let block_fence = Arc::new(ErasureContainmentGateV1::new());
+        let block_fence = Arc::new(ErasureContainmentGateV1::new_test_open());
         poison_fence(&block_fence);
         block_fence.block_timeline(TimelineId::new());
 
-        let block_authority = Arc::new(ErasureContainmentGateV1::new());
+        let block_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
         poison_authority(&block_authority);
         block_authority.block_timeline(TimelineId::new());
 
@@ -7689,7 +7745,7 @@ mod coverage_paths {
                     std::panic::resume_unwind(Box::new(format!("inventory failed: {error:?}")))
                 });
 
-        let poisoned_fence = Arc::new(ErasureContainmentGateV1::new());
+        let poisoned_fence = Arc::new(ErasureContainmentGateV1::new_test_open());
         poison_fence(&poisoned_fence);
         assert_eq!(
             poisoned_fence.bind_timeline(timeline, reference(7)),
@@ -7716,7 +7772,7 @@ mod coverage_paths {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
 
-        let poisoned_authority = Arc::new(ErasureContainmentGateV1::new());
+        let poisoned_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
         poison_authority(&poisoned_authority);
         assert_eq!(
             poisoned_authority.bind_timeline(timeline, reference(7)),
@@ -7744,6 +7800,33 @@ mod coverage_paths {
                 .with_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect,),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
+    }
+
+    #[test]
+    fn frozen_fixture_ignores_poisoned_lock_mutations() {
+        let fence_poisoned = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let fence_owner = Arc::clone(&fence_poisoned);
+        assert!(std::thread::spawn(move || {
+            let _guard = fence_owner.fence_lock.lock().unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+            });
+            std::panic::resume_unwind(Box::new("poison erasure fence"));
+        })
+        .join()
+        .is_err());
+        fence_poisoned.freeze_timeline_for_test(TimelineId::new());
+
+        let authority_poisoned = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let authority_owner = Arc::clone(&authority_poisoned);
+        assert!(std::thread::spawn(move || {
+            let _guard = authority_owner.authority.write().unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+            });
+            std::panic::resume_unwind(Box::new("poison erasure authority"));
+        })
+        .join()
+        .is_err());
+        authority_poisoned.freeze_timeline_for_test(TimelineId::new());
     }
 
     #[test]

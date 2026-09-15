@@ -3662,7 +3662,7 @@ impl SqliteStore {
 }
 
 impl EventStore for SqliteStore {
-    fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+    fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         if self.erasure_gate_bound {
             return Err(CoreError::Storage(
                 "erasure containment gate is already bound".to_owned(),
@@ -6175,7 +6175,7 @@ mod tests {
 
     fn fixture_store(mut store: SqliteStore) -> SqliteStore {
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         store
     }
@@ -14269,7 +14269,7 @@ pub(super) mod key_registry_coverage {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_store() -> Result<SqliteStore, CoreError> {
         let mut store = SqliteStore::open_in_memory()?;
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         Ok(store)
     }
 

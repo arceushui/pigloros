@@ -1054,10 +1054,9 @@ impl ErasureExecutionHostV1 {
 
     fn new_closed_store(mut store: OwnedErasureStoreV1) -> Result<Self, ErasureHostErrorV1> {
         let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
-        let store_gate: Arc<dyn ErasureGate> = gate.clone();
         store
             .host_store()
-            .bind_erasure_gate(store_gate)
+            .bind_erasure_gate(Arc::clone(&gate))
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         Ok(Self {
             store,
@@ -1202,8 +1201,8 @@ impl ErasureExecutionHostV1 {
     /// this host. The returned trait object cannot publish or replace gate
     /// state; the host remains the sole owner of those operations.
     #[must_use]
-    pub fn containment_gate(&self) -> Arc<dyn ErasureGate> {
-        self.gate.clone()
+    pub fn containment_gate(&self) -> Arc<ErasureContainmentGateV1> {
+        Arc::clone(&self.gate)
     }
 
     /// Bind the independently owned consent authority before Gateway commands
@@ -2995,7 +2994,10 @@ mod tests {
     }
 
     impl pos_core::EventStore for FaultStoreV1 {
-        fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<ErasureContainmentGateV1>,
+        ) -> Result<(), CoreError> {
             if self.fault == FaultModeV1::BindGate {
                 Err(CoreError::Storage("fault bind".to_owned()))
             } else {
@@ -4492,7 +4494,7 @@ mod tests {
         let mut prebound_gateway = MemoryStore::new().without_erasure_gate();
         assert!(pos_core::store::EventStore::bind_erasure_gate(
             &mut prebound_gateway,
-            Arc::new(ErasureContainmentGateV1::new()),
+            Arc::new(ErasureContainmentGateV1::new_test_open()),
         )
         .is_ok());
         assert!(matches!(

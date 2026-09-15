@@ -57,7 +57,7 @@ const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 const CONFIDENCE: u32 = 750_000;
 
 fn gated_experiment(config: ExperimentConfig) -> Experiment {
-    Experiment::new(config).with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    Experiment::new(config).with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 }
 
 fn hosted_experiment(config: ExperimentConfig) -> Experiment {
@@ -67,7 +67,7 @@ fn hosted_experiment(config: ExperimentConfig) -> Experiment {
 fn gated_memory_store() -> MemoryStore {
     let mut store = MemoryStore::new();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     store
 }
@@ -458,7 +458,7 @@ impl Driver for BoundaryDriver {
 struct SharedMemoryAdapter {
     store: Arc<Mutex<MemoryStore>>,
     control: Arc<Mutex<AdapterControl>>,
-    erasure_gate: Arc<dyn pos_core::ErasureGate>,
+    erasure_gate: Arc<ErasureContainmentGateV1>,
 }
 
 impl SharedMemoryAdapter {
@@ -466,7 +466,7 @@ impl SharedMemoryAdapter {
         Self {
             store: Arc::new(Mutex::new(MemoryStore::new())),
             control: Arc::new(Mutex::new(AdapterControl::default())),
-            erasure_gate: Arc::new(ErasureContainmentGateV1::new()),
+            erasure_gate: Arc::new(ErasureContainmentGateV1::new_test_open()),
         }
     }
 
@@ -534,7 +534,10 @@ impl SharedMemoryAdapter {
 }
 
 impl EventStore for SharedMemoryAdapter {
-    fn bind_erasure_gate(&mut self, gate: Arc<dyn pos_core::ErasureGate>) -> Result<(), CoreError> {
+    fn bind_erasure_gate(
+        &mut self,
+        gate: Arc<pos_core::ErasureContainmentGateV1>,
+    ) -> Result<(), CoreError> {
         if !Arc::ptr_eq(&self.erasure_gate, &gate) {
             return Err(CoreError::ErasureContainmentUnavailable);
         }
@@ -704,7 +707,7 @@ fn backtest_runner_creates_one_host_owned_erasure_gate() {
 
 #[test]
 fn backtest_runner_rejects_a_caller_supplied_gate() {
-    let host: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let host = Arc::new(ErasureContainmentGateV1::new_test_open());
     let factory_gate = Arc::clone(&host);
     let error = BacktestRunner::new(
         BacktestConfig {
@@ -713,7 +716,7 @@ fn backtest_runner_rejects_a_caller_supplied_gate() {
             eval_ticks: 0,
             store_config: StoreConfig::Memory,
         },
-        move || PluginRegistry::new().with_erasure_gate(Arc::clone(&factory_gate)),
+        move || PluginRegistry::new().with_erasure_gate(factory_gate.clone()),
     )
     .with_erasure_gate(host)
     .run()
@@ -727,7 +730,8 @@ fn backtest_runner_rejects_a_caller_supplied_gate() {
 
 #[test]
 fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
-    let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let foreign: Arc<pos_core::ErasureContainmentGateV1> =
+        Arc::new(ErasureContainmentGateV1::new_test_open());
     let error = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "foreign-train-erasure-host".to_owned(),
@@ -748,7 +752,8 @@ fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
 
 #[test]
 fn backtest_runner_rejects_a_removed_bound_train_gate() {
-    let removed: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let removed: Arc<pos_core::ErasureContainmentGateV1> =
+        Arc::new(ErasureContainmentGateV1::new_test_open());
     let error = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "removed-train-erasure-host".to_owned(),
@@ -774,7 +779,8 @@ fn backtest_runner_rejects_a_removed_bound_train_gate() {
 #[test]
 fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
     let calls = Arc::new(AtomicU64::new(0));
-    let foreign: Arc<dyn pos_core::ErasureGate> = Arc::new(ErasureContainmentGateV1::new());
+    let foreign: Arc<pos_core::ErasureContainmentGateV1> =
+        Arc::new(ErasureContainmentGateV1::new_test_open());
     let error = BacktestRunner::new(
         BacktestConfig {
             experiment_name: "foreign-eval-erasure-host".to_owned(),

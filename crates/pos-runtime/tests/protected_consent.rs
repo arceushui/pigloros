@@ -40,7 +40,7 @@ fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
 
 fn gated_store() -> Box<dyn EventStore> {
     let mut store = test_ok(open_store(StoreConfig::Memory));
-    test_ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new())));
+    test_ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     store
 }
 
@@ -53,7 +53,7 @@ impl PluginRegistry {
     fn new() -> Self {
         Self(
             RuntimePluginRegistry::new()
-                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new())),
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())),
         )
     }
 
@@ -1361,7 +1361,7 @@ fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
     ));
     assert!(matches!(
         PluginRegistry::new_replay()
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .submit_action(timeline, &unknown),
         Err(ActionSubmissionError::Rejected(
             ActionRejected::UnknownEventType

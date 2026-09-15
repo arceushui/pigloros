@@ -423,8 +423,8 @@ mod tests {
     }
 
     fn make_registry() -> ProjectionRegistry {
-        let mut reg =
-            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        let mut reg = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         reg.register("count", Box::new(CountReducer));
         reg
     }
@@ -449,7 +449,7 @@ mod tests {
     fn open_test_store() -> Box<dyn EventStore> {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         store
     }
@@ -494,7 +494,7 @@ mod tests {
             (timeline.id(), entity)
         };
         let evaluation = snapshot_evaluation(ArtifactStateV1::Retained);
-        let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         projected.register("count", Box::new(CountReducer));
         let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
         verified.register("count", Box::new(CountReducer));
@@ -807,8 +807,8 @@ mod extra_tests {
     }
 
     fn make_registry() -> ProjectionRegistry {
-        let mut reg =
-            ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        let mut reg = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         reg.register("count", Box::new(CountReducer));
         reg
     }
@@ -820,7 +820,7 @@ mod extra_tests {
     fn open_test_store() -> Box<dyn EventStore> {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         store
     }

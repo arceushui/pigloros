@@ -203,7 +203,7 @@ mod tests {
     fn open_test_store() -> Box<dyn EventStore> {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
         store
     }
@@ -263,7 +263,7 @@ mod tests {
             (timeline.id(), entity, events[2].seq)
         };
 
-        let mut complete = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut complete = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         complete.register("count", Box::new(CountReducer));
         let mut partial = ProjectionRegistry::new().with_erasure_gate(gate);
         partial.register("count", Box::new(CountReducer));

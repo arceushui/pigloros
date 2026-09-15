@@ -867,7 +867,7 @@ fn containment_includes_admitted_future_fork_extensions() -> Result<(), ErasureE
 #[test]
 fn containment_gate_blocks_bound_timeline_and_preserves_unrelated_timeline(
 ) -> Result<(), ErasureErrorV1> {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let frozen = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
         Some(scope()?),
@@ -904,7 +904,7 @@ fn containment_gate_blocks_bound_timeline_and_preserves_unrelated_timeline(
 
 #[test]
 fn containment_gate_requires_verified_state_for_bound_scope() {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     assert_eq!(gate.bind_timeline(timeline, reference(71)), Ok(()));
     assert_eq!(
@@ -924,7 +924,7 @@ fn containment_gate_requires_verified_state_for_bound_scope() {
 
 #[test]
 fn containment_gate_installs_verified_query_and_scope_bindings() -> Result<(), ErasureErrorV1> {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     let state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
@@ -960,7 +960,7 @@ fn containment_gate_requires_query_topology_proof() -> Result<(), ErasureErrorV1
 
 #[test]
 fn containment_gate_blocks_bindings_when_verified_query_fails() {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     let mut query = TestVerifiedStateQuery { state: None };
     assert_eq!(
@@ -998,7 +998,7 @@ fn containment_gate_denies_legacy_combined_query_and_maps_errors() -> Result<(),
 
 #[test]
 fn containment_gate_does_not_downgrade_a_frozen_state() -> Result<(), ErasureErrorV1> {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     gate.publish_verified_state(verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
@@ -1021,7 +1021,7 @@ fn containment_gate_does_not_downgrade_a_frozen_state() -> Result<(), ErasureErr
 
 #[test]
 fn containment_gate_allows_nested_store_fences() {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     let mut invoked = false;
     assert_eq!(
@@ -1041,7 +1041,7 @@ fn containment_gate_allows_nested_store_fences() {
 
 #[test]
 fn containment_gate_rechecks_nested_timeline_authorization() -> Result<(), ErasureErrorV1> {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let frozen = TimelineId::new();
     let allowed = TimelineId::new();
     gate.publish_verified_state(verified_state_for_containment(
@@ -1070,7 +1070,7 @@ fn containment_gate_rechecks_nested_timeline_authorization() -> Result<(), Erasu
 
 #[test]
 fn containment_gate_rejects_duplicate_timeline_bindings() -> Result<(), ErasureErrorV1> {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     let state =
         verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
@@ -1090,7 +1090,7 @@ fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result
     let timeline = TimelineId::new();
     let other_timeline = TimelineId::new();
 
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
         Some(scope()?),
@@ -1120,7 +1120,7 @@ fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result
         Some(conflicting_scope),
         Vec::new(),
     )?;
-    let fresh_gate = ErasureContainmentGateV1::new();
+    let fresh_gate = ErasureContainmentGateV1::new_test_open();
     fresh_gate
         .bind_timeline(timeline, reference(7))
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
@@ -1144,7 +1144,7 @@ fn containment_gate_covers_public_error_codes_and_safe_scope_paths() -> Result<(
     );
     let _: ErasureContainmentGateV1 = ErasureContainmentGateV1::default();
 
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     gate.publish_verified_state(verified_state_for_containment(
         ErasureLifecycleV1::Authorized,
@@ -1208,7 +1208,7 @@ fn fail_closed_gate_rejects_unbound_timeline() {
 
 #[test]
 fn poisoned_containment_fence_fails_closed() {
-    let gate = ErasureContainmentGateV1::new();
+    let gate = ErasureContainmentGateV1::new_test_open();
     let timeline = TimelineId::new();
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut panic_during_effect = || {

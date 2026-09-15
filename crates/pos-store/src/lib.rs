@@ -419,7 +419,7 @@ pub enum StoreConfig {
 ///
 /// // Parent-then-child CoW sync (identity-preserving).
 /// let mut src = open_store(StoreConfig::Memory).unwrap();
-/// src.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+/// src.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 ///     .unwrap();
 /// let root = src.create_timeline("root").unwrap();
 /// let entity = EntityId::new();
@@ -460,7 +460,7 @@ pub enum StoreConfig {
 /// let (root_artifact, root_evaluation) = host_export_authorization(root.id());
 /// let (child_artifact, child_evaluation) = host_export_authorization(child.id());
 /// let mut dst = open_store(StoreConfig::Memory).unwrap();
-/// dst.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+/// dst.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 ///     .unwrap();
 /// import_timeline_with_id(
 ///     &mut *dst,
@@ -636,7 +636,7 @@ mod tests {
         let mut store = open_store(config).test_ok();
         store
             .bind_erasure_gate(std::sync::Arc::new(
-                pos_core::ErasureContainmentGateV1::new(),
+                pos_core::ErasureContainmentGateV1::new_test_open(),
             ))
             .test_ok();
         store
@@ -1501,7 +1501,7 @@ mod tests {
             memory::MemoryStore::with_clock(Box::new(pos_core::FixedAdmissionClock(admission)));
         store
             .bind_erasure_gate(std::sync::Arc::new(
-                pos_core::ErasureContainmentGateV1::new(),
+                pos_core::ErasureContainmentGateV1::new_test_open(),
             ))
             .test_ok();
         let timeline = store.create_timeline("clock").test_ok();

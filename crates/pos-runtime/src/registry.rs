@@ -68,7 +68,7 @@ mod coverage_paths {
     use std::sync::{Arc, Mutex};
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     struct RestoreDriver {
@@ -318,7 +318,7 @@ mod coverage_entrypoints {
     use std::sync::Arc;
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     struct NoopDriver;
@@ -760,7 +760,7 @@ pub struct PluginRegistry {
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
-    erasure_gate: Option<Arc<dyn ErasureGate>>,
+    erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host composition root.
     /// The constructor's fail-closed gate can be replaced exactly once.
     erasure_gate_bound: bool,
@@ -1018,8 +1018,7 @@ impl PluginRegistry {
     }
 
     fn new_with_mode(run_mode: RunMode, composition_mode: PluginExecutionModeV1) -> Self {
-        let erasure_gate: Arc<dyn ErasureGate> =
-            Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let erasure_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let mut schemas = SchemaRegistry::new();
         // Auto-register the Recorder's internal event type so that
         // Recorder::to_draft() output passes SchemaRegistry::validate().
@@ -1097,14 +1096,14 @@ impl PluginRegistry {
     /// Bind the host-owned erasure containment gate used for snapshots,
     /// Plugin input, proposed actions, and staged Event commits.
     #[must_use]
-    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
+    pub fn with_erasure_gate(mut self, gate: Arc<ErasureContainmentGateV1>) -> Self {
         self.bind_erasure_gate(gate);
         self
     }
 
     /// Bind the host-owned erasure gate in place for a shared Gateway/runtime
     /// composition.
-    pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
+    pub fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) {
         if self.erasure_gate_bound {
             return;
         }
@@ -1124,7 +1123,7 @@ impl PluginRegistry {
     /// Return the host-bound erasure gate for consumers that share the same
     /// Tick Boundary fence as this registry.
     #[must_use]
-    pub fn clone_erasure_gate(&self) -> Option<Arc<dyn ErasureGate>> {
+    pub fn clone_erasure_gate(&self) -> Option<Arc<ErasureContainmentGateV1>> {
         self.erasure_gate.clone()
     }
 
@@ -2714,7 +2713,7 @@ mod tests {
     };
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     fn gated_store() -> Box<dyn pos_core::store::EventStore> {
@@ -2724,7 +2723,7 @@ mod tests {
             )))
         });
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
                     "binding the in-memory erasure gate failed: {error:?}"
@@ -4962,27 +4961,6 @@ mod tests {
         }
     }
 
-    struct FrozenActionGate;
-
-    impl ErasureGate for FrozenActionGate {
-        fn authorize(
-            &self,
-            _timeline: TimelineId,
-            _operation: ErasureProtectedOperationV1,
-        ) -> Result<(), ErasureContainmentErrorV1> {
-            Err(ErasureContainmentErrorV1::AccessFrozen)
-        }
-
-        fn with_fence(
-            &self,
-            timeline: TimelineId,
-            operation: ErasureProtectedOperationV1,
-            _effect: &mut dyn FnMut(),
-        ) -> Result<(), ErasureContainmentErrorV1> {
-            self.authorize(timeline, operation)
-        }
-    }
-
     #[test]
     fn proposed_action_fence_rejects_before_plugin_invocation() {
         let plugin = plugin_with_caps("fenced_approver", &["action.type"], false, false);
@@ -5028,7 +5006,9 @@ mod tests {
             Err(ActionSubmissionError::ErasureOperationUnavailable)
         ));
 
-        let mut frozen = PluginRegistry::new().with_erasure_gate(Arc::new(FrozenActionGate));
+        let frozen_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        frozen_gate.freeze_timeline_for_test(timeline);
+        let mut frozen = PluginRegistry::new().with_erasure_gate(frozen_gate);
         frozen
             .register_with_approver(
                 &plugin,
@@ -5182,7 +5162,7 @@ mod tests {
         ));
 
         let replay = PluginRegistry::new_replay()
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert!(matches!(
             replay.submit_action(action_timeline, &valid),
             Err(ActionSubmissionError::Rejected(
@@ -5268,7 +5248,7 @@ mod tests {
         );
         assert!(matches!(
             PluginRegistry::new_replay()
-                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .submit_action(TimelineId::new(), &proposal),
             Err(ActionSubmissionError::Rejected(
                 ActionRejected::UnknownEventType
@@ -5292,7 +5272,7 @@ mod coverage_public_error_paths {
     use std::sync::Arc;
 
     fn gated_registry() -> PluginRegistry {
-        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
     struct EmptyDriver;
@@ -5370,7 +5350,7 @@ mod coverage_public_error_paths {
             )))
         });
         store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
                     "binding the in-memory erasure gate failed: {error:?}"
@@ -5469,7 +5449,7 @@ mod erasure_gate_coverage {
 
     #[test]
     fn with_erasure_gate_binds_the_shared_gate() {
-        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+        let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
         assert!(registry.clone_erasure_gate().is_some());
     }
@@ -5482,8 +5462,8 @@ mod erasure_gate_coverage {
             missing.step_all_anchored(timeline, pos_core::clock::Seq::ZERO),
             Err(RuntimeError::ErasureContainment(_))
         ));
-        let mut missing =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        let mut missing = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert!(missing
             .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
@@ -5499,14 +5479,14 @@ mod erasure_gate_coverage {
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
 
-        let mut rejecting =
-            PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+        let mut rejecting = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         // A second binding is ignored, so a host cannot replace the original
         // gate after composition and reopen the protected path.
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let mut rejecting_store = pos_store::memory::MemoryStore::new();
         rejecting_store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .unwrap_or_else(|error| {
                 std::panic::resume_unwind(Box::new(format!(
                     "test store erasure gate binding should succeed: {error:?}"

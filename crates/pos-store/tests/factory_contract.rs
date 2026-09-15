@@ -46,7 +46,7 @@ fn assert_appended(outcome: &AppendOrDuplicateOutcome) {
 fn gated_sqlite_store() -> Box<dyn EventStore> {
     let mut store = open_store(StoreConfig::SqliteInMemory).test_ok();
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
     store
 }

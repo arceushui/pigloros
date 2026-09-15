@@ -5,7 +5,7 @@
 /// publication authority through this wrapper.
 struct HostedExperimentStore {
     host: Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: Arc<dyn ErasureGate>,
+    gate: Arc<pos_core::ErasureContainmentGateV1>,
 }
 
 impl HostedExperimentStore {
@@ -32,7 +32,7 @@ impl HostedExperimentStore {
         })
     }
 
-    fn containment_gate(&self) -> Arc<dyn ErasureGate> {
+    fn containment_gate(&self) -> Arc<pos_core::ErasureContainmentGateV1> {
         Arc::clone(&self.gate)
     }
 
@@ -50,7 +50,10 @@ impl HostedExperimentStore {
 }
 
 impl EventStore for HostedExperimentStore {
-    fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) -> Result<(), CoreError> {
+    fn bind_erasure_gate(
+        &mut self,
+        gate: Arc<pos_core::ErasureContainmentGateV1>,
+    ) -> Result<(), CoreError> {
         if Arc::ptr_eq(&self.gate, &gate) {
             Ok(())
         } else {
@@ -148,7 +151,7 @@ mod host_store_tests {
         let host_gate = store.containment_gate();
         store.bind_erasure_gate(Arc::clone(&host_gate))?;
         assert!(store
-            .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))
             .is_err());
 
         let parent = store.create_timeline("parent")?;

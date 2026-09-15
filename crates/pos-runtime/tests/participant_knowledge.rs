@@ -272,8 +272,8 @@ fn fixture() -> Fixture {
 }
 
 fn empty_profile_projections() -> ProjectionRegistry {
-    let mut projections =
-        ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()));
+    let mut projections = ProjectionRegistry::new()
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     projections
         .register_observable(
             "profile",
@@ -382,7 +382,7 @@ fn fixture_with_timeline(timeline_id: TimelineId) -> Fixture {
 }
 
 fn gated_registry() -> PluginRegistry {
-    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 }
 
 fn gated_store() -> Box<dyn pos_core::store::EventStore> {
@@ -392,7 +392,7 @@ fn gated_store() -> Box<dyn pos_core::store::EventStore> {
         )))
     });
     store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!(
                 "binding the in-memory erasure gate failed: {error:?}"

@@ -10,5 +10,8 @@ publish.workspace = true
 pos-core = { path = "../pos-core" }
 pos-store = { path = "../pos-store" }
 
+[dev-dependencies]
+pos-core = { path = "../pos-core", features = ["test-support"] }
+
 [lints]
 workspace = true

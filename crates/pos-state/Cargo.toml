@@ -12,6 +12,7 @@ pos-core = { path = "../pos-core" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+pos-core = { path = "../pos-core", features = ["test-support"] }
 proptest = { workspace = true }
 
 [lints]

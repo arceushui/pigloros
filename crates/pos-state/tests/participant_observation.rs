@@ -34,7 +34,7 @@ impl<T> TestOk<T> for Option<T> {
 }
 
 fn gated_registry() -> ProjectionRegistry {
-    ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    ProjectionRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 }
 
 const fn hash_from_repeated_byte(byte: u8) -> Hash {

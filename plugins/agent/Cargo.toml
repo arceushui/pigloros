@@ -20,6 +20,7 @@ blake3 = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]
+pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-store = { path = "../../crates/pos-store" }
 
 [lints]

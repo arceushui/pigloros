@@ -28,7 +28,7 @@ const PLUGIN_HASH: [u8; 32] = [0x31; 32];
 const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 
 fn gated_registry() -> PluginRegistry {
-    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+    PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 }
 
 trait TestValueExt<T> {

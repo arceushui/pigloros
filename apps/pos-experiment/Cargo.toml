@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]
+pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-plugin-agent = { path = "../../plugins/agent" }
 pos-plugin-rule-agent = { path = "../../plugins/entities/rule-agent" }
 pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }

@@ -42,7 +42,9 @@ fn public_store_verification_rejects_invalid_signature_role_through_host(
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
-    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
+    store.bind_erasure_gate(std::sync::Arc::new(
+        ErasureContainmentGateV1::new_test_open(),
+    ))?;
     let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
@@ -104,7 +106,9 @@ fn public_store_verification_rejects_invalid_registry_key_through_host(
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
-    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
+    store.bind_erasure_gate(std::sync::Arc::new(
+        ErasureContainmentGateV1::new_test_open(),
+    ))?;
     let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let mut invalid_public_key = [0_u8; 32];
@@ -196,7 +200,9 @@ fn public_store_verification_uses_production_host_gate_with_rotated_keys(
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
-    store.bind_erasure_gate(std::sync::Arc::new(ErasureContainmentGateV1::new()))?;
+    store.bind_erasure_gate(std::sync::Arc::new(
+        ErasureContainmentGateV1::new_test_open(),
+    ))?;
     let timeline = store.create_timeline("ledger")?;
     let identity_one = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let identity_two = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 2);

@@ -339,14 +339,14 @@ mod tests {
     fn gated_memory_store() -> MemoryStore {
         let mut store = MemoryStore::new();
         assert!(store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .is_ok());
         store
     }
 
     fn open_store(config: pos_store::StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
         let mut store = pos_store::open_store(config)?;
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new()))?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         Ok(store)
     }
 

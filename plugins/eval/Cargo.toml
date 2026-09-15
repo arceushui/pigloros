@@ -13,5 +13,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 ciborium = { workspace = true }
 
+[dev-dependencies]
+pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+
 [lints]
 workspace = true
