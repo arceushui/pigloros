@@ -92,15 +92,12 @@ impl AuthenticatedSelectorBootstrap {
     /// Issue a cryptographically random fresh-mode challenge.
     ///
     /// # Errors
-    /// Returns a closed boundary error if randomness or deadline creation fails.
+    /// Returns a closed boundary error if secure randomness is unavailable.
     pub fn issue_update_challenge(&self) -> Result<InstallationChallenge, SelectorBoundaryError> {
-        let expires_at = Instant::now()
-            .checked_add(CHALLENGE_LIFETIME)
-            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
         Ok(InstallationChallenge {
             installation: self.installed.manifest().digest(),
             nonce: fresh_selector_id()?,
-            expires_at,
+            expires_at: Instant::now() + CHALLENGE_LIFETIME,
         })
     }
 
@@ -164,7 +161,7 @@ impl AuthenticatedSelectorBootstrap {
         let next_revocation =
             SandboxRevocationSnapshot::authenticate(next_revocation_bytes, &self.trust)
                 .map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-        SandboxAdministratorPolicy::validate_revocation_successor(
+        let next_policy = SandboxAdministratorPolicy::validate_revocation_successor(
             &self.installed.control_record(
                 InstallationObjectKind::ADMINISTRATOR_POLICY,
                 self.policy.policy_digest(),
@@ -184,8 +181,7 @@ impl AuthenticatedSelectorBootstrap {
         let [_, expected_revocation, expected_policy] = next_manifest.authority_digests();
         if next_revocation.snapshot_digest() != expected_revocation
             || update.next_revocation != next_revocation
-            || signed_digest(next_policy_bytes)? != expected_policy
-            || embedded_revocation(revocation_update_bytes)? != next_revocation_bytes
+            || next_policy.policy_digest() != expected_policy
         {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
@@ -279,6 +275,16 @@ impl ValidatedInstallationUpdate {
     pub(crate) fn clear_revocation_update_for_test(&mut self) {
         self.revocation_update_bytes.clear();
     }
+
+    #[cfg(test)]
+    pub(crate) fn replace_next_manifest_for_test(&mut self, manifest: Vec<u8>) {
+        self.next_manifest_bytes = manifest;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_revocation_update_for_test(&mut self, update: Vec<u8>) {
+        self.revocation_update_bytes = update;
+    }
 }
 
 fn decode_update(
@@ -305,78 +311,4 @@ fn decode_update(
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
     Ok((next.clone(), update.clone()))
-}
-
-fn signed_digest(bytes: &[u8]) -> Result<[u8; 32], SelectorBoundaryError> {
-    let document = decode_canonical(bytes).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    fixed_bytes(&array(&document, 3).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?[1])
-        .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
-}
-
-fn embedded_revocation(bytes: &[u8]) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let document = decode_canonical(bytes).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let wrapper = array(&document, 3).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    let fields = array(&wrapper[0], 8).map_err(|_| SelectorBoundaryError::ArtifactInvalid)?;
-    match &fields[4] {
-        Value::Bytes(bytes) => Ok(bytes.clone()),
-        _ => Err(SelectorBoundaryError::ArtifactInvalid),
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signed_record_extractors_reject_malformed_nested_values(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let malformed = encode(&Value::Array(vec![
-            Value::Array(vec![
-                Value::Text("RCU1".to_owned()),
-                Value::Integer(1_u64.into()),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-            ]),
-            Value::Bytes(vec![0; 32]),
-            Value::Bytes(vec![0; 64]),
-        ]))?;
-        assert_eq!(
-            embedded_revocation(&malformed),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        assert_eq!(
-            signed_digest(&[0xff]),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        for value in [
-            Value::Null,
-            Value::Array(Vec::new()),
-            Value::Array(vec![Value::Null, Value::Null, Value::Null]),
-        ] {
-            let bytes = encode(&value)?;
-            assert_eq!(
-                signed_digest(&bytes),
-                Err(SelectorBoundaryError::ArtifactInvalid)
-            );
-            assert_eq!(
-                embedded_revocation(&bytes),
-                Err(SelectorBoundaryError::ArtifactInvalid)
-            );
-        }
-        let malformed_unsigned = encode(&Value::Array(vec![
-            Value::Array(Vec::new()),
-            Value::Bytes(vec![0; 32]),
-            Value::Bytes(vec![0; 64]),
-        ]))?;
-        assert_eq!(
-            embedded_revocation(&malformed_unsigned),
-            Err(SelectorBoundaryError::ArtifactInvalid)
-        );
-        Ok(())
-    }
 }

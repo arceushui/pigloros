@@ -35,7 +35,7 @@ pub(crate) struct UpdateFixture {
 }
 
 impl UpdateFixture {
-    fn new() -> TestResult<Self> {
+    pub(crate) fn new() -> TestResult<Self> {
         let directory = tempfile::tempdir()?;
         drop(materialize_root_selector_state(directory.path())?);
         let root = File::open(directory.path())?;
@@ -59,14 +59,14 @@ impl UpdateFixture {
         })
     }
 
-    fn admitted(&self) -> TestResult<AdmittedSelectorProvider> {
+    pub(crate) fn admitted(&self) -> TestResult<AdmittedSelectorProvider> {
         let root = File::open(self.directory.path())?;
         Ok(InstalledSelectorState::open_at_for_test(&root)?
             .authenticate_bootstrap()?
             .admit_provider()?)
     }
 
-    fn request(
+    pub(crate) fn request(
         &self,
         challenge: &InstallationChallenge,
         nonce_override: Option<[u8; 16]>,
@@ -662,7 +662,7 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
     Ok(())
 }
 
-fn committed_update_fixture() -> TestResult<(
+pub(crate) fn committed_update_fixture() -> TestResult<(
     UpdateFixture,
     Arc<crate::selector::installation::authority::CommittedInstallationUpdate>,
     SigningKey,
@@ -688,7 +688,7 @@ fn committed_update_fixture() -> TestResult<(
     Ok((fixture, committed, SigningKey::from_bytes(&[4; 32])))
 }
 
-fn pending_update_fixture() -> TestResult<(
+pub(crate) fn pending_update_fixture() -> TestResult<(
     UpdateFixture,
     AdmittedSelectorProvider,
     ValidatedInstallationUpdate,

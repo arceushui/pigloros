@@ -2637,6 +2637,22 @@ mod tests {
     }
 
     #[test]
+    fn live_update_preparation_commits_only_a_challenge_bound_successor() -> TestResult {
+        let fixture = crate::selector::installation::tests::updates::UpdateFixture::new()?;
+        let admitted = fixture.admitted()?;
+        let challenge = admitted.bootstrap().issue_update_challenge()?;
+        let request = fixture.request(&challenge, None)?;
+        let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+        let admission = SelectorAdmission::new(admitted, runtime);
+        let closed = admission.close_and_snapshot()?;
+        let committed = prepare_live_update(&closed, challenge, &request)?;
+        assert_ne!(committed.sir1_digest(), [0; 32]);
+        assert!(committed.verify_recovery_floor().is_ok());
+        assert!(admission.current().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn selector_admission_closes_with_one_sorted_live_attempt_snapshot() -> TestResult {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;

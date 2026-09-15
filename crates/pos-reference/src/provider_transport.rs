@@ -1408,6 +1408,92 @@ mod tests {
         Ok(result)
     }
 
+    struct CommittedUpdateControl {
+        transport: ProviderTransport,
+        _directory: tempfile::TempDir,
+        _fixture: crate::selector::installation::tests::updates::UpdateFixture,
+        committed: crate::selector::installation::authority::CommittedInstallationUpdate,
+        provider: std::thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    fn committed_update_control_reply(
+        response_trailing: Vec<u8>,
+    ) -> TestResult<CommittedUpdateControl> {
+        let (fixture, committed, _signer) =
+            crate::selector::installation::tests::updates::committed_update_fixture()?;
+        let committed =
+            std::sync::Arc::into_inner(committed).ok_or("committed update still shared")?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let provider = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let context = read_test_frame(&mut stream)?;
+            let update = read_test_frame(&mut stream)?;
+            let mut trailing = Vec::new();
+            stream.read_to_end(&mut trailing)?;
+            if !trailing.is_empty() {
+                return Err(std::io::Error::other("unexpected request trailing bytes"));
+            }
+            let response =
+                crate::selector::installation::tests::updates::acknowledgement_for_control_frames(
+                    &context, &update,
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let length = u32::try_from(response.len()).map_err(std::io::Error::other)?;
+            stream.write_all(&length.to_be_bytes())?;
+            stream.write_all(&response)?;
+            stream.write_all(&response_trailing)?;
+            stream.shutdown(std::net::Shutdown::Write)
+        });
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        Ok(CommittedUpdateControl {
+            transport,
+            _directory: directory,
+            _fixture: fixture,
+            committed,
+            provider,
+        })
+    }
+
+    fn read_test_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix)?;
+        let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(std::io::Error::other)?;
+        let mut frame = vec![0; length];
+        stream.read_exact(&mut frame)?;
+        Ok(frame)
+    }
+
+    #[test]
+    fn committed_update_transport_publishes_only_an_exact_terminal_reply() -> TestResult {
+        let valid = committed_update_control_reply(Vec::new())?;
+        let (successor, acknowledgement) = valid
+            .transport
+            .complete_committed_update(valid.committed, Duration::from_secs(1))?;
+        assert!(!acknowledgement.is_empty());
+        assert_ne!(
+            successor.bootstrap().installed().manifest().digest(),
+            [0; 32]
+        );
+        valid
+            .provider
+            .join()
+            .map_err(|_| "provider thread panicked")??;
+
+        let trailing = committed_update_control_reply(vec![1])?;
+        assert!(trailing
+            .transport
+            .complete_committed_update(trailing.committed, Duration::from_secs(1))
+            .is_err());
+        trailing
+            .provider
+            .join()
+            .map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
     #[test]
     fn closed_error_mappers_and_connect_completion_preserve_failure_classes() -> TestResult {
         assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);

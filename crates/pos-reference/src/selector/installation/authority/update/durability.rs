@@ -490,6 +490,7 @@ mod tests {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     use super::*;
+    use crate::selector::installation::tests::updates::pending_update_fixture;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -632,6 +633,66 @@ mod tests {
             verify_file_identity(&recovery, &other),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_encoding_rejects_each_invalid_control_record() -> TestResult {
+        let (_fixture, _admitted, mut update, snapshot) = pending_update_fixture()?;
+        update.replace_previous_manifest_for_test(Vec::new());
+        assert!(recovery_bytes(&update, &snapshot).is_err());
+
+        let (_fixture, _admitted, mut update, snapshot) = pending_update_fixture()?;
+        update.replace_next_manifest_for_test(Vec::new());
+        assert!(recovery_bytes(&update, &snapshot).is_err());
+
+        let (_fixture, _admitted, mut update, snapshot) = pending_update_fixture()?;
+        update.clear_revocation_update_for_test();
+        assert!(recovery_bytes(&update, &snapshot).is_err());
+
+        let oversized = vec![0; CONTROL_LIMIT + 1];
+        let (_fixture, _admitted, mut update, snapshot) = pending_update_fixture()?;
+        update.replace_previous_manifest_for_test(oversized.clone());
+        assert!(recovery_bytes(&update, &snapshot).is_err());
+
+        let (_fixture, _admitted, mut update, snapshot) = pending_update_fixture()?;
+        update.replace_next_manifest_for_test(oversized.clone());
+        assert!(recovery_bytes(&update, &snapshot).is_err());
+
+        let (_fixture, _admitted, mut update, snapshot) = pending_update_fixture()?;
+        update.replace_revocation_update_for_test(oversized);
+        assert!(recovery_bytes(&update, &snapshot).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn successor_publication_rechecks_every_manifest_state() -> TestResult {
+        assert_publication_transition(b"previous", b"previous", b"next")?;
+        assert_publication_transition(b"next", b"previous", b"next")?;
+
+        let (directory, root, owner) = durable_root()?;
+        write_private_record(&directory.path().join(MANIFEST_NAME), b"third")?;
+        assert!(matches!(
+            publish_successor(&root, owner, b"previous", b"next", &root, b"recovery"),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+
+    fn assert_publication_transition(current: &[u8], previous: &[u8], next: &[u8]) -> TestResult {
+        let (directory, root, owner) = durable_root()?;
+        write_private_record(&directory.path().join(MANIFEST_NAME), current)?;
+        let staging = open_staging_directory(&root, owner)?;
+        let recovery = write_recovery(&staging, &root, owner, b"recovery")?;
+        assert!(publish_successor(&root, owner, previous, next, &recovery, b"recovery",).is_err());
+        assert_eq!(fs::read(directory.path().join(MANIFEST_NAME))?, next);
+        assert!(!directory.path().join(RECOVERY_NAME).exists());
+        Ok(())
+    }
+
+    fn write_private_record(path: &Path, bytes: &[u8]) -> TestResult {
+        fs::write(path, bytes)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o400))?;
         Ok(())
     }
 }

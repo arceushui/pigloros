@@ -59,7 +59,8 @@ impl SandboxAdministratorPolicy {
     /// Validate a signed, strictly revocation-only APT1 successor.
     ///
     /// Unlike execution admission, this accepts revoking the selected provider.
-    /// It returns no policy or execution authority under that revoked state.
+    /// The returned policy proves the successor record identity but grants no
+    /// execution authority under that revoked state.
     ///
     /// # Errors
     /// Rejects forged or unbound policies, non-successor revocation epochs,
@@ -70,7 +71,7 @@ impl SandboxAdministratorPolicy {
         trust: &SandboxTrustSnapshot,
         previous_revocation: &SandboxRevocationSnapshot,
         next_revocation: &SandboxRevocationSnapshot,
-    ) -> Result<(), SandboxTrustError> {
+    ) -> Result<Self, SandboxTrustError> {
         previous_revocation.validate_immediate_epoch_for_same_registry(next_revocation)?;
         let (previous, previous_signer) =
             Self::authenticate_record(previous_bytes, trust, previous_revocation)?;
@@ -96,7 +97,7 @@ impl SandboxAdministratorPolicy {
         {
             return Err(SandboxTrustError::AuthorityMismatch);
         }
-        Ok(())
+        Ok(next)
     }
 
     fn authenticate_record(
