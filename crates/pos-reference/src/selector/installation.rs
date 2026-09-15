@@ -28,6 +28,7 @@ pub const SANDBOX_ARTIFACT_ROOT: &str = "/var/lib/pigloros/sandbox";
 pub const SANDBOX_ADMIN_SOCKET: &str = "/run/pigloros/sandbox-selector-admin.sock";
 
 const MANIFEST_NAME: &str = "installation.cbor";
+pub(super) const RECOVERY_NAME: &str = "installation-update.cbor";
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 const OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.SelectorInstallation.v1\0";
@@ -545,7 +546,7 @@ fn open_indexed_artifacts(
 }
 
 fn ensure_no_pending_recovery(root: &File) -> Result<(), SelectorBoundaryError> {
-    match statat(root, "installation-update.cbor", AtFlags::SYMLINK_NOFOLLOW) {
+    match statat(root, RECOVERY_NAME, AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => Ok(()),
         _ => Err(SelectorBoundaryError::ArtifactInvalid),
     }

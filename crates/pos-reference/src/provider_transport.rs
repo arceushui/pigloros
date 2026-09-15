@@ -12,6 +12,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ciborium::value::Value;
@@ -24,7 +25,10 @@ use crate::sandbox_provider_protocol::{
     PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
     SelectorGrantCommitment,
 };
-use crate::selector::installation::authority::AdmittedSelectorProvider;
+use crate::selector::installation::authority::{
+    AdmittedProviderRuntime, AdmittedSelectorProvider, CommittedInstallationUpdate,
+    ProviderRuntimeSlot,
+};
 use crate::selector::installation::open_directory_chain;
 use crate::selector::SelectorBoundaryError;
 
@@ -72,6 +76,18 @@ fn invalid_errno<T>(_: T) -> rustix::io::Errno {
 pub(crate) struct ProviderTransport {
     execute_endpoint: SelectedProviderEndpoint,
     control_endpoint: SelectedProviderEndpoint,
+    admitted_process: Mutex<Option<ProviderProcessIdentity>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProviderProcessIdentity {
+    pid: u64,
+    start_time_ticks: u64,
+}
+
+struct ConnectedProviderStream {
+    stream: UnixStream,
+    process: ProviderProcessIdentity,
 }
 
 /// Complete provider evidence authenticated against an admitted selector provider.
@@ -348,7 +364,7 @@ impl SelectedProviderEndpoint {
         }
     }
 
-    fn connect(&self, timeout: Duration) -> Result<UnixStream, SelectorBoundaryError> {
+    fn connect(&self, timeout: Duration) -> Result<ConnectedProviderStream, SelectorBoundaryError> {
         endpoint_metadata(&self.path, Some((self.device, self.inode)), self.owner)
             .and_then(|before| {
                 SocketAddrUnix::new(&self.path)
@@ -393,9 +409,35 @@ impl SelectedProviderEndpoint {
                     peer.uid.as_raw(),
                     self.owner,
                 )
-                .map(|()| stream)
+                .and_then(|()| {
+                    provider_process_identity(peer.pid)
+                        .map(|process| ConnectedProviderStream { stream, process })
+                })
             })
     }
+}
+
+fn provider_process_identity(
+    pid: rustix::process::Pid,
+) -> Result<ProviderProcessIdentity, SelectorBoundaryError> {
+    let raw_pid = pid.as_raw_nonzero().get();
+    let pid = u64::try_from(raw_pid).map_err(artifact_invalid)?;
+    let stat =
+        std::fs::read_to_string(format!("/proc/{raw_pid}/stat")).map_err(artifact_invalid)?;
+    let fields = stat
+        .rsplit_once(") ")
+        .map(|(_, fields)| fields)
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+    let start_time_ticks = fields
+        .split_ascii_whitespace()
+        .nth(19)
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)?
+        .parse()
+        .map_err(artifact_invalid)?;
+    Ok(ProviderProcessIdentity {
+        pid,
+        start_time_ticks,
+    })
 }
 
 fn require_root_owned_endpoint(path: &Path) -> Result<&Path, SelectorBoundaryError> {
@@ -411,6 +453,7 @@ const fn provider_transport(
     ProviderTransport {
         execute_endpoint,
         control_endpoint,
+        admitted_process: Mutex::new(None),
     }
 }
 
@@ -456,7 +499,48 @@ impl ProviderTransport {
         Ok(Self {
             execute_endpoint: endpoint.clone(),
             control_endpoint: endpoint,
+            admitted_process: Mutex::new(None),
         })
+    }
+
+    fn bind_admitted_process(
+        &self,
+        observed: ProviderProcessIdentity,
+    ) -> Result<(), SelectorBoundaryError> {
+        let mut admitted = self.admitted_process.lock().map_err(selector_unavailable)?;
+        match *admitted {
+            None => {
+                *admitted = Some(observed);
+                Ok(())
+            }
+            Some(expected) if expected == observed => Ok(()),
+            Some(_) => Err(SelectorBoundaryError::ArtifactInvalid),
+        }
+    }
+
+    fn require_admitted_process(
+        &self,
+        observed: ProviderProcessIdentity,
+    ) -> Result<(), SelectorBoundaryError> {
+        let expected = *self.admitted_process.lock().map_err(selector_unavailable)?;
+        expected
+            .filter(|expected| *expected == observed)
+            .map(|_| ())
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+    }
+
+    /// Seal the root-generated runtime identities around the synchronized provider process.
+    pub(crate) fn admit_runtime(
+        &self,
+        admitted: &AdmittedSelectorProvider,
+    ) -> Result<AdmittedProviderRuntime, SelectorBoundaryError> {
+        let process = self
+            .admitted_process
+            .lock()
+            .map_err(selector_unavailable)?
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        ProviderRuntimeSlot::allocate(admitted)?
+            .bind_observed_process(process.pid, process.start_time_ticks)
     }
 
     /// Prove that the selected provider has activated the exact admitted policy.
@@ -475,18 +559,53 @@ impl ProviderTransport {
             .describe_request(request_id, nonce)
             .map_err(artifact_invalid)?;
         let deadline = Deadline::new(timeout)?;
-        let mut stream = self.control_endpoint.connect(timeout)?;
-        write_frame(&mut stream, &bytes, &deadline).map_err(selector_unavailable)?;
-        stream
+        let mut connected = self.control_endpoint.connect(timeout)?;
+        write_frame(&mut connected.stream, &bytes, &deadline).map_err(selector_unavailable)?;
+        connected
+            .stream
             .shutdown(std::net::Shutdown::Write)
             .map_err(selector_unavailable)?;
-        let response = read_frame(&mut stream, &deadline)
+        let response = read_frame(&mut connected.stream, &deadline)
             .map_err(selector_unavailable)?
             .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
-        ensure_eof(&mut stream, &deadline).map_err(selector_unavailable)?;
+        ensure_eof(&mut connected.stream, &deadline).map_err(selector_unavailable)?;
         admitted
             .authenticate_describe_response(&response, &request)
-            .map_err(artifact_invalid)
+            .map_err(artifact_invalid)?;
+        self.bind_admitted_process(connected.process)
+    }
+
+    /// Complete one committed live update over the exact admitted control process.
+    pub(crate) fn complete_committed_update(
+        &self,
+        committed: CommittedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<(AdmittedSelectorProvider, Vec<u8>), SelectorBoundaryError> {
+        let context = committed.cancellation_context()?;
+        let context_bytes = context.to_canonical_cbor().map_err(artifact_invalid)?;
+        let mut connected = self.control_endpoint.connect(timeout)?;
+        self.require_admitted_process(connected.process)?;
+        let deadline = Deadline::new(timeout)?;
+        write_frame(&mut connected.stream, &context_bytes, &deadline)
+            .map_err(selector_unavailable)?;
+        write_frame(
+            &mut connected.stream,
+            committed.revocation_update_bytes(),
+            &deadline,
+        )
+        .map_err(selector_unavailable)?;
+        connected
+            .stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(selector_unavailable)?;
+        let response = read_frame(&mut connected.stream, &deadline)
+            .map_err(selector_unavailable)?
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+        ensure_eof(&mut connected.stream, &deadline).map_err(selector_unavailable)?;
+        let acknowledgement = committed.authenticate_live_acknowledgement(&response)?;
+        committed
+            .complete_live_update(acknowledgement)
+            .map(|admitted| (admitted, response))
     }
 
     /// Execute exact constructed SPX1/input bytes and authenticate the full reply.
@@ -583,6 +702,10 @@ impl ProviderTransport {
             .and_then(|remaining| {
                 self.execute_endpoint
                     .connect(remaining)
+                    .and_then(|connected| {
+                        self.require_admitted_process(connected.process)
+                            .map(|()| connected.stream)
+                    })
                     .map_err(receive_incomplete)
             })
             .and_then(|mut stream| {

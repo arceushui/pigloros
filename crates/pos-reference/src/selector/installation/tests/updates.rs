@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::sync::Arc;
 
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
@@ -345,7 +346,7 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
         vec![[41; 16], [42; 16]],
         vec![[42; 16]],
     )?;
-    let committed = admitted.commit_update(update, snapshot)?;
+    let committed = Arc::new(admitted).commit_update(update, snapshot)?;
 
     let recovery_path = fixture.directory.path().join(RECOVERY_NAME);
     let recovery_metadata = fs::metadata(&recovery_path)?;
@@ -402,7 +403,7 @@ fn durable_update_rejects_invalid_snapshots_and_foreign_acknowledgements() -> Te
     let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
     let snapshot =
         InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[41; 16]], vec![[41; 16]])?;
-    let committed = admitted.commit_update(update, snapshot)?;
+    let committed = Arc::new(admitted).commit_update(update, snapshot)?;
     let runtime_signer = SigningKey::from_bytes(&[4; 32]);
     let wrong_set = live_acknowledgement(&committed, &runtime_signer, Vec::new())?;
     assert!(committed

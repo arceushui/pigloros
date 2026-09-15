@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::Write as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
@@ -36,7 +37,7 @@ const RECORD_MODE: Mode = Mode::RUSR;
 /// One durably committed SIR1 awaiting the timely provider acknowledgement.
 #[derive(Debug)]
 pub struct CommittedInstallationUpdate {
-    admitted: AdmittedSelectorProvider,
+    admitted: Arc<AdmittedSelectorProvider>,
     update: ValidatedInstallationUpdate,
     snapshot: InstallationRecoverySnapshot,
     sir1_digest: [u8; 32],
@@ -170,7 +171,7 @@ impl AdmittedSelectorProvider {
     /// Rejects stale authority, pending recovery, unsafe staging state,
     /// changed successor records, oversized SIR1, or synchronization failure.
     pub fn commit_update(
-        self,
+        self: Arc<Self>,
         update: ValidatedInstallationUpdate,
         snapshot: InstallationRecoverySnapshot,
     ) -> Result<CommittedInstallationUpdate, SelectorBoundaryError> {
@@ -269,7 +270,10 @@ fn synchronize_successor_records(
         ),
     ] {
         let identity = update.next_manifest().authority_digests()[usize::from(kind.code())];
-        let object = update.next_manifest().object(kind, identity)?;
+        let object = update
+            .next_manifest()
+            .object(kind, identity)
+            .map_err(invalid)?;
         let reopened = open_immutable_file(
             &directory,
             &hex_name(object.content_digest()),
@@ -471,10 +475,10 @@ fn temporary_name(prefix: &str) -> Result<String, SelectorBoundaryError> {
     Ok(name)
 }
 
-const fn invalid<T>(_: T) -> SelectorBoundaryError {
+fn invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
 
-const fn io<T>(_: T) -> SelectorBoundaryError {
+fn io<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::Io
 }
