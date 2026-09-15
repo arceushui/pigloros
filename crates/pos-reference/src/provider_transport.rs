@@ -587,24 +587,47 @@ impl ProviderTransport {
         nonce: [u8; 16],
         timeout: Duration,
     ) -> Result<(), SelectorBoundaryError> {
-        let (request, bytes) = admitted
-            .describe_request(request_id, nonce)
-            .map_err(artifact_invalid)?;
-        let deadline = Deadline::new(timeout)?;
-        let mut connected = self.control_endpoint.connect(timeout)?;
-        write_frame(&mut connected.stream, &bytes, &deadline).map_err(selector_unavailable)?;
-        connected
-            .stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(selector_unavailable)?;
-        let response = read_frame(&mut connected.stream, &deadline)
-            .map_err(selector_unavailable)?
-            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
-        ensure_eof(&mut connected.stream, &deadline).map_err(selector_unavailable)?;
         admitted
-            .authenticate_describe_response(&response, &request)
-            .map_err(artifact_invalid)?;
-        self.bind_admitted_process(connected.process)
+            .describe_request(request_id, nonce)
+            .map_err(artifact_invalid)
+            .and_then(|(request, bytes)| {
+                Deadline::new(timeout).map(|deadline| (request, bytes, deadline))
+            })
+            .and_then(|(request, bytes, deadline)| {
+                self.control_endpoint
+                    .connect(timeout)
+                    .map(|connected| (request, bytes, deadline, connected))
+            })
+            .and_then(|(request, bytes, deadline, mut connected)| {
+                write_frame(&mut connected.stream, &bytes, &deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (request, deadline, connected))
+            })
+            .and_then(|(request, deadline, connected)| {
+                connected
+                    .stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(selector_unavailable)
+                    .map(|()| (request, deadline, connected))
+            })
+            .and_then(|(request, deadline, mut connected)| {
+                read_frame(&mut connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
+                    .map(|response| (request, deadline, connected, response))
+            })
+            .and_then(|(request, deadline, mut connected, response)| {
+                ensure_eof(&mut connected.stream, &deadline)
+                    .map_err(selector_unavailable)
+                    .map(|()| (request, connected, response))
+            })
+            .and_then(|(request, connected, response)| {
+                admitted
+                    .authenticate_describe_response(&response, &request)
+                    .map_err(artifact_invalid)
+                    .map(|()| connected)
+            })
+            .and_then(|connected| self.bind_admitted_process(connected.process))
     }
 
     /// Complete one committed live update over the exact admitted control process.
