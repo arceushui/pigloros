@@ -2100,7 +2100,7 @@ mod tests {
         Ok(IsolatedCompositionRole::Delegated)
     }
 
-    fn serve_describe_response(
+    fn serve_control_responses(
         listener: &UnixListener,
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
@@ -2121,6 +2121,23 @@ mod tests {
         let response = fixture.describe_response_for_provider(&request, provider)?;
         stream.write_all(&u32::try_from(response.len())?.to_be_bytes())?;
         stream.write_all(&response)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+
+        let mut stream = accept_test_connection(listener)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let context = read_frame(&mut stream)?;
+        let update = read_frame(&mut stream)?;
+        let mut trailing = Vec::new();
+        stream.read_to_end(&mut trailing)?;
+        if !trailing.is_empty() {
+            return Err("revocation update contained trailing bytes".into());
+        }
+        let acknowledgement =
+            crate::selector::installation::tests::updates::acknowledgement_for_control_frames(
+                &context, &update,
+            )?;
+        write_frame(&mut stream, &acknowledgement)?;
         stream.shutdown(std::net::Shutdown::Write)?;
         Ok(())
     }
@@ -2244,6 +2261,9 @@ mod tests {
         let admitted = crate::selector::installation::tests::materialize_root_selector_state(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
+        let update_fixture = crate::selector::installation::tests::updates::UpdateFixture::at(
+            Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
+        )?;
         let control_fixture =
             crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let execute_fixture =
@@ -2262,8 +2282,8 @@ mod tests {
         )?;
         let epochs = [
             admitted.bootstrap().trust().trust_epoch(),
-            admitted.bootstrap().revocation().revocation_epoch(),
-            admitted.bootstrap().policy().policy_epoch(),
+            admitted.bootstrap().revocation().revocation_epoch() + 1,
+            admitted.bootstrap().policy().policy_epoch() + 1,
         ];
         let execute_provider_identity = admitted.provider().clone();
 
@@ -2278,7 +2298,7 @@ mod tests {
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
         let control_provider = std::thread::spawn(move || {
-            serve_describe_response(&control_listener, &control_fixture, admitted.provider())
+            serve_control_responses(&control_listener, &control_fixture, admitted.provider())
                 .map_err(|error| error.to_string())
         });
         let execute_provider = std::thread::spawn(move || {
@@ -2297,6 +2317,27 @@ mod tests {
         let runtime = RootSelectorRuntime::from_composition(composition)?;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
+
+        let (mut administrator, selector) = UnixStream::pair()?;
+        std::thread::scope(|scope| -> TestResult {
+            let update = scope.spawn(|| {
+                runtime
+                    .composition
+                    .update_installation(selector)
+                    .map_err(|error| error.to_string())
+            });
+            let challenge = read_frame(&mut administrator)?;
+            let siu1 = update_fixture.request_from_challenge(&challenge, None)?;
+            write_frame(&mut administrator, &siu1)?;
+            administrator.shutdown(std::net::Shutdown::Write)?;
+            let acknowledgement = read_frame(&mut administrator)?;
+            let mut trailing = Vec::new();
+            administrator.read_to_end(&mut trailing)?;
+            assert!(!acknowledgement.is_empty());
+            assert!(trailing.is_empty());
+            update.join().map_err(|_| "selector update panicked")??;
+            Ok(())
+        })?;
 
         let (_, reply) =
             evaluate_composition_request(&runtime.composition, &request, resolved.attempt())?;

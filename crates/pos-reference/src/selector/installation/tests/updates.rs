@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ciborium::value::Value;
@@ -13,8 +14,22 @@ use crate::selector::installation::authority::{
 };
 use crate::selector::installation::RECOVERY_NAME;
 
-struct UpdateFixture {
-    directory: tempfile::TempDir,
+enum UpdateDirectory {
+    Owned(tempfile::TempDir),
+    Fixed(PathBuf),
+}
+
+impl UpdateDirectory {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Owned(directory) => directory.path(),
+            Self::Fixed(directory) => directory,
+        }
+    }
+}
+
+pub(crate) struct UpdateFixture {
+    directory: UpdateDirectory,
     bootstrap: AuthenticatedSelectorBootstrap,
     policy_signer: SigningKey,
 }
@@ -27,7 +42,18 @@ impl UpdateFixture {
         let bootstrap =
             InstalledSelectorState::open_at_for_test(&root)?.authenticate_bootstrap()?;
         Ok(Self {
-            directory,
+            directory: UpdateDirectory::Owned(directory),
+            bootstrap,
+            policy_signer: SigningKey::from_bytes(&[2; 32]),
+        })
+    }
+
+    pub(crate) fn at(directory: &Path) -> TestResult<Self> {
+        let root = File::open(directory)?;
+        let bootstrap =
+            InstalledSelectorState::open_at_for_test(&root)?.authenticate_bootstrap()?;
+        Ok(Self {
+            directory: UpdateDirectory::Fixed(directory.to_path_buf()),
             bootstrap,
             policy_signer: SigningKey::from_bytes(&[2; 32]),
         })
@@ -45,7 +71,15 @@ impl UpdateFixture {
         challenge: &InstallationChallenge,
         nonce_override: Option<[u8; 16]>,
     ) -> TestResult<Vec<u8>> {
-        let challenge_document = decode_canonical(&challenge.to_canonical_cbor()?)?;
+        self.request_from_challenge(&challenge.to_canonical_cbor()?, nonce_override)
+    }
+
+    pub(crate) fn request_from_challenge(
+        &self,
+        challenge: &[u8],
+        nonce_override: Option<[u8; 16]>,
+    ) -> TestResult<Vec<u8>> {
+        let challenge_document = decode_canonical(challenge)?;
         let challenge_fields = array(&challenge_document, 5)?;
         assert_eq!(text(&challenge_fields[0])?, "SICN1");
         assert_eq!(uint(&challenge_fields[1])?, 1);
@@ -203,6 +237,39 @@ fn live_acknowledgement(
             Value::Text("runtime".to_owned()),
         ]),
         signer,
+    )
+}
+
+pub(crate) fn acknowledgement_for_control_frames(
+    context_bytes: &[u8],
+    update_bytes: &[u8],
+) -> TestResult<Vec<u8>> {
+    let context =
+        crate::sandbox_provider_protocol::RecoveryCancellationContext::from_canonical_cbor(
+            context_bytes,
+        )?;
+    let update = decode_canonical(update_bytes)?;
+    let fields = array(&array(&update, 3)?[0], 8)?;
+    sign_record(
+        "RCA1",
+        Value::Array(vec![
+            Value::Text("RCA1".to_owned()),
+            integer(1),
+            Value::Bytes(fixed_bytes::<16>(&fields[2])?.to_vec()),
+            digest(fixed_bytes(&fields[5])?),
+            digest(context.sir1_digest),
+            digest(context.previous_provider_binding_digest),
+            Value::Array(
+                context
+                    .required_cancelled_attempt_ids
+                    .into_iter()
+                    .map(|attempt| Value::Bytes(attempt.to_vec()))
+                    .collect(),
+            ),
+            integer(0),
+            Value::Text("runtime".to_owned()),
+        ]),
+        &SigningKey::from_bytes(&[4; 32]),
     )
 }
 

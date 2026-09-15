@@ -789,7 +789,7 @@ fn hex_name(digest: [u8; 32]) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod tests {
-    mod updates;
+    pub(crate) mod updates;
 
     use std::collections::BTreeMap;
     use std::fs;
@@ -807,7 +807,7 @@ pub mod tests {
     use super::authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap};
     use super::*;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     const ROOT_SELECTOR_CAPABILITY: &str = "read-public-bundle";
 
