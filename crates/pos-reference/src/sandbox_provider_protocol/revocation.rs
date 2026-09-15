@@ -106,9 +106,8 @@ impl SandboxRevocationSnapshot {
 
     /// Check only immediate epoch continuity for snapshots from one registry.
     ///
-    /// This is not full RCU1/RCA1 update validation: the stateful selector must
-    /// additionally authenticate the request, previous digest, nonce, replay
-    /// identity and provider acknowledgement before accepting an update.
+    /// This API deliberately performs no durable update transition. The
+    /// production selector validates and commits that transaction separately.
     ///
     /// # Errors
     /// Rejects a different registry, skipped epoch, replay or epoch overflow.
