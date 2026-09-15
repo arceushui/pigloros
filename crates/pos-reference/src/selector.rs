@@ -524,13 +524,14 @@ mod tests {
     }
 
     fn local_unavailable() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let encoded = encode_request(&selector_request()?, b"evr1", &selector_attempt(), 0)?;
         let value = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Text("SLE1".to_owned()),
             ciborium::value::Value::Integer(1_u64.into()),
             ciborium::value::Value::Integer(0_u64.into()),
-            ciborium::value::Value::Null,
-            ciborium::value::Value::Null,
-            ciborium::value::Value::Null,
+            ciborium::value::Value::Integer(1_u64.into()),
+            ciborium::value::Value::Bytes(encoded.provider_request_id.to_vec()),
+            ciborium::value::Value::Bytes(encoded.attempt_id.to_vec()),
             ciborium::value::Value::Null,
             ciborium::value::Value::Integer(2_u64.into()),
             ciborium::value::Value::Null,
