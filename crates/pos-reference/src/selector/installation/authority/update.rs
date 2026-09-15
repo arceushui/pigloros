@@ -61,6 +61,11 @@ impl InstallationChallenge {
         self.require_live()?;
         Ok((self.installation, self.nonce, self.expires_at))
     }
+
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&mut self) {
+        self.expires_at = Instant::now();
+    }
 }
 
 /// Fully authenticated SIU1 content awaiting an atomic attempt snapshot and SIR1 commit.

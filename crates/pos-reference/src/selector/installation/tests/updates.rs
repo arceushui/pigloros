@@ -246,6 +246,19 @@ fn live_acknowledgement(
     )
 }
 
+fn replace_nested_unsigned_field(
+    encoded: &[u8],
+    index: usize,
+    replacement: Value,
+) -> TestResult<Vec<u8>> {
+    let document = decode_canonical(encoded)?;
+    let mut wrapper = array_values(&document)?.to_vec();
+    let mut unsigned = array_values(&wrapper[0])?.to_vec();
+    unsigned[index] = replacement;
+    wrapper[0] = Value::Array(unsigned);
+    Ok(encode(&Value::Array(wrapper))?)
+}
+
 pub(crate) fn acknowledgement_for_control_frames(
     context_bytes: &[u8],
     update_bytes: &[u8],
@@ -371,6 +384,55 @@ fn update_rejects_foreign_nonce_stale_manifest_and_malformed_frames() -> TestRes
 }
 
 #[test]
+fn update_rejects_expired_challenge_and_empty_or_oversized_records() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let mut expired = fixture.bootstrap.issue_update_challenge()?;
+    let expired_request = fixture.request(&expired, None)?;
+    expired.expire_for_test();
+    assert!(expired.to_canonical_cbor().is_err());
+    assert!(fixture
+        .bootstrap
+        .validate_update(expired, &expired_request)
+        .is_err());
+
+    for (field, bytes) in [
+        (3, Vec::new()),
+        (4, Vec::new()),
+        (3, vec![0; usize::try_from(MANIFEST_LIMIT)? + 1]),
+        (4, vec![0; usize::try_from(MANIFEST_LIMIT)? + 1]),
+    ] {
+        let challenge = fixture.bootstrap.issue_update_challenge()?;
+        let request = fixture.request(&challenge, None)?;
+        let mut fields = array(&decode_canonical(&request)?, 5)?.to_vec();
+        fields[field] = Value::Bytes(bytes);
+        assert!(fixture
+            .bootstrap
+            .validate_update(challenge, &encode(&Value::Array(fields))?)
+            .is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn update_rejects_every_malformed_rcu1_field() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    for index in 0..8 {
+        let challenge = fixture.bootstrap.issue_update_challenge()?;
+        let request = fixture.request(&challenge, None)?;
+        let mut fields = array(&decode_canonical(&request)?, 5)?.to_vec();
+        let Value::Bytes(rcu1) = &fields[4] else {
+            return Err("SIU1 RCU1 is not bytes".into());
+        };
+        fields[4] = Value::Bytes(replace_nested_unsigned_field(rcu1, index, Value::Null)?);
+        assert!(fixture
+            .bootstrap
+            .validate_update(challenge, &encode(&Value::Array(fields))?)
+            .is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn update_rejects_forged_or_changed_successor_records() -> TestResult {
     let fixture = UpdateFixture::new()?;
     let challenge = fixture.bootstrap.issue_update_challenge()?;
@@ -420,6 +482,7 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
         vec![[42; 16]],
     )?;
     let committed = Arc::new(admitted).commit_update(update, snapshot)?;
+    assert_ne!(committed.sir1_digest(), [0; 32]);
 
     let recovery_path = fixture.directory.path().join(RECOVERY_NAME);
     let recovery_metadata = fs::metadata(&recovery_path)?;
@@ -455,12 +518,106 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
     Ok(())
 }
 
+fn committed_update_fixture() -> TestResult<(
+    UpdateFixture,
+    Arc<crate::selector::installation::authority::CommittedInstallationUpdate>,
+    SigningKey,
+)> {
+    let fixture = UpdateFixture::new()?;
+    let admitted = fixture.admitted()?;
+    let challenge = admitted.bootstrap().issue_update_challenge()?;
+    let request = fixture.request(&challenge, None)?;
+    let update = admitted.bootstrap().validate_update(challenge, &request)?;
+    let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+    assert_ne!(runtime.runtime_instance_id(), [0; 16]);
+    assert_ne!(runtime.lifecycle_scope_id(), [0; 16]);
+    assert_ne!(runtime.runtime_instance_id(), runtime.lifecycle_scope_id());
+    assert_eq!(runtime.main_pid(), 100);
+    assert_eq!(runtime.main_start_time_ticks(), 200);
+    let snapshot = InstallationRecoverySnapshot::seal(
+        &admitted,
+        &runtime,
+        vec![[41; 16], [42; 16]],
+        vec![[42; 16]],
+    )?;
+    let committed = Arc::new(Arc::new(admitted).commit_update(update, snapshot)?);
+    Ok((fixture, committed, SigningKey::from_bytes(&[4; 32])))
+}
+
+#[test]
+fn committed_update_rejects_every_malformed_rcc1_field() -> TestResult {
+    let (_fixture, committed, _signer) = committed_update_fixture()?;
+    let context = committed.cancellation_context()?.to_canonical_cbor()?;
+    for index in 0..7 {
+        assert!(
+            crate::sandbox_provider_protocol::RecoveryCancellationContext::from_canonical_cbor(
+                &replace_nested_unsigned_field(&context, index, Value::Null)?
+            )
+            .is_err()
+        );
+    }
+    let mut wrapper = array_values(&decode_canonical(&context)?)?.to_vec();
+    wrapper[1] = Value::Null;
+    assert!(
+        crate::sandbox_provider_protocol::RecoveryCancellationContext::from_canonical_cbor(
+            &encode(&Value::Array(wrapper))?
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn committed_update_rejects_every_malformed_rca1_field() -> TestResult {
+    let (_fixture, committed, signer) = committed_update_fixture()?;
+    let acknowledgement = live_acknowledgement(&committed, &signer, vec![[42; 16]])?;
+    for index in 0..9 {
+        assert!(committed
+            .authenticate_live_acknowledgement(&replace_nested_unsigned_field(
+                &acknowledgement,
+                index,
+                Value::Null,
+            )?)
+            .is_err());
+    }
+    let mut wrapper = array_values(&decode_canonical(&acknowledgement)?)?.to_vec();
+    for index in 1..3 {
+        let original = std::mem::replace(&mut wrapper[index], Value::Null);
+        assert!(committed
+            .authenticate_live_acknowledgement(&encode(&Value::Array(wrapper.clone()))?)
+            .is_err());
+        wrapper[index] = original;
+    }
+    Ok(())
+}
+
+#[test]
+fn committed_update_rejects_changed_manifest_and_recovery_floor() -> TestResult {
+    let (fixture, committed, _signer) = committed_update_fixture()?;
+    let manifest_path = fixture.directory.path().join(MANIFEST_NAME);
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o600))?;
+    assert!(committed.verify_recovery_floor().is_err());
+
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o400))?;
+    let recovery_path = fixture.directory.path().join(RECOVERY_NAME);
+    fs::set_permissions(&recovery_path, fs::Permissions::from_mode(0o600))?;
+    assert!(committed.verify_recovery_floor().is_err());
+    Ok(())
+}
+
 #[test]
 fn durable_update_rejects_invalid_snapshots_and_foreign_acknowledgements() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let admitted = fixture.admitted()?;
+    assert!(ProviderRuntimeSlot::allocate(&admitted)?
+        .bind_observed_process(0, 200)
+        .is_err());
+
     for (live, cancelled) in [
         (vec![[0; 16]], Vec::new()),
         (vec![[42; 16]], vec![[41; 16]]),
         (vec![[42; 16], [41; 16]], Vec::new()),
+        (vec![[41; 16]; 257], Vec::new()),
     ] {
         let fixture = UpdateFixture::new()?;
         let admitted = fixture.admitted()?;
