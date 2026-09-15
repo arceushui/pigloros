@@ -4887,9 +4887,6 @@ fn sqlite_erasure_inventory_snapshot(
                 })
         };
         topology.and_then(|topology| {
-            if !limits.admits(request_heads.len(), topology.len()) {
-                return Err(ErasureErrorV1::ScopeInvalid);
-            }
             ErasurePersistenceInventorySnapshotV1::new_with_limits(request_heads, topology, limits)
         })
     })
