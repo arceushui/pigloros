@@ -788,6 +788,8 @@ fn hex_name(digest: [u8; 32]) -> String {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod tests {
+    mod updates;
+
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Seek, Write};
