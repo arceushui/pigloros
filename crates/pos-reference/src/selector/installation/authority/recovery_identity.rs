@@ -294,7 +294,7 @@ mod tests {
     use super::*;
     use crate::selector::installation::tests::admitted_state;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     fn admitted() -> TestResult<AdmittedSelectorProvider> {
         Ok(admitted_state()?
