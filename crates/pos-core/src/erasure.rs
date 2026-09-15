@@ -7346,9 +7346,13 @@ mod coverage_paths {
             }
         }
 
-        let allocation_error = match Vec::<u8>::new().try_reserve(usize::MAX) {
-            Err(error) => error,
-            Ok(()) => panic!("a maximum reservation must fail"),
+        let allocation_result = Vec::<u8>::new().try_reserve(usize::MAX);
+        assert!(
+            allocation_result.is_err(),
+            "a maximum reservation must fail"
+        );
+        let Err(allocation_error) = allocation_result else {
+            return Ok(());
         };
         assert_eq!(
             allocation_failure(allocation_error),
