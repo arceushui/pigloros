@@ -19,7 +19,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rustix::fs::{statat, unlinkat, AtFlags, FileType};
+use rustix::fs::{fchmod, fstat, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
@@ -79,7 +79,7 @@ pub struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SocketIdentity {
     device: u64,
     inode: u64,
@@ -130,35 +130,20 @@ impl OwnedSelectorListener {
             _ => return Err(SelectorBoundaryError::ArtifactInvalid),
         }
         let listener = UnixListener::bind(path).map_err(io_error)?;
-        let identity = bound_socket_identity(&parent, &leaf, expected_uid)?;
-        let setup =
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(SELECTOR_SOCKET_MODE))
-                .map_err(io_error)
-                .and_then(|()| listener_socket_identity(&parent, &leaf, expected_uid))
-                .and_then(|current| {
-                    if current.device == identity.device && current.inode == identity.inode {
-                        validate_listener_parent(parent_path, &parent, expected_uid)
-                    } else {
-                        Err(SelectorBoundaryError::ArtifactInvalid)
-                    }
-                });
-        match setup {
-            Ok(()) => {}
-            Err(error) => {
-                drop(listener);
-                let _cleanup_result =
-                    remove_matching_socket(&parent, &leaf, identity, expected_uid);
-                return Err(error);
-            }
-        }
-        Ok(Self {
+        let identity = held_socket_identity(&listener, expected_uid)?;
+        let owned = Self {
             listener,
             parent,
             leaf,
             identity,
             owner_uid: expected_uid,
             owned: true,
-        })
+        };
+        fchmod(&owned.listener, Mode::from_raw_mode(SELECTOR_SOCKET_MODE)).map_err(io_error)?;
+        let current = listener_socket_identity(&owned.parent, &owned.leaf, expected_uid)?;
+        require_same_socket(current, identity)?;
+        validate_listener_parent(parent_path, &owned.parent, expected_uid)?;
+        Ok(owned)
     }
 
     /// Accept one evaluator connection without interpreting its authority.
@@ -241,13 +226,11 @@ fn listener_socket_identity(
     })
 }
 
-fn bound_socket_identity(
-    parent: &File,
-    leaf: &OsString,
+fn held_socket_identity(
+    listener: &UnixListener,
     expected_uid: u32,
 ) -> Result<SocketIdentity, SelectorBoundaryError> {
-    let metadata =
-        statat(parent, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW).map_err(artifact_invalid)?;
+    let metadata = fstat(listener).map_err(artifact_invalid)?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
         || metadata.st_uid != expected_uid
     {
@@ -259,16 +242,37 @@ fn bound_socket_identity(
     })
 }
 
+fn require_same_socket(
+    current: SocketIdentity,
+    expected: SocketIdentity,
+) -> Result<(), SelectorBoundaryError> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    }
+}
+
 fn remove_matching_socket(
     parent: &File,
     leaf: &OsString,
     expected: SocketIdentity,
     expected_uid: u32,
 ) -> Result<(), SelectorBoundaryError> {
-    let current = listener_socket_identity(parent, leaf, expected_uid)?;
-    if current.device != expected.device || current.inode != expected.inode {
+    let metadata =
+        statat(parent, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW).map_err(artifact_invalid)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
+        || metadata.st_uid != expected_uid
+    {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
+    require_same_socket(
+        SocketIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        },
+        expected,
+    )?;
     unlinkat(parent, Path::new(leaf), AtFlags::empty()).map_err(io_error)
 }
 
@@ -1185,6 +1189,147 @@ mod tests {
         fs::write(&socket, b"occupied")?;
         assert!(matches!(
             OwnedSelectorListener::bind_path(&socket, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(Path::new("/"), uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        let child = temporary.path().join("child");
+        fs::create_dir(&child)?;
+        fs::set_permissions(&child, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&child.join(".."), uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(
+                &temporary.path().join("missing").join("selector.sock"),
+                uid,
+            ),
+            Err(SelectorBoundaryError::Io)
+        ));
+        let long_socket = temporary.path().join("s".repeat(200));
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&long_socket, uid),
+            Err(SelectorBoundaryError::Io)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn listener_identity_helpers_reject_every_unsafe_shape() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        fs::set_permissions(
+            temporary.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        let uid = fs::metadata(temporary.path())?.uid();
+        let foreign_uid = uid ^ 1;
+        let socket = temporary.path().join("selector.sock");
+        let leaf = socket
+            .file_name()
+            .ok_or("socket leaf missing")?
+            .to_os_string();
+        let parent = File::open(temporary.path())?;
+
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::write(&socket, b"not a socket")?;
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::remove_file(&socket)?;
+
+        let listener = UnixListener::bind(&socket)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o644))?;
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::set_permissions(&socket, fs::Permissions::from_mode(SELECTOR_SOCKET_MODE))?;
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, foreign_uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        let identity = listener_socket_identity(&parent, &leaf, uid)?;
+        assert_eq!(held_socket_identity(&listener, uid)?, identity);
+        assert!(matches!(
+            held_socket_identity(&listener, foreign_uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert_eq!(require_same_socket(identity, identity), Ok(()));
+        assert!(matches!(
+            require_same_socket(
+                identity,
+                SocketIdentity {
+                    device: identity.device,
+                    inode: identity.inode.wrapping_add(1),
+                },
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        drop(listener);
+        fs::remove_file(&socket)?;
+
+        let listener = OwnedSelectorListener::bind_path(&socket, uid)?;
+        fs::remove_file(&socket)?;
+        fs::write(&socket, b"replacement")?;
+        assert!(matches!(
+            listener.close(),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert_eq!(fs::read(&socket)?, b"replacement");
+        Ok(())
+    }
+
+    #[test]
+    fn listener_parent_validation_rejects_each_identity_boundary() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("parent");
+        fs::create_dir(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+        let uid = fs::metadata(&path)?.uid();
+        let held = File::open(&path)?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid ^ 1),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::set_permissions(&path, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+
+        let moved = temporary.path().join("held-parent");
+        fs::rename(&path, &moved)?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::Io)
+        ));
+        fs::write(&path, b"replacement")?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::remove_file(&path)?;
+        fs::create_dir(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        let regular = temporary.path().join("regular");
+        fs::write(&regular, b"regular")?;
+        let regular_file = File::open(&regular)?;
+        assert!(matches!(
+            validate_listener_parent(&regular, &regular_file, uid),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
         Ok(())

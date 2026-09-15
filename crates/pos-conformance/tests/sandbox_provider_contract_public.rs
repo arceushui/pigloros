@@ -2023,6 +2023,11 @@ fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
             true,
         ),
         (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::PayloadLimitExceeded,
+            false,
+        ),
+        (
             SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
             SandboxLocalErrorCodeV1::ProviderUnavailable,
             true,
