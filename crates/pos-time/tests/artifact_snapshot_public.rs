@@ -57,7 +57,7 @@ fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
 }
 
 fn registry(gate: &Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistry {
-    let runtime_gate: Arc<dyn pos_core::ErasureGate> = Arc::clone(gate);
+    let runtime_gate: Arc<dyn pos_core::ErasureGate> = gate.clone();
     let mut registry = ProjectionRegistry::new().with_erasure_gate(runtime_gate);
     registry.register("noop", Box::new(NoopReducer));
     registry
