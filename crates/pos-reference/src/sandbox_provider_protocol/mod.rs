@@ -49,6 +49,18 @@ pub(crate) fn attempt_values(attempts: &[[u8; 16]]) -> ciborium::value::Value {
             .collect(),
     )
 }
+
+pub(crate) fn validate_attempt_ids(
+    attempts: &[[u8; 16]],
+) -> Result<(), SandboxProviderProtocolError> {
+    if attempts.len() > 256 {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    if attempts.contains(&[0; 16]) || !attempts.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+    }
+    Ok(())
+}
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use admission::{

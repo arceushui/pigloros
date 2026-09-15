@@ -9,8 +9,8 @@ use std::sync::Arc;
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
 use rustix::fs::{
-    fchmod, fsync, mkdirat, openat2, renameat_with, statat, unlinkat, AtFlags, Mode, OFlags,
-    RenameFlags, ResolveFlags,
+    fchmod, fsync, linkat, mkdirat, openat2, renameat_with, statat, unlinkat, AtFlags, Mode,
+    OFlags, RenameFlags, ResolveFlags,
 };
 
 use super::ValidatedInstallationUpdate;
@@ -79,11 +79,11 @@ impl CommittedInstallationUpdate {
                 RecoveryCancellationContext::for_committed_recovery(
                     self.sir1_digest,
                     previous_provider_binding_digest,
-                    self.update.revocation_update_bytes(),
+                    self.update.revocation_update(),
                     self.snapshot.previous_live_attempt_ids().to_vec(),
                     self.snapshot.required_cancelled_attempt_ids().to_vec(),
                 )
-                .map_err(invalid)
+                .map_err(map_artifact_integrity_failure)
             })
     }
 
@@ -101,7 +101,7 @@ impl CommittedInstallationUpdate {
         self.cancellation_context().and_then(|context| {
             let (runtime_key_id, runtime_public_key) = self.snapshot.runtime_key();
             VerifyingKey::from_bytes(&runtime_public_key)
-                .map_err(invalid)
+                .map_err(map_artifact_integrity_failure)
                 .and_then(|runtime_key| {
                     RevocationAcknowledgement::authenticate_for_context(
                         bytes,
@@ -114,7 +114,7 @@ impl CommittedInstallationUpdate {
                             .next_revocation
                             .snapshot_digest(),
                     )
-                    .map_err(invalid)
+                    .map_err(map_artifact_integrity_failure)
                 })
         })
     }
@@ -126,7 +126,7 @@ impl CommittedInstallationUpdate {
     pub fn verify_recovery_floor(&self) -> Result<(), SelectorBoundaryError> {
         let root = &self.admitted.bootstrap().installed().root;
         root.metadata()
-            .map_err(io)
+            .map_err(map_io_to_boundary_failure)
             .map(|metadata| metadata.uid())
             .and_then(|owner| {
                 read_bounded_immutable(root, MANIFEST_NAME, owner, MANIFEST_LIMIT)
@@ -151,7 +151,7 @@ impl CommittedInstallationUpdate {
     pub fn complete_live_update(
         self,
         acknowledgement: &AuthenticatedRevocationAcknowledgement,
-    ) -> Result<AdmittedSelectorProvider, SelectorBoundaryError> {
+    ) -> Result<super::super::AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
         self.verify_recovery_floor()
             .and_then(|()| self.cancellation_context())
             .and_then(|context| {
@@ -170,19 +170,20 @@ impl CommittedInstallationUpdate {
             })
             .and_then(|()| {
                 let root = &self.admitted.bootstrap().installed().root;
-                root.metadata().map_err(io).and_then(|metadata| {
-                    publish_successor(
-                        root,
-                        metadata.uid(),
-                        self.update.previous_manifest_bytes(),
-                        self.update.next_manifest_bytes(),
-                        &self.recovery_file,
-                        &self.recovery_bytes,
-                    )
-                })
+                root.metadata()
+                    .map_err(map_io_to_boundary_failure)
+                    .and_then(|metadata| {
+                        publish_successor(
+                            root,
+                            metadata.uid(),
+                            self.update.previous_manifest_bytes(),
+                            self.update.next_manifest_bytes(),
+                            &self.recovery_file,
+                            &self.recovery_bytes,
+                        )
+                    })
             })
             .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(super::super::AuthenticatedSelectorBootstrap::admit_provider)
     }
 }
 
@@ -210,7 +211,7 @@ impl AdmittedSelectorProvider {
         installed
             .root
             .metadata()
-            .map_err(io)
+            .map_err(map_io_to_boundary_failure)
             .map(|metadata| metadata.uid())
             .and_then(|owner| {
                 read_bounded_immutable(&installed.root, MANIFEST_NAME, owner, MANIFEST_LIMIT)
@@ -223,6 +224,7 @@ impl AdmittedSelectorProvider {
                     })
             })
             .and_then(|owner| ensure_no_pending_recovery(&installed.root).map(|()| owner))
+            .and_then(|owner| snapshot.verify_recovery_peer_reservation().map(|()| owner))
             .and_then(|owner| {
                 recovery_bytes(&update, &snapshot).map(|(bytes, digest)| (owner, bytes, digest))
             })
@@ -279,7 +281,7 @@ fn recovery_bytes(
         attempt_values(snapshot.required_cancelled_attempt_ids()),
     ]);
     encode_with_limit(&unsigned, RECOVERY_LIMIT)
-        .map_err(invalid)
+        .map_err(map_artifact_integrity_failure)
         .and_then(|unsigned_bytes| {
             let mut hasher = blake3::Hasher::new();
             hasher.update(b"PiglorOS.SIR1.v1\0");
@@ -289,7 +291,7 @@ fn recovery_bytes(
                 &Value::Array(vec![unsigned, Value::Bytes(sir1_digest.to_vec())]),
                 RECOVERY_LIMIT,
             )
-            .map_err(invalid)
+            .map_err(map_artifact_integrity_failure)
             .map(|encoded| (encoded, sir1_digest))
         })
 }
@@ -302,7 +304,7 @@ fn synchronize_successor_records(
     installed
         .root
         .try_clone()
-        .map_err(io)
+        .map_err(map_io_to_boundary_failure)
         .and_then(|root| open_directory_chain(root, Path::new("authority"), owner))
         .and_then(|directory| {
             [
@@ -321,7 +323,7 @@ fn synchronize_successor_records(
                 update
                     .next_manifest()
                     .object(kind, identity)
-                    .map_err(invalid)
+                    .map_err(map_artifact_integrity_failure)
                     .and_then(|object| {
                         open_immutable_file(
                             &directory,
@@ -332,21 +334,26 @@ fn synchronize_successor_records(
                         )
                     })
                     .and_then(|reopened| {
-                        reopened.metadata().map_err(io).and_then(|reopened| {
-                            held.metadata().map_err(io).map(|held| (reopened, held))
-                        })
+                        reopened
+                            .metadata()
+                            .map_err(map_io_to_boundary_failure)
+                            .and_then(|reopened| {
+                                held.metadata()
+                                    .map_err(map_io_to_boundary_failure)
+                                    .map(|held| (reopened, held))
+                            })
                     })
                     .and_then(|(reopened, retained)| {
                         if reopened.dev() == retained.dev() && reopened.ino() == retained.ino() {
-                            fsync(held).map_err(io)
+                            fsync(held).map_err(map_io_to_boundary_failure)
                         } else {
                             Err(SelectorBoundaryError::ArtifactInvalid)
                         }
                     })
             })
-            .and_then(|()| fsync(&directory).map_err(io))
+            .and_then(|()| fsync(&directory).map_err(map_io_to_boundary_failure))
         })
-        .and_then(|()| fsync(&installed.root).map_err(io))
+        .and_then(|()| fsync(&installed.root).map_err(map_io_to_boundary_failure))
 }
 
 fn open_staging_directory(root: &File, owner: u32) -> Result<File, SelectorBoundaryError> {
@@ -363,13 +370,13 @@ fn open_staging_directory(root: &File, owner: u32) -> Result<File, SelectorBound
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(invalid)
+    .map_err(map_artifact_integrity_failure)
     .and_then(|staging| {
         if created {
             fchmod(&staging, PRIVATE_DIRECTORY_MODE)
-                .map_err(io)
-                .and_then(|()| fsync(&staging).map_err(io))
-                .and_then(|()| fsync(root).map_err(io))
+                .map_err(map_io_to_boundary_failure)
+                .and_then(|()| fsync(&staging).map_err(map_io_to_boundary_failure))
+                .and_then(|()| fsync(root).map_err(map_io_to_boundary_failure))
                 .map(|()| staging)
         } else {
             Ok(staging)
@@ -378,10 +385,10 @@ fn open_staging_directory(root: &File, owner: u32) -> Result<File, SelectorBound
     .and_then(|staging| {
         staging
             .metadata()
-            .map_err(io)
+            .map_err(map_io_to_boundary_failure)
             .and_then(|metadata| {
                 root.metadata()
-                    .map_err(io)
+                    .map_err(map_io_to_boundary_failure)
                     .map(|root_metadata| (metadata, root_metadata))
             })
             .and_then(|(metadata, root_metadata)| {
@@ -409,20 +416,20 @@ fn write_recovery(
         .and_then(|(name, mut temporary)| {
             temporary
                 .write_all(bytes)
-                .map_err(io)
-                .and_then(|()| fsync(&temporary).map_err(io))
+                .map_err(map_io_to_boundary_failure)
+                .and_then(|()| fsync(&temporary).map_err(map_io_to_boundary_failure))
                 .map(|()| (name, temporary))
         })
         .map_err(InstallationUpdateCommitError::BeforeRecovery)
         .and_then(|(name, temporary)| {
             renameat_with(staging, &name, root, RECOVERY_NAME, RenameFlags::NOREPLACE)
-                .map_err(invalid)
+                .map_err(map_artifact_integrity_failure)
                 .map_err(InstallationUpdateCommitError::RecoveryPending)
                 .map(|()| temporary)
         })
         .and_then(|temporary| {
             u64::try_from(bytes.len())
-                .map_err(invalid)
+                .map_err(map_artifact_integrity_failure)
                 .and_then(|length| open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner))
                 .map_err(InstallationUpdateCommitError::RecoveryPending)
                 .map(|recovery| (temporary, recovery))
@@ -434,7 +441,7 @@ fn write_recovery(
         })
         .and_then(|recovery| {
             fsync(root)
-                .map_err(io)
+                .map_err(map_io_to_boundary_failure)
                 .map_err(InstallationUpdateCommitError::RecoveryPending)
                 .map(|()| recovery)
         })
@@ -468,9 +475,54 @@ fn publish_successor(
             }
         })
         .and_then(|()| verify_recovery_identity(root, owner, retained_recovery, recovery_bytes))
-        .and_then(|()| unlinkat(root, RECOVERY_NAME, AtFlags::empty()).map_err(io))
-        .and_then(|()| fsync(root).map_err(io))
+        .and_then(|()| remove_recovery_durably(root, owner))
         .and_then(|()| InstalledSelectorState::open_at_for_owner(root, owner))
+}
+
+fn remove_recovery_durably(root: &File, owner: u32) -> Result<(), SelectorBoundaryError> {
+    remove_recovery_durably_with(root, owner, |directory| {
+        fsync(directory).map_err(map_io_to_boundary_failure)
+    })
+}
+
+fn remove_recovery_durably_with(
+    root: &File,
+    owner: u32,
+    mut synchronize: impl FnMut(&File) -> Result<(), SelectorBoundaryError>,
+) -> Result<(), SelectorBoundaryError> {
+    let staging = open_staging_directory(root, owner)?;
+    let backup = temporary_name("completed-sir1")?;
+    linkat(root, RECOVERY_NAME, &staging, &backup, AtFlags::empty())
+        .map_err(map_io_to_boundary_failure)?;
+    if let Err(error) = synchronize(&staging) {
+        let _cleanup = unlinkat(&staging, &backup, AtFlags::empty());
+        return Err(error);
+    }
+    if let Err(error) = unlinkat(root, RECOVERY_NAME, AtFlags::empty()) {
+        let _cleanup = unlinkat(&staging, &backup, AtFlags::empty());
+        return Err(map_io_to_boundary_failure(error));
+    }
+    if let Err(error) = synchronize(root) {
+        restore_recovery_marker(root, &staging, &backup, &mut synchronize)?;
+        return Err(error);
+    }
+    let _cleanup = unlinkat(&staging, &backup, AtFlags::empty())
+        .map_err(map_io_to_boundary_failure)
+        .and_then(|()| synchronize(&staging));
+    Ok(())
+}
+
+fn restore_recovery_marker(
+    root: &File,
+    staging: &File,
+    backup: &str,
+    synchronize: &mut impl FnMut(&File) -> Result<(), SelectorBoundaryError>,
+) -> Result<(), SelectorBoundaryError> {
+    linkat(staging, backup, root, RECOVERY_NAME, AtFlags::empty())
+        .map_err(map_io_to_boundary_failure)?;
+    unlinkat(staging, backup, AtFlags::empty()).map_err(map_io_to_boundary_failure)?;
+    synchronize(staging)?;
+    synchronize(root)
 }
 
 fn write_successor_manifest(
@@ -486,14 +538,15 @@ fn write_successor_manifest(
         .and_then(|(staging, name, mut temporary)| {
             temporary
                 .write_all(next)
-                .map_err(io)
-                .and_then(|()| fsync(&temporary).map_err(io))
+                .map_err(map_io_to_boundary_failure)
+                .and_then(|()| fsync(&temporary).map_err(map_io_to_boundary_failure))
                 .map(|()| (staging, name))
         })
         .and_then(|(staging, name)| {
-            renameat_with(&staging, &name, root, MANIFEST_NAME, RenameFlags::empty()).map_err(io)
+            renameat_with(&staging, &name, root, MANIFEST_NAME, RenameFlags::empty())
+                .map_err(map_io_to_boundary_failure)
         })
-        .and_then(|()| fsync(root).map_err(io))
+        .and_then(|()| fsync(root).map_err(map_io_to_boundary_failure))
 }
 
 fn create_staging_file(
@@ -509,11 +562,11 @@ fn create_staging_file(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(io)
+    .map_err(map_io_to_boundary_failure)
     .and_then(|file| {
         fchmod(&file, RECORD_MODE)
-            .map_err(io)
-            .and_then(|()| file.metadata().map_err(io))
+            .map_err(map_io_to_boundary_failure)
+            .and_then(|()| file.metadata().map_err(map_io_to_boundary_failure))
             .and_then(|metadata| {
                 if metadata.is_file()
                     && metadata.uid() == owner
@@ -536,8 +589,10 @@ fn read_bounded_immutable(
     limit: u64,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
     statat(root, name, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(io)
-        .and_then(|metadata| u64::try_from(metadata.st_size).map_err(invalid))
+        .map_err(map_io_to_boundary_failure)
+        .and_then(|metadata| {
+            u64::try_from(metadata.st_size).map_err(map_artifact_integrity_failure)
+        })
         .and_then(|length| {
             if length == 0 || length > limit {
                 Err(SelectorBoundaryError::ArtifactInvalid)
@@ -555,7 +610,7 @@ fn verify_recovery_identity(
     expected_bytes: &[u8],
 ) -> Result<(), SelectorBoundaryError> {
     u64::try_from(expected_bytes.len())
-        .map_err(invalid)
+        .map_err(map_artifact_integrity_failure)
         .and_then(|length| open_immutable_file(root, RECOVERY_NAME, 0o400, length, owner))
         .and_then(|current| verify_file_identity(retained, &current).map(|()| current))
         .and_then(|current| read_complete_file(&current, RECOVERY_LIMIT as u64))
@@ -570,8 +625,13 @@ fn verify_recovery_identity(
 
 fn verify_file_identity(left: &File, right: &File) -> Result<(), SelectorBoundaryError> {
     left.metadata()
-        .map_err(io)
-        .and_then(|left| right.metadata().map_err(io).map(|right| (left, right)))
+        .map_err(map_io_to_boundary_failure)
+        .and_then(|left| {
+            right
+                .metadata()
+                .map_err(map_io_to_boundary_failure)
+                .map(|right| (left, right))
+        })
         .and_then(|(left, right)| {
             if left.dev() == right.dev() && left.ino() == right.ino() {
                 Ok(())
@@ -589,7 +649,7 @@ fn temporary_name(prefix: &str) -> Result<String, SelectorBoundaryError> {
         id.into_iter()
             .try_for_each(|byte| {
                 use std::fmt::Write as _;
-                write!(name, "{byte:02x}").map_err(io)
+                write!(name, "{byte:02x}").map_err(map_io_to_boundary_failure)
             })
             .map(|()| {
                 name.push_str(".cbor");
@@ -598,17 +658,18 @@ fn temporary_name(prefix: &str) -> Result<String, SelectorBoundaryError> {
     })
 }
 
-fn invalid<T>(_: T) -> SelectorBoundaryError {
+fn map_artifact_integrity_failure<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
 
-fn io<T>(_: T) -> SelectorBoundaryError {
+fn map_io_to_boundary_failure<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::Io
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -648,6 +709,30 @@ mod tests {
             create_staging_file(&staging, &name, owner),
             Err(SelectorBoundaryError::Io)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_recovery_unlink_sync_restores_the_fixed_marker() -> TestResult {
+        let (directory, root, owner) = durable_root()?;
+        let recovery = directory.path().join(RECOVERY_NAME);
+        fs::write(&recovery, b"sir1")?;
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o400))?;
+        let calls = Cell::new(0_usize);
+
+        let result = remove_recovery_durably_with(&root, owner, |_| {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call == 1 {
+                Err(SelectorBoundaryError::Io)
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(result, Err(SelectorBoundaryError::Io));
+        assert_eq!(fs::read(&recovery)?, b"sir1");
+        assert_eq!(fs::metadata(recovery)?.nlink(), 1);
         Ok(())
     }
 

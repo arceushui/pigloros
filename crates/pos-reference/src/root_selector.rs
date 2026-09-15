@@ -21,9 +21,10 @@ use std::time::Duration;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
-use rustix::fs::{chmodat, statat, unlinkat, AtFlags, FileType, Mode};
+use rustix::fs::{chmodat, fsync, mkdirat, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
 
+use crate::control_framing::{self, ControlFrameError};
 use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
     ProviderRequestAdmission, ProviderTransport, ProviderTransportError, ReadSeek,
@@ -67,6 +68,7 @@ const SELECTOR_PARENT_MODE: u32 = 0o700;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const SANDBOX_SELECTOR_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-provider.sock";
 const SANDBOX_ADMIN_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-selector-admin.sock";
+const SANDBOX_RECOVERY_DIRECTORY_RELATIVE: &str = "run/pigloros/sandbox-selector-recovery";
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
@@ -95,6 +97,22 @@ struct RootSelectorComposition {
 struct ReceivedInstallationUpdate {
     challenge: InstallationChallenge,
     bytes: Vec<u8>,
+}
+
+struct ClosedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    received: ReceivedInstallationUpdate,
+}
+
+struct CommittedClosedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    committed: CommittedInstallationUpdate,
+}
+
+struct SynchronizedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    successor: AuthenticatedSelectorBootstrap,
+    acknowledgement: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -193,6 +211,44 @@ pub struct RootSelectorRuntime {
     composition: RootSelectorComposition,
     administrator: OwnedAdministratorListener,
     evaluator: OwnedSelectorListener,
+}
+
+#[derive(Default)]
+struct EvaluatorWorkers {
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+struct EvaluatorServeResult {
+    listener: Result<(), SelectorBoundaryError>,
+    workers: EvaluatorWorkers,
+}
+
+impl EvaluatorWorkers {
+    fn spawn(&mut self, composition: Arc<RootSelectorComposition>, stream: UnixStream) {
+        self.handles.push(thread::spawn(move || {
+            let _evaluation_result = composition.evaluate_root_connection(stream);
+        }));
+    }
+
+    fn reap_finished(&mut self) -> Result<(), SelectorBoundaryError> {
+        while let Some(index) = self
+            .handles
+            .iter()
+            .position(thread::JoinHandle::is_finished)
+        {
+            self.handles
+                .swap_remove(index)
+                .join()
+                .map_err(selector_unavailable)?;
+        }
+        Ok(())
+    }
+
+    fn join_all(mut self) -> Result<(), SelectorBoundaryError> {
+        self.handles
+            .drain(..)
+            .try_for_each(|worker| worker.join().map_err(selector_unavailable))
+    }
 }
 
 impl OwnedSelectorListener {
@@ -415,14 +471,14 @@ impl RootSelectorRuntime {
             let evaluator_stopped = Arc::clone(&stopped);
             let evaluator_completed = completed.clone();
             let evaluator_thread = scope.spawn(move || {
-                let result = serve_evaluator(
+                let served = serve_evaluator(
                     &evaluator,
                     &evaluator_administrator,
                     &evaluator_composition,
                     &evaluator_stopped,
                 );
-                let _send_result = evaluator_completed.send(result);
-                result
+                let _send_result = evaluator_completed.send(served.listener);
+                served
             });
             drop(completed);
 
@@ -431,7 +487,8 @@ impl RootSelectorRuntime {
             stopped.store(true, Ordering::Release);
             let admin = admin.join().map_err(selector_unavailable)?;
             let evaluator = evaluator_thread.join().map_err(selector_unavailable)?;
-            first.and(admin).and(evaluator)
+            let workers = evaluator.workers.join_all();
+            first.and(admin).and(evaluator.listener).and(workers)
         })
     }
 }
@@ -457,24 +514,29 @@ fn serve_evaluator(
     administrator: &OwnedAdministratorListener,
     composition: &Arc<RootSelectorComposition>,
     stopped: &AtomicBool,
+) -> EvaluatorServeResult {
+    let mut workers = EvaluatorWorkers::default();
+    let listener =
+        serve_evaluator_connections(listener, administrator, composition, stopped, &mut workers);
+    EvaluatorServeResult { listener, workers }
+}
+
+fn serve_evaluator_connections(
+    listener: &OwnedSelectorListener,
+    administrator: &OwnedAdministratorListener,
+    composition: &Arc<RootSelectorComposition>,
+    stopped: &AtomicBool,
+    workers: &mut EvaluatorWorkers,
 ) -> Result<(), SelectorBoundaryError> {
     while !stopped.load(Ordering::Acquire) {
+        workers.reap_finished()?;
         administrator.verify()?;
         match listener.try_accept()? {
-            Some(stream) => {
-                let composition = Arc::clone(composition);
-                spawn_evaluator_connection(composition, stream);
-            }
+            Some(stream) => workers.spawn(Arc::clone(composition), stream),
             None => thread::sleep(Duration::from_millis(10)),
         }
     }
     Ok(())
-}
-
-fn spawn_evaluator_connection(composition: Arc<RootSelectorComposition>, stream: UnixStream) {
-    let _connection = thread::spawn(move || {
-        let _evaluation_result = composition.evaluate_root_connection(stream);
-    });
 }
 
 impl Drop for OwnedSelectorListener {
@@ -589,20 +651,24 @@ impl RootSelectorComposition {
     /// Returns a closed boundary error for missing, invalid, pending-recovery,
     /// or unavailable installation/provider state.
     fn open() -> Result<Self, SelectorBoundaryError> {
-        InstalledSelectorState::open()
-            .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|admitted| {
-                connect_fixed_provider(&admitted).map(|(transport, runtime)| Self {
-                    service: RootSelectorService {
-                        admission: SelectorAdmission::new(admitted, runtime),
-                        transport,
-                        peer_uid: ROOT_UID,
-                        evaluation_namespaces: EvaluationNamespaceBindings::default(),
-                    },
-                    updates: Mutex::new(()),
+        open_recovery_directory().and_then(|recovery_directory| {
+            InstalledSelectorState::open()
+                .and_then(InstalledSelectorState::authenticate_bootstrap)
+                .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+                .and_then(|admitted| {
+                    connect_fixed_provider(&admitted).map(|(transport, runtime)| Self {
+                        service: RootSelectorService {
+                            admission: SelectorAdmission::new(admitted, runtime),
+                            transport,
+                            peer_uid: ROOT_UID,
+                            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                            recovery_directory: Arc::new(recovery_directory),
+                            recovery_owner: ROOT_UID,
+                        },
+                        updates: Mutex::new(()),
+                    })
                 })
-            })
+        })
     }
 
     /// Evaluates one already-accepted root peer without binding any socket.
@@ -643,30 +709,46 @@ impl RootSelectorComposition {
                 self.service
                     .admission
                     .close_and_snapshot()
-                    .map(|closed| (closed, received))
+                    .map(|admission| ClosedInstallationUpdate {
+                        admission,
+                        received,
+                    })
             })
-            .and_then(|(closed, received)| self.prepare_closed_update(closed, received))
-            .and_then(|(closed, committed)| {
+            .and_then(|closed| self.prepare_closed_update(closed))
+            .and_then(|closed| {
                 self.service
                     .transport
-                    .complete_committed_update(committed, LIVE_UPDATE_TIMEOUT)
-                    .map(|(successor, acknowledgement)| (closed, successor, acknowledgement))
+                    .complete_committed_update(closed.committed, LIVE_UPDATE_TIMEOUT)
+                    .map(
+                        |(successor, acknowledgement)| SynchronizedInstallationUpdate {
+                            admission: closed.admission,
+                            successor,
+                            acknowledgement,
+                        },
+                    )
             })
-            .and_then(|(closed, successor, acknowledgement)| {
-                synchronize_successor_provider(&self.service.transport, &successor)
-                    .map(|()| (closed, successor, acknowledgement))
-            })
-            .and_then(|(closed, successor, acknowledgement)| {
+            .and_then(|synchronized| {
                 self.service
                     .evaluation_namespaces
-                    .clear()
-                    .map(|()| (closed, successor, acknowledgement))
+                    .retire_previous_generation()
+                    .map(|()| synchronized)
             })
-            .and_then(|(closed, successor, acknowledgement)| {
-                self.service
-                    .admission
-                    .admit_successor(&closed.admitted, successor)
-                    .map(|()| acknowledgement)
+            .and_then(|synchronized| {
+                let previous = &synchronized.admission.admitted;
+                match synchronized
+                    .successor
+                    .admit_provider()
+                    .and_then(|successor| {
+                        synchronize_successor_provider(&self.service.transport, &successor)
+                            .map(|()| successor)
+                    }) {
+                    Ok(successor) => self
+                        .service
+                        .admission
+                        .admit_successor(previous, successor)?,
+                    Err(_) => self.service.admission.retire_previous(previous)?,
+                }
+                Ok(synchronized.acknowledgement)
             })
             .and_then(|acknowledgement| write_control_frame(stream, &acknowledgement))
             .and_then(|()| stream.shutdown(std::net::Shutdown::Write).map_err(io_error))
@@ -695,21 +777,57 @@ impl RootSelectorComposition {
 
     fn prepare_closed_update(
         &self,
-        closed: ClosedSelectorAdmission,
-        received: ReceivedInstallationUpdate,
-    ) -> Result<(ClosedSelectorAdmission, CommittedInstallationUpdate), SelectorBoundaryError> {
-        match prepare_live_update(&closed, received.challenge, &received.bytes) {
-            Ok(committed) => Ok((closed, committed)),
-            Err(error) => finish_failed_preparation(&self.service.admission, &closed, error),
+        closed: ClosedInstallationUpdate,
+    ) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
+        match prepare_live_update(
+            &closed.admission,
+            &self.service.recovery_directory,
+            self.service.recovery_owner,
+            closed.received.challenge,
+            &closed.received.bytes,
+        ) {
+            Ok(committed) => Ok(CommittedClosedInstallationUpdate {
+                admission: closed.admission,
+                committed,
+            }),
+            Err(error) => {
+                finish_failed_preparation(&self.service.admission, &closed.admission, error)
+            }
         }
     }
+}
+
+fn open_recovery_directory() -> Result<File, SelectorBoundaryError> {
+    let relative = Path::new(SANDBOX_RECOVERY_DIRECTORY_RELATIVE);
+    let parent_relative = relative
+        .parent()
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+    let leaf = relative
+        .file_name()
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+    let root = File::open("/").map_err(io_error)?;
+    let runtime = open_directory_chain(root, parent_relative, ROOT_UID)?;
+    let created = match mkdirat(&runtime, leaf, Mode::RWXU) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::EXIST) => false,
+        Err(_) => return Err(SelectorBoundaryError::Io),
+    };
+    if created {
+        fsync(&runtime).map_err(io_error)?;
+    }
+    let directory = open_directory_chain(runtime, Path::new(leaf), ROOT_UID)?;
+    let metadata = directory.metadata().map_err(io_error)?;
+    if metadata.mode() & 0o7777 != 0o700 {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(directory)
 }
 
 fn finish_failed_preparation(
     admission: &SelectorAdmission,
     closed: &ClosedSelectorAdmission,
     error: PrepareLiveUpdateError,
-) -> Result<(ClosedSelectorAdmission, CommittedInstallationUpdate), SelectorBoundaryError> {
+) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
     match error {
         PrepareLiveUpdateError::BeforeRecovery(error) => {
             admission.reopen_previous(&closed.admitted).and(Err(error))
@@ -731,6 +849,8 @@ fn configure_update_stream(stream: &UnixStream) -> Result<(), SelectorBoundaryEr
 
 fn prepare_live_update(
     closed: &ClosedSelectorAdmission,
+    recovery_directory: &File,
+    recovery_owner: u32,
     challenge: crate::selector::installation::authority::InstallationChallenge,
     update_bytes: &[u8],
 ) -> Result<CommittedInstallationUpdate, PrepareLiveUpdateError> {
@@ -743,6 +863,8 @@ fn prepare_live_update(
             InstallationRecoverySnapshot::seal(
                 &closed.admitted,
                 &closed.runtime,
+                recovery_directory,
+                recovery_owner,
                 closed.live_attempt_ids.clone(),
                 closed.live_attempt_ids.clone(),
             )
@@ -757,31 +879,23 @@ fn prepare_live_update(
 }
 
 fn write_control_frame(stream: &mut impl Write, bytes: &[u8]) -> Result<(), SelectorBoundaryError> {
-    let length = framed_control_length(bytes.len())?;
-    if length == 0 {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    stream.write_all(&length.to_be_bytes()).map_err(io_error)?;
-    stream.write_all(bytes).map_err(io_error)
+    control_framing::write_frame(stream, bytes, CONTROL_LIMIT_BYTES).map_err(control_frame_error)
 }
 
 fn read_control_frame(stream: &mut impl Read) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let mut prefix = [0; 4];
-    stream.read_exact(&mut prefix).map_err(io_error)?;
-    let length = u32::from_be_bytes(prefix);
-    if length == 0 || length > CONTROL_LIMIT {
-        return Err(SelectorBoundaryError::ArtifactInvalid);
-    }
-    let mut bytes = vec![0; usize::try_from(length).map_err(artifact_invalid)?];
-    stream.read_exact(&mut bytes).map_err(io_error)?;
-    Ok(bytes)
+    control_framing::read_frame(stream, CONTROL_LIMIT_BYTES)
+        .map_err(control_frame_error)?
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
 }
 
 fn require_stream_eof(stream: &mut impl Read) -> Result<(), SelectorBoundaryError> {
-    let mut extra = [0];
-    match stream.read(&mut extra) {
-        Ok(0) => Ok(()),
-        _ => Err(SelectorBoundaryError::ArtifactInvalid),
+    control_framing::require_eof(stream).map_err(control_frame_error)
+}
+
+fn control_frame_error(error: ControlFrameError) -> SelectorBoundaryError {
+    match error {
+        ControlFrameError::Invalid => SelectorBoundaryError::ArtifactInvalid,
+        ControlFrameError::Io => SelectorBoundaryError::Io,
     }
 }
 
@@ -791,7 +905,7 @@ fn connect_fixed_provider(
     connect_and_synchronize(
         admitted,
         ProviderTransport::from_admitted,
-        fresh_selector_id,
+        fresh_synchronization_ids,
         synchronize_fixed_provider,
     )
     .and_then(|transport| {
@@ -804,24 +918,40 @@ fn connect_fixed_provider(
 fn synchronize_fixed_provider(
     transport: &ProviderTransport,
     admitted: &AdmittedSelectorProvider,
-    request_id: [u8; 16],
-    nonce: [u8; 16],
+    ids: RevocationSynchronizationIds,
 ) -> Result<(), SelectorBoundaryError> {
-    transport.synchronize_revocation(admitted.provider(), request_id, nonce, INITIAL_IO_TIMEOUT)
+    transport.synchronize_revocation(
+        admitted.provider(),
+        ids.request_id.0,
+        ids.selector_nonce.0,
+        INITIAL_IO_TIMEOUT,
+    )
 }
 
 fn synchronize_successor_provider(
     transport: &ProviderTransport,
     admitted: &AdmittedSelectorProvider,
 ) -> Result<(), SelectorBoundaryError> {
+    fresh_synchronization_ids().and_then(|ids| synchronize_fixed_provider(transport, admitted, ids))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SynchronizationRequestId([u8; 16]);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SynchronizationNonce([u8; 16]);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RevocationSynchronizationIds {
+    request_id: SynchronizationRequestId,
+    selector_nonce: SynchronizationNonce,
+}
+
+fn fresh_synchronization_ids() -> Result<RevocationSynchronizationIds, SelectorBoundaryError> {
     fresh_selector_id().and_then(|request_id| {
-        fresh_selector_id().and_then(|nonce| {
-            transport.synchronize_revocation(
-                admitted.provider(),
-                request_id,
-                nonce,
-                INITIAL_IO_TIMEOUT,
-            )
+        fresh_selector_id().map(|selector_nonce| RevocationSynchronizationIds {
+            request_id: SynchronizationRequestId(request_id),
+            selector_nonce: SynchronizationNonce(selector_nonce),
         })
     })
 }
@@ -829,15 +959,11 @@ fn synchronize_successor_provider(
 fn connect_and_synchronize<Admitted, Transport, Error>(
     admitted: &Admitted,
     connect: impl FnOnce(&Admitted) -> Result<Transport, Error>,
-    mut nonce: impl FnMut() -> Result<[u8; 16], Error>,
-    synchronize: impl FnOnce(&Transport, &Admitted, [u8; 16], [u8; 16]) -> Result<(), Error>,
+    identities: impl FnOnce() -> Result<RevocationSynchronizationIds, Error>,
+    synchronize: impl FnOnce(&Transport, &Admitted, RevocationSynchronizationIds) -> Result<(), Error>,
 ) -> Result<Transport, Error> {
     connect(admitted).and_then(|transport| {
-        nonce().and_then(|request_id| {
-            nonce().and_then(|challenge| {
-                synchronize(&transport, admitted, request_id, challenge).map(|()| transport)
-            })
-        })
+        identities().and_then(|ids| synchronize(&transport, admitted, ids).map(|()| transport))
     })
 }
 
@@ -872,6 +998,8 @@ struct RootSelectorService<T = ProviderTransport> {
     transport: T,
     peer_uid: u32,
     evaluation_namespaces: EvaluationNamespaceBindings,
+    recovery_directory: Arc<File>,
+    recovery_owner: u32,
 }
 
 struct SelectorAdmission {
@@ -889,6 +1017,7 @@ struct SelectorAdmissionState {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AttemptAdmissionState {
     active_requests: usize,
+    provider_owned: bool,
     provider_retained: bool,
     provider_entries_in_progress: usize,
 }
@@ -1001,7 +1130,11 @@ impl SelectorAdmission {
         Ok(ClosedSelectorAdmission {
             admitted: Arc::clone(&state.admitted),
             runtime: state.runtime.clone(),
-            live_attempt_ids: state.attempts.keys().copied().collect(),
+            live_attempt_ids: state
+                .attempts
+                .iter()
+                .filter_map(|(id, attempt)| attempt.provider_owned.then_some(*id))
+                .collect(),
         })
     }
 
@@ -1031,6 +1164,18 @@ impl SelectorAdmission {
         state.attempts.clear();
         state.open = true;
         drop(state);
+        Ok(())
+    }
+
+    fn retire_previous(
+        &self,
+        previous: &Arc<AdmittedSelectorProvider>,
+    ) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if state.open || !Arc::ptr_eq(&state.admitted, previous) {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        state.attempts.clear();
         Ok(())
     }
 
@@ -1080,12 +1225,13 @@ impl SelectorAdmission {
         Ok(())
     }
 
-    fn finish_provider_entry(&self, attempt_id: [u8; 16]) {
+    fn finish_provider_entry(&self, attempt_id: [u8; 16], entered: bool) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         if let Some(attempt) = state.attempts.get_mut(&attempt_id) {
             attempt.provider_entries_in_progress -= 1;
+            attempt.provider_owned |= entered;
         }
         drop(state);
         self.provider_entry_changed.notify_all();
@@ -1093,12 +1239,34 @@ impl SelectorAdmission {
 
     fn retain_provider_state(&self, attempt_id: [u8; 16]) -> Result<(), SelectorBoundaryError> {
         let mut state = self.state.lock().map_err(selector_unavailable)?;
-        state
+        let attempt = state
             .attempts
             .get_mut(&attempt_id)
-            .ok_or(SelectorBoundaryError::SelectorUnavailable)?
-            .provider_retained = true;
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+        attempt.provider_owned = true;
+        attempt.provider_retained = true;
         drop(state);
+        Ok(())
+    }
+
+    fn finish_provider_state(
+        &self,
+        attempt_id: [u8; 16],
+        admitted: &Arc<AdmittedSelectorProvider>,
+        retained: bool,
+    ) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if !Arc::ptr_eq(&state.admitted, admitted)
+            || !state.open && !state.attempts.contains_key(&attempt_id)
+        {
+            return Ok(());
+        }
+        let attempt = state
+            .attempts
+            .get_mut(&attempt_id)
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+        attempt.provider_owned = retained;
+        attempt.provider_retained = retained;
         Ok(())
     }
 }
@@ -1112,7 +1280,7 @@ impl Drop for SelectorAdmissionLease<'_> {
 #[cfg(test)]
 impl Drop for ProviderEntryPermit<'_> {
     fn drop(&mut self) {
-        self.owner.finish_provider_entry(self.attempt_id);
+        self.owner.finish_provider_entry(self.attempt_id, true);
     }
 }
 
@@ -1124,6 +1292,11 @@ impl SelectorAdmissionLease<'_> {
 
     fn retain_provider_state(&self) -> Result<(), SelectorBoundaryError> {
         self.owner.retain_provider_state(self.attempt_id)
+    }
+
+    fn finish_provider_state(&self, retained: bool) -> Result<(), SelectorBoundaryError> {
+        self.owner
+            .finish_provider_state(self.attempt_id, &self.admitted, retained)
     }
 }
 
@@ -1149,7 +1322,7 @@ impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
 
     fn entered(&mut self) {
         if self.entry_active {
-            self.owner.finish_provider_entry(self.attempt_id);
+            self.owner.finish_provider_entry(self.attempt_id, true);
             self.entry_active = false;
         }
     }
@@ -1157,7 +1330,10 @@ impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
 
 impl Drop for SelectorProviderRequestAdmission<'_> {
     fn drop(&mut self) {
-        self.entered();
+        if self.entry_active {
+            self.owner.finish_provider_entry(self.attempt_id, false);
+            self.entry_active = false;
+        }
     }
 }
 
@@ -1181,6 +1357,7 @@ struct EvaluationNamespaceState {
     request_digest: [u8; 32],
     live_requests: usize,
     retained: bool,
+    retired: bool,
 }
 
 struct EvaluationNamespaceExecution {
@@ -1196,9 +1373,13 @@ struct EvaluationNamespaceLease {
 }
 
 impl EvaluationNamespaceBindings {
-    fn clear(&self) -> Result<(), SelectorBoundaryError> {
+    fn retire_previous_generation(&self) -> Result<(), SelectorBoundaryError> {
         let mut states = self.states.lock().map_err(selector_unavailable)?;
-        states.clear();
+        states.retain(|_, state| {
+            state.retired = true;
+            state.retained = false;
+            state.live_requests != 0
+        });
         drop(states);
         self.changed.notify_all();
         Ok(())
@@ -1227,6 +1408,15 @@ impl EvaluationNamespaceBindings {
         let mut states = self.states.lock().map_err(selector_unavailable)?;
         loop {
             if let Some(state) = states.get_mut(&namespace) {
+                if state.retired {
+                    #[cfg(test)]
+                    self.waiting.fetch_add(1, Ordering::Release);
+                    let waited = self.changed.wait(states);
+                    #[cfg(test)]
+                    self.waiting.fetch_sub(1, Ordering::Release);
+                    states = waited.map_err(selector_unavailable)?;
+                    continue;
+                }
                 if state.request_digest == request.request_digest {
                     state.live_requests += 1;
                     let lease = EvaluationNamespaceLease {
@@ -1263,6 +1453,7 @@ impl EvaluationNamespaceBindings {
                         request_digest: request.request_digest,
                         live_requests: 1,
                         retained: false,
+                        retired: false,
                     },
                 );
                 let lease = EvaluationNamespaceLease {
@@ -1291,8 +1482,10 @@ impl EvaluationNamespaceBindings {
                 .filter(|state| state.request_digest == lease.request_digest)
                 .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
             state.live_requests -= 1;
-            state.retained |= provider_retained;
-            state.live_requests == 0 && !state.retained
+            if !state.retired {
+                state.retained |= provider_retained;
+            }
+            state.live_requests == 0 && (!state.retained || state.retired)
         };
         if remove {
             states.remove(&lease.namespace);
@@ -1397,9 +1590,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                 result
             })
             .and_then(|execution| {
-                if provider_retains_namespace(&execution.result) {
-                    admission.retain_provider_state()?;
-                }
+                admission.finish_provider_state(provider_retains_namespace(&execution.result))?;
                 Ok(execution)
             })?;
         drop(admission);
@@ -1912,6 +2103,12 @@ mod tests {
     const RUNTIME_DIRECTORY: &str = "/run/pigloros";
     const SOCKET_MODE: u32 = 0o600;
 
+    fn test_recovery_directory() -> TestResult<Arc<File>> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        Ok(Arc::new(File::open(directory.path())?))
+    }
+
     struct ListenerTestDirectory {
         directory: tempfile::TempDir,
         socket: std::path::PathBuf,
@@ -2296,6 +2493,57 @@ mod tests {
             validate_listener_parent(&regular, &regular_file, uid),
             Err(SelectorBoundaryError::ArtifactInvalid)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn evaluator_workers_are_joined_before_listener_shutdown_completes() -> TestResult {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let mut workers = EvaluatorWorkers::default();
+        workers.handles.push(thread::spawn(move || {
+            assert!(started_tx.send(()).is_ok());
+            assert!(release_rx.recv().is_ok());
+        }));
+        started_rx.recv_timeout(Duration::from_secs(1))?;
+
+        let joining = thread::spawn(move || {
+            assert!(joined_tx.send(workers.join_all()).is_ok());
+        });
+        assert!(joined_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(())?;
+        joined_rx.recv_timeout(Duration::from_secs(1))??;
+        joining
+            .join()
+            .map_err(|_| "worker-joining thread panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn evaluator_workers_reap_finished_handlers_and_surface_panics() -> TestResult {
+        let mut completed = EvaluatorWorkers::default();
+        completed.handles.push(thread::spawn(|| {}));
+        while !completed.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        completed.reap_finished()?;
+        assert!(completed.handles.is_empty());
+
+        let mut reap_panicked = EvaluatorWorkers::default();
+        reap_panicked
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        while !reap_panicked.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        assert!(reap_panicked.reap_finished().is_err());
+
+        let mut join_panicked = EvaluatorWorkers::default();
+        join_panicked
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        assert!(join_panicked.join_all().is_err());
         Ok(())
     }
 
@@ -2754,53 +3002,35 @@ mod tests {
     }
 
     #[test]
-    fn provider_connection_requires_two_nonces_and_completed_synchronization() {
-        let mut nonces = [[3; 16], [4; 16]].into_iter();
+    fn provider_connection_requires_typed_identities_and_completed_synchronization() {
+        let ids = RevocationSynchronizationIds {
+            request_id: SynchronizationRequestId([3; 16]),
+            selector_nonce: SynchronizationNonce([4; 16]),
+        };
         assert_eq!(
             connect_and_synchronize(
                 &1,
                 |_| Ok::<_, ()>(2),
-                || nonces.next().ok_or(()),
-                |transport, admitted, request_id, challenge| {
+                || Ok(ids),
+                |transport, admitted, actual| {
                     assert_eq!((*transport, *admitted), (2, 1));
-                    assert_eq!((request_id, challenge), ([3; 16], [4; 16]));
+                    assert_eq!(actual, ids);
                     Ok(())
                 },
             ),
             Ok(2)
         );
         assert_eq!(
-            connect_and_synchronize(
-                &1,
-                |_| Err::<u8, _>(()),
-                || Ok([1; 16]),
-                |_, _, _, _| { Ok(()) }
-            ),
+            connect_and_synchronize(&1, |_| Err::<u8, _>(()), || Ok(ids), |_, _, _| Ok(()),),
             Err(())
         );
 
-        let mut missing_first = std::iter::empty();
         assert_eq!(
-            connect_and_synchronize(
-                &1,
-                |_| Ok::<_, ()>(2),
-                || missing_first.next().ok_or(()),
-                |_, _, _, _| Ok(()),
-            ),
-            Err(())
-        );
-        let mut missing_second = std::iter::once([1; 16]);
-        assert_eq!(
-            connect_and_synchronize(
-                &1,
-                |_| Ok::<_, ()>(2),
-                || missing_second.next().ok_or(()),
-                |_, _, _, _| Ok(()),
-            ),
+            connect_and_synchronize(&1, |_| Ok::<_, ()>(2), || Err(()), |_, _, _| Ok(()),),
             Err(())
         );
         assert_eq!(
-            connect_and_synchronize(&1, |_| Ok::<_, ()>(2), || Ok([1; 16]), |_, _, _, _| Err(()),),
+            connect_and_synchronize(&1, |_| Ok::<_, ()>(2), || Ok(ids), |_, _, _| Err(())),
             Err(())
         );
     }
@@ -2888,7 +3118,14 @@ mod tests {
         let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
         let admission = SelectorAdmission::new(admitted, runtime);
         let closed = admission.close_and_snapshot()?;
-        let committed = prepare_live_update(&closed, challenge, &request)?;
+        let recovery_directory = test_recovery_directory()?;
+        let committed = prepare_live_update(
+            &closed,
+            &recovery_directory,
+            fs::metadata(".")?.uid(),
+            challenge,
+            &request,
+        )?;
         assert_ne!(committed.sir1_digest(), [0; 32]);
         assert!(committed.verify_recovery_floor().is_ok());
         assert!(admission.current().is_err());
@@ -2905,7 +3142,7 @@ mod tests {
         first.retain_provider_state()?;
         drop(first);
         let closed = admission.close_and_snapshot()?;
-        assert_eq!(closed.live_attempt_ids, vec![[1; 16], [2; 16]]);
+        assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
         assert!(admission.current().is_err());
         assert!(admission.acquire([3; 16]).is_err());
         assert!(second.begin_provider_execution().is_err());
@@ -2969,15 +3206,18 @@ mod tests {
         let (execution_tx, execution_rx) = std::sync::mpsc::channel();
 
         thread::scope(|scope| -> TestResult {
-            let provider = scope.spawn(|| -> TestResult {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                let _spx1 = read_frame(&mut stream)?;
-                let mut input = Vec::new();
-                stream.read_to_end(&mut input)?;
-                request_entered_tx.send(())?;
-                release_provider_rx.recv_timeout(Duration::from_secs(1))?;
-                Ok(())
+            let provider = scope.spawn(move || {
+                (|| -> TestResult {
+                    let (mut stream, _) = listener.accept()?;
+                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                    let _spx1 = read_frame(&mut stream)?;
+                    let mut input = Vec::new();
+                    stream.read_to_end(&mut input)?;
+                    request_entered_tx.send(())?;
+                    release_provider_rx.recv_timeout(Duration::from_secs(1))?;
+                    Ok(())
+                })()
+                .map_err(|error| error.to_string())
             });
             scope.spawn(|| {
                 let mut request_admission = SelectorProviderRequestAdmission::new(&lease);
@@ -2991,7 +3231,7 @@ mod tests {
                         &mut request_admission,
                     )
                     .map(|_| ());
-                drop(execution_tx.send(result));
+                assert!(execution_tx.send(result).is_ok());
             });
             request_entered_rx.recv_timeout(Duration::from_secs(1))?;
             let closed = admission.close_and_snapshot()?;
@@ -3040,7 +3280,7 @@ mod tests {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;
         assert!(admission.begin_provider_execution([1; 16]).is_err());
-        admission.finish_provider_entry([1; 16]);
+        admission.finish_provider_entry([1; 16], false);
         let lease = admission.acquire([1; 16])?;
         let mut provider_requests = SelectorProviderRequestAdmission::new(&lease);
         assert!(provider_requests.begin().is_ok());
@@ -3116,6 +3356,20 @@ mod tests {
         assert!(provider_retains_namespace(&Ok(
             AuthenticatedProviderTerminal::Error(b"invalid".to_vec())
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_generation_retirement_preserves_live_leases_until_release() -> TestResult {
+        let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let bindings = EvaluationNamespaceBindings::default();
+        let lease = bindings.acquire(&request)?;
+
+        bindings.retire_previous_generation()?;
+        bindings.release(lease, true)?;
+
+        let successor_lease = bindings.acquire(&request)?;
+        bindings.release(successor_lease, false)?;
         Ok(())
     }
 
@@ -3201,6 +3455,7 @@ mod tests {
                         request_digest: [1; 32],
                         live_requests: 0,
                         retained: true,
+                        retired: false,
                     },
                 ))
             })
@@ -3288,6 +3543,7 @@ mod tests {
         assert!(poisoned.close_and_snapshot().is_err());
         assert!(poisoned.reopen_previous(&previous).is_err());
         assert!(poisoned.admit_successor(&previous, successor).is_err());
+        assert!(poisoned.retire_previous(&previous).is_err());
         assert!(matches!(
             poisoned.begin_provider_execution([1; 16]),
             Err(ProviderTransportError::BeforeAdmission)
@@ -3304,7 +3560,7 @@ mod tests {
             std::panic::resume_unwind(Box::new(()));
         }))
         .is_err());
-        assert!(poisoned_namespaces.clear().is_err());
+        assert!(poisoned_namespaces.retire_previous_generation().is_err());
         Ok(())
     }
 
@@ -3416,8 +3672,10 @@ mod tests {
         assert!(synchronize_fixed_provider(
             &sync_transport,
             &admitted,
-            rand::random(),
-            rand::random(),
+            RevocationSynchronizationIds {
+                request_id: SynchronizationRequestId(rand::random()),
+                selector_nonce: SynchronizationNonce(rand::random()),
+            },
         )
         .is_err());
         sync_provider
@@ -3535,6 +3793,8 @@ mod tests {
             transport,
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
 
         let mut without_requirement = request.clone();
@@ -3636,6 +3896,8 @@ mod tests {
                 transport: FixedProviderExecutor(RefCell::new(Some(result))),
                 peer_uid: fs::metadata(".")?.uid(),
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: test_recovery_directory()?,
+                recovery_owner: fs::metadata(".")?.uid(),
             };
             assert_service_error(&service, &request, resolved.attempt(), expected)?;
         }
@@ -3661,6 +3923,8 @@ mod tests {
             transport,
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         assert_service_error(
             &service,
@@ -3695,6 +3959,8 @@ mod tests {
             },
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         });
 
         std::thread::scope(|scope| -> TestResult {
@@ -3798,6 +4064,8 @@ mod tests {
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         assert_service_error(
             &service,
@@ -3820,6 +4088,8 @@ mod tests {
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         let encoded = encoded_request(&request, resolved.attempt())?;
         let (mut client, server) = UnixStream::pair()?;
@@ -3848,6 +4118,8 @@ mod tests {
             transport: ProviderTransport::from_path_for_test(&provider_path)?,
             peer_uid: owner ^ 1,
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: owner,
         };
 
         let (client, server) = UnixStream::pair()?;

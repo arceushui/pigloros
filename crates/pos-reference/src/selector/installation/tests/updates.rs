@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -66,6 +66,11 @@ impl UpdateFixture {
             .admit_provider()?)
     }
 
+    fn recovery_directory(&self) -> TestResult<File> {
+        fs::set_permissions(self.directory.path(), fs::Permissions::from_mode(0o700))?;
+        Ok(File::open(self.directory.path())?)
+    }
+
     pub(crate) fn request(
         &self,
         challenge: &InstallationChallenge,
@@ -78,6 +83,22 @@ impl UpdateFixture {
         &self,
         challenge: &[u8],
         nonce_override: Option<[u8; 16]>,
+    ) -> TestResult<Vec<u8>> {
+        self.request_with_revocation(challenge, nonce_override, false)
+    }
+
+    fn request_revoking_selected_provider(
+        &self,
+        challenge: &InstallationChallenge,
+    ) -> TestResult<Vec<u8>> {
+        self.request_with_revocation(&challenge.to_canonical_cbor()?, None, true)
+    }
+
+    fn request_with_revocation(
+        &self,
+        challenge: &[u8],
+        nonce_override: Option<[u8; 16]>,
+        revoke_selected_provider: bool,
     ) -> TestResult<Vec<u8>> {
         let challenge_document = decode_canonical(challenge)?;
         let challenge_fields = array(&challenge_document, 5)?;
@@ -98,7 +119,13 @@ impl UpdateFixture {
                 digest(self.bootstrap.trust().snapshot_digest()),
                 integer(self.bootstrap.revocation().revocation_epoch() + 1),
                 Value::Array(Vec::new()),
-                Value::Array(Vec::new()),
+                Value::Array(if revoke_selected_provider {
+                    vec![digest(
+                        self.bootstrap.policy().selection().provider_manifest,
+                    )]
+                } else {
+                    Vec::new()
+                }),
                 Value::Array(Vec::new()),
                 Value::Text("policy".to_owned()),
             ]),
@@ -622,6 +649,8 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
     let snapshot = InstallationRecoverySnapshot::seal(
         &admitted,
         &runtime,
+        &fixture.recovery_directory()?,
+        fs::metadata(fixture.directory.path())?.uid(),
         vec![[41; 16], [42; 16]],
         vec![[42; 16]],
     )?;
@@ -647,10 +676,7 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
     let rca1 = live_acknowledgement(&committed, &runtime_signer, vec![[42; 16]])?;
     let acknowledgement = committed.authenticate_live_acknowledgement(&rca1)?;
     let next = committed.complete_live_update(&acknowledgement)?;
-    assert_eq!(
-        next.bootstrap().installed().manifest().digest(),
-        next_manifest
-    );
+    assert_eq!(next.installed().manifest().digest(), next_manifest);
     assert!(!recovery_path.exists());
     assert_eq!(
         InstallationManifest::from_canonical_cbor(&fs::read(
@@ -659,6 +685,35 @@ fn durable_live_update_commits_sir1_before_publishing_successor() -> TestResult 
         .digest(),
         next_manifest
     );
+    Ok(())
+}
+
+#[test]
+fn durable_completion_succeeds_when_successor_revokes_selected_provider() -> TestResult {
+    let fixture = UpdateFixture::new()?;
+    let admitted = fixture.admitted()?;
+    let challenge = admitted.bootstrap().issue_update_challenge()?;
+    let request = fixture.request_revoking_selected_provider(&challenge)?;
+    let update = admitted.bootstrap().validate_update(challenge, &request)?;
+    let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+    let snapshot = InstallationRecoverySnapshot::seal(
+        &admitted,
+        &runtime,
+        &fixture.recovery_directory()?,
+        fs::metadata(fixture.directory.path())?.uid(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let committed = Arc::new(admitted).commit_update(update, snapshot)?;
+    let acknowledgement = committed.authenticate_live_acknowledgement(&live_acknowledgement(
+        &committed,
+        &SigningKey::from_bytes(&[4; 32]),
+        Vec::new(),
+    )?)?;
+    let successor = committed.complete_live_update(&acknowledgement)?;
+
+    assert!(successor.admit_provider().is_err());
+    assert!(!fixture.directory.path().join(RECOVERY_NAME).exists());
     Ok(())
 }
 
@@ -681,6 +736,8 @@ pub(crate) fn committed_update_fixture() -> TestResult<(
     let snapshot = InstallationRecoverySnapshot::seal(
         &admitted,
         &runtime,
+        &fixture.recovery_directory()?,
+        fs::metadata(fixture.directory.path())?.uid(),
         vec![[41; 16], [42; 16]],
         vec![[42; 16]],
     )?;
@@ -700,8 +757,14 @@ pub(crate) fn pending_update_fixture() -> TestResult<(
     let request = fixture.request(&challenge, None)?;
     let update = admitted.bootstrap().validate_update(challenge, &request)?;
     let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
-    let snapshot =
-        InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[41; 16]], vec![[41; 16]])?;
+    let snapshot = InstallationRecoverySnapshot::seal(
+        &admitted,
+        &runtime,
+        &fixture.recovery_directory()?,
+        fs::metadata(fixture.directory.path())?.uid(),
+        vec![[41; 16]],
+        vec![[41; 16]],
+    )?;
     Ok((fixture, admitted, update, snapshot))
 }
 
@@ -791,7 +854,15 @@ fn durable_update_rejects_invalid_snapshots_and_foreign_acknowledgements() -> Te
         let fixture = UpdateFixture::new()?;
         let admitted = fixture.admitted()?;
         let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
-        assert!(InstallationRecoverySnapshot::seal(&admitted, &runtime, live, cancelled).is_err());
+        assert!(InstallationRecoverySnapshot::seal(
+            &admitted,
+            &runtime,
+            &fixture.recovery_directory()?,
+            fs::metadata(fixture.directory.path())?.uid(),
+            live,
+            cancelled,
+        )
+        .is_err());
     }
 
     let fixture = UpdateFixture::new()?;
@@ -800,8 +871,14 @@ fn durable_update_rejects_invalid_snapshots_and_foreign_acknowledgements() -> Te
     let request = fixture.request(&challenge, None)?;
     let update = admitted.bootstrap().validate_update(challenge, &request)?;
     let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
-    let snapshot =
-        InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[41; 16]], vec![[41; 16]])?;
+    let snapshot = InstallationRecoverySnapshot::seal(
+        &admitted,
+        &runtime,
+        &fixture.recovery_directory()?,
+        fs::metadata(fixture.directory.path())?.uid(),
+        vec![[41; 16]],
+        vec![[41; 16]],
+    )?;
     let committed = Arc::new(admitted).commit_update(update, snapshot)?;
     let runtime_signer = SigningKey::from_bytes(&[4; 32]);
     let wrong_set = live_acknowledgement(&committed, &runtime_signer, Vec::new())?;
@@ -900,8 +977,14 @@ fn committed_update_accepts_an_already_published_successor_manifest() -> TestRes
     };
     let update = admitted.bootstrap().validate_update(challenge, &request)?;
     let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
-    let snapshot =
-        InstallationRecoverySnapshot::seal(&admitted, &runtime, vec![[41; 16]], vec![[41; 16]])?;
+    let snapshot = InstallationRecoverySnapshot::seal(
+        &admitted,
+        &runtime,
+        &fixture.recovery_directory()?,
+        fs::metadata(fixture.directory.path())?.uid(),
+        vec![[41; 16]],
+        vec![[41; 16]],
+    )?;
     let committed = Arc::new(admitted).commit_update(update, snapshot)?;
 
     let manifest = fixture.directory.path().join(MANIFEST_NAME);

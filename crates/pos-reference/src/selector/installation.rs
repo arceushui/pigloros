@@ -26,6 +26,7 @@ use crate::evaluator_protocol::{
 pub const SANDBOX_ARTIFACT_ROOT: &str = "/var/lib/pigloros/sandbox";
 /// Root-only endpoint for the separate revocation transaction.
 pub const SANDBOX_ADMIN_SOCKET: &str = "/run/pigloros/sandbox-selector-admin.sock";
+const SANDBOX_RECOVERY_SOCKET_ROOT: &str = "/run/pigloros/sandbox-selector-recovery";
 
 pub(crate) const MANIFEST_NAME: &str = "installation.cbor";
 pub(super) const RECOVERY_NAME: &str = "installation-update.cbor";
@@ -457,7 +458,7 @@ impl InstalledSelectorState {
     }
 
     #[cfg(test)]
-    fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
+    pub(crate) fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
         root.metadata()
             .map_err(|_| SelectorBoundaryError::Io)
             .and_then(|metadata| Self::open_at_for_owner(root, metadata.uid()))
@@ -577,6 +578,10 @@ fn provider_socket(value: &Value) -> Result<String, ProtocolError> {
     if path.len() > 107
         || path.contains('\0')
         || matches!(path, SANDBOX_SELECTOR_SOCKET | SANDBOX_ADMIN_SOCKET)
+        || path == SANDBOX_RECOVERY_SOCKET_ROOT
+        || path
+            .strip_prefix(SANDBOX_RECOVERY_SOCKET_ROOT)
+            .is_some_and(|suffix| suffix.starts_with('/'))
         || tail.split('/').any(|part| matches!(part, "" | "." | ".."))
     {
         return Err(ProtocolError::InvalidEncoding);
@@ -1884,6 +1889,15 @@ pub mod tests {
         let mut reserved_socket = unsigned(valid_objects());
         reserved_socket[7] = Value::Text(SANDBOX_ADMIN_SOCKET.to_owned());
         assert_manifest_rejected(reserved_socket)?;
+
+        for path in [
+            SANDBOX_RECOVERY_SOCKET_ROOT,
+            "/run/pigloros/sandbox-selector-recovery/00.sock",
+        ] {
+            let mut recovery_socket = unsigned(valid_objects());
+            recovery_socket[7] = Value::Text(path.to_owned());
+            assert_manifest_rejected(recovery_socket)?;
+        }
 
         let mut oversized_socket = unsigned(valid_objects());
         oversized_socket[7] = Value::Text(format!("/run/pigloros/{}", "s".repeat(108)));

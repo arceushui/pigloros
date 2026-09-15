@@ -20,14 +20,15 @@ use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::net::sockopt::{socket_error, socket_peercred};
 use rustix::net::{connect, socket_with, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
+use crate::control_framing::{self, ControlFrameError};
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxProvider, AuthenticatedSandboxProviderResult, PayloadDescriptor,
     PayloadDirection, PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
     SelectorGrantCommitment,
 };
 use crate::selector::installation::authority::{
-    AdmittedProviderRuntime, AdmittedSelectorProvider, CommittedInstallationUpdate,
-    ProviderRuntimeSlot,
+    AdmittedProviderRuntime, AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
+    CommittedInstallationUpdate, ProviderRuntimeSlot,
 };
 use crate::selector::installation::open_directory_chain;
 use crate::selector::SelectorBoundaryError;
@@ -88,6 +89,12 @@ struct ProviderProcessIdentity {
 struct ConnectedProviderStream {
     stream: UnixStream,
     process: ProviderProcessIdentity,
+}
+
+struct ConnectedInstallationUpdate {
+    committed: CommittedInstallationUpdate,
+    context_bytes: Vec<u8>,
+    connected: ConnectedProviderStream,
 }
 
 /// Complete provider evidence authenticated against an admitted selector provider.
@@ -347,11 +354,7 @@ impl SelectedProviderEndpoint {
     fn from_admitted(
         admitted: &AdmittedSelectorProvider,
     ) -> Result<(Self, Self), SelectorBoundaryError> {
-        let (execute, control) = admitted
-            .bootstrap()
-            .installed()
-            .manifest()
-            .provider_sockets();
+        let (execute, control) = admitted.selected_provider_sockets();
         Self::from_paths_with_validation(execute, control, ROOT_UID, require_root_owned_endpoint)
     }
 
@@ -670,7 +673,16 @@ impl ProviderTransport {
         &self,
         committed: CommittedInstallationUpdate,
         timeout: Duration,
-    ) -> Result<(AdmittedSelectorProvider, Vec<u8>), SelectorBoundaryError> {
+    ) -> Result<(AuthenticatedSelectorBootstrap, Vec<u8>), SelectorBoundaryError> {
+        self.connect_committed_update(committed, timeout)
+            .and_then(|connected| Self::exchange_committed_update(connected, timeout))
+    }
+
+    fn connect_committed_update(
+        &self,
+        committed: CommittedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<ConnectedInstallationUpdate, SelectorBoundaryError> {
         committed
             .cancellation_context()
             .and_then(|context| {
@@ -680,47 +692,63 @@ impl ProviderTransport {
                     .map(|context_bytes| (committed, context_bytes))
             })
             .and_then(|(committed, context_bytes)| {
-                Deadline::new(timeout).map(|deadline| (committed, context_bytes, deadline))
+                self.control_endpoint
+                    .connect(timeout)
+                    .map(|connected| (committed, context_bytes, connected))
             })
-            .and_then(|(committed, context_bytes, deadline)| {
-                connect_before_deadline(&self.control_endpoint, &deadline)
-                    .map(|connected| (committed, context_bytes, connected, deadline))
+            .and_then(|(committed, context_bytes, connected)| {
+                self.require_admitted_process(connected.process).map(|()| {
+                    ConnectedInstallationUpdate {
+                        committed,
+                        context_bytes,
+                        connected,
+                    }
+                })
             })
-            .and_then(|(committed, context_bytes, connected, deadline)| {
-                self.require_admitted_process(connected.process)
-                    .map(|()| (committed, context_bytes, connected, deadline))
-            })
-            .and_then(|(committed, context_bytes, mut connected, deadline)| {
-                write_frame(&mut connected.stream, &context_bytes, &deadline)
-                    .map_err(selector_unavailable)
-                    .map(|()| (committed, connected, deadline))
-            })
-            .and_then(|(committed, mut connected, deadline)| {
+    }
+
+    fn exchange_committed_update(
+        connected: ConnectedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<(AuthenticatedSelectorBootstrap, Vec<u8>), SelectorBoundaryError> {
+        Deadline::new(timeout)
+            .map(|deadline| (connected, deadline))
+            .and_then(|(mut connected, deadline)| {
                 write_frame(
-                    &mut connected.stream,
-                    committed.revocation_update_bytes(),
+                    &mut connected.connected.stream,
+                    &connected.context_bytes,
                     &deadline,
                 )
                 .map_err(selector_unavailable)
-                .map(|()| (committed, connected, deadline))
+                .map(|()| (connected, deadline))
             })
-            .and_then(|(committed, connected, deadline)| {
+            .and_then(|(mut connected, deadline)| {
+                write_frame(
+                    &mut connected.connected.stream,
+                    connected.committed.revocation_update_bytes(),
+                    &deadline,
+                )
+                .map_err(selector_unavailable)
+                .map(|()| (connected, deadline))
+            })
+            .and_then(|(connected, deadline)| {
                 connected
+                    .connected
                     .stream
                     .shutdown(std::net::Shutdown::Write)
                     .map_err(selector_unavailable)
-                    .map(|()| (committed, connected, deadline))
+                    .map(|()| (connected, deadline))
             })
-            .and_then(|(committed, mut connected, deadline)| {
-                read_frame(&mut connected.stream, &deadline)
+            .and_then(|(mut connected, deadline)| {
+                read_frame(&mut connected.connected.stream, &deadline)
                     .map_err(selector_unavailable)
                     .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
-                    .map(|response| (committed, connected, deadline, response))
+                    .map(|response| (connected, deadline, response))
             })
-            .and_then(|(committed, mut connected, deadline, response)| {
-                ensure_eof(&mut connected.stream, &deadline)
+            .and_then(|(mut connected, deadline, response)| {
+                ensure_eof(&mut connected.connected.stream, &deadline)
                     .map_err(selector_unavailable)
-                    .map(|()| (committed, response))
+                    .map(|()| (connected.committed, response))
             })
             .and_then(|(committed, response)| {
                 committed
@@ -730,7 +758,7 @@ impl ProviderTransport {
             .and_then(|(committed, response, acknowledgement)| {
                 committed
                     .complete_live_update(&acknowledgement)
-                    .map(|admitted| (admitted, response))
+                    .map(|bootstrap| (bootstrap, response))
             })
     }
 
@@ -756,6 +784,10 @@ impl ProviderTransport {
         validate_staged_input(&request.adapter_input, input).map_err(transport_before_admission)?;
         let deadline = Deadline::new(watchdog).map_err(transport_before_admission)?;
         let mut retained_grant = None;
+        let mut progress = ProviderRequestProgress {
+            retained_grant: &mut retained_grant,
+            admission,
+        };
         if let Some(execution) = self.execute_initial_attempt(
             admitted,
             commitment,
@@ -763,10 +795,7 @@ impl ProviderTransport {
             spx1,
             input,
             &deadline,
-            ProviderRequestProgress {
-                retained_grant: &mut retained_grant,
-                admission,
-            },
+            &mut progress,
         )? {
             return Ok(execution);
         }
@@ -777,10 +806,7 @@ impl ProviderTransport {
             spx1,
             input,
             &deadline,
-            ProviderRequestProgress {
-                retained_grant: &mut retained_grant,
-                admission,
-            },
+            &mut progress,
         )
     }
 
@@ -792,19 +818,11 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
-        mut progress: ProviderRequestProgress<'_>,
+        progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<Option<AuthenticatedProviderTerminal>, ProviderTransportError> {
-        progress.admission.begin()?;
-        let first = self.execute_once(
-            admitted,
-            commitment,
-            request,
-            spx1,
-            input,
-            deadline,
-            &mut progress,
-        );
-        progress.admission.entered();
+        let first = self.execute_admitted_attempt(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        )?;
         match first {
             Ok(execution) => Ok(Some(execution)),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
@@ -823,19 +841,11 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
-        mut progress: ProviderRequestProgress<'_>,
+        progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        progress.admission.begin()?;
-        let retry = self.execute_once(
-            admitted,
-            commitment,
-            request,
-            spx1,
-            input,
-            deadline,
-            &mut progress,
-        );
-        progress.admission.entered();
+        let retry = self.execute_admitted_attempt(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        )?;
         match retry {
             Ok(execution) => Ok(execution),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
@@ -847,6 +857,24 @@ impl ProviderTransport {
                 PostAdmissionProviderFailure::TerminalUnavailable,
             )),
         }
+    }
+
+    fn execute_admitted_attempt(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        request: &SandboxExecuteRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        deadline: &Deadline,
+        progress: &mut ProviderRequestProgress<'_>,
+    ) -> Result<Result<AuthenticatedProviderTerminal, ReceiveFailure>, ProviderTransportError> {
+        progress.admission.begin()?;
+        let result = self.execute_once(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        );
+        progress.admission.entered();
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -1363,74 +1391,63 @@ fn write_frame(
     bytes: &[u8],
     deadline: &Deadline,
 ) -> Result<(), ReceiveFailure> {
-    if bytes.is_empty() || bytes.len() > CONTROL_LIMIT {
-        return Err(ReceiveFailure::Invalid);
-    }
-    deadline
-        .set_write(stream)
-        .and_then(|()| u32::try_from(bytes.len()).map_err(receive_invalid))
-        .and_then(|length| {
-            stream
-                .write_all(&length.to_be_bytes())
-                .map_err(receive_incomplete)
-        })
-        .and_then(|()| deadline.set_write(stream))
-        .and_then(|()| stream.write_all(bytes).map_err(receive_incomplete))
+    control_framing::write_frame(
+        &mut DeadlineStream { stream, deadline },
+        bytes,
+        CONTROL_LIMIT,
+    )
+    .map_err(frame_receive_failure)
 }
 
 fn read_frame(
     stream: &mut UnixStream,
     deadline: &Deadline,
 ) -> Result<Option<Vec<u8>>, ReceiveFailure> {
-    let mut prefix = [0_u8; 4];
-    deadline.set_read(stream).and_then(|()| {
-        stream
-            .read(&mut prefix[..1])
-            .map_err(receive_incomplete)
-            .and_then(|read| {
-                if read == 0 {
-                    return Ok(None);
-                }
-                deadline
-                    .set_read(stream)
-                    .and_then(|()| {
-                        stream
-                            .read_exact(&mut prefix[1..])
-                            .map_err(receive_incomplete)
-                    })
-                    .and_then(|()| {
-                        usize::try_from(u32::from_be_bytes(prefix)).map_err(receive_invalid)
-                    })
-                    .and_then(|length| {
-                        if length == 0 || length > CONTROL_LIMIT {
-                            return Err(ReceiveFailure::Invalid);
-                        }
-                        let mut bytes = vec![0; length];
-                        deadline
-                            .set_read(stream)
-                            .and_then(|()| {
-                                stream.read_exact(&mut bytes).map_err(receive_incomplete)
-                            })
-                            .map(|()| Some(bytes))
-                    })
-            })
-    })
+    control_framing::read_frame(&mut DeadlineStream { stream, deadline }, CONTROL_LIMIT)
+        .map_err(frame_receive_failure)
 }
 
 fn ensure_eof(stream: &mut UnixStream, deadline: &Deadline) -> Result<(), ReceiveFailure> {
-    let mut byte = [0_u8; 1];
-    deadline.set_read(stream).and_then(|()| {
-        stream
-            .read(&mut byte)
-            .map_err(receive_incomplete)
-            .and_then(|read| {
-                if read == 0 {
-                    Ok(())
-                } else {
-                    Err(ReceiveFailure::Invalid)
-                }
-            })
-    })
+    control_framing::require_eof(&mut DeadlineStream { stream, deadline })
+        .map_err(frame_receive_failure)
+}
+
+struct DeadlineStream<'a> {
+    stream: &'a mut UnixStream,
+    deadline: &'a Deadline,
+}
+
+impl Read for DeadlineStream<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.deadline
+            .set_read(self.stream)
+            .map_err(deadline_io_error)?;
+        self.stream.read(bytes)
+    }
+}
+
+impl Write for DeadlineStream<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.deadline
+            .set_write(self.stream)
+            .map_err(deadline_io_error)?;
+        self.stream.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn deadline_io_error(_: ReceiveFailure) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "control deadline expired")
+}
+
+fn frame_receive_failure(error: ControlFrameError) -> ReceiveFailure {
+    match error {
+        ControlFrameError::Invalid => ReceiveFailure::Invalid,
+        ControlFrameError::Io => ReceiveFailure::Incomplete,
+    }
 }
 
 fn record_magic(bytes: &[u8]) -> Result<String, ReceiveFailure> {
@@ -1645,10 +1662,7 @@ mod tests {
             .transport
             .complete_committed_update(valid.committed, Duration::from_secs(1))?;
         assert!(!acknowledgement.is_empty());
-        assert_ne!(
-            successor.bootstrap().installed().manifest().digest(),
-            [0; 32]
-        );
+        assert_ne!(successor.installed().manifest().digest(), [0; 32]);
         valid
             .provider
             .join()
@@ -1660,6 +1674,24 @@ mod tests {
             .complete_committed_update(trailing.committed, Duration::from_secs(1))
             .is_err());
         trailing
+            .provider
+            .join()
+            .map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn committed_update_exchange_budget_starts_after_control_connect() -> TestResult {
+        let valid = committed_update_control_reply(Vec::new())?;
+        let connected = valid
+            .transport
+            .connect_committed_update(valid.committed, Duration::from_secs(1))?;
+        std::thread::sleep(Duration::from_millis(150));
+        let (successor, acknowledgement) =
+            ProviderTransport::exchange_committed_update(connected, Duration::from_millis(100))?;
+        assert!(!acknowledgement.is_empty());
+        assert_ne!(successor.installed().manifest().digest(), [0; 32]);
+        valid
             .provider
             .join()
             .map_err(|_| "provider thread panicked")??;

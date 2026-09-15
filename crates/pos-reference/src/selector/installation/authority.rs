@@ -10,11 +10,13 @@ pub use update::{CommittedInstallationUpdate, InstallationChallenge, ValidatedIn
 
 use ed25519_dalek::VerifyingKey;
 use rustix::rand::{getrandom, GetRandomFlags};
+use std::path::Path;
 
 use super::{InstallationObjectKind, InstalledSelectorState, MANIFEST_LIMIT};
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxProvider, ProviderConformanceReport, SandboxAdministratorPolicy,
-    SandboxProviderAdmissionInputs, SandboxRevocationSnapshot, SandboxTrustSnapshot,
+    SandboxProviderAdmissionInputs, SandboxRevocationSnapshot, SandboxTrustKey, SandboxTrustRole,
+    SandboxTrustSnapshot,
 };
 use crate::selector::SelectorBoundaryError;
 
@@ -52,7 +54,7 @@ fn fresh_distinct_selector_id_with(
 fn fill_nonzero_id(
     mut fill: impl FnMut(&mut [u8]) -> Result<usize, SelectorBoundaryError>,
 ) -> Result<[u8; 16], SelectorBoundaryError> {
-    let mut id = [0_u8; 16];
+    let mut id = <[u8; 16]>::default();
     let mut remaining = id.as_mut_slice();
     while !remaining.is_empty() {
         let read = fill(&mut *remaining)?;
@@ -61,7 +63,8 @@ fn fill_nonzero_id(
         }
         remaining = &mut remaining[read..];
     }
-    (id != [0; 16])
+    id.iter()
+        .any(|byte| *byte != u8::default())
         .then_some(id)
         .ok_or(SelectorBoundaryError::SelectorUnavailable)
 }
@@ -271,6 +274,24 @@ impl AdmittedSelectorProvider {
     #[must_use]
     pub const fn provider(&self) -> &AdmittedSandboxProvider {
         &self.provider
+    }
+
+    pub(crate) fn selected_provider_sockets(&self) -> (&Path, &Path) {
+        self.bootstrap.installed.manifest().provider_sockets()
+    }
+
+    pub(crate) fn runtime_attestation_key(
+        &self,
+    ) -> Result<&SandboxTrustKey, SelectorBoundaryError> {
+        let key_id = &self.provider.manifest().runtime_attestation_key_id;
+        self.bootstrap
+            .trust
+            .keys()
+            .iter()
+            .find(|key| {
+                key.key_id == *key_id && key.role == SandboxTrustRole::ProviderRuntimeAttestation
+            })
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)
     }
 }
 

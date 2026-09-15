@@ -23,12 +23,31 @@ SCOPED_CARGO_CRAP_JOB_IF = (
     "${{ always() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
+TEST_ONLY_EXCLUSIONS = (
+    "apps/piglor-gateway/tests/**",
+    "apps/piglor-ledger/tests/**",
+    "apps/piglor-world-client/tests/**",
+    "apps/pos-cli/tests/**",
+    "apps/pos-experiment/tests/**",
+    "crates/pos-conformance/tests/**",
+    "crates/pos-core/tests/**",
+    "crates/pos-crypto/tests/**",
+    "crates/pos-reference/tests/**",
+    "crates/pos-runtime/tests/**",
+    "crates/pos-state/tests/**",
+    "crates/pos-store/benches/**",
+    "crates/pos-store/tests/**",
+    "crates/pos-time/tests/**",
+    "crates/pos-reference/src/selector/installation/tests/**",
+    "crates/pos-core/src/erasure_tests.rs",
+)
+EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
     "--missing pessimistic --jobs 2 "
-    "--exclude '**/tests/**' --exclude '**/benches/**' "
-    "--exclude '**/examples/**' --exclude '**/*_tests.rs' "
+    + EXCLUSION_ARGS
+    +
     "--format json "
     '--output "${{ runner.temp }}/cargo-crap-baseline.json"\n'
 )
@@ -36,8 +55,8 @@ ANALYZE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
     "--missing pessimistic --jobs 2 "
-    "--exclude '**/tests/**' --exclude '**/benches/**' "
-    "--exclude '**/examples/**' --exclude '**/*_tests.rs' "
+    + EXCLUSION_ARGS
+    +
     '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'

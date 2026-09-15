@@ -58,10 +58,11 @@ Documentation-only pull requests skip both jobs. The verdict uses zero
 tool tolerance and treats one IEEE-754 representation step (one ULP) as
 numerical equality; every larger score increase fails, including increases on
 moved functions. Every new function must score at most 30. Standard Cargo
-integration-test, benchmark, and example directories, including nested
-`src/**/tests/**` modules and `*_tests.rs` modules, are excluded from complexity
-scoring; their execution still contributes coverage to production code.
-Production Rust remains in scope regardless of module placement. Repository
+integration-test and benchmark targets that currently exist in the repository
+are excluded through an exact path allowlist; their execution still contributes
+coverage to production code. Filename or directory-name wildcards do not grant
+an exclusion, so future production Rust remains in scope regardless of module
+placement. Repository
 `.cargo-crap.toml` files are prohibited so a change cannot suppress or truncate
 the report.
 

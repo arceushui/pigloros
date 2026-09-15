@@ -814,10 +814,11 @@ fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() ->
         &signer,
         random_nonzero_nonce(),
     )?;
+    let authenticated_rcu1 = RevocationUpdateRequest::authenticate(&rcu1, &trust, &current)?;
     let context = RecoveryCancellationContext::for_committed_recovery(
         [31; 32],
         [32; 32],
-        &rcu1,
+        &authenticated_rcu1,
         vec![[22; 16], [23; 16]],
         vec![[23; 16]],
     )?;
@@ -842,34 +843,49 @@ fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() ->
         RecoveryCancellationContext::for_committed_recovery(
             [0; 32],
             [32; 32],
-            &rcu1,
+            &authenticated_rcu1,
             Vec::new(),
             Vec::new(),
         ),
         RecoveryCancellationContext::for_committed_recovery(
             [31; 32],
             [32; 32],
-            &rcu1,
+            &authenticated_rcu1,
             vec![[23; 16]],
             vec![[22; 16]],
         ),
         RecoveryCancellationContext::for_committed_recovery(
             [31; 32],
             [32; 32],
-            &rcu1,
+            &authenticated_rcu1,
             vec![[0; 16]],
             Vec::new(),
         ),
         RecoveryCancellationContext::for_committed_recovery(
             [31; 32],
             [32; 32],
-            &rcu1,
+            &authenticated_rcu1,
             vec![[23; 16], [22; 16]],
             Vec::new(),
         ),
     ] {
         assert!(invalid.is_err());
     }
+
+    assert!(RecoveryCancellationContext::for_committed_recovery(
+        [31; 32],
+        [32; 32],
+        &authenticated_rcu1,
+        (1_u32..=257)
+            .map(|value| {
+                let mut id = <[u8; 16]>::default();
+                id[..4].copy_from_slice(&value.to_be_bytes());
+                id
+            })
+            .collect(),
+        Vec::new(),
+    )
+    .is_err());
 
     assert!(RevocationAcknowledgement::authenticate_for_context(
         &acknowledgement,

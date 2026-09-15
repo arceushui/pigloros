@@ -11,6 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(unix)]
+mod control_framing;
+
 mod non_interference_report;
 
 pub use non_interference_report::{

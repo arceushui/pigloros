@@ -22,11 +22,11 @@ use ciborium::value::Value;
 
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(30);
 
-fn invalid<T>(_: T) -> SelectorBoundaryError {
+fn map_protocol_to_artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
 
-fn io<T>(_: T) -> SelectorBoundaryError {
+fn map_io_to_boundary_failure<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::Io
 }
 
@@ -165,12 +165,12 @@ impl AuthenticatedSelectorBootstrap {
         decoded: DecodedInstallationUpdate,
     ) -> Result<OpenedInstallationUpdate, SelectorBoundaryError> {
         InstallationManifest::from_canonical_cbor(&decoded.next_manifest_bytes)
-            .map_err(invalid)
+            .map_err(map_protocol_to_artifact_invalid)
             .and_then(|next_manifest| {
                 self.installed
                     .manifest()
                     .validate_revocation_successor(&next_manifest)
-                    .map_err(invalid)
+                    .map_err(map_protocol_to_artifact_invalid)
                     .map(|()| next_manifest)
             })
             .and_then(|next_manifest| {
@@ -242,7 +242,7 @@ impl AuthenticatedSelectorBootstrap {
         revocation_update_bytes: &[u8],
     ) -> Result<RevocationUpdateRequest, SelectorBoundaryError> {
         SandboxRevocationSnapshot::authenticate(next_revocation_bytes, &self.trust)
-            .map_err(invalid)
+            .map_err(map_protocol_to_artifact_invalid)
             .and_then(|next_revocation| {
                 self.installed
                     .control_record(
@@ -257,7 +257,7 @@ impl AuthenticatedSelectorBootstrap {
                             &self.revocation,
                             &next_revocation,
                         )
-                        .map_err(invalid)
+                        .map_err(map_protocol_to_artifact_invalid)
                     })
                     .map(|next_policy| (next_revocation, next_policy))
             })
@@ -267,13 +267,14 @@ impl AuthenticatedSelectorBootstrap {
                     &self.trust,
                     &self.revocation,
                 )
-                .map_err(invalid)
+                .map_err(map_protocol_to_artifact_invalid)
                 .map(|update| (next_revocation, next_policy, update))
             })
             .and_then(|(next_revocation, next_policy, update)| {
                 let [_, expected_revocation, expected_policy] = next_manifest.authority_digests();
                 if next_revocation.snapshot_digest() == expected_revocation
                     && update.next_revocation == next_revocation
+                    && update.next_revocation_bytes() == next_revocation_bytes
                     && next_policy.policy_digest() == expected_policy
                 {
                     Ok(update)
@@ -291,7 +292,7 @@ impl AuthenticatedSelectorBootstrap {
         let identity = manifest.authority_digests()[usize::from(kind.code())];
         manifest
             .object(kind, identity)
-            .map_err(invalid)
+            .map_err(map_protocol_to_artifact_invalid)
             .cloned()
             .and_then(|object| {
                 if object.byte_length() <= MANIFEST_LIMIT {
@@ -304,14 +305,14 @@ impl AuthenticatedSelectorBootstrap {
                 self.installed
                     .root
                     .metadata()
-                    .map_err(io)
+                    .map_err(map_io_to_boundary_failure)
                     .map(|metadata| (object, metadata.uid()))
             })
             .and_then(|(object, owner)| {
                 self.installed
                     .root
                     .try_clone()
-                    .map_err(io)
+                    .map_err(map_io_to_boundary_failure)
                     .and_then(|root| open_directory_chain(root, Path::new(kind.directory()), owner))
                     .map(|directory| (object, owner, directory))
             })
@@ -423,12 +424,15 @@ fn decode_update(
 
 #[cfg(test)]
 mod tests {
-    use super::{invalid, io};
+    use super::{map_io_to_boundary_failure, map_protocol_to_artifact_invalid};
     use crate::selector::SelectorBoundaryError;
 
     #[test]
     fn closed_error_mappers_preserve_boundary_classification() {
-        assert_eq!(invalid(()), SelectorBoundaryError::ArtifactInvalid);
-        assert_eq!(io(()), SelectorBoundaryError::Io);
+        assert_eq!(
+            map_protocol_to_artifact_invalid(()),
+            SelectorBoundaryError::ArtifactInvalid
+        );
+        assert_eq!(map_io_to_boundary_failure(()), SelectorBoundaryError::Io);
     }
 }

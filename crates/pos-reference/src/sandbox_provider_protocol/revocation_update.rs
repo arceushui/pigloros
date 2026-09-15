@@ -11,8 +11,8 @@ use super::codec::{
     verify_signature,
 };
 use super::{
-    attempt_values, SandboxProviderProtocolError, SandboxRevocationSnapshot, SandboxTrustError,
-    SandboxTrustRole, SandboxTrustSnapshot,
+    attempt_values, validate_attempt_ids, SandboxProviderProtocolError, SandboxRevocationSnapshot,
+    SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
 };
 
 /// Closed selector-side revocation-update failures.
@@ -47,7 +47,7 @@ pub struct RecoveryCancellationContext {
 }
 
 impl RecoveryCancellationContext {
-    /// Construct exact RCC1 from one committed SIR1 and its exact RCU1 bytes.
+    /// Construct exact RCC1 from one committed SIR1 and an authenticated RCU1.
     ///
     /// # Errors
     /// Rejects zero identities, malformed attempt sets, a non-subset cancellation
@@ -55,30 +55,26 @@ impl RecoveryCancellationContext {
     pub fn for_committed_recovery(
         sir1_digest: [u8; 32],
         previous_provider_binding_digest: [u8; 32],
-        rcu1_bytes: &[u8],
+        rcu1: &RevocationUpdateRequest,
         previous_live_attempt_ids: Vec<[u8; 16]>,
         required_cancelled_attempt_ids: Vec<[u8; 16]>,
     ) -> Result<Self, SandboxRevocationUpdateError> {
-        decode_document(rcu1_bytes)
-            .map_err(SandboxRevocationUpdateError::from)
-            .and_then(|_| {
-                let mut context = Self {
-                    sir1_digest,
-                    previous_provider_binding_digest,
-                    rcu1_wire_digest: wire_digest(rcu1_bytes),
-                    previous_live_attempt_ids,
-                    required_cancelled_attempt_ids,
-                    context_digest: [0; 32],
-                };
-                context.validate().and_then(|()| {
-                    record_digest("RCC1", &Value::Array(context.unsigned_fields().to_vec()))
-                        .map_err(SandboxRevocationUpdateError::from)
-                        .map(|context_digest| {
-                            context.context_digest = context_digest;
-                            context
-                        })
+        let mut context = Self {
+            sir1_digest,
+            previous_provider_binding_digest,
+            rcu1_wire_digest: wire_digest(rcu1.exact_bytes()),
+            previous_live_attempt_ids,
+            required_cancelled_attempt_ids,
+            context_digest: [0; 32],
+        };
+        context.validate().and_then(|()| {
+            record_digest("RCC1", &Value::Array(context.unsigned_fields().to_vec()))
+                .map_err(SandboxRevocationUpdateError::from)
+                .map(|context_digest| {
+                    context.context_digest = context_digest;
+                    context
                 })
-            })
+        })
     }
 
     /// Decode one exact preferred-deterministic RCC1.
@@ -177,6 +173,8 @@ pub struct RevocationUpdateRequest {
     /// Exact RCU1 self-digest.
     pub request_digest: [u8; 32],
     signature: [u8; 64],
+    exact_bytes: Vec<u8>,
+    next_revocation_bytes: Vec<u8>,
 }
 
 impl RevocationUpdateRequest {
@@ -205,10 +203,24 @@ impl RevocationUpdateRequest {
                             policy_signer_key_id: key_id(&fields[7])?,
                             request_digest,
                             signature,
+                            exact_bytes: bytes.to_vec(),
+                            next_revocation_bytes: next_bytes.to_vec(),
                         };
                         request.validate(fields, trust, current).map(|()| request)
                     })
             })
+    }
+
+    /// Exact authenticated canonical RCU1 bytes.
+    #[must_use]
+    pub fn exact_bytes(&self) -> &[u8] {
+        &self.exact_bytes
+    }
+
+    /// Exact authenticated canonical successor RVS1 bytes embedded in RCU1.
+    #[must_use]
+    pub fn next_revocation_bytes(&self) -> &[u8] {
+        &self.next_revocation_bytes
     }
 
     fn validate(
@@ -414,10 +426,7 @@ impl RevocationAcknowledgement {
 }
 
 fn validate_attempts(attempts: &[[u8; 16]]) -> Result<(), SandboxProviderProtocolError> {
-    if attempts.contains(&[0; 16]) || !attempts.windows(2).all(|pair| pair[0] < pair[1]) {
-        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
-    }
-    Ok(())
+    validate_attempt_ids(attempts)
 }
 
 fn decode_attempts(value: &Value) -> Result<Vec<[u8; 16]>, SandboxProviderProtocolError> {

@@ -541,10 +541,22 @@ jobs:
           --lcov "${{ runner.temp }}/coverage.lcov"
           --missing pessimistic
           --jobs 2
-          --exclude '**/tests/**'
-          --exclude '**/benches/**'
-          --exclude '**/examples/**'
-          --exclude '**/*_tests.rs'
+          --exclude 'apps/piglor-gateway/tests/**'
+          --exclude 'apps/piglor-ledger/tests/**'
+          --exclude 'apps/piglor-world-client/tests/**'
+          --exclude 'apps/pos-cli/tests/**'
+          --exclude 'apps/pos-experiment/tests/**'
+          --exclude 'crates/pos-conformance/tests/**'
+          --exclude 'crates/pos-core/tests/**'
+          --exclude 'crates/pos-crypto/tests/**'
+          --exclude 'crates/pos-reference/tests/**'
+          --exclude 'crates/pos-runtime/tests/**'
+          --exclude 'crates/pos-state/tests/**'
+          --exclude 'crates/pos-store/benches/**'
+          --exclude 'crates/pos-store/tests/**'
+          --exclude 'crates/pos-time/tests/**'
+          --exclude 'crates/pos-reference/src/selector/installation/tests/**'
+          --exclude 'crates/pos-core/src/erasure_tests.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -553,10 +565,22 @@ jobs:
           --lcov "${{ runner.temp }}/coverage.lcov"
           --missing pessimistic
           --jobs 2
-          --exclude '**/tests/**'
-          --exclude '**/benches/**'
-          --exclude '**/examples/**'
-          --exclude '**/*_tests.rs'
+          --exclude 'apps/piglor-gateway/tests/**'
+          --exclude 'apps/piglor-ledger/tests/**'
+          --exclude 'apps/piglor-world-client/tests/**'
+          --exclude 'apps/pos-cli/tests/**'
+          --exclude 'apps/pos-experiment/tests/**'
+          --exclude 'crates/pos-conformance/tests/**'
+          --exclude 'crates/pos-core/tests/**'
+          --exclude 'crates/pos-crypto/tests/**'
+          --exclude 'crates/pos-reference/tests/**'
+          --exclude 'crates/pos-runtime/tests/**'
+          --exclude 'crates/pos-state/tests/**'
+          --exclude 'crates/pos-store/benches/**'
+          --exclude 'crates/pos-store/tests/**'
+          --exclude 'crates/pos-time/tests/**'
+          --exclude 'crates/pos-reference/src/selector/installation/tests/**'
+          --exclude 'crates/pos-core/src/erasure_tests.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
