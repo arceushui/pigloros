@@ -3,18 +3,25 @@
 //! This module owns no caller-configurable authority. It opens exactly one
 //! SIC1 state and fails closed while SIR1 recovery is pending. ADR-069 assigns
 //! both fixed listeners and final production activation to #359, so this module
-//! deliberately exposes no runtime socket by itself.
+//! does not activate a runtime socket by itself. [`OwnedSelectorListener`]
+//! exposes the separate, non-activating listener-ownership seam consumed by the
+//! production activation work.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
+use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rustix::fs::{chmodat, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 
@@ -30,7 +37,9 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
-use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
+use crate::selector::installation::{
+    open_directory_chain, InstallationObjectKind, InstalledSelectorState,
+};
 use crate::selector::SelectorBoundaryError;
 #[cfg(test)]
 use crate::selector_protocol::decode_request;
@@ -48,6 +57,11 @@ const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_RETAINED_EVALUATION_NAMESPACES: usize = 256;
 const ROOT_UID: u32 = 0;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const SELECTOR_SOCKET_MODE: u32 = 0o600;
+#[cfg(test)]
+const SELECTOR_PARENT_MODE: u32 = 0o700;
+const GROUP_OR_OTHER_WRITE: u32 = 0o022;
+const SANDBOX_SELECTOR_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-provider.sock";
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
@@ -70,6 +84,308 @@ fn map_to_unit_error<T>(_: T) {}
 /// only after composing the mandatory administrative and evaluator listeners.
 pub struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+struct OwnedSocketPath {
+    parent: File,
+    parent_path: PathBuf,
+    leaf: OsString,
+    identity: SocketIdentity,
+    owner_uid: u32,
+}
+
+impl OwnedSocketPath {
+    fn capture(
+        parent: File,
+        parent_path: PathBuf,
+        leaf: OsString,
+        owner_uid: u32,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let (identity, _) = named_socket(&parent, &leaf, owner_uid)?;
+        Ok(Self {
+            parent,
+            parent_path,
+            leaf,
+            identity,
+            owner_uid,
+        })
+    }
+
+    fn finish_setup(&self, parent_path: &Path) -> Result<(), SelectorBoundaryError> {
+        if parent_path != self.parent_path {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        chmodat(
+            &self.parent,
+            Path::new(&self.leaf),
+            Mode::from_raw_mode(SELECTOR_SOCKET_MODE),
+            AtFlags::empty(),
+        )
+        .map_err(io_error)?;
+        self.verify()
+    }
+
+    fn verify(&self) -> Result<(), SelectorBoundaryError> {
+        validate_listener_parent(&self.parent_path, &self.parent, self.owner_uid)?;
+        let current = listener_socket_identity(&self.parent, &self.leaf, self.owner_uid)?;
+        require_same_socket(current, self.identity)
+    }
+
+    fn remove(&self) -> Result<(), SelectorBoundaryError> {
+        self.verify()?;
+        remove_matching_socket(&self.parent, &self.leaf, self.identity, self.owner_uid)
+    }
+}
+
+/// Identity-bound owner of the fixed evaluator listener.
+///
+/// Constructing this type is the activation step owned by #359. Merely opening
+/// [`RootSelectorComposition`] never binds the fixed endpoint. Cleanup retains
+/// the root-owned parent directory and removes the pathname only while it still
+/// names the socket inode created by this owner.
+pub struct OwnedSelectorListener {
+    listener: UnixListener,
+    path: OwnedSocketPath,
+    owned: bool,
+}
+
+impl OwnedSelectorListener {
+    /// Bind and own the fixed evaluator listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed boundary error if the root-owned runtime directory is
+    /// unsafe, the endpoint already exists, or the bound socket cannot be
+    /// authenticated through the retained parent directory.
+    pub fn bind() -> Result<Self, SelectorBoundaryError> {
+        Self::bind_beneath(
+            Path::new("/"),
+            Path::new(SANDBOX_SELECTOR_SOCKET_RELATIVE),
+            ROOT_UID,
+        )
+    }
+
+    #[cfg(test)]
+    fn bind_path(path: &Path, expected_uid: u32) -> Result<Self, SelectorBoundaryError> {
+        let parent_path = path
+            .parent()
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let leaf = path
+            .file_name()
+            .map(OsString::from)
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let parent = File::open(parent_path).map_err(io_error)?;
+        Self::bind_in_parent(path, parent, leaf, expected_uid)
+    }
+
+    fn bind_beneath(
+        ancestry_root: &Path,
+        relative_path: &Path,
+        expected_uid: u32,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let parent_relative = relative_path
+            .parent()
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let leaf = relative_path
+            .file_name()
+            .map(OsString::from)
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        let root = File::open(ancestry_root).map_err(io_error)?;
+        let parent = open_directory_chain(root, parent_relative, expected_uid)?;
+        let path = ancestry_root.join(relative_path);
+        Self::bind_in_parent(&path, parent, leaf, expected_uid)
+    }
+
+    fn bind_in_parent(
+        path: &Path,
+        parent: File,
+        leaf: OsString,
+        expected_uid: u32,
+    ) -> Result<Self, SelectorBoundaryError> {
+        let parent_path = path
+            .parent()
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+        validate_listener_parent(parent_path, &parent, expected_uid)?;
+        match statat(&parent, Path::new(&leaf), AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {}
+            _ => return Err(SelectorBoundaryError::ArtifactInvalid),
+        }
+        let listener = UnixListener::bind(path).map_err(io_error)?;
+        Self::from_bound(
+            listener,
+            parent,
+            parent_path.to_path_buf(),
+            leaf,
+            expected_uid,
+        )
+        .and_then(|owned| owned.finish_setup(parent_path))
+    }
+
+    fn from_bound(
+        listener: UnixListener,
+        parent: File,
+        parent_path: PathBuf,
+        leaf: OsString,
+        expected_uid: u32,
+    ) -> Result<Self, SelectorBoundaryError> {
+        // Without a captured pathname identity there is no safe basis for
+        // unlinking after an observation failure. Retaining a fail-closed stale
+        // node is preferable to removing a possible replacement.
+        let path = OwnedSocketPath::capture(parent, parent_path, leaf, expected_uid)?;
+        Ok(Self {
+            listener,
+            path,
+            owned: true,
+        })
+    }
+
+    fn finish_setup(self, parent_path: &Path) -> Result<Self, SelectorBoundaryError> {
+        self.path.finish_setup(parent_path)?;
+        Ok(self)
+    }
+
+    /// Accept one evaluator connection without interpreting its authority.
+    ///
+    /// The returned stream is passed to
+    /// [`RootSelectorComposition::evaluate_root_connection`], which performs
+    /// the required peer authentication and protocol handling.
+    ///
+    /// # Errors
+    /// Returns a closed I/O error when the listener cannot accept a stream.
+    pub fn accept(&self) -> Result<UnixStream, SelectorBoundaryError> {
+        self.path.verify()?;
+        self.listener
+            .accept()
+            .map(|(stream, _)| stream)
+            .map_err(io_error)
+    }
+
+    /// Remove the exact owned socket and consume the listener.
+    ///
+    /// # Errors
+    /// Returns a closed identity error if the pathname is absent or has been
+    /// replaced. A replacement is never removed.
+    pub fn close(mut self) -> Result<(), SelectorBoundaryError> {
+        let result = self.remove_owned_socket();
+        if result.is_ok() {
+            self.owned = false;
+        }
+        result
+    }
+
+    fn remove_owned_socket(&self) -> Result<(), SelectorBoundaryError> {
+        self.path.remove()
+    }
+}
+
+impl Drop for OwnedSelectorListener {
+    fn drop(&mut self) {
+        if self.owned {
+            let _cleanup_result = self.remove_owned_socket();
+        }
+    }
+}
+
+fn validate_listener_parent(
+    path: &Path,
+    parent: &File,
+    expected_uid: u32,
+) -> Result<(), SelectorBoundaryError> {
+    validate_listener_parent_with(path, parent, expected_uid, File::metadata)
+}
+
+fn validate_listener_parent_with(
+    path: &Path,
+    parent: &File,
+    expected_uid: u32,
+    held_metadata: impl FnOnce(&File) -> std::io::Result<std::fs::Metadata>,
+) -> Result<(), SelectorBoundaryError> {
+    let held = held_metadata(parent).map_err(io_error)?;
+    let named = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if !held.is_dir()
+        || !named.is_dir()
+        || held.uid() != expected_uid
+        || held.mode() & GROUP_OR_OTHER_WRITE != 0
+        || held.dev() != named.dev()
+        || held.ino() != named.ino()
+    {
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn listener_socket_identity(
+    parent: &File,
+    leaf: &OsString,
+    expected_uid: u32,
+) -> Result<SocketIdentity, SelectorBoundaryError> {
+    let (identity, mode) = named_socket(parent, leaf, expected_uid)?;
+    if mode != SELECTOR_SOCKET_MODE {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(identity)
+}
+
+fn named_socket(
+    parent: &File,
+    leaf: &OsString,
+    expected_uid: u32,
+) -> Result<(SocketIdentity, u32), SelectorBoundaryError> {
+    let metadata =
+        statat(parent, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW).map_err(artifact_invalid)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
+        || metadata.st_uid != expected_uid
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok((
+        SocketIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        },
+        metadata.st_mode & 0o777,
+    ))
+}
+
+fn require_same_socket(
+    current: SocketIdentity,
+    expected: SocketIdentity,
+) -> Result<(), SelectorBoundaryError> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(SelectorBoundaryError::ArtifactInvalid)
+    }
+}
+
+fn remove_matching_socket(
+    parent: &File,
+    leaf: &OsString,
+    expected: SocketIdentity,
+    expected_uid: u32,
+) -> Result<(), SelectorBoundaryError> {
+    let metadata =
+        statat(parent, Path::new(leaf), AtFlags::SYMLINK_NOFOLLOW).map_err(artifact_invalid)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Socket
+        || metadata.st_uid != expected_uid
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    require_same_socket(
+        SocketIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        },
+        expected,
+    )?;
+    unlinkat(parent, Path::new(leaf), AtFlags::empty()).map_err(io_error)
 }
 
 impl RootSelectorComposition {
@@ -714,17 +1030,11 @@ fn write_policy_error(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
 ) -> Result<(), SelectorBoundaryError> {
-    write_local_error(
+    write_pre_admission_error(
         stream,
-        &SandboxLocalError {
-            phase: SandboxLocalErrorPhase::BeforeSpx1,
-            operation: Some(SandboxProviderOperation::Execute),
-            request_id: Some(decoded.provider_request_id),
-            attempt_id: None,
-            agr1_digest: None,
-            code: SandboxLocalErrorCode::PolicyUnavailable,
-            safe_detail: None,
-        },
+        decoded,
+        SandboxLocalErrorPhase::BeforeSpx1,
+        SandboxLocalErrorCode::PolicyUnavailable,
     )
 }
 
@@ -732,17 +1042,11 @@ fn write_authority_mismatch(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
 ) -> Result<(), SelectorBoundaryError> {
-    write_local_error(
+    write_pre_admission_error(
         stream,
-        &SandboxLocalError {
-            phase: SandboxLocalErrorPhase::BeforeSpx1,
-            operation: Some(SandboxProviderOperation::Execute),
-            request_id: Some(decoded.provider_request_id),
-            attempt_id: Some(decoded.attempt_id),
-            agr1_digest: None,
-            code: SandboxLocalErrorCode::RequestAuthorityMismatch,
-            safe_detail: None,
-        },
+        decoded,
+        SandboxLocalErrorPhase::BeforeSpx1,
+        SandboxLocalErrorCode::RequestAuthorityMismatch,
     )
 }
 
@@ -750,15 +1054,29 @@ fn write_provider_unavailable(
     stream: &mut UnixStream,
     decoded: &DecodedSelectorRequest,
 ) -> Result<(), SelectorBoundaryError> {
+    write_pre_admission_error(
+        stream,
+        decoded,
+        SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+        SandboxLocalErrorCode::ProviderUnavailable,
+    )
+}
+
+fn write_pre_admission_error(
+    stream: &mut UnixStream,
+    decoded: &DecodedSelectorRequest,
+    phase: SandboxLocalErrorPhase,
+    code: SandboxLocalErrorCode,
+) -> Result<(), SelectorBoundaryError> {
     write_local_error(
         stream,
         &SandboxLocalError {
-            phase: SandboxLocalErrorPhase::AfterSpx1BeforeAdmission,
+            phase,
             operation: Some(SandboxProviderOperation::Execute),
             request_id: Some(decoded.provider_request_id),
             attempt_id: Some(decoded.attempt_id),
             agr1_digest: None,
-            code: SandboxLocalErrorCode::ProviderUnavailable,
+            code,
             safe_detail: None,
         },
     )
@@ -911,7 +1229,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::process::Command;
@@ -924,7 +1242,397 @@ mod tests {
     const RUNTIME_DIRECTORY: &str = "/run/pigloros";
     const SOCKET_MODE: u32 = 0o600;
 
-    struct FixedCompositionFixture;
+    struct ListenerTestDirectory {
+        directory: tempfile::TempDir,
+        socket: std::path::PathBuf,
+        uid: u32,
+    }
+
+    impl ListenerTestDirectory {
+        fn create() -> TestResult<Self> {
+            let directory = tempfile::tempdir()?;
+            fs::set_permissions(
+                directory.path(),
+                fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+            )?;
+            let uid = fs::metadata(directory.path())?.uid();
+            let socket = directory.path().join("selector.sock");
+            Ok(Self {
+                directory,
+                socket,
+                uid,
+            })
+        }
+    }
+
+    #[test]
+    fn owned_selector_listener_accepts_and_removes_only_its_socket() -> TestResult {
+        assert_eq!(
+            Path::new("/").join(SANDBOX_SELECTOR_SOCKET_RELATIVE),
+            Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET)
+        );
+        let fixture = ListenerTestDirectory::create()?;
+        let listener = OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid)?;
+        let client = UnixStream::connect(&fixture.socket)?;
+        let accepted = listener.accept()?;
+        drop(accepted);
+        drop(client);
+        listener.close()?;
+        assert!(!fixture.socket.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn owned_selector_listener_rejects_a_symlink_ancestor() -> TestResult {
+        let root = tempfile::tempdir()?;
+        fs::set_permissions(
+            root.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        let uid = fs::metadata(root.path())?.uid();
+        assert!(OwnedSelectorListener::bind_beneath(root.path(), Path::new(""), uid).is_err());
+        assert!(OwnedSelectorListener::bind_beneath(root.path(), Path::new("."), uid).is_err());
+        assert!(OwnedSelectorListener::bind_beneath(
+            &root.path().join("missing"),
+            Path::new("runtime/selector.sock"),
+            uid,
+        )
+        .is_err());
+        assert!(OwnedSelectorListener::bind_in_parent(
+            Path::new("/"),
+            File::open(root.path())?,
+            OsString::from("selector.sock"),
+            uid,
+        )
+        .is_err());
+        let parent = root.path().join("runtime");
+        fs::create_dir(&parent)?;
+        fs::set_permissions(&parent, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+
+        let relative = Path::new("runtime/selector.sock");
+        OwnedSelectorListener::bind_beneath(root.path(), relative, uid)?.close()?;
+
+        fs::remove_dir(&parent)?;
+        let replacement = root.path().join("replacement");
+        fs::create_dir(&replacement)?;
+        fs::set_permissions(
+            &replacement,
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        std::os::unix::fs::symlink("replacement", &parent)?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_beneath(root.path(), relative, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn owned_selector_listener_preserves_a_replacement_socket() -> TestResult {
+        let fixture = ListenerTestDirectory::create()?;
+        let listener = OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid)?;
+        fs::remove_file(&fixture.socket)?;
+        let replacement = UnixListener::bind(&fixture.socket)?;
+        fs::set_permissions(
+            &fixture.socket,
+            fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        assert!(matches!(
+            listener.accept(),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        drop(listener);
+        assert!(fs::symlink_metadata(&fixture.socket)?
+            .file_type()
+            .is_socket());
+        drop(replacement);
+        fs::remove_file(&fixture.socket)?;
+        Ok(())
+    }
+
+    #[test]
+    fn owned_selector_listener_rejects_unsafe_or_occupied_parents() -> TestResult {
+        let fixture = ListenerTestDirectory::create()?;
+        fs::set_permissions(fixture.directory.path(), fs::Permissions::from_mode(0o775))?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        fs::set_permissions(
+            fixture.directory.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        fs::write(&fixture.socket, b"occupied")?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(Path::new("/"), fixture.uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        let child = fixture.directory.path().join("child");
+        fs::create_dir(&child)?;
+        fs::set_permissions(&child, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&child.join(".."), fixture.uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(
+                &fixture
+                    .directory
+                    .path()
+                    .join("missing")
+                    .join("selector.sock"),
+                fixture.uid,
+            ),
+            Err(SelectorBoundaryError::Io)
+        ));
+        let long_socket = fixture.directory.path().join("s".repeat(200));
+        assert!(matches!(
+            OwnedSelectorListener::bind_path(&long_socket, fixture.uid),
+            Err(SelectorBoundaryError::Io)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn listener_identity_helpers_reject_every_unsafe_shape() -> TestResult {
+        let fixture = ListenerTestDirectory::create()?;
+        let foreign_uid = fixture.uid ^ 1;
+        let leaf = fixture
+            .socket
+            .file_name()
+            .ok_or("socket leaf missing")?
+            .to_os_string();
+        let parent = File::open(fixture.directory.path())?;
+
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, fixture.uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::write(&fixture.socket, b"not a socket")?;
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, fixture.uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::remove_file(&fixture.socket)?;
+
+        let listener = UnixListener::bind(&fixture.socket)?;
+        fs::set_permissions(&fixture.socket, fs::Permissions::from_mode(0o644))?;
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, fixture.uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::set_permissions(
+            &fixture.socket,
+            fs::Permissions::from_mode(SELECTOR_SOCKET_MODE),
+        )?;
+        assert!(matches!(
+            listener_socket_identity(&parent, &leaf, foreign_uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        let identity = listener_socket_identity(&parent, &leaf, fixture.uid)?;
+        assert_eq!(named_socket(&parent, &leaf, fixture.uid)?.0, identity);
+        assert_eq!(require_same_socket(identity, identity), Ok(()));
+        assert!(matches!(
+            require_same_socket(
+                identity,
+                SocketIdentity {
+                    device: identity.device,
+                    inode: identity.inode.wrapping_add(1),
+                },
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(matches!(
+            remove_matching_socket(&parent, &leaf, identity, foreign_uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(matches!(
+            remove_matching_socket(
+                &parent,
+                &leaf,
+                SocketIdentity {
+                    device: identity.device,
+                    inode: identity.inode.wrapping_add(1),
+                },
+                fixture.uid,
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        drop(listener);
+        fs::remove_file(&fixture.socket)?;
+
+        let listener = OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid)?;
+        fs::remove_file(&fixture.socket)?;
+        fs::write(&fixture.socket, b"replacement")?;
+        assert!(matches!(
+            listener.close(),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert_eq!(fs::read(&fixture.socket)?, b"replacement");
+        Ok(())
+    }
+
+    fn capture_test_listener(path: &Path, uid: u32) -> TestResult<OwnedSelectorListener> {
+        let listener = UnixListener::bind(path)?;
+        let parent = File::open(path.parent().ok_or("listener parent missing")?)?;
+        let leaf = path
+            .file_name()
+            .ok_or("listener leaf missing")?
+            .to_os_string();
+        OwnedSelectorListener::from_bound(
+            listener,
+            parent,
+            path.parent()
+                .ok_or("listener parent missing")?
+                .to_path_buf(),
+            leaf,
+            uid,
+        )
+        .map_err(Into::into)
+    }
+
+    #[test]
+    fn listener_setup_and_cleanup_propagate_each_identity_failure() -> TestResult {
+        let fixture = ListenerTestDirectory::create()?;
+
+        let owned = capture_test_listener(&fixture.socket, fixture.uid)?;
+        assert!(matches!(
+            owned.path.finish_setup(Path::new("/different-parent")),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        owned.path.finish_setup(fixture.directory.path())?;
+        owned.close()?;
+
+        let listener = UnixListener::bind(&fixture.socket)?;
+        let parent = File::open(fixture.directory.path())?;
+        assert!(matches!(
+            OwnedSelectorListener::from_bound(
+                listener,
+                parent,
+                fixture.directory.path().to_path_buf(),
+                OsString::from("missing.sock"),
+                fixture.uid,
+            ),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::remove_file(&fixture.socket)?;
+
+        let owned = capture_test_listener(&fixture.socket, fixture.uid)?;
+        fs::remove_file(&fixture.socket)?;
+        assert!(matches!(
+            owned.finish_setup(fixture.directory.path()),
+            Err(SelectorBoundaryError::Io)
+        ));
+
+        let owned = capture_test_listener(&fixture.socket, fixture.uid)?;
+        fs::remove_file(&fixture.socket)?;
+        fs::write(&fixture.socket, b"replacement")?;
+        assert!(matches!(
+            owned.finish_setup(fixture.directory.path()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::remove_file(&fixture.socket)?;
+
+        let owned = capture_test_listener(&fixture.socket, fixture.uid)?;
+        fs::remove_file(&fixture.socket)?;
+        let replacement = UnixListener::bind(&fixture.socket)?;
+        assert!(matches!(
+            owned.finish_setup(fixture.directory.path()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        drop(replacement);
+        fs::remove_file(&fixture.socket)?;
+
+        let owned = capture_test_listener(&fixture.socket, fixture.uid)?;
+        let moved_parent = fixture.directory.path().with_extension("held");
+        fs::rename(fixture.directory.path(), &moved_parent)?;
+        fs::create_dir(fixture.directory.path())?;
+        fs::set_permissions(
+            fixture.directory.path(),
+            fs::Permissions::from_mode(SELECTOR_PARENT_MODE),
+        )?;
+        assert!(matches!(
+            owned.finish_setup(fixture.directory.path()),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::remove_file(moved_parent.join("selector.sock"))?;
+        fs::remove_dir(moved_parent)?;
+
+        let listener = OwnedSelectorListener::bind_path(&fixture.socket, fixture.uid)?;
+        fs::remove_file(&fixture.socket)?;
+        assert!(matches!(
+            listener.close(),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn listener_parent_validation_rejects_each_identity_boundary() -> TestResult {
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("parent");
+        fs::create_dir(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+        let uid = fs::metadata(&path)?.uid();
+        let held = File::open(&path)?;
+        assert!(matches!(
+            validate_listener_parent_with(&path, &held, uid, |_| {
+                Err(std::io::Error::other("injected metadata failure"))
+            }),
+            Err(SelectorBoundaryError::Io)
+        ));
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid ^ 1),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        validate_listener_parent(&path, &held, uid)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o775))?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::set_permissions(&path, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+
+        let moved = temporary.path().join("held-parent");
+        fs::rename(&path, &moved)?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::Io)
+        ));
+        fs::write(&path, b"replacement")?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        fs::remove_file(&path)?;
+        fs::create_dir(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SELECTOR_PARENT_MODE))?;
+        assert!(matches!(
+            validate_listener_parent(&path, &held, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+
+        let regular = temporary.path().join("regular");
+        fs::write(&regular, b"regular")?;
+        let regular_file = File::open(&regular)?;
+        assert!(matches!(
+            validate_listener_parent(&regular, &regular_file, uid),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        Ok(())
+    }
+
+    struct FixedCompositionFixture {
+        installation: Option<SocketIdentity>,
+        runtime: Option<SocketIdentity>,
+    }
 
     impl FixedCompositionFixture {
         fn create() -> TestResult<Self> {
@@ -932,7 +1640,10 @@ mod tests {
                 return Err("fixed selector test paths already exist".into());
             }
             fs::create_dir(INSTALLATION_PARENT)?;
-            let fixture = Self;
+            let mut fixture = Self {
+                installation: Some(path_identity(Path::new(INSTALLATION_PARENT))?),
+                runtime: None,
+            };
             fs::set_permissions(INSTALLATION_PARENT, fs::Permissions::from_mode(0o700))?;
             fs::create_dir(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)?;
             fs::set_permissions(
@@ -940,6 +1651,7 @@ mod tests {
                 fs::Permissions::from_mode(0o700),
             )?;
             fs::create_dir(RUNTIME_DIRECTORY)?;
+            fixture.runtime = Some(path_identity(Path::new(RUNTIME_DIRECTORY))?);
             fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
             Ok(fixture)
         }
@@ -947,44 +1659,67 @@ mod tests {
 
     impl Drop for FixedCompositionFixture {
         fn drop(&mut self) {
-            for socket in [
-                "/run/pigloros/provider-execute.sock",
-                "/run/pigloros/provider-control.sock",
-            ] {
-                drop(fs::remove_file(socket));
-            }
-            drop(fs::remove_dir_all(INSTALLATION_PARENT));
-            drop(fs::remove_dir_all(RUNTIME_DIRECTORY));
+            remove_owned_test_tree(Path::new(RUNTIME_DIRECTORY), self.runtime);
+            remove_owned_test_tree(Path::new(INSTALLATION_PARENT), self.installation);
         }
     }
 
-    fn privileged_composition_child() -> TestResult<bool> {
-        if rustix::process::geteuid().as_raw() == ROOT_UID {
-            return Ok(false);
+    fn path_identity(path: &Path) -> TestResult<SocketIdentity> {
+        let metadata = fs::symlink_metadata(path)?;
+        Ok(SocketIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn remove_owned_test_tree(path: &Path, expected: Option<SocketIdentity>) {
+        let matches = expected.is_some_and(|expected| {
+            fs::symlink_metadata(path).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && metadata.dev() == expected.device
+                    && metadata.ino() == expected.inode
+            })
+        });
+        if matches {
+            drop(fs::remove_dir_all(path));
         }
-        let mut command = Command::new("sudo");
-        command.args(["-n", "env"]);
-        command.arg(format!("{PRIVILEGED_COMPOSITION_TEST}=1"));
-        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
-            command.arg(format!("LLVM_PROFILE_FILE={}", profile.to_string_lossy()));
-        }
-        let output = command
+    }
+
+    enum IsolatedCompositionRole {
+        Delegated,
+        ExecuteBody,
+    }
+
+    fn run_isolated_test(test_name: &str) -> TestResult {
+        let runner =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-isolated-test.sh");
+        let output = Command::new(runner)
             .arg(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "root_selector::tests::nonactivating_public_composition_authenticates_sly1",
-                "--nocapture",
-            ])
+            .arg(test_name)
             .output()?;
         if !output.status.success() {
             return Err(format!(
-                "privileged selector composition failed:\nstdout:\n{}\nstderr:\n{}",
+                "isolated test {test_name} failed with {}:\nstdout:\n{}\nstderr:\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             )
             .into());
         }
-        Ok(true)
+        Ok(())
+    }
+
+    fn isolated_composition_role() -> TestResult<IsolatedCompositionRole> {
+        if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_some() {
+            if rustix::process::geteuid().as_raw() != ROOT_UID {
+                return Err("isolated selector composition child is not root".into());
+            }
+            return Ok(IsolatedCompositionRole::ExecuteBody);
+        }
+        run_isolated_test(
+            "root_selector::tests::nonactivating_public_composition_authenticates_sly1",
+        )?;
+        Ok(IsolatedCompositionRole::Delegated)
     }
 
     fn serve_describe_response(
@@ -992,7 +1727,7 @@ mod tests {
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
     ) -> TestResult {
-        let (mut stream, _) = listener.accept()?;
+        let mut stream = accept_test_connection(listener)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut prefix = [0; 4];
@@ -1010,6 +1745,23 @@ mod tests {
         stream.write_all(&response)?;
         stream.shutdown(std::net::Shutdown::Write)?;
         Ok(())
+    }
+
+    fn accept_test_connection(listener: &UnixListener) -> TestResult<UnixStream> {
+        listener.set_nonblocking(true)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err("timed out waiting for provider test connection".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     fn read_frame(stream: &mut UnixStream) -> TestResult<Vec<u8>> {
@@ -1076,7 +1828,7 @@ mod tests {
         epochs: [u64; 3],
     ) -> TestResult {
         for identity_conflict in [false, true] {
-            let (mut stream, _) = listener.accept()?;
+            let mut stream = accept_test_connection(listener)?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
             let spx1 = read_frame(&mut stream)?;
@@ -1101,13 +1853,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn nonactivating_public_composition_authenticates_sly1() -> TestResult {
-        if privileged_composition_child()? {
+        if matches!(
+            isolated_composition_role()?,
+            IsolatedCompositionRole::Delegated
+        ) {
             return Ok(());
-        }
-        if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none()
-            && rustix::process::geteuid().as_raw() != ROOT_UID
-        {
-            return Err("privileged selector composition did not start".into());
         }
 
         let _paths = FixedCompositionFixture::create()?;
@@ -1166,6 +1916,10 @@ mod tests {
         let composition = RootSelectorComposition::open()?;
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
+        let evaluator_listener = OwnedSelectorListener::bind()?;
+        assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        evaluator_listener.close()?;
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
 
         let (_, reply) = evaluate_composition_request(&composition, &request, resolved.attempt())?;
         assert_eq!(
@@ -2400,7 +3154,12 @@ mod tests {
         client.write_all(&encoded.attempt_stream)?;
         client.shutdown(std::net::Shutdown::Write)?;
         service.handle_connection(server)?;
-        assert_eq!(read_local_error(&mut client)?.code, expected);
+        let error = read_local_error(&mut client)?;
+        assert_eq!(error.code, expected);
+        if expected == SandboxLocalErrorCode::PolicyUnavailable {
+            assert_eq!(error.request_id, Some(encoded.provider_request_id));
+            assert_eq!(error.attempt_id, Some(encoded.attempt_id));
+        }
         Ok(())
     }
 
@@ -2410,7 +3169,12 @@ mod tests {
     ) -> TestResult {
         let (mut root, mut client) = UnixStream::pair()?;
         write(&mut root)?;
-        assert_eq!(read_local_error(&mut client)?.code, expected);
+        let error = read_local_error(&mut client)?;
+        assert_eq!(error.code, expected);
+        if expected == SandboxLocalErrorCode::PolicyUnavailable {
+            assert!(error.request_id.is_some());
+            assert!(error.attempt_id.is_some());
+        }
         Ok(())
     }
 

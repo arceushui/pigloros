@@ -1060,9 +1060,9 @@ fn safe_detail_uses_a_strict_utf8_byte_bound_in_both_decoders() -> TestResult {
     for detail in [None, Some("x".to_owned()), Some("é".repeat(128))] {
         let local = SandboxLocalErrorV1 {
             phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
-            operation: None,
-            request_id: None,
-            attempt_id: None,
+            operation: Some(SandboxProviderOperationV1::Execute),
+            request_id: Some([1; 16]),
+            attempt_id: Some([2; 16]),
             agr1_digest: None,
             code: SandboxLocalErrorCodeV1::PolicyUnavailable,
             safe_detail: detail.clone(),
@@ -1098,9 +1098,9 @@ fn safe_detail_uses_a_strict_utf8_byte_bound_in_both_decoders() -> TestResult {
     ] {
         let local = SandboxLocalErrorV1 {
             phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
-            operation: None,
-            request_id: None,
-            attempt_id: None,
+            operation: Some(SandboxProviderOperationV1::Execute),
+            request_id: Some([1; 16]),
+            attempt_id: Some([2; 16]),
             agr1_digest: None,
             code: SandboxLocalErrorCodeV1::PolicyUnavailable,
             safe_detail: Some(detail.clone()),
@@ -2005,11 +2005,6 @@ fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
         (
             SandboxLocalErrorPhaseV1::BeforeSpx1,
             SandboxLocalErrorCodeV1::PolicyUnavailable,
-            false,
-        ),
-        (
-            SandboxLocalErrorPhaseV1::BeforeSpx1,
-            SandboxLocalErrorCodeV1::PolicyUnavailable,
             true,
         ),
         (
@@ -2026,6 +2021,11 @@ fn local_errors_round_trip_every_legal_phase_and_failure_code() -> TestResult {
             SandboxLocalErrorPhaseV1::BeforeSpx1,
             SandboxLocalErrorCodeV1::PayloadLimitExceeded,
             true,
+        ),
+        (
+            SandboxLocalErrorPhaseV1::BeforeSpx1,
+            SandboxLocalErrorCodeV1::PayloadLimitExceeded,
+            false,
         ),
         (
             SandboxLocalErrorPhaseV1::AfterSpx1BeforeAdmission,
@@ -2110,6 +2110,146 @@ fn local_errors_reject_codes_from_another_phase() {
         };
         assert!(error.validate().is_err());
     }
+}
+
+#[test]
+fn complete_selector_policy_errors_require_both_derived_identities() -> TestResult {
+    for (request_id, attempt_id) in [(Some([1; 16]), None), (None, Some([2; 16])), (None, None)] {
+        let error = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
+            operation: Some(SandboxProviderOperationV1::Execute),
+            request_id,
+            attempt_id,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::PolicyUnavailable,
+            safe_detail: None,
+        };
+        assert_eq!(
+            error.validate(),
+            Err(SandboxContractErrorV1::FieldOutOfBounds)
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![
+                Value::Text("SLE1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Integer(0.into()),
+                Value::Integer(1.into()),
+                request_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                Value::Null,
+                Value::Integer(2.into()),
+                Value::Null,
+            ]),
+            &mut bytes,
+        )?;
+        assert!(independent::SandboxLocalError::from_canonical_cbor(&bytes).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn invalid_selector_request_preserves_each_decoded_identity_prefix() -> TestResult {
+    for (operation, request_id, attempt_id) in [
+        (None, None, None),
+        (Some(SandboxProviderOperationV1::Execute), None, None),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            Some([1; 16]),
+            None,
+        ),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            Some([1; 16]),
+            Some([2; 16]),
+        ),
+    ] {
+        let error = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
+            operation,
+            request_id,
+            attempt_id,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::InvalidSelectorRequest,
+            safe_detail: None,
+        };
+        let bytes = error.to_canonical_cbor()?;
+        assert_eq!(SandboxLocalErrorV1::from_canonical_cbor(&bytes)?, error);
+        independent::SandboxLocalError::from_canonical_cbor(&bytes)?;
+    }
+
+    for (operation, request_id, attempt_id) in [
+        (None, Some([1; 16]), None),
+        (
+            Some(SandboxProviderOperationV1::Execute),
+            None,
+            Some([2; 16]),
+        ),
+        (Some(SandboxProviderOperationV1::Describe), None, None),
+    ] {
+        let error = SandboxLocalErrorV1 {
+            phase: SandboxLocalErrorPhaseV1::BeforeSpx1,
+            operation,
+            request_id,
+            attempt_id,
+            agr1_digest: None,
+            code: SandboxLocalErrorCodeV1::InvalidSelectorRequest,
+            safe_detail: None,
+        };
+        assert_eq!(
+            error.validate(),
+            Err(SandboxContractErrorV1::FieldOutOfBounds)
+        );
+        let operation = match operation {
+            None => Value::Null,
+            Some(SandboxProviderOperationV1::Describe) => Value::Integer(0.into()),
+            Some(SandboxProviderOperationV1::Execute) => Value::Integer(1.into()),
+            Some(_) => return Err("unexpected local-error operation fixture".into()),
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![
+                Value::Text("SLE1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Integer(0.into()),
+                operation,
+                request_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                Value::Null,
+                Value::Integer(4.into()),
+                Value::Null,
+            ]),
+            &mut bytes,
+        )?;
+        assert!(independent::SandboxLocalError::from_canonical_cbor(&bytes).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn before_spx1_errors_reject_admission_and_partial_payload_identity() -> TestResult {
+    for (attempt_id, admission_digest, code) in
+        [(Some([2; 16]), Some([3; 32]), 4_u64), (None, None, 6_u64)]
+    {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![
+                Value::Text("SLE1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Integer(0.into()),
+                Value::Integer(1.into()),
+                Value::Bytes(vec![1; 16]),
+                attempt_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
+                admission_digest.map_or(Value::Null, |digest| Value::Bytes(digest.to_vec())),
+                Value::Integer(code.into()),
+                Value::Null,
+            ]),
+            &mut bytes,
+        )?;
+        assert!(SandboxLocalErrorV1::from_canonical_cbor(&bytes).is_err());
+        assert!(independent::SandboxLocalError::from_canonical_cbor(&bytes).is_err());
+    }
+    Ok(())
 }
 
 #[test]

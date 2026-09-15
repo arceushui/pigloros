@@ -1033,6 +1033,10 @@ jobs:
         run: |
           python scripts/test_check_asan_ci_policy.py
           python scripts/test_check_lsan_suppression_report.py
+      - name: Check delegated isolated-test policy
+        run: |
+          python scripts/check_isolated_test_runner_policy.py
+          python scripts/test_check_isolated_test_runner_policy.py
       - name: Check cargo-crap CI policy
         run: python scripts/check_cargo_crap_ci_policy.py
       - name: Test cargo-crap policy checkers

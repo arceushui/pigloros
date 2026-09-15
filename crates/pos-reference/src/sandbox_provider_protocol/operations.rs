@@ -162,6 +162,57 @@ fn decode_optional_operation(
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DecodedLocalErrorIdentity {
+    Unidentified,
+    Operation,
+    Request,
+    Complete,
+}
+
+const fn decoded_local_error_identity(
+    error: &SandboxLocalError,
+) -> Option<DecodedLocalErrorIdentity> {
+    match (
+        error.operation,
+        error.request_id.is_some(),
+        error.attempt_id.is_some(),
+    ) {
+        (None, false, false) => Some(DecodedLocalErrorIdentity::Unidentified),
+        (Some(SandboxProviderOperation::Execute), false, false) => {
+            Some(DecodedLocalErrorIdentity::Operation)
+        }
+        (Some(SandboxProviderOperation::Execute), true, false) => {
+            Some(DecodedLocalErrorIdentity::Request)
+        }
+        (Some(SandboxProviderOperation::Execute), true, true) => {
+            Some(DecodedLocalErrorIdentity::Complete)
+        }
+        _ => None,
+    }
+}
+
+fn before_spx1_local_error_is_valid(
+    error: &SandboxLocalError,
+    identity: Option<DecodedLocalErrorIdentity>,
+) -> bool {
+    if error.agr1_digest.is_some() {
+        return false;
+    }
+    match error.code {
+        SandboxLocalErrorCode::PolicyUnavailable
+        | SandboxLocalErrorCode::RequestAuthorityMismatch => {
+            identity == Some(DecodedLocalErrorIdentity::Complete)
+        }
+        SandboxLocalErrorCode::InvalidSelectorRequest => identity.is_some(),
+        SandboxLocalErrorCode::PayloadLimitExceeded => matches!(
+            identity,
+            Some(DecodedLocalErrorIdentity::Unidentified | DecodedLocalErrorIdentity::Complete)
+        ),
+        _ => false,
+    }
+}
+
 fn validate_local_error_shape(
     error: &SandboxLocalError,
 ) -> Result<(), SandboxProviderProtocolError> {
@@ -171,34 +222,12 @@ fn validate_local_error_shape(
     {
         return Err(SandboxProviderProtocolError::FieldOutOfBounds);
     }
-    let execute = error.operation == Some(SandboxProviderOperation::Execute);
-    let request = error.request_id.is_some_and(|id| id != [0; 16]);
-    let attempt = error.attempt_id.is_some_and(|id| id != [0; 16]);
-    let admission = error.agr1_digest.is_some_and(|digest| digest != [0; 32]);
+    let identity = decoded_local_error_identity(error);
     let valid = match error.phase {
-        SandboxLocalErrorPhase::BeforeSpx1 => {
-            !admission
-                && (error.operation.is_none() || execute)
-                && matches!(
-                    error.code,
-                    SandboxLocalErrorCode::PolicyUnavailable
-                        | SandboxLocalErrorCode::InvalidSelectorRequest
-                        | SandboxLocalErrorCode::RequestAuthorityMismatch
-                        | SandboxLocalErrorCode::PayloadLimitExceeded
-                )
-                && if matches!(error.code, SandboxLocalErrorCode::RequestAuthorityMismatch) {
-                    execute && request && attempt
-                } else if error.code == SandboxLocalErrorCode::PayloadLimitExceeded {
-                    (!request && !attempt) || (execute && request && attempt)
-                } else {
-                    (!request && !attempt) || (request && execute)
-                }
-        }
+        SandboxLocalErrorPhase::BeforeSpx1 => before_spx1_local_error_is_valid(error, identity),
         SandboxLocalErrorPhase::AfterSpx1BeforeAdmission => {
-            execute
-                && request
-                && attempt
-                && !admission
+            identity == Some(DecodedLocalErrorIdentity::Complete)
+                && error.agr1_digest.is_none()
                 && matches!(
                     error.code,
                     SandboxLocalErrorCode::ProviderUnavailable
@@ -208,10 +237,8 @@ fn validate_local_error_shape(
                 )
         }
         SandboxLocalErrorPhase::AfterAdmission => {
-            execute
-                && request
-                && attempt
-                && admission
+            identity == Some(DecodedLocalErrorIdentity::Complete)
+                && error.agr1_digest.is_some()
                 && matches!(
                     error.code,
                     SandboxLocalErrorCode::ControlChannelUnavailable

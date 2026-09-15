@@ -601,7 +601,7 @@ pub(crate) fn decode_staged_reply(
     let value = decode_canonical_with_limit(control, CONTROL_LIMIT)
         .map_err(|_| AdapterError::ProtocolFailure)?;
     if is_magic(&value, "SLE1") {
-        return decode_local_reply(control, trailing_length);
+        return decode_local_reply(control, trailing_length, request);
     }
     decode_authenticated_reply(
         &value,
@@ -632,12 +632,12 @@ pub(crate) fn reply_carries_admission_evidence(control: &[u8]) -> bool {
 fn decode_local_reply(
     control: &[u8],
     trailing_length: u64,
+    request: &EncodedSelectorRequest,
 ) -> Result<DecodedSelectorReply, AdapterError> {
     if trailing_length != 0 {
         return Err(AdapterError::ProtocolFailure);
     }
-    let local = SandboxLocalError::from_canonical_cbor(control)
-        .map_err(|_| AdapterError::ProtocolFailure)?;
+    let local = decode_request_bound_local_error(control, request)?;
     let error = if local.phase == SandboxLocalErrorPhase::AfterAdmission {
         AdapterError::AuthenticatedEvidenceFailure
     } else {
@@ -647,6 +647,28 @@ fn decode_local_reply(
         observation: Err(error),
         provenance: None,
     })
+}
+
+fn decode_request_bound_local_error(
+    control: &[u8],
+    request: &EncodedSelectorRequest,
+) -> Result<SandboxLocalError, AdapterError> {
+    let local = SandboxLocalError::from_canonical_cbor(control)
+        .map_err(|_| AdapterError::ProtocolFailure)?;
+    require_matching_local_identity(local.request_id, request.provider_request_id)?;
+    require_matching_local_identity(local.attempt_id, request.attempt_id)?;
+    Ok(local)
+}
+
+fn require_matching_local_identity(
+    actual: Option<[u8; 16]>,
+    expected: [u8; 16],
+) -> Result<(), AdapterError> {
+    if actual.is_none_or(|actual| actual == expected) {
+        Ok(())
+    } else {
+        Err(AdapterError::ProtocolFailure)
+    }
 }
 
 fn decode_authenticated_reply(
@@ -1715,9 +1737,9 @@ mod tests {
 
         let oversized_error = SandboxLocalError {
             phase: SandboxLocalErrorPhase::BeforeSpx1,
-            operation: None,
-            request_id: None,
-            attempt_id: None,
+            operation: Some(SandboxProviderOperation::Execute),
+            request_id: Some(server_request.provider_request_id),
+            attempt_id: Some(server_request.attempt_id),
             agr1_digest: None,
             code: SandboxLocalErrorCode::PolicyUnavailable,
             safe_detail: Some("x".repeat(257)),
@@ -1879,9 +1901,9 @@ mod tests {
         let errors = [
             SandboxLocalError {
                 phase: SandboxLocalErrorPhase::BeforeSpx1,
-                operation: None,
-                request_id: None,
-                attempt_id: None,
+                operation: Some(SandboxProviderOperation::Execute),
+                request_id: Some(request.provider_request_id),
+                attempt_id: Some(request.attempt_id),
                 agr1_digest: None,
                 code: SandboxLocalErrorCode::PolicyUnavailable,
                 safe_detail: None,
@@ -1947,20 +1969,20 @@ mod tests {
         Ok(())
     }
 
-    fn local_error(phase: u64) -> Result<Vec<u8>, AdapterError> {
+    fn local_error(phase: u64, request: &EncodedSelectorRequest) -> Result<Vec<u8>, AdapterError> {
         local_error_with_fields(vec![
             Value::Text("SLE1".to_owned()),
             integer(1),
             integer(phase),
             integer(1),
-            Value::Bytes(vec![1; 16]),
-            Value::Bytes(vec![2; 16]),
+            Value::Bytes(request.provider_request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
             if phase == 2 {
                 Value::Bytes(vec![3; 32])
             } else {
                 Value::Null
             },
-            integer(if phase == 2 { 7 } else { 4 }),
+            integer(if phase == 2 { 7 } else { 2 }),
             Value::Null,
         ])
     }
@@ -2416,15 +2438,15 @@ mod tests {
     #[test]
     fn sle1_preserves_pre_and_post_admission_failure_classes() -> Result<(), AdapterError> {
         let encoded = encode_request(&request(), b"evr1", &attempt(), 0)?;
-        let pre = decode_reply(&local_error(0)?, &[], &encoded, [14; 32], 1024)?;
+        let pre = decode_reply(&local_error(0, &encoded)?, &[], &encoded, [14; 32], 1024)?;
         assert_eq!(pre.observation, Err(AdapterError::Unavailable));
-        let post = decode_reply(&local_error(2)?, &[], &encoded, [14; 32], 1024)?;
+        let post = decode_reply(&local_error(2, &encoded)?, &[], &encoded, [14; 32], 1024)?;
         assert_eq!(
             post.observation,
             Err(AdapterError::AuthenticatedEvidenceFailure)
         );
         assert_eq!(
-            decode_reply(&local_error(0)?, &[1], &encoded, [14; 32], 1024),
+            decode_reply(&local_error(0, &encoded)?, &[1], &encoded, [14; 32], 1024,),
             Err(AdapterError::ProtocolFailure)
         );
         assert_eq!(
@@ -2461,7 +2483,7 @@ mod tests {
         };
 
         let valid_cases = [
-            (0, None, None, None, None, 2),
+            (0, Some(1), Some([1; 16]), Some([2; 16]), None, 2),
             (0, None, None, None, None, 6),
             (0, None, None, None, None, 4),
             (0, Some(1), Some([1; 16]), Some([2; 16]), None, 5),
@@ -2501,8 +2523,8 @@ mod tests {
                 integer(1),
                 integer(0),
                 integer(code),
-                Value::Null,
-                Value::Null,
+                Value::Bytes(vec![1; 16]),
+                Value::Bytes(vec![2; 16]),
                 Value::Null,
                 integer(2),
                 Value::Null,
