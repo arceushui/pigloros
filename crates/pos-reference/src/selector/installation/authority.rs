@@ -52,7 +52,7 @@ fn fresh_distinct_selector_id_with(
 fn fill_nonzero_id(
     mut fill: impl FnMut(&mut [u8]) -> Result<usize, SelectorBoundaryError>,
 ) -> Result<[u8; 16], SelectorBoundaryError> {
-    let mut id = [0_u8; 16];
+    let mut id = <[u8; 16]>::default();
     let mut remaining = id.as_mut_slice();
     while !remaining.is_empty() {
         let read = fill(&mut *remaining)?;
@@ -61,7 +61,8 @@ fn fill_nonzero_id(
         }
         remaining = &mut remaining[read..];
     }
-    (id != [0; 16])
+    id.iter()
+        .any(|byte| *byte != u8::default())
         .then_some(id)
         .ok_or(SelectorBoundaryError::SelectorUnavailable)
 }

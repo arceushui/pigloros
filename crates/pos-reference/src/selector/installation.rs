@@ -457,7 +457,7 @@ impl InstalledSelectorState {
     }
 
     #[cfg(test)]
-    fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
+    pub(crate) fn open_at_for_test(root: &File) -> Result<Self, SelectorBoundaryError> {
         root.metadata()
             .map_err(|_| SelectorBoundaryError::Io)
             .and_then(|metadata| Self::open_at_for_owner(root, metadata.uid()))

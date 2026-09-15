@@ -90,6 +90,12 @@ struct ConnectedProviderStream {
     process: ProviderProcessIdentity,
 }
 
+struct ConnectedInstallationUpdate {
+    committed: CommittedInstallationUpdate,
+    context_bytes: Vec<u8>,
+    connected: ConnectedProviderStream,
+}
+
 /// Complete provider evidence authenticated against an admitted selector provider.
 #[derive(Debug)]
 pub(crate) struct AuthenticatedProviderExecution {
@@ -671,6 +677,15 @@ impl ProviderTransport {
         committed: CommittedInstallationUpdate,
         timeout: Duration,
     ) -> Result<(AdmittedSelectorProvider, Vec<u8>), SelectorBoundaryError> {
+        self.connect_committed_update(committed, timeout)
+            .and_then(|connected| Self::exchange_committed_update(connected, timeout))
+    }
+
+    fn connect_committed_update(
+        &self,
+        committed: CommittedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<ConnectedInstallationUpdate, SelectorBoundaryError> {
         committed
             .cancellation_context()
             .and_then(|context| {
@@ -680,47 +695,63 @@ impl ProviderTransport {
                     .map(|context_bytes| (committed, context_bytes))
             })
             .and_then(|(committed, context_bytes)| {
-                Deadline::new(timeout).map(|deadline| (committed, context_bytes, deadline))
+                self.control_endpoint
+                    .connect(timeout)
+                    .map(|connected| (committed, context_bytes, connected))
             })
-            .and_then(|(committed, context_bytes, deadline)| {
-                connect_before_deadline(&self.control_endpoint, &deadline)
-                    .map(|connected| (committed, context_bytes, connected, deadline))
+            .and_then(|(committed, context_bytes, connected)| {
+                self.require_admitted_process(connected.process).map(|()| {
+                    ConnectedInstallationUpdate {
+                        committed,
+                        context_bytes,
+                        connected,
+                    }
+                })
             })
-            .and_then(|(committed, context_bytes, connected, deadline)| {
-                self.require_admitted_process(connected.process)
-                    .map(|()| (committed, context_bytes, connected, deadline))
-            })
-            .and_then(|(committed, context_bytes, mut connected, deadline)| {
-                write_frame(&mut connected.stream, &context_bytes, &deadline)
-                    .map_err(selector_unavailable)
-                    .map(|()| (committed, connected, deadline))
-            })
-            .and_then(|(committed, mut connected, deadline)| {
+    }
+
+    fn exchange_committed_update(
+        connected: ConnectedInstallationUpdate,
+        timeout: Duration,
+    ) -> Result<(AdmittedSelectorProvider, Vec<u8>), SelectorBoundaryError> {
+        Deadline::new(timeout)
+            .map(|deadline| (connected, deadline))
+            .and_then(|(mut connected, deadline)| {
                 write_frame(
-                    &mut connected.stream,
-                    committed.revocation_update_bytes(),
+                    &mut connected.connected.stream,
+                    &connected.context_bytes,
                     &deadline,
                 )
                 .map_err(selector_unavailable)
-                .map(|()| (committed, connected, deadline))
+                .map(|()| (connected, deadline))
             })
-            .and_then(|(committed, connected, deadline)| {
+            .and_then(|(mut connected, deadline)| {
+                write_frame(
+                    &mut connected.connected.stream,
+                    connected.committed.revocation_update_bytes(),
+                    &deadline,
+                )
+                .map_err(selector_unavailable)
+                .map(|()| (connected, deadline))
+            })
+            .and_then(|(connected, deadline)| {
                 connected
+                    .connected
                     .stream
                     .shutdown(std::net::Shutdown::Write)
                     .map_err(selector_unavailable)
-                    .map(|()| (committed, connected, deadline))
+                    .map(|()| (connected, deadline))
             })
-            .and_then(|(committed, mut connected, deadline)| {
-                read_frame(&mut connected.stream, &deadline)
+            .and_then(|(mut connected, deadline)| {
+                read_frame(&mut connected.connected.stream, &deadline)
                     .map_err(selector_unavailable)
                     .and_then(|response| response.ok_or(SelectorBoundaryError::SelectorUnavailable))
-                    .map(|response| (committed, connected, deadline, response))
+                    .map(|response| (connected, deadline, response))
             })
-            .and_then(|(committed, mut connected, deadline, response)| {
-                ensure_eof(&mut connected.stream, &deadline)
+            .and_then(|(mut connected, deadline, response)| {
+                ensure_eof(&mut connected.connected.stream, &deadline)
                     .map_err(selector_unavailable)
-                    .map(|()| (committed, response))
+                    .map(|()| (connected.committed, response))
             })
             .and_then(|(committed, response)| {
                 committed
@@ -756,6 +787,10 @@ impl ProviderTransport {
         validate_staged_input(&request.adapter_input, input).map_err(transport_before_admission)?;
         let deadline = Deadline::new(watchdog).map_err(transport_before_admission)?;
         let mut retained_grant = None;
+        let mut progress = ProviderRequestProgress {
+            retained_grant: &mut retained_grant,
+            admission,
+        };
         if let Some(execution) = self.execute_initial_attempt(
             admitted,
             commitment,
@@ -763,10 +798,7 @@ impl ProviderTransport {
             spx1,
             input,
             &deadline,
-            ProviderRequestProgress {
-                retained_grant: &mut retained_grant,
-                admission,
-            },
+            &mut progress,
         )? {
             return Ok(execution);
         }
@@ -777,10 +809,7 @@ impl ProviderTransport {
             spx1,
             input,
             &deadline,
-            ProviderRequestProgress {
-                retained_grant: &mut retained_grant,
-                admission,
-            },
+            &mut progress,
         )
     }
 
@@ -792,19 +821,11 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
-        mut progress: ProviderRequestProgress<'_>,
+        progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<Option<AuthenticatedProviderTerminal>, ProviderTransportError> {
-        progress.admission.begin()?;
-        let first = self.execute_once(
-            admitted,
-            commitment,
-            request,
-            spx1,
-            input,
-            deadline,
-            &mut progress,
-        );
-        progress.admission.entered();
+        let first = self.execute_admitted_attempt(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        )?;
         match first {
             Ok(execution) => Ok(Some(execution)),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
@@ -823,19 +844,11 @@ impl ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
-        mut progress: ProviderRequestProgress<'_>,
+        progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        progress.admission.begin()?;
-        let retry = self.execute_once(
-            admitted,
-            commitment,
-            request,
-            spx1,
-            input,
-            deadline,
-            &mut progress,
-        );
-        progress.admission.entered();
+        let retry = self.execute_admitted_attempt(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        )?;
         match retry {
             Ok(execution) => Ok(execution),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
@@ -847,6 +860,24 @@ impl ProviderTransport {
                 PostAdmissionProviderFailure::TerminalUnavailable,
             )),
         }
+    }
+
+    fn execute_admitted_attempt(
+        &self,
+        admitted: &AdmittedSandboxProvider,
+        commitment: &SelectorGrantCommitment,
+        request: &SandboxExecuteRequest,
+        spx1: &[u8],
+        input: &mut dyn ReadSeek,
+        deadline: &Deadline,
+        progress: &mut ProviderRequestProgress<'_>,
+    ) -> Result<Result<AuthenticatedProviderTerminal, ReceiveFailure>, ProviderTransportError> {
+        progress.admission.begin()?;
+        let result = self.execute_once(
+            admitted, commitment, request, spx1, input, deadline, progress,
+        );
+        progress.admission.entered();
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -1660,6 +1691,27 @@ mod tests {
             .complete_committed_update(trailing.committed, Duration::from_secs(1))
             .is_err());
         trailing
+            .provider
+            .join()
+            .map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn committed_update_exchange_budget_starts_after_control_connect() -> TestResult {
+        let valid = committed_update_control_reply(Vec::new())?;
+        let connected = valid
+            .transport
+            .connect_committed_update(valid.committed, Duration::from_secs(1))?;
+        std::thread::sleep(Duration::from_millis(150));
+        let (successor, acknowledgement) =
+            ProviderTransport::exchange_committed_update(connected, Duration::from_millis(100))?;
+        assert!(!acknowledgement.is_empty());
+        assert_ne!(
+            successor.bootstrap().installed().manifest().digest(),
+            [0; 32]
+        );
+        valid
             .provider
             .join()
             .map_err(|_| "provider thread panicked")??;

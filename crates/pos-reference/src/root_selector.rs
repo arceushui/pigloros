@@ -97,6 +97,22 @@ struct ReceivedInstallationUpdate {
     bytes: Vec<u8>,
 }
 
+struct ClosedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    received: ReceivedInstallationUpdate,
+}
+
+struct CommittedClosedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    committed: CommittedInstallationUpdate,
+}
+
+struct SynchronizedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    successor: AdmittedSelectorProvider,
+    acknowledgement: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 enum PrepareLiveUpdateError {
     #[error(transparent)]
@@ -193,6 +209,44 @@ pub struct RootSelectorRuntime {
     composition: RootSelectorComposition,
     administrator: OwnedAdministratorListener,
     evaluator: OwnedSelectorListener,
+}
+
+#[derive(Default)]
+struct EvaluatorWorkers {
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+struct EvaluatorServeResult {
+    listener: Result<(), SelectorBoundaryError>,
+    workers: EvaluatorWorkers,
+}
+
+impl EvaluatorWorkers {
+    fn spawn(&mut self, composition: Arc<RootSelectorComposition>, stream: UnixStream) {
+        self.handles.push(thread::spawn(move || {
+            let _evaluation_result = composition.evaluate_root_connection(stream);
+        }));
+    }
+
+    fn reap_finished(&mut self) -> Result<(), SelectorBoundaryError> {
+        while let Some(index) = self
+            .handles
+            .iter()
+            .position(thread::JoinHandle::is_finished)
+        {
+            self.handles
+                .swap_remove(index)
+                .join()
+                .map_err(selector_unavailable)?;
+        }
+        Ok(())
+    }
+
+    fn join_all(mut self) -> Result<(), SelectorBoundaryError> {
+        self.handles
+            .drain(..)
+            .try_for_each(|worker| worker.join().map_err(selector_unavailable))
+    }
 }
 
 impl OwnedSelectorListener {
@@ -415,14 +469,14 @@ impl RootSelectorRuntime {
             let evaluator_stopped = Arc::clone(&stopped);
             let evaluator_completed = completed.clone();
             let evaluator_thread = scope.spawn(move || {
-                let result = serve_evaluator(
+                let served = serve_evaluator(
                     &evaluator,
                     &evaluator_administrator,
                     &evaluator_composition,
                     &evaluator_stopped,
                 );
-                let _send_result = evaluator_completed.send(result);
-                result
+                let _send_result = evaluator_completed.send(served.listener);
+                served
             });
             drop(completed);
 
@@ -431,7 +485,8 @@ impl RootSelectorRuntime {
             stopped.store(true, Ordering::Release);
             let admin = admin.join().map_err(selector_unavailable)?;
             let evaluator = evaluator_thread.join().map_err(selector_unavailable)?;
-            first.and(admin).and(evaluator)
+            let workers = evaluator.workers.join_all();
+            first.and(admin).and(evaluator.listener).and(workers)
         })
     }
 }
@@ -457,24 +512,29 @@ fn serve_evaluator(
     administrator: &OwnedAdministratorListener,
     composition: &Arc<RootSelectorComposition>,
     stopped: &AtomicBool,
+) -> EvaluatorServeResult {
+    let mut workers = EvaluatorWorkers::default();
+    let listener =
+        serve_evaluator_connections(listener, administrator, composition, stopped, &mut workers);
+    EvaluatorServeResult { listener, workers }
+}
+
+fn serve_evaluator_connections(
+    listener: &OwnedSelectorListener,
+    administrator: &OwnedAdministratorListener,
+    composition: &Arc<RootSelectorComposition>,
+    stopped: &AtomicBool,
+    workers: &mut EvaluatorWorkers,
 ) -> Result<(), SelectorBoundaryError> {
     while !stopped.load(Ordering::Acquire) {
+        workers.reap_finished()?;
         administrator.verify()?;
         match listener.try_accept()? {
-            Some(stream) => {
-                let composition = Arc::clone(composition);
-                spawn_evaluator_connection(composition, stream);
-            }
+            Some(stream) => workers.spawn(Arc::clone(composition), stream),
             None => thread::sleep(Duration::from_millis(10)),
         }
     }
     Ok(())
-}
-
-fn spawn_evaluator_connection(composition: Arc<RootSelectorComposition>, stream: UnixStream) {
-    let _connection = thread::spawn(move || {
-        let _evaluation_result = composition.evaluate_root_connection(stream);
-    });
 }
 
 impl Drop for OwnedSelectorListener {
@@ -643,30 +703,39 @@ impl RootSelectorComposition {
                 self.service
                     .admission
                     .close_and_snapshot()
-                    .map(|closed| (closed, received))
+                    .map(|admission| ClosedInstallationUpdate {
+                        admission,
+                        received,
+                    })
             })
-            .and_then(|(closed, received)| self.prepare_closed_update(closed, received))
-            .and_then(|(closed, committed)| {
+            .and_then(|closed| self.prepare_closed_update(closed))
+            .and_then(|closed| {
                 self.service
                     .transport
-                    .complete_committed_update(committed, LIVE_UPDATE_TIMEOUT)
-                    .map(|(successor, acknowledgement)| (closed, successor, acknowledgement))
+                    .complete_committed_update(closed.committed, LIVE_UPDATE_TIMEOUT)
+                    .map(
+                        |(successor, acknowledgement)| SynchronizedInstallationUpdate {
+                            admission: closed.admission,
+                            successor,
+                            acknowledgement,
+                        },
+                    )
             })
-            .and_then(|(closed, successor, acknowledgement)| {
-                synchronize_successor_provider(&self.service.transport, &successor)
-                    .map(|()| (closed, successor, acknowledgement))
+            .and_then(|synchronized| {
+                synchronize_successor_provider(&self.service.transport, &synchronized.successor)
+                    .map(|()| synchronized)
             })
-            .and_then(|(closed, successor, acknowledgement)| {
+            .and_then(|synchronized| {
                 self.service
                     .evaluation_namespaces
                     .clear()
-                    .map(|()| (closed, successor, acknowledgement))
+                    .map(|()| synchronized)
             })
-            .and_then(|(closed, successor, acknowledgement)| {
+            .and_then(|synchronized| {
                 self.service
                     .admission
-                    .admit_successor(&closed.admitted, successor)
-                    .map(|()| acknowledgement)
+                    .admit_successor(&synchronized.admission.admitted, synchronized.successor)
+                    .map(|()| synchronized.acknowledgement)
             })
             .and_then(|acknowledgement| write_control_frame(stream, &acknowledgement))
             .and_then(|()| stream.shutdown(std::net::Shutdown::Write).map_err(io_error))
@@ -695,12 +764,20 @@ impl RootSelectorComposition {
 
     fn prepare_closed_update(
         &self,
-        closed: ClosedSelectorAdmission,
-        received: ReceivedInstallationUpdate,
-    ) -> Result<(ClosedSelectorAdmission, CommittedInstallationUpdate), SelectorBoundaryError> {
-        match prepare_live_update(&closed, received.challenge, &received.bytes) {
-            Ok(committed) => Ok((closed, committed)),
-            Err(error) => finish_failed_preparation(&self.service.admission, &closed, error),
+        closed: ClosedInstallationUpdate,
+    ) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
+        match prepare_live_update(
+            &closed.admission,
+            closed.received.challenge,
+            &closed.received.bytes,
+        ) {
+            Ok(committed) => Ok(CommittedClosedInstallationUpdate {
+                admission: closed.admission,
+                committed,
+            }),
+            Err(error) => {
+                finish_failed_preparation(&self.service.admission, &closed.admission, error)
+            }
         }
     }
 }
@@ -709,7 +786,7 @@ fn finish_failed_preparation(
     admission: &SelectorAdmission,
     closed: &ClosedSelectorAdmission,
     error: PrepareLiveUpdateError,
-) -> Result<(ClosedSelectorAdmission, CommittedInstallationUpdate), SelectorBoundaryError> {
+) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
     match error {
         PrepareLiveUpdateError::BeforeRecovery(error) => {
             admission.reopen_previous(&closed.admitted).and(Err(error))
@@ -2299,6 +2376,57 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn evaluator_workers_are_joined_before_listener_shutdown_completes() -> TestResult {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let mut workers = EvaluatorWorkers::default();
+        workers.handles.push(thread::spawn(move || {
+            assert!(started_tx.send(()).is_ok());
+            assert!(release_rx.recv().is_ok());
+        }));
+        started_rx.recv_timeout(Duration::from_secs(1))?;
+
+        let joining = thread::spawn(move || {
+            assert!(joined_tx.send(workers.join_all()).is_ok());
+        });
+        assert!(joined_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(())?;
+        joined_rx.recv_timeout(Duration::from_secs(1))??;
+        joining
+            .join()
+            .map_err(|_| "worker-joining thread panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn evaluator_workers_reap_finished_handlers_and_surface_panics() -> TestResult {
+        let mut completed = EvaluatorWorkers::default();
+        completed.handles.push(thread::spawn(|| {}));
+        while !completed.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        completed.reap_finished()?;
+        assert!(completed.handles.is_empty());
+
+        let mut reap_panicked = EvaluatorWorkers::default();
+        reap_panicked
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        while !reap_panicked.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        assert!(reap_panicked.reap_finished().is_err());
+
+        let mut join_panicked = EvaluatorWorkers::default();
+        join_panicked
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        assert!(join_panicked.join_all().is_err());
+        Ok(())
+    }
+
     struct FixedCompositionFixture {
         installation: Option<SocketIdentity>,
         runtime: Option<SocketIdentity>,
@@ -2969,15 +3097,18 @@ mod tests {
         let (execution_tx, execution_rx) = std::sync::mpsc::channel();
 
         thread::scope(|scope| -> TestResult {
-            let provider = scope.spawn(|| -> TestResult {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                let _spx1 = read_frame(&mut stream)?;
-                let mut input = Vec::new();
-                stream.read_to_end(&mut input)?;
-                request_entered_tx.send(())?;
-                release_provider_rx.recv_timeout(Duration::from_secs(1))?;
-                Ok(())
+            let provider = scope.spawn(move || {
+                (|| -> TestResult {
+                    let (mut stream, _) = listener.accept()?;
+                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                    let _spx1 = read_frame(&mut stream)?;
+                    let mut input = Vec::new();
+                    stream.read_to_end(&mut input)?;
+                    request_entered_tx.send(())?;
+                    release_provider_rx.recv_timeout(Duration::from_secs(1))?;
+                    Ok(())
+                })()
+                .map_err(|error| error.to_string())
             });
             scope.spawn(|| {
                 let mut request_admission = SelectorProviderRequestAdmission::new(&lease);
@@ -2991,7 +3122,7 @@ mod tests {
                         &mut request_admission,
                     )
                     .map(|_| ());
-                drop(execution_tx.send(result));
+                assert!(execution_tx.send(result).is_ok());
             });
             request_entered_rx.recv_timeout(Duration::from_secs(1))?;
             let closed = admission.close_and_snapshot()?;
