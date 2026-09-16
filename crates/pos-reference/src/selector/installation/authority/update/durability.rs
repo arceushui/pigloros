@@ -782,6 +782,17 @@ mod tests {
     }
 
     #[test]
+    fn recovery_removal_propagates_staging_and_missing_marker_failures() -> TestResult {
+        let (_directory, root, owner) = durable_root()?;
+        assert!(remove_recovery_durably_with(&root, owner ^ 1, |_| Ok(())).is_err());
+        assert_eq!(
+            remove_recovery_durably_with(&root, owner, |_| Ok(())),
+            Err(SelectorBoundaryError::Io)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn staging_directory_rejects_occupied_and_unsafe_entries() -> TestResult {
         let (occupied, root, owner) = durable_root()?;
         fs::write(occupied.path().join(STAGING_NAME), b"occupied")?;

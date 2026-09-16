@@ -3414,6 +3414,43 @@ mod tests {
             &mut workers,
         )?;
 
+        let running = AtomicBool::new(false);
+        let mut panicked_workers = EvaluatorWorkers::default();
+        panicked_workers
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        while !panicked_workers.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        assert!(serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &running,
+            &mut panicked_workers,
+        )
+        .is_err());
+
+        fs::remove_file(&evaluator_fixture.socket)?;
+        let evaluator_replacement = UnixListener::bind(&evaluator_fixture.socket)?;
+        let mut workers = EvaluatorWorkers::default();
+        assert!(serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &running,
+            &mut workers,
+        )
+        .is_err());
+        drop(evaluator_replacement);
+        fs::remove_file(&evaluator_fixture.socket)?;
+
+        fs::remove_file(&administrator_fixture.socket)?;
+        let administrator_replacement = UnixListener::bind(&administrator_fixture.socket)?;
+        assert!(serve_administrator(&administrator, &composition, &running).is_err());
+        drop(administrator_replacement);
+        fs::remove_file(&administrator_fixture.socket)?;
+
         if owner != ROOT_UID {
             let (client, server) = UnixStream::pair()?;
             assert!(composition.update_installation(server).is_err());
