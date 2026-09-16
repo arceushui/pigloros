@@ -192,6 +192,14 @@ fn decoder_rejects_closed_header_enum_and_reference_shapes() -> TestResult {
         ReproVerificationRequestContractErrorV1::InvalidEncoding,
     );
     assert_decode_error(
+        &replace_field(&valid, 0, Value::Bytes(Vec::new()))?,
+        ReproVerificationRequestContractErrorV1::InvalidEncoding,
+    );
+    assert_decode_error(
+        &replace_field(&valid, 1, Value::Bytes(Vec::new()))?,
+        ReproVerificationRequestContractErrorV1::InvalidEncoding,
+    );
+    assert_decode_error(
         &replace_field(&valid, 1, uint(2))?,
         ReproVerificationRequestContractErrorV1::UnsupportedVersion,
     );
@@ -200,9 +208,20 @@ fn decoder_rejects_closed_header_enum_and_reference_shapes() -> TestResult {
         ReproVerificationRequestContractErrorV1::UnsupportedVersion,
     );
     assert_decode_error(
-        &replace_field(&valid, 2, Value::Bytes(vec![1; 31]))?,
+        &replace_field(&valid, 4, Value::Bytes(Vec::new()))?,
         ReproVerificationRequestContractErrorV1::InvalidEncoding,
     );
+    for index in [2, 3, 5, 6, 7, 8] {
+        for replacement in [
+            Value::Bytes(vec![1; 31]),
+            Value::Text("digest".to_owned()),
+        ] {
+            assert_decode_error(
+                &replace_field(&valid, index, replacement)?,
+                ReproVerificationRequestContractErrorV1::InvalidEncoding,
+            );
+        }
+    }
     assert_decode_error(
         &replace_field(&valid, 3, Value::Null)?,
         ReproVerificationRequestContractErrorV1::InvalidEncoding,
