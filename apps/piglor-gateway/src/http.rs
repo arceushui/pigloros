@@ -443,7 +443,6 @@ impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let status = match &self {
             Self::InvalidId(_)
-            | Self::UnsupportedAction(_)
             | Self::InvalidPageLimit { .. }
             | Self::InvalidEventsQuery(_)
             | Self::InvalidAuthorizationRequest

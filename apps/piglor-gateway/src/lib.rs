@@ -738,9 +738,6 @@ pub enum GatewayError {
     /// Malformed ULID path/body field.
     #[error("invalid id: {0}")]
     InvalidId(String),
-    /// Unsupported action event type.
-    #[error("unsupported action type: {0}")]
-    UnsupportedAction(String),
     /// An ingress identity was reused with a different canonical intent.
     #[error("ingress identity conflicts with retained canonical intent")]
     IngressConflict,
@@ -2103,7 +2100,9 @@ impl Gateway {
         payload: &serde_json::Value,
     ) -> Result<Event, GatewayError> {
         if event_type != EVENT_TYPE_ACTION {
-            return Err(GatewayError::UnsupportedAction(event_type.to_owned()));
+            return Err(GatewayError::ActionRejected(
+                ActionRejected::UnknownEventType,
+            ));
         }
         let timeline = parse_timeline_id(timeline_id)?;
         let entity = parse_entity_id(entity_id)?;
@@ -2407,7 +2406,9 @@ impl Gateway {
         ingress_id: &str,
     ) -> Result<IdentifiedAppend, GatewayError> {
         if event_type != EVENT_TYPE_ACTION {
-            return Err(GatewayError::UnsupportedAction(event_type.to_owned()));
+            return Err(GatewayError::ActionRejected(
+                ActionRejected::UnknownEventType,
+            ));
         }
         let timeline = parse_timeline_id(timeline_id)?;
         let entity = parse_entity_id(entity_id)?;
@@ -5521,7 +5522,9 @@ mod tests {
                     "device-1:unsupported",
                 )
                 .await,
-            Err(GatewayError::UnsupportedAction(_))
+            Err(GatewayError::ActionRejected(
+                ActionRejected::UnknownEventType
+            ))
         ));
         drop(gateway);
     }
@@ -6245,7 +6248,10 @@ mod tests {
             )
             .await
             .test_err();
-        assert!(matches!(err, GatewayError::UnsupportedAction(_)));
+        assert!(matches!(
+            err,
+            GatewayError::ActionRejected(ActionRejected::UnknownEventType)
+        ));
         drop(gw);
     }
 
@@ -6718,8 +6724,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn gateway_error_display() {
-        let e = GatewayError::UnsupportedAction("x".into());
-        assert!(e.to_string().contains("unsupported"));
+        let e = GatewayError::ActionRejected(ActionRejected::UnknownEventType);
+        assert!(e.to_string().contains("unknown"));
         let e = GatewayError::InvalidId("bad".into());
         assert!(e.to_string().contains("invalid"));
         let e = GatewayError::InvalidPageLimit {
@@ -6862,6 +6868,7 @@ mod tests {
             1
         );
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     #[tokio::test]
