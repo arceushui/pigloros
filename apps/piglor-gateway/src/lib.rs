@@ -34,9 +34,9 @@ use pos_core::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1, Plugin,
-    ProposedAction,
+    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
+    ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError,
+    ErasureContainmentGateV1, Plugin, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -603,6 +603,24 @@ struct GatewayActionPlugin {
     id: PluginId,
 }
 
+struct GatewayWorldActionApprover(WorldPlugin);
+
+impl ActionApprover for GatewayWorldActionApprover {
+    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+        WorldActionV1::decode(&proposal.payload)
+            .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
+            .and_then(|action| encode_world_action(&action))
+            .and_then(|canonical| {
+                if canonical != proposal.payload {
+                    return Err(ActionRejected::DomainValidationFailed(
+                        "non-canonical world.action.v1 payload".to_owned(),
+                    ));
+                }
+                self.0.approve(proposal)
+            })
+    }
+}
+
 impl Plugin for GatewayActionPlugin {
     fn id(&self) -> PluginId {
         self.id
@@ -652,7 +670,9 @@ fn gateway_action_registry_builder(
         &descriptor,
         None,
         None,
-        Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
+        Some(Box::new(GatewayWorldActionApprover(
+            WorldPlugin::new().with_bodies(bodies),
+        ))),
         [Kind::new(EVENT_TYPE_ACTION)],
     ));
     if let Some(authority) = authority {
@@ -2712,23 +2732,6 @@ struct GatewayWorldActionPayload {
 
 impl GatewayWorldActionPayload {
     fn encode(self) -> Result<CanonicalBytes, ActionRejected> {
-        let params =
-            ciborium::from_reader::<ciborium::Value, _>(self.params.as_slice()).map_err(|_| {
-                ActionRejected::DomainValidationFailed("invalid action parameters".to_owned())
-            });
-        let finite_params = params.and_then(|params| {
-            if finite_action_params(&params) {
-                Ok(())
-            } else {
-                Err(ActionRejected::DomainValidationFailed(
-                    "non-finite action parameters".to_owned(),
-                ))
-            }
-        });
-        finite_params.and_then(|()| self.encode_typed())
-    }
-
-    fn encode_typed(self) -> Result<CanonicalBytes, ActionRejected> {
         match self.action_kind.as_str() {
             "impulse" => Some(ActionKindV1::Impulse),
             "target_velocity" => Some(ActionKindV1::TargetVelocity),
@@ -2736,7 +2739,7 @@ impl GatewayWorldActionPayload {
         }
         .ok_or_else(|| ActionRejected::DomainValidationFailed("unknown action kind".to_owned()))
         .and_then(|action_kind| {
-            WorldActionV1 {
+            encode_world_action(&WorldActionV1 {
                 actor_entity_id: self.actor_entity_id,
                 body_entity_id: self.body_entity_id,
                 action_kind,
@@ -2744,28 +2747,54 @@ impl GatewayWorldActionPayload {
                 action_scope: self.action_scope,
                 catalogue_version: self.catalogue_version,
                 tick: self.tick,
+            })
+        })
+    }
+}
+
+fn encode_world_action(action: &WorldActionV1) -> Result<CanonicalBytes, ActionRejected> {
+    ciborium::from_reader::<ciborium::Value, _>(action.params_cbor.as_slice())
+        .map_err(|_| ActionRejected::DomainValidationFailed("invalid action parameters".to_owned()))
+        .and_then(|params| {
+            if !valid_action_params(&params) {
+                return Err(ActionRejected::DomainValidationFailed(
+                    "non-canonical or non-finite action parameters".to_owned(),
+                ));
             }
-            .encode()
-            .map_err(|error| match error {
+            action.encode().map_err(|error| match error {
                 pos_plugin_world::WorldCodecError::PayloadTooLarge { size, max } => {
                     ActionRejected::PayloadTooLarge { size, max }
                 }
                 error => ActionRejected::DomainValidationFailed(error.to_string()),
             })
         })
+}
+
+fn valid_action_params(value: &ciborium::Value) -> bool {
+    match value {
+        ciborium::Value::Float(value) => value.is_finite(),
+        ciborium::Value::Array(values) => values.iter().all(valid_action_params),
+        ciborium::Value::Map(entries) => {
+            entries.iter().enumerate().all(|(index, (key, value))| {
+                valid_action_params(key)
+                    && valid_action_params(value)
+                    && !entries[..index].iter().any(|(previous, _)| previous == key)
+            }) && entries.windows(2).all(|pair| {
+                let left = action_param_key_bytes(&pair[0].0);
+                let right = action_param_key_bytes(&pair[1].0);
+                (left.len(), left) < (right.len(), right)
+            })
+        }
+        ciborium::Value::Tag(_, value) => valid_action_params(value),
+        _ => true,
     }
 }
 
-fn finite_action_params(value: &ciborium::Value) -> bool {
-    match value {
-        ciborium::Value::Float(value) => value.is_finite(),
-        ciborium::Value::Array(values) => values.iter().all(finite_action_params),
-        ciborium::Value::Map(entries) => entries
-            .iter()
-            .all(|(key, value)| finite_action_params(key) && finite_action_params(value)),
-        ciborium::Value::Tag(_, value) => finite_action_params(value),
-        _ => true,
-    }
+fn action_param_key_bytes(key: &ciborium::Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    // Parsed CBOR values serialize into this infallible byte sink.
+    drop(ciborium::into_writer(key, &mut bytes));
+    bytes
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
@@ -3175,6 +3204,18 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn action_submission_rejects_unauthorized_inputs_before_store_access() {
         let gateway = memory_gw();
+        assert!(matches!(
+            gateway
+                .submit_json_action(
+                    &TimelineId::new().to_string(),
+                    &EntityId::new().to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world.action.v1.submit",
+                )
+                .await,
+            Err(GatewayError::ActionAuthorizationUnavailable)
+        ));
         let proposal = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             EntityId::new(),
@@ -6724,6 +6765,103 @@ mod tests {
             ingress_identity(timeline, EntityId::new(), "device-1:42").scope
         );
         assert_ne!(same.dedup_key.as_bytes(), same.scope.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn raw_versioned_proposals_require_canonical_finite_payloads() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_principal_for_test(
+            open_store(StoreConfig::Memory).test_ok(),
+            [body],
+            ActionPrincipal::new(
+                actor,
+                [
+                    Kind::new("world.action.v1.submit"),
+                    Kind::new("world.action.submit"),
+                ],
+            ),
+        );
+        let timeline = gateway.create_timeline("raw-actions").await.test_ok();
+        let timeline_id = timeline.id().to_string();
+        let canonical = WorldActionV1 {
+            actor_entity_id: actor,
+            body_entity_id: body,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: vec![1],
+            action_scope: 0,
+            catalogue_version: 1,
+            tick: 1,
+        }
+        .encode()
+        .test_ok();
+        let mut invalid_payloads = vec![CanonicalBytes::from_vec(vec![0xff])];
+        let mut indefinite = vec![0x9f];
+        indefinite.extend_from_slice(&canonical.as_slice()[1..]);
+        indefinite.push(0xff);
+        invalid_payloads.push(CanonicalBytes::from_vec(indefinite));
+        for params in [
+            vec![0xff],
+            vec![0x18, 1],
+            vec![1, 2],
+            vec![0xf9, 0x7e, 0],
+            vec![0xa2, 2, 2, 1, 1],
+            vec![0xa2, 1, 1, 1, 2],
+            vec![0xa2, 0xf9, 0, 0, 1, 0xf9, 0x80, 0, 2],
+            vec![0xa2, 0x18, 24, 1, 0x20, 2],
+        ] {
+            let mut fields =
+                ciborium::from_reader::<Vec<ciborium::Value>, _>(canonical.as_slice()).test_ok();
+            fields[5] = ciborium::Value::Bytes(params);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&fields, &mut bytes).test_ok();
+            invalid_payloads.push(CanonicalBytes::from_vec(bytes));
+        }
+        for payload in invalid_payloads {
+            let proposal = ProposedAction::new(
+                Kind::new(EVENT_TYPE_ACTION),
+                actor,
+                payload,
+                Kind::new("world.action.v1.submit"),
+            );
+            let error = gateway
+                .submit_proposed_action(&timeline_id, proposal)
+                .await
+                .test_err();
+            assert!(error.to_string().contains("domain validation failed"));
+        }
+        let legacy = ProposedAction::new(
+            Kind::new("world.action"),
+            actor,
+            canonical.clone(),
+            Kind::new("world.action.submit"),
+        );
+        let error = gateway
+            .submit_proposed_action(&timeline_id, legacy)
+            .await
+            .test_err();
+        assert!(error.to_string().contains("unknown event type"));
+        let valid = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION),
+            actor,
+            canonical.clone(),
+            Kind::new("world.action.v1.submit"),
+        );
+        let event = gateway
+            .submit_proposed_action(&timeline_id, valid)
+            .await
+            .test_ok();
+        assert_eq!(event.payload, canonical);
+        assert_eq!(
+            gateway
+                .read_events_page(&timeline_id, 0, 100)
+                .await
+                .test_ok()
+                .events
+                .len(),
+            1
+        );
+        gateway.shutdown().await.test_ok();
     }
 
     #[tokio::test]

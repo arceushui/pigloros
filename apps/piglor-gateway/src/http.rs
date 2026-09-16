@@ -670,6 +670,8 @@ mod tests {
             ("params", json!([0xa1, 0xf9, 0x7e, 0, 1])),
             ("params", json!([0xa1, 1, 0xf9, 0x7e, 0])),
             ("params", json!([0xc0, 0xf9, 0x7e, 0])),
+            ("params", json!([0xa2, 2, 2, 1, 1])),
+            ("params", json!([0xa2, 1, 1, 1, 2])),
             ("tick", json!(-1)),
             ("unexpected", json!(true)),
         ] {
@@ -681,6 +683,8 @@ mod tests {
         for params in [
             vec![0x81, 1],
             vec![0xa1, 1, 2],
+            vec![0xa2, 1, 1, 2, 2],
+            vec![0xa2, 0x20, 2, 0x18, 24, 1],
             vec![0xc0, 1],
             vec![0xf9, 0x3c, 0],
         ] {
