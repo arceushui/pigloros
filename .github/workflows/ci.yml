@@ -256,6 +256,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install fixture verification tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+      - name: Obtain pinned offline SCS1 derivation inputs
+        env:
+          SYSTEMD_SCS1_SYSTEMD_SOURCE: ${{ runner.temp }}/systemd-scs1-source
+          SYSTEMD_SCS1_LIBSECCOMP_ARCHIVE: ${{ runner.temp }}/libseccomp-2.6.1.tar.gz
+        run: |
+          git init "$SYSTEMD_SCS1_SYSTEMD_SOURCE"
+          git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" remote add origin https://github.com/systemd/systemd.git
+          git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" fetch --depth=2 origin f1d0952a125b96b7ab2f1ff29a87448ade8ac29b
+          git -C "$SYSTEMD_SCS1_SYSTEMD_SOURCE" checkout --detach FETCH_HEAD
+          curl --fail --location --retry 3 --max-time 60 \
+            https://github.com/seccomp/libseccomp/releases/download/v2.6.1/libseccomp-2.6.1.tar.gz \
+            --output "$SYSTEMD_SCS1_LIBSECCOMP_ARCHIVE"
+      - name: Reproduce production SCS1 and exercise materializer rejection boundaries
+        env:
+          SYSTEMD_SCS1_SYSTEMD_SOURCE: ${{ runner.temp }}/systemd-scs1-source
+          SYSTEMD_SCS1_LIBSECCOMP_ARCHIVE: ${{ runner.temp }}/libseccomp-2.6.1.tar.gz
+        run: python3 scripts/test_materialize_systemd_scs1.py
       - name: Independently regenerate public fixture records
         run: bash scripts/generate-conformance-fixture-records.sh
       - name: Verify public conformance fixtures
