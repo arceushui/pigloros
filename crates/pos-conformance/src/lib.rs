@@ -115,12 +115,10 @@ pub use verification_request::{
 };
 pub use verification_preflight::{
     preflight_verification_v1, ArtifactClosureStatusV1, ArtifactRevocationStatusV1,
-    ProfileSupportStatusV1, TrustRootStatusV1, TrustSignatureStatusV1,
-    TrustSnapshotContinuityV1, VerificationPreflightCoordinateV1,
-    VerificationPreflightErrorV1, VerificationPreflightEvidenceV1,
-    VerificationPreflightInputV1, VerificationPreflightResultV1,
-    MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1,
-    MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1,
+    ProfileSupportStatusV1, TrustRootStatusV1, TrustSignatureStatusV1, TrustSnapshotContinuityV1,
+    VerificationPreflightCoordinateV1, VerificationPreflightErrorV1,
+    VerificationPreflightEvidenceV1, VerificationPreflightInputV1, VerificationPreflightResultV1,
+    MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1, MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1,
     MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1,
 };
 
