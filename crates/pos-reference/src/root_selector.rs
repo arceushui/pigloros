@@ -2875,17 +2875,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn activated_public_composition_authenticates_sly1() -> TestResult {
-        if matches!(
-            isolated_composition_role()?,
-            IsolatedCompositionRole::Delegated
-        ) {
-            return Ok(());
-        }
-
-        let _paths = FixedCompositionFixture::create()?;
+    fn assert_recovery_directory_activation_failures() -> TestResult {
         fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o755))?;
         assert!(RootSelectorRuntime::activate().is_err());
         fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
@@ -2897,7 +2887,22 @@ mod tests {
         fs::create_dir(&recovery_directory)?;
         fs::set_permissions(&recovery_directory, fs::Permissions::from_mode(0o755))?;
         assert!(RootSelectorRuntime::activate().is_err());
-        fs::remove_dir(&recovery_directory)?;
+        fs::remove_dir(recovery_directory)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn activated_public_composition_authenticates_sly1() -> TestResult {
+        if matches!(
+            isolated_composition_role()?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+
+        let _paths = FixedCompositionFixture::create()?;
+        assert_recovery_directory_activation_failures()?;
         assert!(RootSelectorRuntime::activate().is_err());
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
