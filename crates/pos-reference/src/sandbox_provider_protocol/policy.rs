@@ -56,6 +56,25 @@ impl SandboxAdministratorPolicy {
         Ok(policy)
     }
 
+    /// Authenticates APT1 authority and snapshot bindings for installed state.
+    ///
+    /// A selected provider may be revoked in a valid successor installation.
+    /// This method therefore authenticates the policy record without granting
+    /// provider execution authority; [`Self::authenticate`] remains the
+    /// admission-oriented entry point that rejects such a selection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed records, invalid or revoked policy signers, and
+    /// mismatched snapshot digests or epochs.
+    pub(crate) fn authenticate_installed(
+        bytes: &[u8],
+        trust: &SandboxTrustSnapshot,
+        revocation: &SandboxRevocationSnapshot,
+    ) -> Result<Self, SandboxTrustError> {
+        Self::authenticate_record(bytes, trust, revocation).map(|(policy, _)| policy)
+    }
+
     /// Validate a signed, strictly revocation-only APT1 successor.
     ///
     /// Unlike execution admission, this accepts revoking the selected provider.

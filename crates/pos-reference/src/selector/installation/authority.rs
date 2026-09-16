@@ -93,8 +93,10 @@ impl InstalledSelectorState {
     /// Authenticates the pinned TRS1, RVS1, and APT1 bootstrap chain.
     ///
     /// # Errors
-    /// Returns an error for forged or inconsistent authority, revoked selected
-    /// artifacts, or any APT1-selected provider artifact absent from SIC1.
+    /// Returns an error for forged or inconsistent authority, revoked authority
+    /// signers, or any APT1-selected provider artifact absent from SIC1. A
+    /// revoked selected provider remains authenticated installed state but
+    /// cannot pass [`AuthenticatedSelectorBootstrap::admit_provider`].
     pub fn authenticate_bootstrap(
         self,
     ) -> Result<AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
@@ -120,7 +122,7 @@ impl InstalledSelectorState {
             .and_then(|(trust, revocation)| {
                 self.control_record(InstallationObjectKind(2), policy_digest)
                     .and_then(|policy_record| {
-                        SandboxAdministratorPolicy::authenticate(
+                        SandboxAdministratorPolicy::authenticate_installed(
                             &policy_record,
                             &trust,
                             &revocation,
