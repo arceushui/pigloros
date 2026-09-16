@@ -13,6 +13,53 @@ const REQUIRED_SYSCALLS: [&str; 6] = [
     "sendto",
     "socket",
 ];
+const X86_64_IMPLICIT_DEFAULTS: [&str; 18] = [
+    "cacheflush",
+    "clock_getres_time64",
+    "clock_gettime64",
+    "clock_nanosleep_time64",
+    "futex_time64",
+    "getegid32",
+    "geteuid32",
+    "getgid32",
+    "getgroups32",
+    "getresgid32",
+    "getresuid32",
+    "getuid32",
+    "mmap2",
+    "riscv_flush_icache",
+    "riscv_hwprobe",
+    "set_tls",
+    "sigreturn",
+    "ugetrlimit",
+];
+const AARCH64_IMPLICIT_DEFAULTS: [&str; 25] = [
+    "arch_prctl",
+    "cacheflush",
+    "clock_getres_time64",
+    "clock_gettime64",
+    "clock_nanosleep_time64",
+    "futex_time64",
+    "get_thread_area",
+    "getegid32",
+    "geteuid32",
+    "getgid32",
+    "getgroups32",
+    "getpgrp",
+    "getresgid32",
+    "getresuid32",
+    "getuid32",
+    "mmap2",
+    "pause",
+    "riscv_flush_icache",
+    "riscv_hwprobe",
+    "set_thread_area",
+    "set_tls",
+    "sigreturn",
+    "time",
+    "ugetrlimit",
+    "uretprobe",
+];
 const X86_64_BYTES: &[u8] =
     include_bytes!("../vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor");
 const AARCH64_BYTES: &[u8] =
@@ -36,8 +83,8 @@ fn production_systemd_syscall_sets_match_both_public_decoders() -> Result<(), Bo
         IndependentArchitecture::Aarch64
     );
 
-    assert_record(&x86_64, 315);
-    assert_record(&aarch64, 275);
+    assert_record(&x86_64, 315, &X86_64_IMPLICIT_DEFAULTS);
+    assert_record(&aarch64, 275, &AARCH64_IMPLICIT_DEFAULTS);
     assert_eq!(x86_64.requested_names, independent_x86_64.requested_names);
     assert_eq!(
         x86_64.expected_effective_names,
@@ -152,18 +199,27 @@ fn production_systemd_syscall_set_manifest_binds_exact_records() -> Result<(), B
     Ok(())
 }
 
-fn assert_record(record: &SandboxSyscallSetV1, expected_count: usize) {
-    assert_eq!(record.requested_names.len(), expected_count);
-    assert_eq!(record.expected_effective_names.len(), expected_count);
-    assert_eq!(record.requested_names, record.expected_effective_names);
-    assert!(record
-        .requested_names
-        .windows(2)
-        .all(|pair| pair[0] < pair[1]));
+fn assert_record(record: &SandboxSyscallSetV1, requested_count: usize, implicit_defaults: &[&str]) {
+    assert_eq!(record.requested_names.len(), requested_count);
+    assert_eq!(
+        record.expected_effective_names.len(),
+        requested_count + implicit_defaults.len()
+    );
+    for names in [&record.requested_names, &record.expected_effective_names] {
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(names.iter().all(|name| !name.starts_with('@')));
+    }
     assert!(record
         .requested_names
         .iter()
-        .all(|name| !name.starts_with('@')));
+        .all(|name| record.expected_effective_names.binary_search(name).is_ok()));
+    let additions: Vec<&str> = record
+        .expected_effective_names
+        .iter()
+        .filter(|name| record.requested_names.binary_search(name).is_err())
+        .map(String::as_str)
+        .collect();
+    assert_eq!(additions, implicit_defaults);
     for required in REQUIRED_SYSCALLS {
         assert!(record
             .requested_names

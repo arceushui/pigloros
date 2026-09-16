@@ -29,7 +29,8 @@ LIBSECCOMP_SYSCALLS_SHA256 = (
 )
 SCS1_DOMAIN = b"PiglorOS.SCS1.v1\0"
 EXPECTED_EXPANDED_NAMES = 395
-EXPECTED_MATERIALIZED_NAMES = {"x86_64": 315, "aarch64": 275}
+EXPECTED_REQUESTED_NAMES = {"x86_64": 315, "aarch64": 275}
+EXPECTED_READBACK_NAMES = {"x86_64": 333, "aarch64": 300}
 REQUIRED_NAMES = frozenset(
     {"execveat", "getsockopt", "poll", "recvmsg", "sendto", "socket"}
 )
@@ -137,6 +138,27 @@ def target_names(
     return names
 
 
+def systemd_readback_names(
+    requested: list[str],
+    defaults: set[str],
+    interface: dict[str, dict[str, str]],
+    architecture: str,
+) -> list[str]:
+    # The pinned transient-unit setter inserts @default before the caller's
+    # allow-list. Its parser and getter preserve resolvable PNR names, even
+    # though those names are not native kernel rules on this architecture.
+    implicit = {
+        name
+        for name in defaults
+        if name in interface
+        and (
+            interface[name][architecture].isdecimal()
+            or interface[name][architecture] == "PNR"
+        )
+    }
+    return sorted(set(requested) | implicit)
+
+
 def cbor_head(major: int, value: int) -> bytes:
     if value < 24:
         return bytes([(major << 5) | value])
@@ -179,15 +201,16 @@ def blake3(preimage: bytes) -> bytes:
     return completed.stdout
 
 
-def materialize_record(architecture: str, names: list[str]) -> tuple[bytes, bytes]:
-    encoded_names = cbor_array([cbor_text(name) for name in names])
+def materialize_record(
+    architecture: str, requested: list[str], expected: list[str]
+) -> tuple[bytes, bytes]:
     unsigned = cbor_array(
         [
             cbor_text("SCS1"),
             cbor_uint(1),
             cbor_uint(ARCHITECTURES[architecture]),
-            encoded_names,
-            encoded_names,
+            cbor_array([cbor_text(name) for name in requested]),
+            cbor_array([cbor_text(name) for name in expected]),
         ]
     )
     digest = blake3(SCS1_DOMAIN + unsigned)
@@ -242,17 +265,24 @@ def materialize(
             f"expected {EXPECTED_EXPANDED_NAMES}"
         )
     interface = parse_libseccomp_interface(syscall_bytes.decode("utf-8"))
+    defaults = set(expand_group("@default", groups))
 
     records = []
     outputs = {}
     for architecture in ARCHITECTURES:
         names = target_names(expanded, interface, architecture)
-        expected_count = EXPECTED_MATERIALIZED_NAMES[architecture]
+        expected_count = EXPECTED_REQUESTED_NAMES[architecture]
         if len(names) != expected_count:
             raise ValueError(
                 f"{architecture} materialized {len(names)} names; expected {expected_count}"
             )
-        encoded, record_digest = materialize_record(architecture, names)
+        readback = systemd_readback_names(names, defaults, interface, architecture)
+        readback_count = EXPECTED_READBACK_NAMES[architecture]
+        if len(readback) != readback_count:
+            raise ValueError(
+                f"{architecture} readback has {len(readback)} names; expected {readback_count}"
+            )
+        encoded, record_digest = materialize_record(architecture, names, readback)
         filename = f"systemd-v{SYSTEMD_VERSION}-{architecture}.scs1.cbor"
         outputs[filename] = encoded
         records.append(
@@ -262,7 +292,7 @@ def materialize(
                 "file": filename,
                 "record_blake3": blake3(encoded).hex(),
                 "requested_count": len(names),
-                "expected_effective_count": len(names),
+                "expected_effective_count": len(readback),
                 "syscall_set_digest": record_digest.hex(),
             }
         )

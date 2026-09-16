@@ -23,11 +23,11 @@ PINNED_REVISION = "f1d0952a125b96b7ab2f1ff29a87448ade8ac29b"
 WRONG_PARENT = "03def5c285a32c5c0def2edc5ff6a407d9cc5fb0"
 PINNED_SYSTEMD_SHA256 = "4242ae8aead8d2f0d9094449dfe039486edf0c0d8b32ba4cffc7991820590751"
 PINNED_ARCHIVE_SHA256 = "501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be"
-SPEC = importlib.util.spec_from_file_location("systemd_scs1", SCRIPT)
-if SPEC is None or SPEC.loader is None:
+MATERIALIZER_MODULE_SPEC = importlib.util.spec_from_file_location("systemd_scs1", SCRIPT)
+if MATERIALIZER_MODULE_SPEC is None or MATERIALIZER_MODULE_SPEC.loader is None:
     raise RuntimeError(f"cannot load {SCRIPT}")
-MATERIALIZER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MATERIALIZER)
+MATERIALIZER = importlib.util.module_from_spec(MATERIALIZER_MODULE_SPEC)
+MATERIALIZER_MODULE_SPEC.loader.exec_module(MATERIALIZER)
 
 
 class MaterializerPolicyTests(unittest.TestCase):
@@ -186,7 +186,7 @@ class MaterializerPolicyTests(unittest.TestCase):
             with archive.extractfile("libseccomp-2.6.1/src/syscalls.csv") as source:
                 interface = MATERIALIZER.parse_libseccomp_interface(source.read().decode("utf-8"))
         expected_counts = {"x86_64": 315, "aarch64": 275}
-        self.assertEqual(MATERIALIZER.EXPECTED_MATERIALIZED_NAMES, expected_counts)
+        self.assertEqual(MATERIALIZER.EXPECTED_REQUESTED_NAMES, expected_counts)
         for architecture, count in expected_counts.items():
             names = MATERIALIZER.target_names(expanded, interface, architecture)
             self.assertEqual(len(names), count)
@@ -205,6 +205,61 @@ class MaterializerPolicyTests(unittest.TestCase):
             if architecture == "aarch64":
                 native.add("poll")
             self.assertEqual(set(names), native)
+
+    def test_systemd_readback_preserves_only_resolvable_defaults(self) -> None:
+        requested = ["poll", "socket"]
+        defaults = {"socket", "native", "pseudo", "undefined", "empty", "invalid", "unknown"}
+        interface = {
+            name: {"x86_64": value, "aarch64": value}
+            for name, value in {
+                "socket": "41", "native": "0", "pseudo": "PNR",
+                "undefined": "KV_UNDEF", "empty": "", "invalid": "-1",
+            }.items()
+        }
+        for architecture in ("x86_64", "aarch64"):
+            self.assertEqual(
+                MATERIALIZER.systemd_readback_names(requested, defaults, interface, architecture),
+                ["native", "poll", "pseudo", "socket"],
+            )
+
+    def test_pinned_readback_includes_implicit_default_pseudo_names(self) -> None:
+        groups = MATERIALIZER.parse_systemd_groups(
+            (self.systemd / "src/shared/seccomp-util.c").read_text(encoding="utf-8")
+        )
+        expanded = set(MATERIALIZER.expand_group("@system-service", groups))
+        defaults = set(MATERIALIZER.expand_group("@default", groups))
+        self.assertEqual(len(defaults), 70)
+        self.assertTrue(defaults.issubset(expanded))
+        with tarfile.open(self.archive, "r:gz") as archive:
+            with archive.extractfile("libseccomp-2.6.1/src/syscalls.csv") as source:
+                interface = MATERIALIZER.parse_libseccomp_interface(source.read().decode("utf-8"))
+        self.assertEqual(MATERIALIZER.EXPECTED_READBACK_NAMES, {"x86_64": 333, "aarch64": 300})
+        for architecture, count, added_count in [("x86_64", 333, 18), ("aarch64", 300, 25)]:
+            requested = MATERIALIZER.target_names(expanded, interface, architecture)
+            # Independent oracle for the pinned setter/parser/getter: every
+            # known @default name has a number or a resolvable PNR identifier.
+            resolvable = set()
+            for name in defaults & interface.keys():
+                value = interface[name][architecture]
+                if value == "PNR":
+                    resolvable.add(name)
+                else:
+                    try:
+                        number = int(value)
+                    except ValueError:
+                        continue
+                    if number >= 0:
+                        resolvable.add(name)
+            expected = sorted(set(requested) | resolvable)
+            actual = MATERIALIZER.systemd_readback_names(requested, defaults, interface, architecture)
+            self.assertEqual(actual, expected)
+            self.assertEqual(len(actual), count)
+            added = set(actual) - set(requested)
+            self.assertEqual(len(added), added_count)
+            self.assertTrue(all(interface[name][architecture] == "PNR" for name in added))
+            self.assertTrue({"cacheflush", "getuid32", "mmap2"}.issubset(added))
+            if architecture == "aarch64":
+                self.assertIn("arch_prctl", added)
 
 
 if __name__ == "__main__":

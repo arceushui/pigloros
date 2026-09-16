@@ -7,21 +7,21 @@
   "records": [
     {
       "architecture": "x86_64",
-      "byte_length": 6373,
-      "expected_effective_count": 315,
+      "byte_length": 6598,
+      "expected_effective_count": 333,
       "file": "systemd-v260.2-x86_64.scs1.cbor",
-      "record_blake3": "ece37a1698bdc1321d73c945c3af03a600de168b02fddbac524be82fcc8b356e",
+      "record_blake3": "34efba1fca3616aacce00f719fbed233184a0b488aa70bd22e764eb9d7dc5dfd",
       "requested_count": 315,
-      "syscall_set_digest": "b05d61259ef9f6e484bd54ff363c07327a9e9e82c16fe7fb7b50295b8ba14853"
+      "syscall_set_digest": "2018acb56bc002ef2deedaf7bdc803f49e3d335add91ef7d038ede57ec73496a"
     },
     {
       "architecture": "aarch64",
-      "byte_length": 5727,
-      "expected_effective_count": 275,
+      "byte_length": 6024,
+      "expected_effective_count": 300,
       "file": "systemd-v260.2-aarch64.scs1.cbor",
-      "record_blake3": "d7fbcadd04465768df0eb859919485e47a9656657df7675605f79df0f8fd4b04",
+      "record_blake3": "41fca607842627c5ac60cf50028df3276372ad8c79073cc7a7014f39e55f3c6b",
       "requested_count": 275,
-      "syscall_set_digest": "762c25feeddb3714672f61befcae830717edb8d2bd7e21d99479f8893428c27e"
+      "syscall_set_digest": "86c6d5e117ab74cf4e26f93821c423a918cf15c431a9ecba030b9a1027d9f0a9"
     }
   ],
   "systemd": {

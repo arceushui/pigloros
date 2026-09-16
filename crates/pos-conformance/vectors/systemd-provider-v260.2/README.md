@@ -32,6 +32,14 @@ pseudo-syscall names. The only exception is aarch64 `poll`, expressly retained
 by ADR-069. It describes the required systemd `SystemCallFilter` D-Bus property
 readback, not a native aarch64 kernel rule. The pinned expansion yields 315
 x86_64 names and 275 aarch64 names; the two arrays are architecture-specific.
+Requested and expected-readback arrays are deliberately distinct. The pinned
+systemd transient-unit allow-list setter inserts `@default` before the supplied
+names, and its D-Bus getter retains resolvable PNR identifiers. The offline
+materializer enumerates those implicit additions into the expected array:
+333 names for x86_64 and 300 for aarch64. These additional readback names do not
+claim native kernel rules and are never added to the requested arrays. Actual
+runtime readback/enforcement proof remains in #214.
+
 Production code must consume these checked-in records through APT1/SIC1; it
 must never invoke `systemd-analyze`, expand groups, infer architecture, or add
 names from the running host.
