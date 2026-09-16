@@ -510,6 +510,12 @@ mod tests {
 
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))?;
         assert!(reservation.verify().is_err());
+        assert!(RecoveryEndpointReservation::reserve(
+            &recovery_directory,
+            recovery_directory.metadata()?.uid(),
+            [8; 16],
+        )
+        .is_err());
         Ok(())
     }
 }

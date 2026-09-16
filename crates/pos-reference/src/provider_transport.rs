@@ -3093,6 +3093,16 @@ mod tests {
 
     #[test]
     fn framing_helpers_reject_closed_shapes_and_expired_deadlines() -> TestResult {
+        struct DenyInitialAdmission;
+
+        impl ProviderRequestAdmission for DenyInitialAdmission {
+            fn begin(&mut self) -> Result<(), ProviderTransportError> {
+                Err(ProviderTransportError::BeforeAdmission)
+            }
+
+            fn entered(&mut self) {}
+        }
+
         assert_eq!(
             require_root_owned_endpoint(Path::new("relative.sock")),
             Err(SelectorBoundaryError::ArtifactInvalid)
@@ -3141,6 +3151,24 @@ mod tests {
             deadline: &deadline,
         };
         live_stream.flush()?;
+
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let _listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        assert!(matches!(
+            transport.execute_staged(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                &mut std::io::Cursor::new(b"input"),
+                Duration::from_secs(1),
+                &mut DenyInitialAdmission,
+            ),
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
         assert_eq!(
             wait_for_connection(&UnixStream::pair()?.0, Duration::MAX),
             Err(rustix::io::Errno::INVAL)

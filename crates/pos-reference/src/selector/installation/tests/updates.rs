@@ -623,6 +623,14 @@ fn manifest_successor_validation_rejects_each_forbidden_change_class() -> TestRe
         .validate_revocation_successor(&existing_object_changed)
         .is_err());
 
+    let mut missing_existing_object = next.clone();
+    missing_existing_object.objects.retain(|object| {
+        object.kind != previous_object.kind || object.identity != previous_object.identity
+    });
+    assert!(previous
+        .validate_revocation_successor(&missing_existing_object)
+        .is_err());
+
     let mut unauthorized_object = next;
     let mut added = previous.objects[0].clone();
     added.identity = [99; 32];

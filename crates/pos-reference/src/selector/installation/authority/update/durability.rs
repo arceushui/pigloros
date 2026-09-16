@@ -761,6 +761,27 @@ mod tests {
     }
 
     #[test]
+    fn recovery_restoration_propagates_each_directory_sync_failure() -> TestResult {
+        for failed_call in [2_usize, 3] {
+            let (directory, root, owner) = durable_root()?;
+            let recovery = directory.path().join(RECOVERY_NAME);
+            fs::write(&recovery, b"sir1")?;
+            fs::set_permissions(&recovery, fs::Permissions::from_mode(0o400))?;
+            let calls = Cell::new(0_usize);
+            let result = remove_recovery_durably_with(&root, owner, |_| {
+                let call = calls.replace(calls.get() + 1);
+                if call == 1 || call == failed_call {
+                    Err(SelectorBoundaryError::Io)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result, Err(SelectorBoundaryError::Io));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn staging_directory_rejects_occupied_and_unsafe_entries() -> TestResult {
         let (occupied, root, owner) = durable_root()?;
         fs::write(occupied.path().join(STAGING_NAME), b"occupied")?;

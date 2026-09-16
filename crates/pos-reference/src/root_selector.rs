@@ -2886,6 +2886,18 @@ mod tests {
         }
 
         let _paths = FixedCompositionFixture::create()?;
+        fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o755))?;
+        assert!(RootSelectorRuntime::activate().is_err());
+        fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
+
+        let recovery_directory = Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE);
+        fs::write(&recovery_directory, b"occupied")?;
+        assert!(RootSelectorRuntime::activate().is_err());
+        fs::remove_file(&recovery_directory)?;
+        fs::create_dir(&recovery_directory)?;
+        fs::set_permissions(&recovery_directory, fs::Permissions::from_mode(0o755))?;
+        assert!(RootSelectorRuntime::activate().is_err());
+        fs::remove_dir(&recovery_directory)?;
         assert!(RootSelectorRuntime::activate().is_err());
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
@@ -3338,6 +3350,10 @@ mod tests {
 
         let lease = admission.acquire([1; 16])?;
         let closed = admission.close_and_snapshot()?;
+        assert!(admission
+            .finish_provider_state([9; 16], &closed.admitted, false)
+            .is_ok());
+        admission.finish_provider_state([1; 16], &closed.admitted, true)?;
         assert!(admission.retire_previous(&foreign).is_err());
         admission.retire_previous(&closed.admitted)?;
         assert!(admission.current().is_err());
@@ -3348,6 +3364,53 @@ mod tests {
             .attempts
             .is_empty());
         drop(lease);
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_selector_servers_return_without_accepting_connections() -> TestResult {
+        let provider_directory = tempfile::tempdir()?;
+        let provider_path = provider_directory.path().join("provider.sock");
+        let _provider_listener = UnixListener::bind(&provider_path)?;
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let owner = fs::metadata(".")?.uid();
+        let composition = Arc::new(RootSelectorComposition {
+            service: RootSelectorService {
+                admission: SelectorAdmission::for_test(admitted)?,
+                transport: ProviderTransport::from_path_for_test(&provider_path)?,
+                peer_uid: owner,
+                evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: test_recovery_directory()?,
+                recovery_owner: owner,
+            },
+            updates: Mutex::new(()),
+        });
+        let administrator_fixture = ListenerTestDirectory::create()?;
+        let administrator = OwnedAdministratorListener {
+            inner: OwnedSelectorListener::bind_path(
+                &administrator_fixture.socket,
+                administrator_fixture.uid,
+            )?,
+        };
+        let evaluator_fixture = ListenerTestDirectory::create()?;
+        let evaluator =
+            OwnedSelectorListener::bind_path(&evaluator_fixture.socket, evaluator_fixture.uid)?;
+        let stopped = AtomicBool::new(true);
+        serve_administrator(&administrator, &composition, &stopped)?;
+        let mut workers = EvaluatorWorkers::default();
+        serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &stopped,
+            &mut workers,
+        )?;
+
+        if owner != ROOT_UID {
+            let (client, server) = UnixStream::pair()?;
+            assert!(composition.update_installation(server).is_err());
+            drop(client);
+        }
         Ok(())
     }
 
