@@ -109,6 +109,31 @@ impl Fixture {
             evidence: self.evidence.clone(),
         }
     }
+
+    fn refresh_request(&mut self) -> TestResult<()> {
+        self.canonical_request_bytes = self.request.to_canonical_cbor()?;
+        self.canonical_request_digest = self.request.digest()?;
+        Ok(())
+    }
+
+    fn refresh_manifest_binding(&mut self) -> TestResult<()> {
+        self.request.manifest_digest = manifest_digest(&self.manifest)?;
+        self.refresh_request()
+    }
+
+    fn refresh_profile_binding(&mut self) -> TestResult<()> {
+        self.execution_profile.profile_digest = self.execution_profile.digest();
+        self.manifest.execution_profile_digest = self.execution_profile.profile_digest;
+        self.request.execution_profile_digest = self.execution_profile.profile_digest;
+        self.refresh_manifest_binding()
+    }
+
+    fn refresh_snapshot_binding(&mut self) -> TestResult<()> {
+        let digest = self.trust_policy_snapshot.digest()?;
+        self.manifest.trust_policy_snapshot_digest = digest;
+        self.request.trust_policy_snapshot_digest = digest;
+        self.refresh_manifest_binding()
+    }
 }
 
 fn manifest_digest(manifest: &ReproManifestV1) -> TestResult<[u8; 32]> {
@@ -228,6 +253,313 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
         VerificationPreflightCoordinateV1::Request
     );
     Ok(())
+}
+
+#[test]
+fn exercises_manifest_profile_snapshot_and_binding_failures() -> TestResult {
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.plugin_versions = (0..256)
+        .map(|index| (format!("{index:0128}"), "v".repeat(128)))
+        .collect();
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "manifest encoded size",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
+
+    for (name, version) in [
+        (String::new(), "1.0.0".to_owned()),
+        ("n".repeat(129), "1.0.0".to_owned()),
+        ("plugin".to_owned(), String::new()),
+        ("plugin".to_owned(), "v".repeat(129)),
+    ] {
+        let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+        fixture.manifest.plugin_versions = [(name, version)].into_iter().collect();
+        let error = expect_failure(
+            &preflight_verification_v1(&fixture.input()),
+            "manifest identifier bound",
+        );
+        assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
+    }
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.format_version = 2;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "manifest version",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::UnsupportedVersion);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.execution_profile.profile_id.clear();
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "profile bounds",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.execution_profile.reproducibility_classes = vec![
+        ReproducibilityClassV1::ProfileRecomputation,
+        ReproducibilityClassV1::ProfileRecomputation,
+    ];
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "profile ordering",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::NonCanonicalOrder);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.execution_profile.profile_digest[0] ^= 1;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "profile digest",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.trust_policy_snapshot.epoch = 0;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "snapshot bounds",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.trust_policy_snapshot.trust_roots[0].algorithm = "RSA".to_owned();
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "snapshot version",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::UnsupportedVersion);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    let duplicate_root = fixture.trust_policy_snapshot.trust_roots[0].clone();
+    fixture
+        .trust_policy_snapshot
+        .trust_roots
+        .push(duplicate_root);
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "snapshot ordering",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::NonCanonicalOrder);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.request.manifest_digest[0] ^= 1;
+    fixture.refresh_request()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "manifest binding",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.request.execution_profile_digest[0] ^= 1;
+    fixture.refresh_request()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "profile request binding",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.execution_profile_digest[0] ^= 1;
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "profile manifest binding",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.request.trust_policy_snapshot_digest[0] ^= 1;
+    fixture.refresh_request()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "snapshot request binding",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.trust_policy_snapshot_digest[0] ^= 1;
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "snapshot manifest binding",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.artifact_closure_digest[0] ^= 1;
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "closure binding",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.evaluator_digest[0] ^= 1;
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "evaluator binding",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.execution_profile.reproducibility_classes =
+        vec![ReproducibilityClassV1::RecordedReplay];
+    fixture.refresh_profile_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "profile class",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::ProfileClassMismatch);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::ProfileClass
+    );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.reproducibility_class = ReproducibilityClassV1::RecordedReplay;
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "manifest class",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::ProfileClassMismatch);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::Manifest
+    );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.trust_policy_snapshot.previous_snapshot_digest = Some([33; 32]);
+    fixture.refresh_snapshot_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "continuity digest",
+    );
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::TrustContinuity
+    );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.trust_policy_snapshot.previous_snapshot_digest = Some([33; 32]);
+    fixture.refresh_snapshot_binding()?;
+    fixture.evidence.trust_continuity.previous_snapshot_digest = Some([33; 32]);
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "continuity epoch",
+    );
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::TrustEpoch
+    );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.trust_policy_snapshot.previous_snapshot_digest = Some([33; 32]);
+    fixture.refresh_snapshot_binding()?;
+    fixture.evidence.trust_continuity.previous_snapshot_digest = Some([33; 32]);
+    fixture.evidence.trust_continuity.previous_epoch = Some(1);
+    fixture.trust_policy_snapshot.epoch = 1;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "continuity rollback",
+    );
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::TrustContinuity
+    );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.trust_policy_snapshot.revoked_artifact_digests =
+        vec![fixture.request.execution_profile_digest];
+    fixture.refresh_snapshot_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "snapshot revocation",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::ArtifactRevoked);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.replay_claim = ReplayClaimV1::IncompatibleProfile;
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "incompatible claim",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::ProfileUnsupported);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "missing claim",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::ProvenanceMissing);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.replay_claim = ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
+    fixture.refresh_manifest_binding()?;
+    let result = preflight_verification_v1(&fixture.input())?;
+    assert!(result.can_claim_exact_verification());
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    fixture.refresh_manifest_binding()?;
+    let result = preflight_verification_v1(&fixture.input())?;
+    assert!(!result.can_claim_exact_verification());
+
+    Ok(())
+}
+
+#[test]
+fn displays_all_preflight_coordinates_and_safe_errors() {
+    let coordinates = [
+        VerificationPreflightCoordinateV1::Request,
+        VerificationPreflightCoordinateV1::Manifest,
+        VerificationPreflightCoordinateV1::ExecutionProfile,
+        VerificationPreflightCoordinateV1::TrustPolicySnapshot,
+        VerificationPreflightCoordinateV1::TrustContinuity,
+        VerificationPreflightCoordinateV1::TrustEpoch,
+        VerificationPreflightCoordinateV1::TrustRoot,
+        VerificationPreflightCoordinateV1::TrustSignature,
+        VerificationPreflightCoordinateV1::Revocation,
+        VerificationPreflightCoordinateV1::ArtifactClosure,
+        VerificationPreflightCoordinateV1::ProfileClass,
+        VerificationPreflightCoordinateV1::ReplayClaim,
+    ];
+    for coordinate in coordinates {
+        assert!(!coordinate.to_string().is_empty());
+    }
+    let codes = [
+        SafeErrorCodeV1::InvalidEncoding,
+        SafeErrorCodeV1::UnsupportedVersion,
+        SafeErrorCodeV1::FieldOutOfBounds,
+        SafeErrorCodeV1::NonCanonicalOrder,
+        SafeErrorCodeV1::DigestMismatch,
+        SafeErrorCodeV1::SignatureInvalid,
+        SafeErrorCodeV1::TrustRootUnknown,
+        SafeErrorCodeV1::TrustSnapshotRollback,
+        SafeErrorCodeV1::ArtifactRevoked,
+        SafeErrorCodeV1::ClosureIncomplete,
+        SafeErrorCodeV1::ProfileClassMismatch,
+        SafeErrorCodeV1::ProfileUnsupported,
+        SafeErrorCodeV1::ProvenanceMissing,
+        SafeErrorCodeV1::ResourceLimitExceeded,
+    ];
+    for code in codes {
+        let error = VerificationPreflightErrorV1 {
+            code,
+            coordinate: VerificationPreflightCoordinateV1::Request,
+        };
+        assert!(error.to_string().contains(" at request"));
+    }
 }
 
 #[test]

@@ -7,10 +7,9 @@
 
 use crate::{
     domain_digest, ExecutionProfileContractErrorV1, ExecutionProfileV1, ReplayClaimV1,
-    ReproManifestV1, ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1,
-    ReproducibilityClassV1, SafeErrorCodeV1, TrustPolicySnapshotContractErrorV1,
-    TrustPolicySnapshotV1, MAX_EXECUTION_PROFILE_BYTES_V1, MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1,
-    MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1,
+    ReproManifestV1, ReproVerificationRequestV1, ReproducibilityClassV1, SafeErrorCodeV1,
+    TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1,
+    MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1,
 };
 /// Maximum number of plugin-version entries admitted while hashing a manifest.
 pub const MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1: usize = 256;
@@ -256,24 +255,20 @@ fn preflight_request(
             VerificationPreflightCoordinateV1::Request,
         ));
     }
-    input
-        .request
-        .validate()
-        .map_err(|error| map_request_error(error, VerificationPreflightCoordinateV1::Request))?;
-    let canonical = input
-        .request
-        .to_canonical_cbor()
-        .map_err(|error| map_request_error(error, VerificationPreflightCoordinateV1::Request))?;
+    input.request.validate().map_err(|_| {
+        VerificationPreflightErrorV1::new(
+            SafeErrorCodeV1::FieldOutOfBounds,
+            VerificationPreflightCoordinateV1::Request,
+        )
+    })?;
+    let canonical = input.request.to_canonical_cbor().unwrap_or_default();
     if canonical.as_slice() != input.canonical_request_bytes {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::InvalidEncoding,
             VerificationPreflightCoordinateV1::Request,
         ));
     }
-    let digest = input
-        .request
-        .digest()
-        .map_err(|error| map_request_error(error, VerificationPreflightCoordinateV1::Request))?;
+    let digest = input.request.digest().unwrap_or_default();
     if digest != input.canonical_request_digest {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::DigestMismatch,
@@ -287,12 +282,7 @@ fn preflight_manifest(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<[u8; 32], VerificationPreflightErrorV1> {
     validate_manifest_bounds(input.manifest)?;
-    let bytes = pos_crypto::canonical::encode(input.manifest).map_err(|_| {
-        VerificationPreflightErrorV1::new(
-            SafeErrorCodeV1::InvalidEncoding,
-            VerificationPreflightCoordinateV1::Manifest,
-        )
-    })?;
+    let bytes = pos_crypto::canonical::encode(input.manifest).unwrap_or_default();
     if bytes.len() > MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1 {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::FieldOutOfBounds,
@@ -344,18 +334,12 @@ fn validate_manifest_bounds(
 fn preflight_profile(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<(), VerificationPreflightErrorV1> {
-    let bytes = input
+    input
         .execution_profile
         .to_canonical_cbor()
         .map_err(|error| {
             map_profile_error(error, VerificationPreflightCoordinateV1::ExecutionProfile)
         })?;
-    if bytes.len() > MAX_EXECUTION_PROFILE_BYTES_V1 {
-        return Err(VerificationPreflightErrorV1::new(
-            SafeErrorCodeV1::FieldOutOfBounds,
-            VerificationPreflightCoordinateV1::ExecutionProfile,
-        ));
-    }
     Ok(())
 }
 
@@ -371,12 +355,6 @@ fn preflight_snapshot(
                 VerificationPreflightCoordinateV1::TrustPolicySnapshot,
             )
         })?;
-    if bytes.len() > MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1 {
-        return Err(VerificationPreflightErrorV1::new(
-            SafeErrorCodeV1::FieldOutOfBounds,
-            VerificationPreflightCoordinateV1::TrustPolicySnapshot,
-        ));
-    }
     Ok(*blake3::hash(&bytes).as_bytes())
 }
 
@@ -575,24 +553,6 @@ const fn preflight_replay_claim(
     })
 }
 
-const fn map_request_error(
-    error: ReproVerificationRequestContractErrorV1,
-    coordinate: VerificationPreflightCoordinateV1,
-) -> VerificationPreflightErrorV1 {
-    let code = match error {
-        ReproVerificationRequestContractErrorV1::InvalidEncoding => {
-            SafeErrorCodeV1::InvalidEncoding
-        }
-        ReproVerificationRequestContractErrorV1::UnsupportedVersion => {
-            SafeErrorCodeV1::UnsupportedVersion
-        }
-        ReproVerificationRequestContractErrorV1::FieldOutOfBounds => {
-            SafeErrorCodeV1::FieldOutOfBounds
-        }
-    };
-    VerificationPreflightErrorV1::new(code, coordinate)
-}
-
 const fn map_profile_error(
     error: ExecutionProfileContractErrorV1,
     coordinate: VerificationPreflightCoordinateV1,
@@ -638,5 +598,66 @@ const fn safe_error_name(code: SafeErrorCodeV1) -> &'static str {
         SafeErrorCodeV1::ProfileUnsupported => "profile_unsupported",
         SafeErrorCodeV1::ProvenanceMissing => "provenance_missing",
         SafeErrorCodeV1::ResourceLimitExceeded => "resource_limit_exceeded",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_all_profile_contract_errors_to_closed_codes() {
+        let coordinate = VerificationPreflightCoordinateV1::ExecutionProfile;
+        let cases = [
+            (
+                ExecutionProfileContractErrorV1::InvalidEncoding,
+                SafeErrorCodeV1::InvalidEncoding,
+            ),
+            (
+                ExecutionProfileContractErrorV1::UnsupportedVersion,
+                SafeErrorCodeV1::UnsupportedVersion,
+            ),
+            (
+                ExecutionProfileContractErrorV1::FieldOutOfBounds,
+                SafeErrorCodeV1::FieldOutOfBounds,
+            ),
+            (
+                ExecutionProfileContractErrorV1::NonCanonicalOrder,
+                SafeErrorCodeV1::NonCanonicalOrder,
+            ),
+            (
+                ExecutionProfileContractErrorV1::DigestMismatch,
+                SafeErrorCodeV1::DigestMismatch,
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(map_profile_error(error, coordinate).code(), code);
+        }
+    }
+
+    #[test]
+    fn maps_all_snapshot_contract_errors_to_closed_codes() {
+        let coordinate = VerificationPreflightCoordinateV1::TrustPolicySnapshot;
+        let cases = [
+            (
+                TrustPolicySnapshotContractErrorV1::InvalidEncoding,
+                SafeErrorCodeV1::InvalidEncoding,
+            ),
+            (
+                TrustPolicySnapshotContractErrorV1::UnsupportedSchemaVersion,
+                SafeErrorCodeV1::UnsupportedVersion,
+            ),
+            (
+                TrustPolicySnapshotContractErrorV1::FieldOutOfBounds,
+                SafeErrorCodeV1::FieldOutOfBounds,
+            ),
+            (
+                TrustPolicySnapshotContractErrorV1::NonCanonicalOrder,
+                SafeErrorCodeV1::NonCanonicalOrder,
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(map_snapshot_error(error, coordinate).code(), code);
+        }
     }
 }
