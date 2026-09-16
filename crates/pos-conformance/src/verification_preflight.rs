@@ -261,12 +261,7 @@ fn preflight_request(
             VerificationPreflightCoordinateV1::Request,
         )
     })?;
-    let canonical = input.request.to_canonical_cbor().map_err(|_| {
-        VerificationPreflightErrorV1::new(
-            SafeErrorCodeV1::InvalidEncoding,
-            VerificationPreflightCoordinateV1::Request,
-        )
-    })?;
+    let canonical = map_request_encoding(input.request.to_canonical_cbor())?;
     if canonical.as_slice() != input.canonical_request_bytes {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::InvalidEncoding,
@@ -280,12 +275,7 @@ fn preflight_manifest(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<pos_core::CanonicalBytes, VerificationPreflightErrorV1> {
     validate_manifest_bounds(input.manifest)?;
-    let bytes = pos_crypto::canonical::encode(input.manifest).map_err(|_| {
-        VerificationPreflightErrorV1::new(
-            SafeErrorCodeV1::InvalidEncoding,
-            VerificationPreflightCoordinateV1::Manifest,
-        )
-    })?;
+    let bytes = map_manifest_encoding(pos_crypto::canonical::encode(input.manifest))?;
     if bytes.len() > MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1 {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::FieldOutOfBounds,
@@ -573,6 +563,28 @@ const fn preflight_replay_claim(
     })
 }
 
+fn map_request_encoding(
+    result: Result<Vec<u8>, crate::ReproVerificationRequestContractErrorV1>,
+) -> Result<Vec<u8>, VerificationPreflightErrorV1> {
+    result.map_err(|_| {
+        VerificationPreflightErrorV1::new(
+            SafeErrorCodeV1::InvalidEncoding,
+            VerificationPreflightCoordinateV1::Request,
+        )
+    })
+}
+
+fn map_manifest_encoding(
+    result: Result<pos_core::CanonicalBytes, pos_core::CoreError>,
+) -> Result<pos_core::CanonicalBytes, VerificationPreflightErrorV1> {
+    result.map_err(|_| {
+        VerificationPreflightErrorV1::new(
+            SafeErrorCodeV1::InvalidEncoding,
+            VerificationPreflightCoordinateV1::Manifest,
+        )
+    })
+}
+
 const fn map_profile_error(
     error: ExecutionProfileContractErrorV1,
     coordinate: VerificationPreflightCoordinateV1,
@@ -628,6 +640,36 @@ mod tests {
     // These tests cover private exhaustive adapters whose foreign error
     // variants are not all constructible through the typed public seam.
     use super::*;
+
+    #[test]
+    fn maps_canonical_encoding_failures_to_closed_errors() {
+        let request_error = map_request_encoding(Err(
+            crate::ReproVerificationRequestContractErrorV1::InvalidEncoding,
+        ));
+        assert_eq!(
+            request_error,
+            Err(VerificationPreflightErrorV1::new(
+                SafeErrorCodeV1::InvalidEncoding,
+                VerificationPreflightCoordinateV1::Request,
+            ))
+        );
+        assert_eq!(map_request_encoding(Ok(vec![1, 2, 3])), Ok(vec![1, 2, 3]));
+
+        let manifest_error = map_manifest_encoding(Err(
+            pos_core::CoreError::CanonicalCborSerialization("test".to_owned()),
+        ));
+        assert_eq!(
+            manifest_error,
+            Err(VerificationPreflightErrorV1::new(
+                SafeErrorCodeV1::InvalidEncoding,
+                VerificationPreflightCoordinateV1::Manifest,
+            ))
+        );
+        assert_eq!(
+            map_manifest_encoding(Ok(pos_core::CanonicalBytes::from_static(b"bytes"))),
+            Ok(pos_core::CanonicalBytes::from_static(b"bytes"))
+        );
+    }
 
     #[test]
     fn maps_all_profile_contract_errors_to_closed_codes() {
