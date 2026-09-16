@@ -2227,7 +2227,7 @@ impl Gateway {
         self.submit_proposed_action(timeline_id, proposal).await
     }
 
-    fn require_action_authorization(&self) -> Result<(), GatewayError> {
+    const fn require_action_authorization(&self) -> Result<(), GatewayError> {
         let authorized_host = self.authorization.is_some();
         #[cfg(test)]
         let authorized_host = authorized_host || self.action_principal.is_some();
