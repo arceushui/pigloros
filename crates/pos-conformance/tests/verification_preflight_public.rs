@@ -256,7 +256,7 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
 }
 
 #[test]
-fn exercises_manifest_profile_snapshot_and_binding_failures() -> TestResult {
+fn exercises_manifest_profile_snapshot_failures() -> TestResult {
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.manifest.plugin_versions = (0..256)
         .map(|index| (format!("{index:0128}"), "v".repeat(128)))
@@ -274,7 +274,7 @@ fn exercises_manifest_profile_snapshot_and_binding_failures() -> TestResult {
         ("plugin".to_owned(), "v".repeat(129)),
     ] {
         let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
-        fixture.manifest.plugin_versions = [(name, version)].into_iter().collect();
+        fixture.manifest.plugin_versions = std::iter::once((name, version)).collect();
         let error = expect_failure(
             &preflight_verification_v1(&fixture.input()),
             "manifest identifier bound",
@@ -353,7 +353,13 @@ fn exercises_manifest_profile_snapshot_and_binding_failures() -> TestResult {
     );
     assert_eq!(error.code(), SafeErrorCodeV1::NonCanonicalOrder);
 
+    Ok(())
+}
+
+#[test]
+fn exercises_digest_binding_and_profile_class_failures() -> TestResult {
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+
     fixture.request.manifest_digest[0] ^= 1;
     fixture.refresh_request()?;
     let error = expect_failure(
@@ -443,7 +449,13 @@ fn exercises_manifest_profile_snapshot_and_binding_failures() -> TestResult {
         VerificationPreflightCoordinateV1::Manifest
     );
 
+    Ok(())
+}
+
+#[test]
+fn exercises_trust_continuity_revocation_and_claim_failures() -> TestResult {
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+
     fixture.trust_policy_snapshot.previous_snapshot_digest = Some([33; 32]);
     fixture.refresh_snapshot_binding()?;
     let error = expect_failure(
