@@ -11,6 +11,7 @@ mod execution;
 mod operations;
 mod policy;
 mod revocation;
+mod revocation_update;
 mod trust;
 
 /// ADR-069's closed SIC1/HCP1 feature set in bytewise identifier order.
@@ -35,6 +36,31 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
 
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
+pub use revocation_update::{
+    AuthenticatedRevocationAcknowledgement, RecoveryCancellationContext, RevocationAcknowledgement,
+    RevocationUpdateRequest, SandboxRevocationUpdateError,
+};
+
+pub(crate) fn attempt_values(attempts: &[[u8; 16]]) -> ciborium::value::Value {
+    ciborium::value::Value::Array(
+        attempts
+            .iter()
+            .map(|attempt| ciborium::value::Value::Bytes(attempt.to_vec()))
+            .collect(),
+    )
+}
+
+pub(crate) fn validate_attempt_ids(
+    attempts: &[[u8; 16]],
+) -> Result<(), SandboxProviderProtocolError> {
+    if attempts.len() > 256 {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    if attempts.contains(&[0; 16]) || !attempts.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(SandboxProviderProtocolError::NonCanonicalOrder);
+    }
+    Ok(())
+}
 pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, SandboxTrustSnapshot};
 
 pub use admission::{

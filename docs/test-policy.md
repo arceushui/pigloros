@@ -58,10 +58,14 @@ Documentation-only pull requests skip both jobs. The verdict uses zero
 tool tolerance and treats one IEEE-754 representation step (one ULP) as
 numerical equality; every larger score increase fails, including increases on
 moved functions. Every new function must score at most 30. Standard Cargo
-integration-test, benchmark, and example directories are excluded from
-complexity scoring; their execution still contributes coverage to production
-code. Repository `.cargo-crap.toml` files are prohibited so a change cannot
-suppress or truncate the report.
+integration-test, benchmark, and example targets are excluded with crate-relative
+`tests/**`, `benches/**`, and `examples/**` patterns; their execution still
+contributes coverage to production code. Internal test modules require an
+explicit crate-relative path in the CI allowlist. No broad `src/**` pattern is
+allowed, so production Rust remains in scope regardless of module placement.
+Repository
+`.cargo-crap.toml` files are prohibited so a change cannot suppress or truncate
+the report.
 
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so

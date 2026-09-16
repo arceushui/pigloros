@@ -23,11 +23,20 @@ SCOPED_CARGO_CRAP_JOB_IF = (
     "${{ always() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
+TEST_ONLY_EXCLUSIONS = (
+    "tests/**",
+    "benches/**",
+    "examples/**",
+    "src/selector/installation/tests/**",
+    "src/erasure_tests.rs",
+)
+EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
     "--missing pessimistic --jobs 2 "
-    "--exclude 'tests/**' --exclude 'benches/**' --exclude 'examples/**' "
+    + EXCLUSION_ARGS
+    +
     "--format json "
     '--output "${{ runner.temp }}/cargo-crap-baseline.json"\n'
 )
@@ -35,7 +44,8 @@ ANALYZE_COMMAND = (
     "cargo crap --workspace "
     '--lcov "${{ runner.temp }}/coverage.lcov" '
     "--missing pessimistic --jobs 2 "
-    "--exclude 'tests/**' --exclude 'benches/**' --exclude 'examples/**' "
+    + EXCLUSION_ARGS
+    +
     '--baseline "${{ runner.temp }}/cargo-crap-baseline.json" '
     "--epsilon 0 --format json "
     '--output "${{ runner.temp }}/cargo-crap-report.json"\n'

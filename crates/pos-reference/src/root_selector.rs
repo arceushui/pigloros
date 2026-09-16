@@ -1,11 +1,9 @@
-//! Non-activating normal-path composition for ADR-069's root-owned selector.
+//! Final composition and activation for ADR-069's root-owned selector.
 //!
 //! This module owns no caller-configurable authority. It opens exactly one
-//! SIC1 state and fails closed while SIR1 recovery is pending. ADR-069 assigns
-//! both fixed listeners and final production activation to #359, so this module
-//! does not activate a runtime socket by itself. [`OwnedSelectorListener`]
-//! exposes the separate, non-activating listener-ownership seam consumed by the
-//! production activation work.
+//! SIC1 state, fails closed while SIR1 recovery is pending, binds the fixed
+//! administrative listener before the evaluator listener, and keeps both
+//! pathname identities under one admission lifetime.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -15,27 +13,33 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::Duration;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
-use rustix::fs::{chmodat, statat, unlinkat, AtFlags, FileType, Mode};
+use rustix::fs::{chmodat, fsync, mkdirat, statat, unlinkat, AtFlags, FileType, Mode};
 use rustix::net::sockopt::socket_peercred;
-use rustix::rand::{getrandom, GetRandomFlags};
 
+use crate::control_framing::{self, ControlFrameError};
 use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
-    ProviderTransport, ProviderTransportError, ReadSeek,
+    ProviderRequestAdmission, ProviderTransport, ProviderTransportError, ReadSeek,
 };
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError,
     SandboxProviderErrorCode, SandboxProviderOperation, SignedImageManifest,
 };
+#[cfg(test)]
+use crate::selector::installation::authority::ProviderRuntimeSlot;
 use crate::selector::installation::authority::{
-    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
+    fresh_selector_id, AdmittedProviderRuntime, AdmittedSelectorProvider,
+    AuthenticatedSelectorBootstrap, CommittedInstallationUpdate, InstallationChallenge,
+    InstallationRecoverySnapshot, InstallationUpdateCommitError,
 };
 use crate::selector::installation::{
     open_directory_chain, InstallationObjectKind, InstalledSelectorState,
@@ -57,11 +61,14 @@ const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_RETAINED_EVALUATION_NAMESPACES: usize = 256;
 const ROOT_UID: u32 = 0;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const LIVE_UPDATE_TIMEOUT: Duration = Duration::from_millis(100);
 const SELECTOR_SOCKET_MODE: u32 = 0o600;
 #[cfg(test)]
 const SELECTOR_PARENT_MODE: u32 = 0o700;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const SANDBOX_SELECTOR_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-provider.sock";
+const SANDBOX_ADMIN_SOCKET_RELATIVE: &str = "run/pigloros/sandbox-selector-admin.sock";
+const SANDBOX_RECOVERY_DIRECTORY_RELATIVE: &str = "run/pigloros/sandbox-selector-recovery";
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
@@ -77,13 +84,52 @@ fn io_error<T>(_: T) -> SelectorBoundaryError {
 
 fn map_to_unit_error<T>(_: T) {}
 
-/// Authenticated normal-path composition without fixed runtime activation.
+/// Authenticated selector composition before fixed runtime activation.
 ///
 /// Pending SIR1 deliberately remains unavailable: `InstalledSelectorState::open`
-/// rejects it before any capability can be returned. #359 consumes this seam
-/// only after composing the mandatory administrative and evaluator listeners.
-pub struct RootSelectorComposition {
+/// rejects it before any capability can be returned. [`RootSelectorRuntime`]
+/// owns the only production activation path.
+struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
+    updates: Mutex<()>,
+}
+
+struct ReceivedInstallationUpdate {
+    challenge: InstallationChallenge,
+    bytes: Vec<u8>,
+}
+
+struct ClosedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    received: ReceivedInstallationUpdate,
+}
+
+struct CommittedClosedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    committed: CommittedInstallationUpdate,
+}
+
+struct SynchronizedInstallationUpdate {
+    admission: ClosedSelectorAdmission,
+    successor: AuthenticatedSelectorBootstrap,
+    acknowledgement: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+enum PrepareLiveUpdateError {
+    #[error(transparent)]
+    BeforeRecovery(SelectorBoundaryError),
+    #[error(transparent)]
+    RecoveryPending(SelectorBoundaryError),
+}
+
+impl From<InstallationUpdateCommitError> for PrepareLiveUpdateError {
+    fn from(error: InstallationUpdateCommitError) -> Self {
+        match error {
+            InstallationUpdateCommitError::BeforeRecovery(error) => Self::BeforeRecovery(error),
+            InstallationUpdateCommitError::RecoveryPending(error) => Self::RecoveryPending(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,10 +195,60 @@ impl OwnedSocketPath {
 /// [`RootSelectorComposition`] never binds the fixed endpoint. Cleanup retains
 /// the root-owned parent directory and removes the pathname only while it still
 /// names the socket inode created by this owner.
-pub struct OwnedSelectorListener {
+struct OwnedSelectorListener {
     listener: UnixListener,
     path: OwnedSocketPath,
     owned: bool,
+}
+
+/// Identity-bound owner of the fixed root-administrator listener.
+struct OwnedAdministratorListener {
+    inner: OwnedSelectorListener,
+}
+
+/// Fully activated root selector with both fixed listeners owned together.
+pub struct RootSelectorRuntime {
+    composition: RootSelectorComposition,
+    administrator: OwnedAdministratorListener,
+    evaluator: OwnedSelectorListener,
+}
+
+#[derive(Default)]
+struct EvaluatorWorkers {
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+struct EvaluatorServeResult {
+    listener: Result<(), SelectorBoundaryError>,
+    workers: EvaluatorWorkers,
+}
+
+impl EvaluatorWorkers {
+    fn spawn(&mut self, composition: Arc<RootSelectorComposition>, stream: UnixStream) {
+        self.handles.push(thread::spawn(move || {
+            let _evaluation_result = composition.evaluate_root_connection(stream);
+        }));
+    }
+
+    fn reap_finished(&mut self) -> Result<(), SelectorBoundaryError> {
+        while let Some(index) = self
+            .handles
+            .iter()
+            .position(thread::JoinHandle::is_finished)
+        {
+            self.handles
+                .swap_remove(index)
+                .join()
+                .map_err(selector_unavailable)?;
+        }
+        Ok(())
+    }
+
+    fn join_all(mut self) -> Result<(), SelectorBoundaryError> {
+        self.handles
+            .drain(..)
+            .try_for_each(|worker| worker.join().map_err(selector_unavailable))
+    }
 }
 
 impl OwnedSelectorListener {
@@ -163,12 +259,12 @@ impl OwnedSelectorListener {
     /// Returns a closed boundary error if the root-owned runtime directory is
     /// unsafe, the endpoint already exists, or the bound socket cannot be
     /// authenticated through the retained parent directory.
-    pub fn bind() -> Result<Self, SelectorBoundaryError> {
-        Self::bind_beneath(
-            Path::new("/"),
-            Path::new(SANDBOX_SELECTOR_SOCKET_RELATIVE),
-            ROOT_UID,
-        )
+    fn bind() -> Result<Self, SelectorBoundaryError> {
+        Self::bind_fixed(Path::new(SANDBOX_SELECTOR_SOCKET_RELATIVE))
+    }
+
+    fn bind_fixed(relative_path: &Path) -> Result<Self, SelectorBoundaryError> {
+        Self::bind_beneath(Path::new("/"), relative_path, ROOT_UID)
     }
 
     #[cfg(test)]
@@ -258,7 +354,8 @@ impl OwnedSelectorListener {
     ///
     /// # Errors
     /// Returns a closed I/O error when the listener cannot accept a stream.
-    pub fn accept(&self) -> Result<UnixStream, SelectorBoundaryError> {
+    #[cfg(test)]
+    fn accept(&self) -> Result<UnixStream, SelectorBoundaryError> {
         self.path.verify()?;
         self.listener
             .accept()
@@ -266,12 +363,26 @@ impl OwnedSelectorListener {
             .map_err(io_error)
     }
 
+    fn set_nonblocking(&self) -> Result<(), SelectorBoundaryError> {
+        self.listener.set_nonblocking(true).map_err(io_error)
+    }
+
+    fn try_accept(&self) -> Result<Option<UnixStream>, SelectorBoundaryError> {
+        self.path.verify()?;
+        match self.listener.accept() {
+            Ok((stream, _)) => Ok(Some(stream)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
     /// Remove the exact owned socket and consume the listener.
     ///
     /// # Errors
     /// Returns a closed identity error if the pathname is absent or has been
     /// replaced. A replacement is never removed.
-    pub fn close(mut self) -> Result<(), SelectorBoundaryError> {
+    #[cfg(test)]
+    fn close(mut self) -> Result<(), SelectorBoundaryError> {
         let result = self.remove_owned_socket();
         if result.is_ok() {
             self.owned = false;
@@ -282,6 +393,150 @@ impl OwnedSelectorListener {
     fn remove_owned_socket(&self) -> Result<(), SelectorBoundaryError> {
         self.path.remove()
     }
+}
+
+impl OwnedAdministratorListener {
+    fn bind() -> Result<Self, SelectorBoundaryError> {
+        OwnedSelectorListener::bind_fixed(Path::new(SANDBOX_ADMIN_SOCKET_RELATIVE))
+            .map(|inner| Self { inner })
+    }
+
+    fn set_nonblocking(&self) -> Result<(), SelectorBoundaryError> {
+        self.inner.set_nonblocking()
+    }
+
+    fn try_accept(&self) -> Result<Option<UnixStream>, SelectorBoundaryError> {
+        self.inner.try_accept()
+    }
+
+    fn verify(&self) -> Result<(), SelectorBoundaryError> {
+        self.inner.path.verify()
+    }
+}
+
+impl RootSelectorRuntime {
+    /// Authenticate the fixed installation and expose both listeners in safe order.
+    ///
+    /// # Errors
+    /// Returns a closed boundary error unless provider synchronization succeeds,
+    /// the administrative listener is valid first, and the evaluator listener
+    /// can then be bound without replacing any existing node.
+    pub fn activate() -> Result<Self, SelectorBoundaryError> {
+        let administrator = OwnedAdministratorListener::bind()?;
+        let composition = RootSelectorComposition::open()?;
+        administrator.verify()?;
+        let evaluator = OwnedSelectorListener::bind()?;
+        administrator.verify()?;
+        administrator.set_nonblocking()?;
+        evaluator.set_nonblocking()?;
+        Ok(Self {
+            composition,
+            administrator,
+            evaluator,
+        })
+    }
+
+    /// Serve both fixed root-only endpoints until a listener invariant fails.
+    ///
+    /// Administrative transactions are serialized; evaluator connections may
+    /// overlap and are fenced by the root-owned admission registry.
+    ///
+    /// # Errors
+    /// Returns after closing admission when either fixed listener loses its
+    /// retained pathname identity or its accept loop encounters a local error.
+    pub fn serve(self) -> Result<(), SelectorBoundaryError> {
+        let Self {
+            composition,
+            administrator,
+            evaluator,
+        } = self;
+        let composition = Arc::new(composition);
+        let administrator = Arc::new(administrator);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (completed, completion) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            let admin_composition = Arc::clone(&composition);
+            let admin_listener = Arc::clone(&administrator);
+            let admin_stopped = Arc::clone(&stopped);
+            let admin_completed = completed.clone();
+            let admin = scope.spawn(move || {
+                let result =
+                    serve_administrator(&admin_listener, &admin_composition, &admin_stopped);
+                let _send_result = admin_completed.send(result);
+                result
+            });
+
+            let evaluator_composition = Arc::clone(&composition);
+            let evaluator_administrator = Arc::clone(&administrator);
+            let evaluator_stopped = Arc::clone(&stopped);
+            let evaluator_completed = completed.clone();
+            let evaluator_thread = scope.spawn(move || {
+                let served = serve_evaluator(
+                    &evaluator,
+                    &evaluator_administrator,
+                    &evaluator_composition,
+                    &evaluator_stopped,
+                );
+                let _send_result = evaluator_completed.send(served.listener);
+                served
+            });
+            drop(completed);
+
+            let first = completion.recv().map_err(selector_unavailable)?;
+            composition.service.admission.close()?;
+            stopped.store(true, Ordering::Release);
+            let admin = admin.join().map_err(selector_unavailable)?;
+            let evaluator = evaluator_thread.join().map_err(selector_unavailable)?;
+            let workers = evaluator.workers.join_all();
+            first.and(admin).and(evaluator.listener).and(workers)
+        })
+    }
+}
+
+fn serve_administrator(
+    listener: &OwnedAdministratorListener,
+    composition: &RootSelectorComposition,
+    stopped: &AtomicBool,
+) -> Result<(), SelectorBoundaryError> {
+    while !stopped.load(Ordering::Acquire) {
+        match listener.try_accept()? {
+            Some(stream) => {
+                let _update_result = composition.update_installation(stream);
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    Ok(())
+}
+
+fn serve_evaluator(
+    listener: &OwnedSelectorListener,
+    administrator: &OwnedAdministratorListener,
+    composition: &Arc<RootSelectorComposition>,
+    stopped: &AtomicBool,
+) -> EvaluatorServeResult {
+    let mut workers = EvaluatorWorkers::default();
+    let listener =
+        serve_evaluator_connections(listener, administrator, composition, stopped, &mut workers);
+    EvaluatorServeResult { listener, workers }
+}
+
+fn serve_evaluator_connections(
+    listener: &OwnedSelectorListener,
+    administrator: &OwnedAdministratorListener,
+    composition: &Arc<RootSelectorComposition>,
+    stopped: &AtomicBool,
+    workers: &mut EvaluatorWorkers,
+) -> Result<(), SelectorBoundaryError> {
+    while !stopped.load(Ordering::Acquire) {
+        workers.reap_finished()?;
+        administrator.verify()?;
+        match listener.try_accept()? {
+            Some(stream) => workers.spawn(Arc::clone(composition), stream),
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    Ok(())
 }
 
 impl Drop for OwnedSelectorListener {
@@ -395,20 +650,25 @@ impl RootSelectorComposition {
     ///
     /// Returns a closed boundary error for missing, invalid, pending-recovery,
     /// or unavailable installation/provider state.
-    pub fn open() -> Result<Self, SelectorBoundaryError> {
-        InstalledSelectorState::open()
-            .and_then(InstalledSelectorState::authenticate_bootstrap)
-            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|admitted| {
-                connect_fixed_provider(&admitted).map(|transport| Self {
-                    service: RootSelectorService {
-                        admitted,
-                        transport,
-                        peer_uid: ROOT_UID,
-                        evaluation_namespaces: EvaluationNamespaceBindings::default(),
-                    },
+    fn open() -> Result<Self, SelectorBoundaryError> {
+        open_recovery_directory().and_then(|recovery_directory| {
+            InstalledSelectorState::open()
+                .and_then(InstalledSelectorState::authenticate_bootstrap)
+                .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+                .and_then(|admitted| {
+                    connect_fixed_provider(&admitted).map(|(transport, runtime)| Self {
+                        service: RootSelectorService {
+                            admission: SelectorAdmission::new(admitted, runtime),
+                            transport,
+                            peer_uid: ROOT_UID,
+                            evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                            recovery_directory: Arc::new(recovery_directory),
+                            recovery_owner: ROOT_UID,
+                        },
+                        updates: Mutex::new(()),
+                    })
                 })
-            })
+        })
     }
 
     /// Evaluates one already-accepted root peer without binding any socket.
@@ -418,45 +678,293 @@ impl RootSelectorComposition {
     /// Returns a closed boundary error when the stream cannot be authenticated,
     /// decoded, executed, or answered. Protocol-level failures are encoded in
     /// the selector reply where the request identity permits one.
-    pub fn evaluate_root_connection(
-        &self,
-        stream: UnixStream,
-    ) -> Result<(), SelectorBoundaryError> {
+    fn evaluate_root_connection(&self, stream: UnixStream) -> Result<(), SelectorBoundaryError> {
         self.service.handle_connection(stream)
+    }
+
+    /// Process one root-administrator SICN1/SIU1 transaction.
+    ///
+    /// The connection receives one challenge, may submit one framed SIU1 and
+    /// write EOF, and receives the exact provider RCA1 only after durable
+    /// successor publication and successor admission have completed.
+    ///
+    /// # Errors
+    /// Returns a closed boundary error for a foreign peer, malformed framing,
+    /// invalid authority, failed durability, timeout, or provider rejection.
+    fn update_installation(&self, mut stream: UnixStream) -> Result<(), SelectorBoundaryError> {
+        if !root_peer(&stream, ROOT_UID) {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        configure_update_stream(&stream)
+            .and_then(|()| self.updates.lock().map_err(selector_unavailable))
+            .and_then(|_serialized| self.process_installation_update(&mut stream))
+    }
+
+    fn process_installation_update(
+        &self,
+        stream: &mut UnixStream,
+    ) -> Result<(), SelectorBoundaryError> {
+        self.receive_installation_update(stream)
+            .and_then(|received| {
+                self.service
+                    .admission
+                    .close_and_snapshot()
+                    .map(|admission| ClosedInstallationUpdate {
+                        admission,
+                        received,
+                    })
+            })
+            .and_then(|closed| self.prepare_closed_update(closed))
+            .and_then(|closed| {
+                self.service
+                    .transport
+                    .complete_committed_update(closed.committed, LIVE_UPDATE_TIMEOUT)
+                    .map(
+                        |(successor, acknowledgement)| SynchronizedInstallationUpdate {
+                            admission: closed.admission,
+                            successor,
+                            acknowledgement,
+                        },
+                    )
+            })
+            .and_then(|synchronized| {
+                self.service
+                    .evaluation_namespaces
+                    .retire_previous_generation()
+                    .map(|()| synchronized)
+            })
+            .and_then(|synchronized| {
+                let previous = &synchronized.admission.admitted;
+                match synchronized
+                    .successor
+                    .admit_provider()
+                    .and_then(|successor| {
+                        synchronize_successor_provider(&self.service.transport, &successor)
+                            .map(|()| successor)
+                    }) {
+                    Ok(successor) => self
+                        .service
+                        .admission
+                        .admit_successor(previous, successor)?,
+                    Err(_) => self.service.admission.retire_previous(previous)?,
+                }
+                Ok(synchronized.acknowledgement)
+            })
+            .and_then(|acknowledgement| write_control_frame(stream, &acknowledgement))
+            .and_then(|()| stream.shutdown(std::net::Shutdown::Write).map_err(io_error))
+    }
+
+    fn receive_installation_update(
+        &self,
+        stream: &mut UnixStream,
+    ) -> Result<ReceivedInstallationUpdate, SelectorBoundaryError> {
+        self.service
+            .admission
+            .current()
+            .and_then(|current| current.bootstrap().issue_update_challenge())
+            .and_then(|challenge| {
+                challenge
+                    .to_canonical_cbor()
+                    .map(|bytes| (challenge, bytes))
+            })
+            .and_then(|(challenge, bytes)| write_control_frame(stream, &bytes).map(|()| challenge))
+            .and_then(|challenge| {
+                read_control_frame(stream)
+                    .map(|bytes| ReceivedInstallationUpdate { challenge, bytes })
+            })
+            .and_then(|received| require_stream_eof(stream).map(|()| received))
+    }
+
+    fn prepare_closed_update(
+        &self,
+        closed: ClosedInstallationUpdate,
+    ) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
+        match prepare_live_update(
+            &closed.admission,
+            &self.service.recovery_directory,
+            self.service.recovery_owner,
+            closed.received.challenge,
+            &closed.received.bytes,
+        ) {
+            Ok(committed) => Ok(CommittedClosedInstallationUpdate {
+                admission: closed.admission,
+                committed,
+            }),
+            Err(error) => {
+                finish_failed_preparation(&self.service.admission, &closed.admission, error)
+            }
+        }
+    }
+}
+
+fn open_recovery_directory() -> Result<File, SelectorBoundaryError> {
+    let relative = Path::new(SANDBOX_RECOVERY_DIRECTORY_RELATIVE);
+    let parent_relative = relative
+        .parent()
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+    let leaf = relative
+        .file_name()
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)?;
+    let root = File::open("/").map_err(io_error)?;
+    let runtime = open_directory_chain(root, parent_relative, ROOT_UID)?;
+    let created = match mkdirat(&runtime, leaf, Mode::RWXU) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::EXIST) => false,
+        Err(_) => return Err(SelectorBoundaryError::Io),
+    };
+    if created {
+        fsync(&runtime).map_err(io_error)?;
+    }
+    let directory = open_directory_chain(runtime, Path::new(leaf), ROOT_UID)?;
+    let metadata = directory.metadata().map_err(io_error)?;
+    if metadata.mode() & 0o7777 != 0o700 {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
+    Ok(directory)
+}
+
+fn finish_failed_preparation(
+    admission: &SelectorAdmission,
+    closed: &ClosedSelectorAdmission,
+    error: PrepareLiveUpdateError,
+) -> Result<CommittedClosedInstallationUpdate, SelectorBoundaryError> {
+    match error {
+        PrepareLiveUpdateError::BeforeRecovery(error) => {
+            admission.reopen_previous(&closed.admitted).and(Err(error))
+        }
+        PrepareLiveUpdateError::RecoveryPending(error) => Err(error),
+    }
+}
+
+fn configure_update_stream(stream: &UnixStream) -> Result<(), SelectorBoundaryError> {
+    stream
+        .set_read_timeout(Some(INITIAL_IO_TIMEOUT))
+        .map_err(io_error)
+        .and_then(|()| {
+            stream
+                .set_write_timeout(Some(INITIAL_IO_TIMEOUT))
+                .map_err(io_error)
+        })
+}
+
+fn prepare_live_update(
+    closed: &ClosedSelectorAdmission,
+    recovery_directory: &File,
+    recovery_owner: u32,
+    challenge: crate::selector::installation::authority::InstallationChallenge,
+    update_bytes: &[u8],
+) -> Result<CommittedInstallationUpdate, PrepareLiveUpdateError> {
+    closed
+        .admitted
+        .bootstrap()
+        .validate_update(challenge, update_bytes)
+        .map_err(PrepareLiveUpdateError::BeforeRecovery)
+        .and_then(|update| {
+            InstallationRecoverySnapshot::seal(
+                &closed.admitted,
+                &closed.runtime,
+                recovery_directory,
+                recovery_owner,
+                closed.live_attempt_ids.clone(),
+                closed.live_attempt_ids.clone(),
+            )
+            .map(|snapshot| (update, snapshot))
+            .map_err(PrepareLiveUpdateError::BeforeRecovery)
+        })
+        .and_then(|(update, snapshot)| {
+            Arc::clone(&closed.admitted)
+                .commit_update(update, snapshot)
+                .map_err(PrepareLiveUpdateError::from)
+        })
+}
+
+fn write_control_frame(stream: &mut impl Write, bytes: &[u8]) -> Result<(), SelectorBoundaryError> {
+    control_framing::write_frame(stream, bytes, CONTROL_LIMIT_BYTES).map_err(control_frame_error)
+}
+
+fn read_control_frame(stream: &mut impl Read) -> Result<Vec<u8>, SelectorBoundaryError> {
+    control_framing::read_frame(stream, CONTROL_LIMIT_BYTES)
+        .map_err(control_frame_error)?
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
+}
+
+fn require_stream_eof(stream: &mut impl Read) -> Result<(), SelectorBoundaryError> {
+    control_framing::require_eof(stream).map_err(control_frame_error)
+}
+
+const fn control_frame_error(error: ControlFrameError) -> SelectorBoundaryError {
+    match error {
+        ControlFrameError::Invalid => SelectorBoundaryError::ArtifactInvalid,
+        ControlFrameError::Io => SelectorBoundaryError::Io,
     }
 }
 
 fn connect_fixed_provider(
     admitted: &AdmittedSelectorProvider,
-) -> Result<ProviderTransport, SelectorBoundaryError> {
+) -> Result<(ProviderTransport, AdmittedProviderRuntime), SelectorBoundaryError> {
     connect_and_synchronize(
         admitted,
         ProviderTransport::from_admitted,
-        fresh_nonce,
+        fresh_synchronization_ids,
         synchronize_fixed_provider,
     )
+    .and_then(|transport| {
+        transport
+            .admit_runtime(admitted)
+            .map(|runtime| (transport, runtime))
+    })
 }
 
 fn synchronize_fixed_provider(
     transport: &ProviderTransport,
     admitted: &AdmittedSelectorProvider,
-    request_id: [u8; 16],
-    nonce: [u8; 16],
+    ids: RevocationSynchronizationIds,
 ) -> Result<(), SelectorBoundaryError> {
-    transport.synchronize_revocation(admitted.provider(), request_id, nonce, INITIAL_IO_TIMEOUT)
+    transport.synchronize_revocation(
+        admitted.provider(),
+        ids.request_id.0,
+        ids.selector_nonce.0,
+        INITIAL_IO_TIMEOUT,
+    )
+}
+
+fn synchronize_successor_provider(
+    transport: &ProviderTransport,
+    admitted: &AdmittedSelectorProvider,
+) -> Result<(), SelectorBoundaryError> {
+    fresh_synchronization_ids().and_then(|ids| synchronize_fixed_provider(transport, admitted, ids))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SynchronizationRequestId([u8; 16]);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SynchronizationNonce([u8; 16]);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RevocationSynchronizationIds {
+    request_id: SynchronizationRequestId,
+    selector_nonce: SynchronizationNonce,
+}
+
+fn fresh_synchronization_ids() -> Result<RevocationSynchronizationIds, SelectorBoundaryError> {
+    fresh_selector_id().and_then(|request_id| {
+        fresh_selector_id().map(|selector_nonce| RevocationSynchronizationIds {
+            request_id: SynchronizationRequestId(request_id),
+            selector_nonce: SynchronizationNonce(selector_nonce),
+        })
+    })
 }
 
 fn connect_and_synchronize<Admitted, Transport, Error>(
     admitted: &Admitted,
     connect: impl FnOnce(&Admitted) -> Result<Transport, Error>,
-    mut nonce: impl FnMut() -> Result<[u8; 16], Error>,
-    synchronize: impl FnOnce(&Transport, &Admitted, [u8; 16], [u8; 16]) -> Result<(), Error>,
+    identities: impl FnOnce() -> Result<RevocationSynchronizationIds, Error>,
+    synchronize: impl FnOnce(&Transport, &Admitted, RevocationSynchronizationIds) -> Result<(), Error>,
 ) -> Result<Transport, Error> {
-    let transport = connect(admitted)?;
-    let request_id = nonce()?;
-    let challenge = nonce()?;
-    synchronize(&transport, admitted, request_id, challenge)?;
-    Ok(transport)
+    connect(admitted).and_then(|transport| {
+        identities().and_then(|ids| synchronize(&transport, admitted, ids).map(|()| transport))
+    })
 }
 
 trait ProviderExecutor {
@@ -467,6 +975,7 @@ trait ProviderExecutor {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
+        admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError>;
 }
 
@@ -478,16 +987,358 @@ impl ProviderExecutor for ProviderTransport {
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
+        admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        Self::execute_staged(self, admitted, commitment, spx1, input, watchdog)
+        Self::execute_staged(self, admitted, commitment, spx1, input, watchdog, admission)
     }
 }
 
 struct RootSelectorService<T = ProviderTransport> {
-    admitted: AdmittedSelectorProvider,
+    admission: SelectorAdmission,
     transport: T,
     peer_uid: u32,
     evaluation_namespaces: EvaluationNamespaceBindings,
+    recovery_directory: Arc<File>,
+    recovery_owner: u32,
+}
+
+struct SelectorAdmission {
+    state: Mutex<SelectorAdmissionState>,
+    provider_entry_changed: Condvar,
+}
+
+struct SelectorAdmissionState {
+    admitted: Arc<AdmittedSelectorProvider>,
+    runtime: AdmittedProviderRuntime,
+    open: bool,
+    attempts: BTreeMap<[u8; 16], AttemptAdmissionState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AttemptAdmissionState {
+    active_requests: usize,
+    provider_owned: bool,
+    provider_retained: bool,
+    provider_entries_in_progress: usize,
+}
+
+struct SelectorAdmissionLease<'a> {
+    owner: &'a SelectorAdmission,
+    admitted: Arc<AdmittedSelectorProvider>,
+    attempt_id: [u8; 16],
+}
+
+#[cfg(test)]
+struct ProviderEntryPermit<'a> {
+    owner: &'a SelectorAdmission,
+    attempt_id: [u8; 16],
+}
+
+struct SelectorProviderRequestAdmission<'a> {
+    owner: &'a SelectorAdmission,
+    attempt_id: [u8; 16],
+    entry_active: bool,
+}
+
+struct ClosedSelectorAdmission {
+    admitted: Arc<AdmittedSelectorProvider>,
+    runtime: AdmittedProviderRuntime,
+    live_attempt_ids: Vec<[u8; 16]>,
+}
+
+impl SelectorAdmission {
+    fn new(admitted: AdmittedSelectorProvider, runtime: AdmittedProviderRuntime) -> Self {
+        Self {
+            state: Mutex::new(SelectorAdmissionState {
+                admitted: Arc::new(admitted),
+                runtime,
+                open: true,
+                attempts: BTreeMap::new(),
+            }),
+            provider_entry_changed: Condvar::new(),
+        }
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn for_test(admitted: AdmittedSelectorProvider) -> Result<Self, SelectorBoundaryError> {
+        let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(1, 1)?;
+        Ok(Self::new(admitted, runtime))
+    }
+
+    fn acquire(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<SelectorAdmissionLease<'_>, SelectorBoundaryError> {
+        if attempt_id == [0; 16] {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if !state.open {
+            return Err(SelectorBoundaryError::SelectorUnavailable);
+        }
+        if !state.attempts.contains_key(&attempt_id)
+            && state.attempts.len() >= MAX_RETAINED_EVALUATION_NAMESPACES
+        {
+            return Err(SelectorBoundaryError::SelectorUnavailable);
+        }
+        state
+            .attempts
+            .entry(attempt_id)
+            .or_default()
+            .active_requests += 1;
+        let admitted = Arc::clone(&state.admitted);
+        drop(state);
+        Ok(SelectorAdmissionLease {
+            owner: self,
+            admitted,
+            attempt_id,
+        })
+    }
+
+    fn current(&self) -> Result<Arc<AdmittedSelectorProvider>, SelectorBoundaryError> {
+        let state = self.state.lock().map_err(selector_unavailable)?;
+        state
+            .open
+            .then(|| Arc::clone(&state.admitted))
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)
+    }
+
+    fn close(&self) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        state.open = false;
+        drop(state);
+        Ok(())
+    }
+
+    fn close_and_snapshot(&self) -> Result<ClosedSelectorAdmission, SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if !state.open {
+            return Err(SelectorBoundaryError::SelectorUnavailable);
+        }
+        state.open = false;
+        while state
+            .attempts
+            .values()
+            .any(|attempt| attempt.provider_entries_in_progress != 0)
+        {
+            state = self
+                .provider_entry_changed
+                .wait(state)
+                .map_err(selector_unavailable)?;
+        }
+        Ok(ClosedSelectorAdmission {
+            admitted: Arc::clone(&state.admitted),
+            runtime: state.runtime.clone(),
+            live_attempt_ids: state
+                .attempts
+                .iter()
+                .filter_map(|(id, attempt)| attempt.provider_owned.then_some(*id))
+                .collect(),
+        })
+    }
+
+    fn reopen_previous(
+        &self,
+        previous: &Arc<AdmittedSelectorProvider>,
+    ) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if state.open || !Arc::ptr_eq(&state.admitted, previous) {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        state.open = true;
+        drop(state);
+        Ok(())
+    }
+
+    fn admit_successor(
+        &self,
+        previous: &Arc<AdmittedSelectorProvider>,
+        successor: AdmittedSelectorProvider,
+    ) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if state.open || !Arc::ptr_eq(&state.admitted, previous) {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        state.admitted = Arc::new(successor);
+        state.attempts.clear();
+        state.open = true;
+        drop(state);
+        Ok(())
+    }
+
+    fn retire_previous(
+        &self,
+        previous: &Arc<AdmittedSelectorProvider>,
+    ) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if state.open || !Arc::ptr_eq(&state.admitted, previous) {
+            return Err(SelectorBoundaryError::ArtifactInvalid);
+        }
+        state.attempts.clear();
+        drop(state);
+        Ok(())
+    }
+
+    fn release(&self, attempt_id: [u8; 16]) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let std::collections::btree_map::Entry::Occupied(mut entry) =
+            state.attempts.entry(attempt_id)
+        {
+            if entry.get().active_requests == 0 {
+                return;
+            }
+            entry.get_mut().active_requests -= 1;
+            if entry.get().active_requests == 0 && !entry.get().provider_retained {
+                entry.remove();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn begin_provider_execution(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<ProviderEntryPermit<'_>, ProviderTransportError> {
+        self.start_provider_entry(attempt_id)?;
+        Ok(ProviderEntryPermit {
+            owner: self,
+            attempt_id,
+        })
+    }
+
+    fn start_provider_entry(&self, attempt_id: [u8; 16]) -> Result<(), ProviderTransportError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+        if !state.open {
+            return Err(ProviderTransportError::BeforeAdmission);
+        }
+        let attempt = state
+            .attempts
+            .get_mut(&attempt_id)
+            .ok_or(ProviderTransportError::BeforeAdmission)?;
+        attempt.provider_entries_in_progress += 1;
+        drop(state);
+        Ok(())
+    }
+
+    fn finish_provider_entry(&self, attempt_id: [u8; 16], entered: bool) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(attempt) = state.attempts.get_mut(&attempt_id) {
+            attempt.provider_entries_in_progress -= 1;
+            attempt.provider_owned |= entered;
+        }
+        drop(state);
+        self.provider_entry_changed.notify_all();
+    }
+
+    #[cfg(test)]
+    fn retain_provider_state(&self, attempt_id: [u8; 16]) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        let attempt = state
+            .attempts
+            .get_mut(&attempt_id)
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+        attempt.provider_owned = true;
+        attempt.provider_retained = true;
+        drop(state);
+        Ok(())
+    }
+
+    fn finish_provider_state(
+        &self,
+        attempt_id: [u8; 16],
+        admitted: &Arc<AdmittedSelectorProvider>,
+        retained: bool,
+    ) -> Result<(), SelectorBoundaryError> {
+        let mut state = self.state.lock().map_err(selector_unavailable)?;
+        if !Arc::ptr_eq(&state.admitted, admitted)
+            || !state.open && !state.attempts.contains_key(&attempt_id)
+        {
+            return Ok(());
+        }
+        let attempt = state
+            .attempts
+            .get_mut(&attempt_id)
+            .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
+        attempt.provider_owned = retained;
+        attempt.provider_retained = retained;
+        drop(state);
+        Ok(())
+    }
+}
+
+impl Drop for SelectorAdmissionLease<'_> {
+    fn drop(&mut self) {
+        self.owner.release(self.attempt_id);
+    }
+}
+
+#[cfg(test)]
+impl Drop for ProviderEntryPermit<'_> {
+    fn drop(&mut self) {
+        self.owner.finish_provider_entry(self.attempt_id, true);
+    }
+}
+
+impl SelectorAdmissionLease<'_> {
+    #[cfg(test)]
+    fn begin_provider_execution(&self) -> Result<ProviderEntryPermit<'_>, ProviderTransportError> {
+        self.owner.begin_provider_execution(self.attempt_id)
+    }
+
+    #[cfg(test)]
+    fn retain_provider_state(&self) -> Result<(), SelectorBoundaryError> {
+        self.owner.retain_provider_state(self.attempt_id)
+    }
+
+    fn finish_provider_state(&self, retained: bool) -> Result<(), SelectorBoundaryError> {
+        self.owner
+            .finish_provider_state(self.attempt_id, &self.admitted, retained)
+    }
+}
+
+impl<'a> SelectorProviderRequestAdmission<'a> {
+    const fn new(admission: &SelectorAdmissionLease<'a>) -> Self {
+        Self {
+            owner: admission.owner,
+            attempt_id: admission.attempt_id,
+            entry_active: false,
+        }
+    }
+}
+
+impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
+    fn begin(&mut self) -> Result<(), ProviderTransportError> {
+        if self.entry_active {
+            return Err(ProviderTransportError::BeforeAdmission);
+        }
+        self.owner.start_provider_entry(self.attempt_id)?;
+        self.entry_active = true;
+        Ok(())
+    }
+
+    fn entered(&mut self) {
+        if self.entry_active {
+            self.owner.finish_provider_entry(self.attempt_id, true);
+            self.entry_active = false;
+        }
+    }
+}
+
+impl Drop for SelectorProviderRequestAdmission<'_> {
+    fn drop(&mut self) {
+        if self.entry_active {
+            self.owner.finish_provider_entry(self.attempt_id, false);
+            self.entry_active = false;
+        }
+    }
 }
 
 struct StagedSelectorRequest {
@@ -510,6 +1361,28 @@ struct EvaluationNamespaceState {
     request_digest: [u8; 32],
     live_requests: usize,
     retained: bool,
+    retired: bool,
+}
+
+impl EvaluationNamespaceState {
+    fn try_acquire(&mut self, request_digest: [u8; 32]) -> Option<bool> {
+        if self.retired {
+            return None;
+        }
+        if self.request_digest == request_digest {
+            self.live_requests += 1;
+            return Some(false);
+        }
+        self.retained.then_some(true)
+    }
+
+    const fn release(&mut self, provider_retained: bool) -> bool {
+        self.live_requests -= 1;
+        if !self.retired {
+            self.retained |= provider_retained;
+        }
+        self.live_requests == 0 && (!self.retained || self.retired)
+    }
 }
 
 struct EvaluationNamespaceExecution {
@@ -525,6 +1398,18 @@ struct EvaluationNamespaceLease {
 }
 
 impl EvaluationNamespaceBindings {
+    fn retire_previous_generation(&self) -> Result<(), SelectorBoundaryError> {
+        let mut states = self.states.lock().map_err(selector_unavailable)?;
+        states.retain(|_, state| {
+            state.retired = true;
+            state.retained = false;
+            state.live_requests != 0
+        });
+        drop(states);
+        self.changed.notify_all();
+        Ok(())
+    }
+
     fn execute_ordered(
         &self,
         request: &crate::evaluator_protocol::EvaluationRequest,
@@ -548,21 +1433,11 @@ impl EvaluationNamespaceBindings {
         let mut states = self.states.lock().map_err(selector_unavailable)?;
         loop {
             if let Some(state) = states.get_mut(&namespace) {
-                if state.request_digest == request.request_digest {
-                    state.live_requests += 1;
+                if let Some(conflict) = state.try_acquire(request.request_digest) {
                     let lease = EvaluationNamespaceLease {
                         namespace,
                         request_digest: request.request_digest,
-                        conflict: false,
-                    };
-                    drop(states);
-                    return Ok(lease);
-                }
-                if state.retained {
-                    let lease = EvaluationNamespaceLease {
-                        namespace,
-                        request_digest: request.request_digest,
-                        conflict: true,
+                        conflict,
                     };
                     drop(states);
                     return Ok(lease);
@@ -584,6 +1459,7 @@ impl EvaluationNamespaceBindings {
                         request_digest: request.request_digest,
                         live_requests: 1,
                         retained: false,
+                        retired: false,
                     },
                 );
                 let lease = EvaluationNamespaceLease {
@@ -611,9 +1487,7 @@ impl EvaluationNamespaceBindings {
                 .get_mut(&lease.namespace)
                 .filter(|state| state.request_digest == lease.request_digest)
                 .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
-            state.live_requests -= 1;
-            state.retained |= provider_retained;
-            state.live_requests == 0 && !state.retained
+            state.release(provider_retained)
         };
         if remove {
             states.remove(&lease.namespace);
@@ -664,6 +1538,10 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         decoded: &DecodedSelectorRequest,
         input: &mut dyn ReadSeek,
     ) -> Result<(), SelectorBoundaryError> {
+        let Ok(admission) = self.admission.acquire(decoded.attempt_id) else {
+            return write_provider_unavailable(stream, decoded);
+        };
+        let admitted = admission.admitted.as_ref();
         let Some(requirement) = decoded.request.sandbox_requirement.as_ref() else {
             return write_policy_error(stream, decoded);
         };
@@ -671,8 +1549,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             decoded.provider_request_id[14],
             decoded.provider_request_id[15],
         ]);
-        let resolved = match self
-            .admitted
+        let resolved = match admitted
             .bootstrap()
             .resolve_installed_case(&decoded.request, ordinal)
         {
@@ -682,10 +1559,10 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         let io_timeout = Some(Duration::from_millis(resolved.attempt().watchdog_ms));
         stream.set_read_timeout(io_timeout).map_err(io_error)?;
         stream.set_write_timeout(io_timeout).map_err(io_error)?;
-        let Ok((image, launch)) = selected_image_and_launch(&self.admitted, requirement) else {
+        let Ok((image, launch)) = selected_image_and_launch(admitted, requirement) else {
             return write_policy_error(stream, decoded);
         };
-        let Ok(commitment) = self.admitted.provider().derive_selector_grant_commitment(
+        let Ok(commitment) = admitted.provider().derive_selector_grant_commitment(
             &image,
             &launch,
             &decoded.request,
@@ -694,24 +1571,31 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         ) else {
             return write_authority_mismatch(stream, decoded);
         };
-        let Ok(spx1) = selector_execute_bytes(&self.admitted, decoded, &resolved, requirement)
-        else {
+        let Ok(spx1) = selector_execute_bytes(admitted, decoded, &resolved, requirement) else {
             return write_authority_mismatch(stream, decoded);
         };
         // The same EVR1 legitimately derives one ID per selected case and exact
         // retries remain provider-idempotent. Only a namespace bound to another
         // EVR1 digest is a conflict.
-        let namespace_execution =
-            self.evaluation_namespaces
-                .execute_ordered(&decoded.request, || {
-                    self.transport.execute(
-                        self.admitted.provider(),
-                        &commitment,
-                        &spx1,
-                        input,
-                        Duration::from_millis(resolved.attempt().watchdog_ms),
-                    )
-                })?;
+        let namespace_execution = self
+            .evaluation_namespaces
+            .execute_ordered(&decoded.request, || {
+                let mut provider_requests = SelectorProviderRequestAdmission::new(&admission);
+                let result = self.transport.execute(
+                    admitted.provider(),
+                    &commitment,
+                    &spx1,
+                    input,
+                    Duration::from_millis(resolved.attempt().watchdog_ms),
+                    &mut provider_requests,
+                );
+                result
+            })
+            .and_then(|execution| {
+                admission.finish_provider_state(provider_retains_namespace(&execution.result))?;
+                Ok(execution)
+            })?;
+        drop(admission);
         let terminal = match namespace_execution.result {
             Ok(terminal) => terminal,
             Err(ProviderTransportError::BeforeAdmission) => {
@@ -906,45 +1790,24 @@ fn selector_execute_bytes(
         pcr1_digest: provider.conformance_report().report_digest,
         hcp1_digest: provider.host_profile().profile_digest,
     };
-    let request = SandboxExecuteRequest::for_selector(
-        RequestAuthority {
-            request_id: decoded.provider_request_id,
-            apt1_digest: requirement.apt1_digest,
-            policy_epoch: requirement.policy_epoch,
-            nonce: fresh_nonce()?,
-        },
-        decoded.attempt_id,
-        authority,
-        resolved.attempt().capability_ids.clone(),
-        decoded.input_descriptor(),
-        Vec::new(),
-    )
-    .map_err(artifact_invalid)?;
-    request.to_canonical_cbor().map_err(artifact_invalid)
-}
-
-fn fresh_nonce() -> Result<[u8; 16], SelectorBoundaryError> {
-    let mut nonce = <[u8; 16]>::default();
-    let mut remaining = nonce.as_mut_slice();
-    while !remaining.is_empty() {
-        let received =
-            getrandom(&mut *remaining, GetRandomFlags::empty()).map_err(selector_unavailable)?;
-        let received = nonzero_random_count(received)?;
-        remaining = &mut remaining[received..];
-    }
-    validate_nonce(nonce)
-}
-
-fn nonzero_random_count(received: usize) -> Result<usize, SelectorBoundaryError> {
-    (received != 0)
-        .then_some(received)
-        .ok_or(SelectorBoundaryError::SelectorUnavailable)
-}
-
-fn validate_nonce(nonce: [u8; 16]) -> Result<[u8; 16], SelectorBoundaryError> {
-    (nonce != [0; 16])
-        .then_some(nonce)
-        .ok_or(SelectorBoundaryError::SelectorUnavailable)
+    fresh_selector_id()
+        .and_then(|nonce| {
+            SandboxExecuteRequest::for_selector(
+                RequestAuthority {
+                    request_id: decoded.provider_request_id,
+                    apt1_digest: requirement.apt1_digest,
+                    policy_epoch: requirement.policy_epoch,
+                    nonce,
+                },
+                decoded.attempt_id,
+                authority,
+                resolved.attempt().capability_ids.clone(),
+                decoded.input_descriptor(),
+                Vec::new(),
+            )
+            .map_err(artifact_invalid)
+        })
+        .and_then(|request| request.to_canonical_cbor().map_err(artifact_invalid))
 }
 
 fn write_authenticated_execution(
@@ -1241,6 +2104,12 @@ mod tests {
     const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
     const RUNTIME_DIRECTORY: &str = "/run/pigloros";
     const SOCKET_MODE: u32 = 0o600;
+
+    fn test_recovery_directory() -> TestResult<Arc<File>> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        Ok(Arc::new(File::open(directory.path())?))
+    }
 
     struct ListenerTestDirectory {
         directory: tempfile::TempDir,
@@ -1629,6 +2498,57 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn evaluator_workers_are_joined_before_listener_shutdown_completes() -> TestResult {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let mut workers = EvaluatorWorkers::default();
+        workers.handles.push(thread::spawn(move || {
+            assert!(started_tx.send(()).is_ok());
+            assert!(release_rx.recv().is_ok());
+        }));
+        started_rx.recv_timeout(Duration::from_secs(1))?;
+
+        let joining = thread::spawn(move || {
+            assert!(joined_tx.send(workers.join_all()).is_ok());
+        });
+        assert!(joined_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(())?;
+        joined_rx.recv_timeout(Duration::from_secs(1))??;
+        joining
+            .join()
+            .map_err(|_| "worker-joining thread panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn evaluator_workers_reap_finished_handlers_and_surface_panics() -> TestResult {
+        let mut completed = EvaluatorWorkers::default();
+        completed.handles.push(thread::spawn(|| {}));
+        while !completed.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        completed.reap_finished()?;
+        assert!(completed.handles.is_empty());
+
+        let mut reap_panicked = EvaluatorWorkers::default();
+        reap_panicked
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        while !reap_panicked.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        assert!(reap_panicked.reap_finished().is_err());
+
+        let mut join_panicked = EvaluatorWorkers::default();
+        join_panicked
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        assert!(join_panicked.join_all().is_err());
+        Ok(())
+    }
+
     struct FixedCompositionFixture {
         installation: Option<SocketIdentity>,
         runtime: Option<SocketIdentity>,
@@ -1716,9 +2636,7 @@ mod tests {
             }
             return Ok(IsolatedCompositionRole::ExecuteBody);
         }
-        run_isolated_test(
-            "root_selector::tests::nonactivating_public_composition_authenticates_sly1",
-        )?;
+        run_isolated_test("root_selector::tests::activated_public_composition_authenticates_sly1")?;
         Ok(IsolatedCompositionRole::Delegated)
     }
 
@@ -1727,7 +2645,14 @@ mod tests {
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
     ) -> TestResult {
-        let mut stream = accept_test_connection(listener)?;
+        respond_to_describe(accept_test_connection(listener)?, fixture, provider)
+    }
+
+    fn respond_to_describe(
+        mut stream: UnixStream,
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+        provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
+    ) -> TestResult {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut prefix = [0; 4];
@@ -1743,6 +2668,39 @@ mod tests {
         let response = fixture.describe_response_for_provider(&request, provider)?;
         stream.write_all(&u32::try_from(response.len())?.to_be_bytes())?;
         stream.write_all(&response)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+
+        Ok(())
+    }
+
+    fn serve_installed_describe_response(
+        listener: &UnixListener,
+        fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
+    ) -> TestResult {
+        let stream = accept_test_connection(listener)?;
+        let root = File::open(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)?;
+        let admitted = InstalledSelectorState::open_at_for_test(&root)?
+            .authenticate_bootstrap()?
+            .admit_provider()?;
+        respond_to_describe(stream, fixture, admitted.provider())
+    }
+
+    fn serve_control_response(listener: &UnixListener) -> TestResult {
+        let mut stream = accept_test_connection(listener)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let context = read_frame(&mut stream)?;
+        let update = read_frame(&mut stream)?;
+        let mut trailing = Vec::new();
+        stream.read_to_end(&mut trailing)?;
+        if !trailing.is_empty() {
+            return Err("revocation update contained trailing bytes".into());
+        }
+        let acknowledgement =
+            crate::selector::installation::tests::updates::acknowledgement_for_control_frames(
+                &context, &update,
+            )?;
+        write_frame(&mut stream, &acknowledgement)?;
         stream.shutdown(std::net::Shutdown::Write)?;
         Ok(())
     }
@@ -1790,44 +2748,14 @@ mod tests {
         })
     }
 
-    fn evaluate_composition_request(
-        composition: &RootSelectorComposition,
-        request: &crate::evaluator_protocol::EvaluationRequest,
-        attempt: &crate::evaluator::CaseAttempt,
-    ) -> TestResult<(
-        crate::selector_protocol::EncodedSelectorRequest,
-        crate::selector_protocol::DecodedSelectorReply,
-    )> {
-        let encoded = encoded_request(request, attempt)?;
-        let (mut client, server) = UnixStream::pair()?;
-        write_frame(&mut client, &encoded.control)?;
-        client.write_all(&encoded.attempt_stream)?;
-        client.shutdown(std::net::Shutdown::Write)?;
-        composition.evaluate_root_connection(server)?;
-        let control = read_frame(&mut client)?;
-        let mut trailing = Vec::new();
-        client.read_to_end(&mut trailing)?;
-        if let Ok(local) = SandboxLocalError::from_canonical_cbor(&control) {
-            return Err(format!("composition returned local selector failure: {local:?}").into());
-        }
-        let reply = crate::selector_protocol::decode_reply(
-            &control,
-            &trailing,
-            &encoded,
-            request.request_digest,
-            SELECTOR_INPUT_LIMIT,
-        )?;
-        Ok((encoded, reply))
-    }
-
     fn serve_execution_responses(
         listener: &UnixListener,
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
-        epochs: [u64; 3],
+        responses: &[([u64; 3], bool)],
     ) -> TestResult {
-        for identity_conflict in [false, true] {
+        for &(epochs, identity_conflict) in responses {
             let mut stream = accept_test_connection(listener)?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -1850,9 +2778,123 @@ mod tests {
         Ok(())
     }
 
+    fn reject_invalid_administrator_updates(
+        fixture: &crate::selector::installation::tests::updates::UpdateFixture,
+        manifest_path: &Path,
+    ) -> TestResult {
+        let original_manifest = fs::read(manifest_path)?;
+        let mut abandoned =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        abandoned.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let abandoned_challenge = read_frame(&mut abandoned)?;
+        drop(abandoned);
+
+        let mut cross_connection =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        cross_connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let cross_challenge = read_frame(&mut cross_connection)?;
+        assert_ne!(cross_challenge, abandoned_challenge);
+        let cross_update = fixture.request_from_challenge(&abandoned_challenge, None)?;
+        write_frame(&mut cross_connection, &cross_update)?;
+        cross_connection.shutdown(std::net::Shutdown::Write)?;
+        let mut rejected = Vec::new();
+        cross_connection.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+
+        let mut extra_frame =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        extra_frame.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let extra_frame_challenge = read_frame(&mut extra_frame)?;
+        let extra_frame_update = fixture.request_from_challenge(&extra_frame_challenge, None)?;
+        write_frame(&mut extra_frame, &extra_frame_update)?;
+        extra_frame.write_all(&[0])?;
+        extra_frame.shutdown(std::net::Shutdown::Write)?;
+        rejected.clear();
+        extra_frame.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+        assert_eq!(fs::read(manifest_path)?, original_manifest);
+        Ok(())
+    }
+
+    fn apply_update_and_reject_replay(
+        fixture: &crate::selector::installation::tests::updates::UpdateFixture,
+    ) -> TestResult {
+        let mut administrator =
+            UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        administrator.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let challenge = read_frame(&mut administrator)?;
+        let siu1 = fixture.request_from_challenge(&challenge, None)?;
+        write_frame(&mut administrator, &siu1)?;
+        administrator.shutdown(std::net::Shutdown::Write)?;
+        let acknowledgement = read_frame(&mut administrator)?;
+        let mut trailing = Vec::new();
+        administrator.read_to_end(&mut trailing)?;
+        assert!(!acknowledgement.is_empty());
+        assert!(trailing.is_empty());
+
+        let mut stale = UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        stale.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let successor_challenge = read_frame(&mut stale)?;
+        assert_ne!(successor_challenge, challenge);
+        write_frame(&mut stale, &siu1)?;
+        stale.shutdown(std::net::Shutdown::Write)?;
+        let mut rejected = Vec::new();
+        stale.read_to_end(&mut rejected)?;
+        assert!(rejected.is_empty());
+        Ok(())
+    }
+
+    fn assert_current_identity_conflict(
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        attempt: &crate::evaluator::CaseAttempt,
+    ) -> TestResult {
+        let mut conflicting_request = request.clone();
+        conflicting_request.implementation.organization_id = Some("conflicting-owner".to_owned());
+        refresh_request_digest(&mut conflicting_request)?;
+        let reply = evaluate_fixed_runtime_request(&conflicting_request, attempt)?;
+        assert_eq!(
+            reply.observation,
+            Err(crate::evaluator::AdapterError::ProtocolFailure)
+        );
+        assert_eq!(reply.provenance, None);
+        Ok(())
+    }
+
+    fn assert_successor_rejects_stale_request(
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        attempt: &crate::evaluator::CaseAttempt,
+    ) -> TestResult {
+        let reply = evaluate_fixed_runtime_request(request, attempt)?;
+        assert_eq!(
+            reply.observation,
+            Err(crate::evaluator::AdapterError::Unavailable)
+        );
+        assert_eq!(reply.provenance, None);
+        Ok(())
+    }
+
+    fn assert_recovery_directory_activation_failures() -> TestResult {
+        let recovery_directory = Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE);
+        fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o755))?;
+        assert!(RootSelectorRuntime::activate().is_err());
+        fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
+        if recovery_directory.try_exists()? {
+            fs::remove_dir(&recovery_directory)?;
+        }
+
+        fs::write(&recovery_directory, b"occupied")?;
+        assert!(RootSelectorRuntime::activate().is_err());
+        fs::remove_file(&recovery_directory)?;
+        fs::create_dir(&recovery_directory)?;
+        fs::set_permissions(&recovery_directory, fs::Permissions::from_mode(0o755))?;
+        assert!(RootSelectorRuntime::activate().is_err());
+        fs::remove_dir(recovery_directory)?;
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
-    fn nonactivating_public_composition_authenticates_sly1() -> TestResult {
+    fn activated_public_composition_authenticates_sly1() -> TestResult {
         if matches!(
             isolated_composition_role()?,
             IsolatedCompositionRole::Delegated
@@ -1861,9 +2903,15 @@ mod tests {
         }
 
         let _paths = FixedCompositionFixture::create()?;
-        assert!(RootSelectorComposition::open().is_err());
+        assert_recovery_directory_activation_failures()?;
+        assert!(RootSelectorRuntime::activate().is_err());
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
         let admitted = crate::selector::installation::tests::materialize_root_selector_state(
+            Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
+        )?;
+        let update_fixture = crate::selector::installation::tests::updates::UpdateFixture::at(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
         let control_fixture =
@@ -1882,7 +2930,7 @@ mod tests {
             resolved.attempt(),
             &[],
         )?;
-        let epochs = [
+        let current_epochs = [
             admitted.bootstrap().trust().trust_epoch(),
             admitted.bootstrap().revocation().revocation_epoch(),
             admitted.bootstrap().policy().policy_epoch(),
@@ -1900,104 +2948,111 @@ mod tests {
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
         let control_provider = std::thread::spawn(move || {
-            serve_describe_response(&control_listener, &control_fixture, admitted.provider())
-                .map_err(|error| error.to_string())
+            serve_control_response(&control_listener).map_err(|error| error.to_string())
         });
         let execute_provider = std::thread::spawn(move || {
+            serve_describe_response(
+                &execute_listener,
+                &control_fixture,
+                &execute_provider_identity,
+            )
+            .map_err(|error| error.to_string())?;
             serve_execution_responses(
                 &execute_listener,
                 &execute_fixture,
                 &execute_provider_identity,
                 &commitment,
-                epochs,
+                &[(current_epochs, false), (current_epochs, true)],
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            serve_installed_describe_response(&execute_listener, &control_fixture)
+                .map_err(|error| error.to_string())
         });
-        let composition = RootSelectorComposition::open()?;
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
-        let evaluator_listener = OwnedSelectorListener::bind()?;
+        let runtime = RootSelectorRuntime::activate()?;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
-        evaluator_listener.close()?;
-        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
+        let runtime = std::thread::spawn(move || runtime.serve());
 
-        let (_, reply) = evaluate_composition_request(&composition, &request, resolved.attempt())?;
-        assert_eq!(
-            reply.observation,
-            Ok(crate::evaluator::SubjectObservation {
-                result: crate::evaluator::SubjectResult::Unavailable,
-                usage: crate::evaluator::ResourceUsage::default(),
-            })
-        );
-        assert!(reply.provenance.is_some());
+        let manifest_path = Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)
+            .join(crate::selector::installation::MANIFEST_NAME);
+        reject_invalid_administrator_updates(&update_fixture, &manifest_path)?;
 
-        let mut conflicting_request = request.clone();
-        conflicting_request.implementation.organization_id = Some("conflicting-owner".to_owned());
-        refresh_request_digest(&mut conflicting_request)?;
-        let (_, reply) =
-            evaluate_composition_request(&composition, &conflicting_request, resolved.attempt())?;
-        assert_eq!(
-            reply.observation,
-            Err(crate::evaluator::AdapterError::ProtocolFailure)
-        );
-        assert_eq!(reply.provenance, None);
+        let reply = evaluate_fixed_runtime_request(&request, resolved.attempt())?;
+        assert!(reply.observation.is_ok());
+        assert_current_identity_conflict(&request, resolved.attempt())?;
+
+        apply_update_and_reject_replay(&update_fixture)?;
+        assert_successor_rejects_stale_request(&request, resolved.attempt())?;
         control_provider
             .join()
             .map_err(|_| "provider control thread panicked")??;
         execute_provider
             .join()
             .map_err(|_| "provider execute thread panicked")??;
+        fs::remove_file(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
+        assert!(runtime
+            .join()
+            .map_err(|_| "root selector runtime panicked")?
+            .is_err());
+        assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
+        assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         Ok(())
     }
 
+    fn evaluate_fixed_runtime_request(
+        request: &crate::evaluator_protocol::EvaluationRequest,
+        attempt: &crate::evaluator::CaseAttempt,
+    ) -> TestResult<crate::selector_protocol::DecodedSelectorReply> {
+        let encoded = encoded_request(request, attempt)?;
+        let mut client = UnixStream::connect(crate::selector::SANDBOX_SELECTOR_SOCKET)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        write_frame(&mut client, &encoded.control)?;
+        client.write_all(&encoded.attempt_stream)?;
+        client.shutdown(std::net::Shutdown::Write)?;
+        let control = read_frame(&mut client)?;
+        let mut trailing = Vec::new();
+        client.read_to_end(&mut trailing)?;
+        Ok(crate::selector_protocol::decode_reply(
+            &control,
+            &trailing,
+            &encoded,
+            request.request_digest,
+            SELECTOR_INPUT_LIMIT,
+        )?)
+    }
+
     #[test]
-    fn provider_connection_requires_two_nonces_and_completed_synchronization() {
-        let mut nonces = [[3; 16], [4; 16]].into_iter();
+    fn provider_connection_requires_typed_identities_and_completed_synchronization() {
+        let ids = RevocationSynchronizationIds {
+            request_id: SynchronizationRequestId([3; 16]),
+            selector_nonce: SynchronizationNonce([4; 16]),
+        };
         assert_eq!(
             connect_and_synchronize(
                 &1,
                 |_| Ok::<_, ()>(2),
-                || nonces.next().ok_or(()),
-                |transport, admitted, request_id, challenge| {
+                || Ok(ids),
+                |transport, admitted, actual| {
                     assert_eq!((*transport, *admitted), (2, 1));
-                    assert_eq!((request_id, challenge), ([3; 16], [4; 16]));
+                    assert_eq!(actual, ids);
                     Ok(())
                 },
             ),
             Ok(2)
         );
         assert_eq!(
-            connect_and_synchronize(
-                &1,
-                |_| Err::<u8, _>(()),
-                || Ok([1; 16]),
-                |_, _, _, _| { Ok(()) }
-            ),
+            connect_and_synchronize(&1, |_| Err::<u8, _>(()), || Ok(ids), |_, _, _| Ok(()),),
             Err(())
         );
 
-        let mut missing_first = std::iter::empty();
         assert_eq!(
-            connect_and_synchronize(
-                &1,
-                |_| Ok::<_, ()>(2),
-                || missing_first.next().ok_or(()),
-                |_, _, _, _| Ok(()),
-            ),
-            Err(())
-        );
-        let mut missing_second = std::iter::once([1; 16]);
-        assert_eq!(
-            connect_and_synchronize(
-                &1,
-                |_| Ok::<_, ()>(2),
-                || missing_second.next().ok_or(()),
-                |_, _, _, _| Ok(()),
-            ),
+            connect_and_synchronize(&1, |_| Ok::<_, ()>(2), || Err(()), |_, _, _| Ok(()),),
             Err(())
         );
         assert_eq!(
-            connect_and_synchronize(&1, |_| Ok::<_, ()>(2), || Ok([1; 16]), |_, _, _, _| Err(()),),
+            connect_and_synchronize(&1, |_| Ok::<_, ()>(2), || Ok(ids), |_, _, _| Err(())),
             Err(())
         );
     }
@@ -2011,17 +3066,6 @@ mod tests {
         );
         assert_eq!(io_error(()), SelectorBoundaryError::Io);
         map_to_unit_error(());
-        assert_eq!(
-            nonzero_random_count(0),
-            Err(SelectorBoundaryError::SelectorUnavailable)
-        );
-        assert_eq!(nonzero_random_count(1), Ok(1));
-        assert_eq!(
-            validate_nonce(<[u8; 16]>::default()),
-            Err(SelectorBoundaryError::SelectorUnavailable)
-        );
-        let nonzero = std::array::from_fn(|_| 1);
-        assert_eq!(validate_nonce(nonzero), Ok(nonzero));
         assert_eq!(checked_staged_input_length(0, 0), Ok(0));
         assert_eq!(framed_control_length(1), Ok(1));
         assert_eq!(
@@ -2057,6 +3101,369 @@ mod tests {
             ),
             Err(SelectorBoundaryError::SelectorUnavailable)
         );
+    }
+
+    #[test]
+    fn administrative_framing_requires_one_bounded_frame_and_eof() -> TestResult {
+        let mut framed = Vec::new();
+        write_control_frame(&mut framed, b"update")?;
+        let mut input = std::io::Cursor::new(framed);
+        assert_eq!(read_control_frame(&mut input)?, b"update");
+        require_stream_eof(&mut input)?;
+
+        assert!(write_control_frame(&mut Vec::new(), &[]).is_err());
+        for length in [0, CONTROL_LIMIT + 1] {
+            assert!(read_control_frame(&mut std::io::Cursor::new(length.to_be_bytes())).is_err());
+        }
+        assert!(read_control_frame(&mut std::io::Cursor::new([0, 0, 0, 1])).is_err());
+        assert!(read_control_frame(&mut FailingReader).is_err());
+        let mut truncated = std::io::Cursor::new(1_u32.to_be_bytes()).chain(FailingReader);
+        assert!(read_control_frame(&mut truncated).is_err());
+        assert!(require_stream_eof(&mut std::io::Cursor::new([1])).is_err());
+        assert!(require_stream_eof(&mut FailingReader).is_err());
+        assert!(write_control_frame(&mut FailingWriter, b"update").is_err());
+        assert!(write_control_frame(
+            &mut NthFailWriter {
+                writes: 0,
+                fail_at: 2,
+            },
+            b"update",
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn live_update_preparation_commits_only_a_challenge_bound_successor() -> TestResult {
+        let fixture = crate::selector::installation::tests::updates::UpdateFixture::new()?;
+        let admitted = fixture.admitted()?;
+        let challenge = admitted.bootstrap().issue_update_challenge()?;
+        let request = fixture.request(&challenge, None)?;
+        let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+        let admission = SelectorAdmission::new(admitted, runtime);
+        let closed = admission.close_and_snapshot()?;
+        let recovery_directory = test_recovery_directory()?;
+        let committed = prepare_live_update(
+            &closed,
+            &recovery_directory,
+            fs::metadata(".")?.uid(),
+            challenge,
+            &request,
+        )?;
+        assert_ne!(committed.sir1_digest(), [0; 32]);
+        assert!(committed.verify_recovery_floor().is_ok());
+        assert!(admission.current().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selector_admission_closes_with_one_sorted_live_attempt_snapshot() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let second = admission.acquire([2; 16])?;
+        let first = admission.acquire([1; 16])?;
+        let duplicate = admission.acquire([2; 16])?;
+        first.retain_provider_state()?;
+        drop(first);
+        let closed = admission.close_and_snapshot()?;
+        assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+        assert!(admission.current().is_err());
+        assert!(admission.acquire([3; 16]).is_err());
+        assert!(second.begin_provider_execution().is_err());
+        assert!(admission.retain_provider_state([3; 16]).is_err());
+        assert!(admission.close_and_snapshot().is_err());
+
+        drop(second);
+        drop(duplicate);
+        admission.reopen_previous(&closed.admitted)?;
+        assert!(Arc::ptr_eq(&admission.current()?, &closed.admitted));
+        assert!(admission.acquire([0; 16]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selector_snapshot_waits_for_authorized_provider_entry() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = Arc::new(SelectorAdmission::for_test(admitted)?);
+        let lease = admission.acquire([1; 16])?;
+        let provider_entry = lease
+            .begin_provider_execution()
+            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)?;
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+
+        thread::scope(|scope| -> TestResult {
+            let closing = Arc::clone(&admission);
+            scope.spawn(move || {
+                drop(closed_tx.send(closing.close_and_snapshot()));
+            });
+            loop {
+                let state = admission.state.lock().map_err(selector_unavailable)?;
+                if !state.open {
+                    break;
+                }
+                drop(state);
+                thread::yield_now();
+            }
+            assert!(closed_rx.try_recv().is_err());
+            drop(provider_entry);
+            let closed = closed_rx.recv_timeout(Duration::from_secs(1))??;
+            assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn transport_retry_cannot_cross_a_closed_selector_snapshot() -> TestResult {
+        let transport_fixture =
+            crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = Arc::new(SelectorAdmission::for_test(admitted)?);
+        let lease = admission.acquire([1; 16])?;
+        let (request_entered_tx, request_entered_rx) = std::sync::mpsc::channel();
+        let (release_provider_tx, release_provider_rx) = std::sync::mpsc::channel();
+        let (execution_tx, execution_rx) = std::sync::mpsc::channel();
+
+        thread::scope(|scope| -> TestResult {
+            let provider = scope.spawn(move || {
+                (|| -> TestResult {
+                    let (mut stream, _) = listener.accept()?;
+                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                    let _spx1 = read_frame(&mut stream)?;
+                    let mut input = Vec::new();
+                    stream.read_to_end(&mut input)?;
+                    request_entered_tx.send(())?;
+                    release_provider_rx.recv_timeout(Duration::from_secs(1))?;
+                    Ok(())
+                })()
+                .map_err(|error| error.to_string())
+            });
+            scope.spawn(|| {
+                let mut request_admission = SelectorProviderRequestAdmission::new(&lease);
+                let result = transport
+                    .execute_staged(
+                        &transport_fixture.provider,
+                        &transport_fixture.commitment,
+                        &transport_fixture.spx1,
+                        &mut std::io::Cursor::new(b"input"),
+                        Duration::from_secs(1),
+                        &mut request_admission,
+                    )
+                    .map(|_| ());
+                assert!(execution_tx.send(result).is_ok());
+            });
+            request_entered_rx.recv_timeout(Duration::from_secs(1))?;
+            let closed = admission.close_and_snapshot()?;
+            assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+            release_provider_tx.send(())?;
+            assert!(matches!(
+                execution_rx.recv_timeout(Duration::from_secs(1))?,
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+            provider.join().map_err(|_| "provider thread panicked")??;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn pending_recovery_failure_never_reopens_previous_admission() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let closed = admission.close_and_snapshot()?;
+        let result = finish_failed_preparation(
+            &admission,
+            &closed,
+            PrepareLiveUpdateError::RecoveryPending(SelectorBoundaryError::Io),
+        );
+        assert!(matches!(result, Err(SelectorBoundaryError::Io)));
+        assert!(admission.current().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn commit_phase_mapping_and_impossible_entry_state_fail_closed() -> TestResult {
+        assert!(matches!(
+            PrepareLiveUpdateError::from(InstallationUpdateCommitError::BeforeRecovery(
+                SelectorBoundaryError::ArtifactInvalid,
+            )),
+            PrepareLiveUpdateError::BeforeRecovery(SelectorBoundaryError::ArtifactInvalid)
+        ));
+        assert!(matches!(
+            PrepareLiveUpdateError::from(InstallationUpdateCommitError::RecoveryPending(
+                SelectorBoundaryError::Io,
+            )),
+            PrepareLiveUpdateError::RecoveryPending(SelectorBoundaryError::Io)
+        ));
+
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        assert!(admission.begin_provider_execution([1; 16]).is_err());
+        admission.finish_provider_entry([1; 16], false);
+        let lease = admission.acquire([1; 16])?;
+        let mut provider_requests = SelectorProviderRequestAdmission::new(&lease);
+        assert!(provider_requests.begin().is_ok());
+        assert!(provider_requests.begin().is_err());
+        provider_requests.entered();
+        provider_requests.entered();
+        assert!(provider_requests.begin().is_ok());
+        drop(provider_requests);
+        let closed = admission.close_and_snapshot()?;
+        assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+        Ok(())
+    }
+
+    #[test]
+    fn selector_admission_reopens_only_with_the_exact_successor_transition() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let current = admission.current()?;
+        let (_, premature, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        assert!(admission.admit_successor(&current, premature).is_err());
+        let closed = admission.close_and_snapshot()?;
+        let (_, foreign, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let foreign = Arc::new(foreign);
+        assert!(admission.reopen_previous(&foreign).is_err());
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        assert!(admission.admit_successor(&foreign, successor).is_err());
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        admission.admit_successor(&closed.admitted, successor)?;
+        assert!(!Arc::ptr_eq(&admission.current()?, &closed.admitted));
+        assert!(admission.reopen_previous(&closed.admitted).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selector_admission_retires_only_the_closed_current_provider() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let current = admission.current()?;
+        admission.release([9; 16]);
+
+        let (_, foreign, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let foreign = Arc::new(foreign);
+        assert!(admission
+            .finish_provider_state([9; 16], &foreign, false)
+            .is_ok());
+        assert!(admission
+            .finish_provider_state([9; 16], &current, false)
+            .is_err());
+
+        let lease = admission.acquire([1; 16])?;
+        let closed = admission.close_and_snapshot()?;
+        assert!(admission
+            .finish_provider_state([9; 16], &closed.admitted, false)
+            .is_ok());
+        admission.finish_provider_state([1; 16], &closed.admitted, true)?;
+        assert!(admission.retire_previous(&foreign).is_err());
+        admission.retire_previous(&closed.admitted)?;
+        assert!(admission.current().is_err());
+        assert!(admission
+            .state
+            .lock()
+            .map_err(|_| "admission lock poisoned")?
+            .attempts
+            .is_empty());
+        drop(lease);
+        Ok(())
+    }
+
+    #[test]
+    fn stopped_selector_servers_return_without_accepting_connections() -> TestResult {
+        let provider_directory = tempfile::tempdir()?;
+        let provider_path = provider_directory.path().join("provider.sock");
+        let _provider_listener = UnixListener::bind(&provider_path)?;
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let owner = fs::metadata(".")?.uid();
+        let composition = Arc::new(RootSelectorComposition {
+            service: RootSelectorService {
+                admission: SelectorAdmission::for_test(admitted)?,
+                transport: ProviderTransport::from_path_for_test(&provider_path)?,
+                peer_uid: owner,
+                evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: test_recovery_directory()?,
+                recovery_owner: owner,
+            },
+            updates: Mutex::new(()),
+        });
+        let administrator_fixture = ListenerTestDirectory::create()?;
+        let administrator = OwnedAdministratorListener {
+            inner: OwnedSelectorListener::bind_path(
+                &administrator_fixture.socket,
+                administrator_fixture.uid,
+            )?,
+        };
+        let evaluator_fixture = ListenerTestDirectory::create()?;
+        let evaluator =
+            OwnedSelectorListener::bind_path(&evaluator_fixture.socket, evaluator_fixture.uid)?;
+        let stopped = AtomicBool::new(true);
+        serve_administrator(&administrator, &composition, &stopped)?;
+        let mut workers = EvaluatorWorkers::default();
+        serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &stopped,
+            &mut workers,
+        )?;
+
+        let running = AtomicBool::new(false);
+        let mut panicked_workers = EvaluatorWorkers::default();
+        panicked_workers
+            .handles
+            .push(thread::spawn(|| std::panic::resume_unwind(Box::new(()))));
+        while !panicked_workers.handles[0].is_finished() {
+            thread::yield_now();
+        }
+        assert!(serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &running,
+            &mut panicked_workers,
+        )
+        .is_err());
+
+        fs::remove_file(&evaluator_fixture.socket)?;
+        let evaluator_replacement = UnixListener::bind(&evaluator_fixture.socket)?;
+        let mut workers = EvaluatorWorkers::default();
+        assert!(serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &running,
+            &mut workers,
+        )
+        .is_err());
+        drop(evaluator_replacement);
+        fs::remove_file(&evaluator_fixture.socket)?;
+
+        fs::remove_file(&administrator_fixture.socket)?;
+        let administrator_replacement = UnixListener::bind(&administrator_fixture.socket)?;
+        assert!(serve_administrator(&administrator, &composition, &running).is_err());
+        let mut workers = EvaluatorWorkers::default();
+        assert!(serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &running,
+            &mut workers,
+        )
+        .is_err());
+        drop(administrator_replacement);
+        fs::remove_file(&administrator_fixture.socket)?;
+
+        if owner != ROOT_UID {
+            let (client, server) = UnixStream::pair()?;
+            assert!(composition.update_installation(server).is_err());
+            drop(client);
+        }
+        Ok(())
     }
 
     #[test]
@@ -2101,6 +3508,30 @@ mod tests {
         assert!(provider_retains_namespace(&Ok(
             AuthenticatedProviderTerminal::Error(b"invalid".to_vec())
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_generation_retirement_preserves_live_leases_until_release() -> TestResult {
+        let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let bindings = Arc::new(EvaluationNamespaceBindings::default());
+        let lease = bindings.acquire(&request)?;
+
+        bindings.retire_previous_generation()?;
+        let waiting_bindings = Arc::clone(&bindings);
+        let waiter = std::thread::spawn(move || {
+            let lease = waiting_bindings.acquire(&request)?;
+            waiting_bindings.release(lease, false)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while bindings.waiting.load(Ordering::Acquire) == 0 {
+            if std::time::Instant::now() >= deadline {
+                return Err("retired namespace waiter did not block".into());
+            }
+            std::thread::yield_now();
+        }
+        bindings.release(lease, true)?;
+        waiter.join().map_err(|_| "namespace waiter panicked")??;
         Ok(())
     }
 
@@ -2186,6 +3617,7 @@ mod tests {
                         request_digest: [1; 32],
                         live_requests: 0,
                         retained: true,
+                        retired: false,
                     },
                 ))
             })
@@ -2202,6 +3634,99 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn selector_admission_capacity_and_release_edges_fail_closed() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        {
+            let mut state = admission
+                .state
+                .lock()
+                .map_err(|_| "admission lock poisoned")?;
+            for index in 0..(MAX_RETAINED_EVALUATION_NAMESPACES - 1) {
+                let mut attempt = [0; 16];
+                attempt[..8].copy_from_slice(&u64::try_from(index + 1)?.to_be_bytes());
+                state
+                    .attempts
+                    .insert(attempt, AttemptAdmissionState::default());
+            }
+            state
+                .attempts
+                .insert([1; 16], AttemptAdmissionState::default());
+        }
+        assert!(matches!(
+            admission.acquire([u8::MAX; 16]),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        ));
+        admission.release([1; 16]);
+        assert_eq!(
+            admission
+                .state
+                .lock()
+                .map_err(|_| "admission lock poisoned")?
+                .attempts
+                .len(),
+            MAX_RETAINED_EVALUATION_NAMESPACES
+        );
+        admission
+            .state
+            .lock()
+            .map_err(|_| "admission lock poisoned")?
+            .attempts
+            .get_mut(&[1; 16])
+            .ok_or("retained admission missing")?
+            .active_requests = 1;
+        admission.release([1; 16]);
+        assert_eq!(
+            admission
+                .state
+                .lock()
+                .map_err(|_| "admission lock poisoned")?
+                .attempts
+                .len(),
+            MAX_RETAINED_EVALUATION_NAMESPACES - 1
+        );
+
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let poisoned = SelectorAdmission::for_test(admitted)?;
+        let previous = poisoned.current()?;
+        let (_, successor, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert!(poisoned.acquire([1; 16]).is_err());
+        assert!(poisoned.current().is_err());
+        assert!(poisoned.close().is_err());
+        assert!(poisoned.close_and_snapshot().is_err());
+        assert!(poisoned.reopen_previous(&previous).is_err());
+        assert!(poisoned.admit_successor(&previous, successor).is_err());
+        assert!(poisoned.retire_previous(&previous).is_err());
+        assert!(matches!(
+            poisoned.begin_provider_execution([1; 16]),
+            Err(ProviderTransportError::BeforeAdmission)
+        ));
+        assert!(poisoned.retain_provider_state([1; 16]).is_err());
+        poisoned.finish_provider_entry([1; 16], false);
+        poisoned.release([1; 16]);
+
+        let poisoned_namespaces = EvaluationNamespaceBindings::default();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned_namespaces
+                .states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new(()));
+        }))
+        .is_err());
+        assert!(poisoned_namespaces.retire_previous_generation().is_err());
+        Ok(())
+    }
+
     struct FixedProviderExecutor(
         RefCell<Option<Result<AuthenticatedProviderTerminal, ProviderTransportError>>>,
     );
@@ -2214,7 +3739,10 @@ mod tests {
             _spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            admission.begin()?;
+            admission.entered();
             self.0
                 .borrow_mut()
                 .take()
@@ -2234,7 +3762,10 @@ mod tests {
             _spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            admission.begin()?;
+            admission.entered();
             self.0
                 .lock()
                 .map_err(|_| ProviderTransportError::BeforeAdmission)?
@@ -2257,7 +3788,10 @@ mod tests {
             spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
+            admission: &mut dyn ProviderRequestAdmission,
         ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
+            admission.begin()?;
+            admission.entered();
             let request = SandboxExecuteRequest::from_canonical_cbor(spx1)
                 .map_err(|_| ProviderTransportError::BeforeAdmission)?;
             let digest = request.authority.evr1_digest;
@@ -2301,8 +3835,10 @@ mod tests {
         assert!(synchronize_fixed_provider(
             &sync_transport,
             &admitted,
-            rand::random(),
-            rand::random(),
+            RevocationSynchronizationIds {
+                request_id: SynchronizationRequestId(rand::random()),
+                selector_nonce: SynchronizationNonce(rand::random()),
+            },
         )
         .is_err());
         sync_provider
@@ -2396,7 +3932,7 @@ mod tests {
             selected.0.manifest().manifest_digest,
             requirement.sim1_digest
         );
-        assert_ne!(fresh_nonce()?, [0; 16]);
+        assert_ne!(fresh_selector_id()?, [0; 16]);
 
         let mut missing_image = requirement.clone();
         missing_image.sim1_digest = [0; 32];
@@ -2416,10 +3952,12 @@ mod tests {
         let provider_listener = UnixListener::bind(&provider_path)?;
         let transport = ProviderTransport::from_path_for_test(&provider_path)?;
         let service = RootSelectorService {
-            admitted,
+            admission: SelectorAdmission::for_test(admitted)?,
             transport,
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
 
         let mut without_requirement = request.clone();
@@ -2477,6 +4015,14 @@ mod tests {
             resolved.attempt(),
             SandboxLocalErrorCode::ProviderUnavailable,
         )?;
+
+        service.admission.close()?;
+        assert_service_error(
+            &service,
+            &request,
+            resolved.attempt(),
+            SandboxLocalErrorCode::ProviderUnavailable,
+        )?;
         Ok(())
     }
 
@@ -2509,10 +4055,12 @@ mod tests {
             let (request, admitted, resolved) =
                 crate::selector::installation::tests::root_selector_fixture()?;
             let service = RootSelectorService {
-                admitted,
+                admission: SelectorAdmission::for_test(admitted)?,
                 transport: FixedProviderExecutor(RefCell::new(Some(result))),
                 peer_uid: fs::metadata(".")?.uid(),
                 evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: test_recovery_directory()?,
+                recovery_owner: fs::metadata(".")?.uid(),
             };
             assert_service_error(&service, &request, resolved.attempt(), expected)?;
         }
@@ -2534,10 +4082,12 @@ mod tests {
             }),
         ])));
         let service = RootSelectorService {
-            admitted,
+            admission: SelectorAdmission::for_test(admitted)?,
             transport,
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         assert_service_error(
             &service,
@@ -2564,7 +4114,7 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let release_first = std::sync::Arc::new((Mutex::new(false), Condvar::new()));
         let service = std::sync::Arc::new(RootSelectorService {
-            admitted,
+            admission: SelectorAdmission::for_test(admitted)?,
             transport: OrderedProviderExecutor {
                 first_digest: request.request_digest,
                 entered: entered_tx,
@@ -2572,6 +4122,8 @@ mod tests {
             },
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         });
 
         std::thread::scope(|scope| -> TestResult {
@@ -2637,7 +4189,7 @@ mod tests {
         conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
         refresh_request_digest(&mut conflicting)?;
         let service = RootSelectorService {
-            admitted,
+            admission: SelectorAdmission::for_test(admitted)?,
             transport: FixedProviderExecutor(RefCell::new(Some(Err(
                 ProviderTransportError::AfterAdmission {
                     agr1_digest: [94; 32],
@@ -2646,6 +4198,8 @@ mod tests {
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces,
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         assert_service_error(
             &service,
@@ -2669,12 +4223,14 @@ mod tests {
             None,
         );
         let service = RootSelectorService {
-            admitted,
+            admission: SelectorAdmission::for_test(admitted)?,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Execution(execution),
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         assert_service_error(
             &service,
@@ -2691,12 +4247,14 @@ mod tests {
             crate::selector::installation::tests::root_selector_fixture()?;
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let service = RootSelectorService {
-            admitted,
+            admission: SelectorAdmission::for_test(admitted)?,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Error(fixture.spe1),
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         let encoded = encoded_request(&request, resolved.attempt())?;
         let (mut client, server) = UnixStream::pair()?;
@@ -2721,10 +4279,12 @@ mod tests {
         let _provider_listener = UnixListener::bind(&provider_path)?;
         let owner = fs::metadata(".")?.uid();
         let mut service = RootSelectorService {
-            admitted,
+            admission: SelectorAdmission::for_test(admitted)?,
             transport: ProviderTransport::from_path_for_test(&provider_path)?,
             peer_uid: owner ^ 1,
             evaluation_namespaces: EvaluationNamespaceBindings::default(),
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: owner,
         };
 
         let (client, server) = UnixStream::pair()?;
