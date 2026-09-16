@@ -261,10 +261,10 @@ fn preflight_request(
             VerificationPreflightCoordinateV1::Request,
         )
     })?;
-    let canonical = input.request.to_canonical_cbor().map_or(
-        pos_core::CanonicalBytes::from_static(b""),
-        preserve_canonical_bytes,
-    );
+    let canonical = input
+        .request
+        .to_canonical_cbor()
+        .map_or(Vec::new(), preserve_bytes);
     if canonical.as_slice() != input.canonical_request_bytes {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::InvalidEncoding,
@@ -338,6 +338,10 @@ fn validate_manifest_bounds(
 }
 
 fn preserve_canonical_bytes(bytes: pos_core::CanonicalBytes) -> pos_core::CanonicalBytes {
+    bytes
+}
+
+fn preserve_bytes(bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
