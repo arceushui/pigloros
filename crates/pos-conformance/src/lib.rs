@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 mod bundle_contract;
+mod execution_profile;
 mod non_interference;
 mod non_interference_report;
 mod profile_contract;
@@ -47,6 +48,11 @@ pub use bundle_contract::{
     BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
     ConformanceBundlePairV1, ConformanceBundleV1, CONFORMANCE_BUNDLE_MAGIC_V1,
     MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+};
+pub use execution_profile::{
+    ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,
+    ExecutionProfileContractErrorV1, ExecutionProfileV1, EXECUTION_PROFILE_MAGIC_V1,
+    MAX_EXECUTION_PROFILE_BYTES_V1,
 };
 pub use non_interference::{
     execute_non_interference_pair, execute_wave8_non_interference_matrix,
