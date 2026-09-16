@@ -3,12 +3,12 @@
 use std::io::{Read, Write};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ControlFrameError {
+pub enum ControlFrameError {
     Invalid,
     Io,
 }
 
-pub(crate) fn write_frame(
+pub fn write_frame(
     writer: &mut impl Write,
     bytes: &[u8],
     maximum: usize,
@@ -23,7 +23,7 @@ pub(crate) fn write_frame(
     writer.write_all(bytes).map_err(|_| ControlFrameError::Io)
 }
 
-pub(crate) fn read_frame(
+pub fn read_frame(
     reader: &mut impl Read,
     maximum: usize,
 ) -> Result<Option<Vec<u8>>, ControlFrameError> {
@@ -48,7 +48,7 @@ pub(crate) fn read_frame(
     Ok(Some(bytes))
 }
 
-pub(crate) fn require_eof(reader: &mut impl Read) -> Result<(), ControlFrameError> {
+pub fn require_eof(reader: &mut impl Read) -> Result<(), ControlFrameError> {
     let mut byte = [0_u8; 1];
     match reader.read(&mut byte).map_err(|_| ControlFrameError::Io)? {
         0 => Ok(()),
