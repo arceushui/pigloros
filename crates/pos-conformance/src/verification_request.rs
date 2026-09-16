@@ -47,7 +47,7 @@ impl std::error::Error for ReproVerificationRequestContractErrorV1 {}
 pub struct ReproVerificationRequestV1 {
     /// Digest identifying the caller's verification request.
     pub request_digest: [u8; 32],
-    /// Digest identifying the ReproManifest to verify.
+    /// Digest identifying the `ReproManifest` to verify.
     pub manifest_digest: [u8; 32],
     /// Reproducibility class requested for this verification.
     pub reproducibility_class: ReproducibilityClassV1,
@@ -125,8 +125,7 @@ fn validate_fields(
         request.artifact_closure_digest,
         request.evaluator_digest,
     ]
-    .iter()
-    .any(|digest| *digest == [0; 32])
+    .contains(&[0; 32])
         || request.report_bytes_limit == 0
         || request.report_bytes_limit > MAX_REPORT_BYTES_V1
     {
