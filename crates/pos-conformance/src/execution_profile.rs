@@ -138,10 +138,10 @@ fn encode_validated_profile(
     profile: &ExecutionProfileV1,
 ) -> Result<Vec<u8>, ExecutionProfileContractErrorV1> {
     encode_profile_shape(profile).and_then(|(unsigned, encoded)| {
-        if domain_digest(b"PiglorOS.ExecutionProfile.v1", &unsigned) != profile.profile_digest {
-            Err(ExecutionProfileContractErrorV1::DigestMismatch)
-        } else {
+        if domain_digest(b"PiglorOS.ExecutionProfile.v1", &unsigned) == profile.profile_digest {
             Ok(encoded)
+        } else {
+            Err(ExecutionProfileContractErrorV1::DigestMismatch)
         }
     })
 }
