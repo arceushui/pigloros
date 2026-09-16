@@ -1376,7 +1376,7 @@ impl EvaluationNamespaceState {
         self.retained.then_some(true)
     }
 
-    fn release(&mut self, provider_retained: bool) -> bool {
+    const fn release(&mut self, provider_retained: bool) -> bool {
         self.live_requests -= 1;
         if !self.retired {
             self.retained |= provider_retained;
