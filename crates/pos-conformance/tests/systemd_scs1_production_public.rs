@@ -2,8 +2,7 @@ use std::error::Error;
 
 use pos_conformance::{SandboxArchitectureV1, SandboxSyscallSetV1};
 use pos_reference::sandbox_provider_protocol::{
-    SandboxArchitecture as IndependentArchitecture,
-    SandboxSyscallSet as IndependentSyscallSet,
+    SandboxArchitecture as IndependentArchitecture, SandboxSyscallSet as IndependentSyscallSet,
 };
 
 const REQUIRED_SYSCALLS: [&str; 6] = [
@@ -15,12 +14,10 @@ const REQUIRED_SYSCALLS: [&str; 6] = [
     "socket",
 ];
 const EXPECTED_NAME_COUNT: usize = 392;
-const X86_64_BYTES: &[u8] = include_bytes!(
-    "../vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
-);
-const AARCH64_BYTES: &[u8] = include_bytes!(
-    "../vectors/systemd-provider-v260.2/systemd-v260.2-aarch64.scs1.cbor"
-);
+const X86_64_BYTES: &[u8] =
+    include_bytes!("../vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor");
+const AARCH64_BYTES: &[u8] =
+    include_bytes!("../vectors/systemd-provider-v260.2/systemd-v260.2-aarch64.scs1.cbor");
 
 #[test]
 fn production_systemd_syscall_sets_match_both_public_decoders() -> Result<(), Box<dyn Error>> {
@@ -73,7 +70,10 @@ fn production_systemd_syscall_set_manifest_binds_exact_records() -> Result<(), B
         assert_eq!(record["requested_count"].as_u64(), Some(392));
         assert_eq!(record["expected_effective_count"].as_u64(), Some(392));
         assert_eq!(record["byte_length"].as_u64(), Some(byte_length));
-        assert_eq!(record["record_blake3"].as_str(), Some(record_digest.as_str()));
+        assert_eq!(
+            record["record_blake3"].as_str(),
+            Some(record_digest.as_str())
+        );
 
         let decoded = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
         let syscall_set_digest = blake3::Hash::from_bytes(decoded.syscall_set_digest)
@@ -91,13 +91,14 @@ fn assert_record(record: &SandboxSyscallSetV1) {
     assert_eq!(record.requested_names.len(), EXPECTED_NAME_COUNT);
     assert_eq!(record.expected_effective_names.len(), EXPECTED_NAME_COUNT);
     assert_eq!(record.requested_names, record.expected_effective_names);
-    assert!(record.requested_names.windows(2).all(|pair| pair[0] < pair[1]));
-    assert!(
-        record
-            .requested_names
-            .iter()
-            .all(|name| !name.starts_with('@'))
-    );
+    assert!(record
+        .requested_names
+        .windows(2)
+        .all(|pair| pair[0] < pair[1]));
+    assert!(record
+        .requested_names
+        .iter()
+        .all(|name| !name.starts_with('@')));
     for required in REQUIRED_SYSCALLS {
         assert!(record
             .requested_names
