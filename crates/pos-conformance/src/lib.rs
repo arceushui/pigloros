@@ -23,6 +23,7 @@ mod non_interference_report;
 mod profile_contract;
 mod provider_contract;
 mod sandbox_provider_contract;
+mod trust_policy_snapshot;
 include!("wire_syntax.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
@@ -101,6 +102,10 @@ pub use sandbox_provider_contract::{
     MAX_SANDBOX_PAYLOAD_CHUNKS_V1, MAX_SANDBOX_PROVIDER_DOCUMENT_BYTES_V1,
     MAX_SANDBOX_PROVIDER_ENTRIES_V1, MAX_SANDBOX_SYSCALL_NAMES_V1, SANDBOX_PAYLOAD_CHUNK_BYTES_V1,
     SANDBOX_RELEASE_TIMEOUT_SECONDS_V1,
+};
+pub use trust_policy_snapshot::{
+    MinimumArtifactVersionV1, TrustPolicyRootV1, TrustPolicySnapshotContractErrorV1,
+    TrustPolicySnapshotV1, MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1, TRUST_POLICY_SNAPSHOT_MAGIC_V1,
 };
 
 fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {
