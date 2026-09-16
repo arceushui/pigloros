@@ -652,6 +652,12 @@ mod tests {
             ("params", json!([0xff])),
             ("params", json!([1, 2])),
             ("params", json!([0x18, 1])),
+            ("params", json!([0xf9, 0x7e, 0])),
+            ("params", json!([0xf9, 0x7c, 0])),
+            ("params", json!([0x81, 0xf9, 0xfc, 0])),
+            ("params", json!([0xa1, 0xf9, 0x7e, 0, 1])),
+            ("params", json!([0xa1, 1, 0xf9, 0x7e, 0])),
+            ("params", json!([0xc0, 0xf9, 0x7e, 0])),
             ("tick", json!(-1)),
             ("unexpected", json!(true)),
         ] {
@@ -659,6 +665,17 @@ mod tests {
             rejected["payload"][field] = value;
             let (status, _) = json_request(app.clone(), "POST", &path, Some(rejected)).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}");
+        }
+        for params in [
+            vec![0x81, 1],
+            vec![0xa1, 1, 2],
+            vec![0xc0, 1],
+            vec![0xf9, 0x3c, 0],
+        ] {
+            let mut accepted = request.clone();
+            accepted["payload"]["params"] = json!(params);
+            let (status, _) = json_request(app.clone(), "POST", &path, Some(accepted)).await;
+            assert_eq!(status, StatusCode::CREATED);
         }
         let mut oversized = request;
         let mut params = vec![0x59, 0x13, 0x88];

@@ -2692,7 +2692,7 @@ fn build_proposed_action(
         .map_err(|_| {
             ActionRejected::DomainValidationFailed("invalid world.action.v1 payload".to_owned())
         })
-        .and_then(|action| action.encode())
+        .and_then(GatewayWorldActionPayload::encode)
         .and_then(|bytes| {
             ProposedAction::try_new(Kind::new(event_type), entity, bytes, Kind::new(capability))
         })
@@ -2712,6 +2712,23 @@ struct GatewayWorldActionPayload {
 
 impl GatewayWorldActionPayload {
     fn encode(self) -> Result<CanonicalBytes, ActionRejected> {
+        let params =
+            ciborium::from_reader::<ciborium::Value, _>(self.params.as_slice()).map_err(|_| {
+                ActionRejected::DomainValidationFailed("invalid action parameters".to_owned())
+            });
+        let finite_params = params.and_then(|params| {
+            if finite_action_params(&params) {
+                Ok(())
+            } else {
+                Err(ActionRejected::DomainValidationFailed(
+                    "non-finite action parameters".to_owned(),
+                ))
+            }
+        });
+        finite_params.and_then(|()| self.encode_typed())
+    }
+
+    fn encode_typed(self) -> Result<CanonicalBytes, ActionRejected> {
         match self.action_kind.as_str() {
             "impulse" => Some(ActionKindV1::Impulse),
             "target_velocity" => Some(ActionKindV1::TargetVelocity),
@@ -2739,6 +2756,18 @@ impl GatewayWorldActionPayload {
     }
 }
 
+fn finite_action_params(value: &ciborium::Value) -> bool {
+    match value {
+        ciborium::Value::Float(value) => value.is_finite(),
+        ciborium::Value::Array(values) => values.iter().all(finite_action_params),
+        ciborium::Value::Map(entries) => entries
+            .iter()
+            .all(|(key, value)| finite_action_params(key) && finite_action_params(value)),
+        ciborium::Value::Tag(_, value) => finite_action_params(value),
+        _ => true,
+    }
+}
+
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
     Ulid::from_string(s)
         .map(TimelineId::from_ulid)
@@ -2751,6 +2780,7 @@ fn parse_entity_id(s: &str) -> Result<EntityId, GatewayError> {
         .map_err(|e| GatewayError::InvalidId(e.to_string()))
 }
 
+#[cfg(test)]
 fn json_to_cbor(value: &serde_json::Value) -> CanonicalBytes {
     let mut buf = Vec::new();
     // `Vec<u8>` is an infallible CBOR sink; JSON values have no fallible
