@@ -3,12 +3,21 @@
 use std::io::{Read, Write};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ControlFrameError {
+/// Failure while reading or writing a bounded control frame.
+pub enum ControlFrameError {
+    /// The frame violates the bounded framing contract.
     Invalid,
+    /// The underlying stream could not complete the operation.
     Io,
 }
 
-pub(super) fn write_frame(
+/// Writes one non-empty, length-prefixed frame within `maximum` bytes.
+///
+/// # Errors
+///
+/// Returns [`ControlFrameError::Invalid`] for an empty or oversized frame and
+/// [`ControlFrameError::Io`] when the stream cannot accept the complete frame.
+pub fn write_frame(
     writer: &mut impl Write,
     bytes: &[u8],
     maximum: usize,
@@ -23,7 +32,13 @@ pub(super) fn write_frame(
     writer.write_all(bytes).map_err(|_| ControlFrameError::Io)
 }
 
-pub(super) fn read_frame(
+/// Reads one optional, length-prefixed frame within `maximum` bytes.
+///
+/// # Errors
+///
+/// Returns [`ControlFrameError::Invalid`] for a zero or oversized declared
+/// length and [`ControlFrameError::Io`] for an incomplete stream operation.
+pub fn read_frame(
     reader: &mut impl Read,
     maximum: usize,
 ) -> Result<Option<Vec<u8>>, ControlFrameError> {
@@ -48,7 +63,13 @@ pub(super) fn read_frame(
     Ok(Some(bytes))
 }
 
-pub(super) fn require_eof(reader: &mut impl Read) -> Result<(), ControlFrameError> {
+/// Requires the framed stream to be exactly at EOF.
+///
+/// # Errors
+///
+/// Returns [`ControlFrameError::Invalid`] when trailing bytes remain and
+/// [`ControlFrameError::Io`] when the EOF check cannot read the stream.
+pub fn require_eof(reader: &mut impl Read) -> Result<(), ControlFrameError> {
     let mut byte = [0_u8; 1];
     match reader.read(&mut byte).map_err(|_| ControlFrameError::Io)? {
         0 => Ok(()),
