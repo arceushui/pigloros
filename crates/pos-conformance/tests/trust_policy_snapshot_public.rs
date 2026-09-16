@@ -315,7 +315,7 @@ fn public_codec_rejects_unsupported_magic_and_version() -> TestResult {
 }
 
 #[test]
-fn public_codec_rejects_malformed_field_shapes() -> TestResult {
+fn public_codec_rejects_malformed_top_level_fields() -> TestResult {
     for (index, value) in [
         (0, Value::Null),
         (1, Value::Text("one".to_owned())),
@@ -359,6 +359,11 @@ fn public_codec_rejects_malformed_field_shapes() -> TestResult {
         Err(SnapshotError::InvalidEncoding)
     );
 
+    Ok(())
+}
+
+#[test]
+fn public_codec_rejects_malformed_root_entries() -> TestResult {
     for root in [
         Value::Array(vec![
             Value::Null,
@@ -394,6 +399,11 @@ fn public_codec_rejects_malformed_field_shapes() -> TestResult {
         );
     }
 
+    Ok(())
+}
+
+#[test]
+fn public_codec_rejects_malformed_artifact_entries() -> TestResult {
     let Value::Array(mut fields) = draft_value()? else {
         return Err("Draft TPS1 must be an array".into());
     };
