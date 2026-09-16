@@ -8,6 +8,11 @@ use std::io::Cursor;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+const FIELD_TRUST_ROOTS: usize = 5;
+const FIELD_REVOKED_KEYS: usize = 6;
+const FIELD_REVOKED_ARTIFACTS: usize = 7;
+const FIELD_MINIMUM_VERSIONS: usize = 8;
+
 fn draft_snapshot() -> TestResult<(Vec<u8>, TrustPolicySnapshotV1)> {
     let bytes = draft_trust_policy_snapshot_bytes_v1()?;
     let snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&bytes)?;
@@ -25,11 +30,11 @@ fn draft_value() -> TestResult<Value> {
     Ok(ciborium::from_reader(Cursor::new(bytes))?)
 }
 
-fn draft_bytes_with_field(index: usize, value: Value) -> TestResult<Vec<u8>> {
+fn draft_bytes_with_field(field_index: usize, value: Value) -> TestResult<Vec<u8>> {
     let Value::Array(mut fields) = draft_value()? else {
         return Err("Draft TPS1 must be an array".into());
     };
-    fields[index] = value;
+    fields[field_index] = value;
     encode(&Value::Array(fields))
 }
 
@@ -173,7 +178,10 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
             .collect(),
     );
     assert_eq!(
-        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(5, oversized_roots)?)
+        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+            FIELD_TRUST_ROOTS,
+            oversized_roots,
+        )?)
             .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
@@ -184,7 +192,10 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
             .collect(),
     );
     assert_eq!(
-        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(6, oversized_keys)?)
+        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+            FIELD_REVOKED_KEYS,
+            oversized_keys,
+        )?)
             .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
@@ -200,7 +211,7 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
     );
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-            7,
+            FIELD_REVOKED_ARTIFACTS,
             oversized_artifacts
         )?)
         .map(|_| ()),
@@ -213,14 +224,20 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
             .collect(),
     );
     assert_eq!(
-        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(8, oversized_versions)?)
+        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+            FIELD_MINIMUM_VERSIONS,
+            oversized_versions,
+        )?)
             .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
 
     let too_many_items = Value::Array(vec![Value::Null; 4_098]);
     assert_eq!(
-        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(6, too_many_items)?)
+        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+            FIELD_REVOKED_KEYS,
+            too_many_items,
+        )?)
             .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
@@ -308,7 +325,7 @@ fn public_codec_rejects_unsupported_magic_and_version() -> TestResult {
         };
         assert_eq!(
             TrustPolicySnapshotV1::from_canonical_cbor(&encode(&Value::Array(fields))?),
-            Err(SnapshotError::UnsupportedVersion)
+            Err(SnapshotError::UnsupportedSchemaVersion)
         );
     }
     Ok(())
@@ -353,7 +370,8 @@ fn public_codec_rejects_malformed_top_level_fields() -> TestResult {
     let Value::Array(mut fields) = draft_value()? else {
         return Err("Draft TPS1 must be an array".into());
     };
-    fields[5] = Value::Array(vec![Value::Array(vec![Value::Text("short".to_owned())])]);
+    fields[FIELD_TRUST_ROOTS] =
+        Value::Array(vec![Value::Array(vec![Value::Text("short".to_owned())])]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&encode(&Value::Array(fields))?),
         Err(SnapshotError::InvalidEncoding)
@@ -392,7 +410,7 @@ fn public_codec_rejects_malformed_root_entries() -> TestResult {
     ] {
         assert_eq!(
             TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-                5,
+                FIELD_TRUST_ROOTS,
                 Value::Array(vec![root]),
             )?),
             Err(SnapshotError::InvalidEncoding)
@@ -407,7 +425,8 @@ fn public_codec_rejects_malformed_artifact_entries() -> TestResult {
     let Value::Array(mut fields) = draft_value()? else {
         return Err("Draft TPS1 must be an array".into());
     };
-    fields[8] = Value::Array(vec![Value::Array(vec![Value::Text("kind".to_owned())])]);
+    fields[FIELD_MINIMUM_VERSIONS] =
+        Value::Array(vec![Value::Array(vec![Value::Text("kind".to_owned())])]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&encode(&Value::Array(fields))?),
         Err(SnapshotError::InvalidEncoding)
@@ -419,7 +438,7 @@ fn public_codec_rejects_malformed_artifact_entries() -> TestResult {
     ] {
         assert_eq!(
             TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-                8,
+                FIELD_MINIMUM_VERSIONS,
                 Value::Array(vec![version]),
             )?),
             Err(SnapshotError::InvalidEncoding)
@@ -429,7 +448,7 @@ fn public_codec_rejects_malformed_artifact_entries() -> TestResult {
     let Value::Array(mut fields) = draft_value()? else {
         return Err("Draft TPS1 must be an array".into());
     };
-    fields[7] = Value::Array(vec![Value::Bytes(vec![8; 31])]);
+    fields[FIELD_REVOKED_ARTIFACTS] = Value::Array(vec![Value::Bytes(vec![8; 31])]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&encode(&Value::Array(fields))?),
         Err(SnapshotError::InvalidEncoding)
@@ -445,8 +464,8 @@ fn public_error_types_have_stable_safe_messages() {
             "invalid TPS1 trust-policy snapshot encoding",
         ),
         (
-            SnapshotError::UnsupportedVersion,
-            "unsupported TPS1 trust-policy snapshot version",
+            SnapshotError::UnsupportedSchemaVersion,
+            "unsupported TPS1 trust-policy snapshot schema version",
         ),
         (
             SnapshotError::FieldOutOfBounds,
@@ -477,10 +496,21 @@ fn public_contract_rejects_invalid_values_and_root_algorithms() -> TestResult {
         Err(SnapshotError::FieldOutOfBounds)
     );
 
-    let mut invalid_expiry = snapshot.clone();
-    invalid_expiry.offline_valid_through = "2026-09-16T00:00:00+00:00".to_owned();
+    let mut schema_valid_expiry = snapshot.clone();
+    schema_valid_expiry.offline_valid_through = "2026-09-16T00:00:00+00:00".to_owned();
     assert_eq!(
-        invalid_expiry.validate(),
+        schema_valid_expiry.validate(),
+        Ok(())
+    );
+
+    let mut empty_expiry = snapshot.clone();
+    empty_expiry.offline_valid_through.clear();
+    assert_eq!(empty_expiry.validate(), Err(SnapshotError::FieldOutOfBounds));
+
+    let mut oversized_expiry = snapshot.clone();
+    oversized_expiry.offline_valid_through = "x".repeat(65);
+    assert_eq!(
+        oversized_expiry.validate(),
         Err(SnapshotError::FieldOutOfBounds)
     );
 
@@ -506,7 +536,7 @@ fn public_contract_rejects_invalid_values_and_root_algorithms() -> TestResult {
     unsupported_algorithm.trust_roots[0].algorithm = "future-signature".to_owned();
     assert_eq!(
         unsupported_algorithm.validate(),
-        Err(SnapshotError::UnsupportedVersion)
+        Err(SnapshotError::UnsupportedSchemaVersion)
     );
 
     let mut invalid_revoked_key = snapshot.clone();
@@ -529,7 +559,10 @@ fn public_contract_rejects_invalid_values_and_root_algorithms() -> TestResult {
 fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
     let unordered_roots = Value::Array(vec![encoded_root("root-b", 2), encoded_root("root-a", 1)]);
     assert_eq!(
-        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(5, unordered_roots)?)
+        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+            FIELD_TRUST_ROOTS,
+            unordered_roots,
+        )?)
             .map(|_| ()),
         Err(SnapshotError::NonCanonicalOrder)
     );
@@ -538,7 +571,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
         Value::Array(vec![encoded_root("root-a", 1), encoded_root("root-b", 1)]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-            5,
+            FIELD_TRUST_ROOTS,
             duplicate_root_keys
         )?)
         .map(|_| ()),
@@ -551,7 +584,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
     ]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-            6,
+            FIELD_REVOKED_KEYS,
             unordered_revoked_keys
         )?)
         .map(|_| ()),
@@ -564,7 +597,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
     ]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-            6,
+            FIELD_REVOKED_KEYS,
             duplicate_revoked_keys
         )?)
         .map(|_| ()),
@@ -575,7 +608,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
         Value::Array(vec![Value::Bytes(vec![2; 32]), Value::Bytes(vec![1; 32])]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-            7,
+            FIELD_REVOKED_ARTIFACTS,
             unordered_artifacts
         )?)
         .map(|_| ()),
@@ -586,7 +619,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
         Value::Array(vec![Value::Bytes(vec![1; 32]), Value::Bytes(vec![1; 32])]);
     assert_eq!(
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
-            7,
+            FIELD_REVOKED_ARTIFACTS,
             duplicate_artifacts
         )?)
         .map(|_| ()),
@@ -598,7 +631,10 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
         encoded_minimum_version("kind-a", "1.0.0"),
     ]);
     assert_eq!(
-        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(8, unordered_versions)?)
+        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+            FIELD_MINIMUM_VERSIONS,
+            unordered_versions,
+        )?)
             .map(|_| ()),
         Err(SnapshotError::NonCanonicalOrder)
     );
@@ -608,7 +644,10 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
         encoded_minimum_version("kind-a", "2.0.0"),
     ]);
     assert_eq!(
-        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(8, duplicate_versions)?)
+        TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+            FIELD_MINIMUM_VERSIONS,
+            duplicate_versions,
+        )?)
             .map(|_| ()),
         Err(SnapshotError::NonCanonicalOrder)
     );

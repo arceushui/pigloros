@@ -26,7 +26,7 @@ pub enum TrustPolicySnapshotContractErrorV1 {
     /// The bytes are malformed, noncanonical, or contain a forbidden CBOR type.
     InvalidEncoding,
     /// The record magic, schema version, or trust-root signature algorithm is unsupported.
-    UnsupportedVersion,
+    UnsupportedSchemaVersion,
     /// A required value or encoded record exceeds its specified bound.
     FieldOutOfBounds,
     /// A set-like record list is not strictly ordered or contains a duplicate.
@@ -37,7 +37,9 @@ impl std::fmt::Display for TrustPolicySnapshotContractErrorV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::InvalidEncoding => "invalid TPS1 trust-policy snapshot encoding",
-            Self::UnsupportedVersion => "unsupported TPS1 trust-policy snapshot version",
+            Self::UnsupportedSchemaVersion => {
+                "unsupported TPS1 trust-policy snapshot schema version"
+            }
             Self::FieldOutOfBounds => "TPS1 trust-policy snapshot field is out of bounds",
             Self::NonCanonicalOrder => "TPS1 trust-policy snapshot lists are not canonical",
         })
@@ -158,7 +160,7 @@ fn validate_trust_roots(
             return Err(TrustPolicySnapshotContractErrorV1::FieldOutOfBounds);
         }
         if root.algorithm != "Ed25519" {
-            return Err(TrustPolicySnapshotContractErrorV1::UnsupportedVersion);
+            return Err(TrustPolicySnapshotContractErrorV1::UnsupportedSchemaVersion);
         }
         if previous_key_id.is_some_and(|previous| previous.as_bytes() >= root.key_id.as_bytes())
             || !public_keys.insert(root.public_key)
@@ -215,12 +217,7 @@ fn validate_minimum_versions(
 }
 
 fn valid_expiry(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_EXPIRY_BYTES
-        && value.is_ascii()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'.' | b'Z'))
+    !value.is_empty() && value.len() <= MAX_EXPIRY_BYTES
 }
 
 fn strictly_ordered_by<T>(values: &[T], less_than: impl Fn(&T, &T) -> bool) -> bool {
@@ -288,7 +285,7 @@ fn decode_snapshot(
 ) -> Result<TrustPolicySnapshotV1, TrustPolicySnapshotContractErrorV1> {
     let fields = array(value, FIELD_COUNT)?;
     if text_value(&fields[0])? != TRUST_POLICY_SNAPSHOT_MAGIC_V1 || uint_value(&fields[1])? != 1 {
-        return Err(TrustPolicySnapshotContractErrorV1::UnsupportedVersion);
+        return Err(TrustPolicySnapshotContractErrorV1::UnsupportedSchemaVersion);
     }
     Ok(TrustPolicySnapshotV1 {
         policy_id: text_value(&fields[2])?,
