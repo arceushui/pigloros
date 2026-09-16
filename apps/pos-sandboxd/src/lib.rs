@@ -12,7 +12,6 @@ use pos_reference::sandbox_provider_protocol::{
 ///
 /// Fields are private so callers cannot replace validated names or invert the
 /// allow-list mode after compiling a selected canonical record.
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemCallFilter {
     record: SandboxSyscallSet,
 }

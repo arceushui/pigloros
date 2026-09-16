@@ -12,7 +12,7 @@ const AARCH64: &[u8] = include_bytes!(
     "../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-aarch64.scs1.cbor"
 );
 
-const fn records() -> [(SandboxArchitecture, &'static [u8]); 2] {
+const fn production_systemd_scs1_records() -> [(SandboxArchitecture, &'static [u8]); 2] {
     [
         (SandboxArchitecture::X86_64, X86_64),
         (SandboxArchitecture::Aarch64, AARCH64),
@@ -21,7 +21,7 @@ const fn records() -> [(SandboxArchitecture, &'static [u8]); 2] {
 
 #[test]
 fn production_requests_have_exact_dbus_type_and_roundtrip() -> Result<(), Box<dyn Error>> {
-    for (architecture, bytes) in records() {
+    for (architecture, bytes) in production_systemd_scs1_records() {
         let authority = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
         let filter = SystemCallFilter::from_selected_record(
             bytes,
@@ -48,32 +48,31 @@ fn production_requests_have_exact_dbus_type_and_roundtrip() -> Result<(), Box<dy
             filter.verify_readback(&request),
             Err(SystemCallFilterError::ReadbackMismatch)
         );
-        assert_eq!(filter.clone(), filter);
     }
     Ok(())
 }
 
 #[test]
 fn selected_digest_and_architecture_are_checked_before_compilation() -> Result<(), Box<dyn Error>> {
-    for (architecture, bytes) in records() {
+    for (architecture, bytes) in production_systemd_scs1_records() {
         let authority = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
-        assert_eq!(
+        assert!(matches!(
             SystemCallFilter::from_selected_record(bytes, [0; 32], architecture),
             Err(SystemCallFilterError::DigestMismatch)
-        );
+        ));
         let wrong_architecture = if architecture == SandboxArchitecture::X86_64 {
             SandboxArchitecture::Aarch64
         } else {
             SandboxArchitecture::X86_64
         };
-        assert_eq!(
+        assert!(matches!(
             SystemCallFilter::from_selected_record(
                 bytes,
                 authority.syscall_set_digest,
                 wrong_architecture
             ),
             Err(SystemCallFilterError::ArchitectureMismatch)
-        );
+        ));
     }
     Ok(())
 }
@@ -81,10 +80,10 @@ fn selected_digest_and_architecture_are_checked_before_compilation() -> Result<(
 #[test]
 fn malformed_or_unbound_canonical_records_do_not_produce_properties() -> Result<(), Box<dyn Error>>
 {
-    for (architecture, bytes) in records() {
+    for (architecture, bytes) in production_systemd_scs1_records() {
         let authority = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
         for malformed in [b"not canonical CBOR".to_vec(), [bytes, &[0]].concat()] {
-            assert_eq!(
+            assert!(matches!(
                 SystemCallFilter::from_selected_record(
                     &malformed,
                     authority.syscall_set_digest,
@@ -93,14 +92,14 @@ fn malformed_or_unbound_canonical_records_do_not_produce_properties() -> Result<
                 Err(SystemCallFilterError::InvalidRecord(
                     SandboxProviderProtocolError::InvalidEncoding
                 ))
-            );
+            ));
         }
         let mut unbound = bytes.to_vec();
         let final_byte = unbound
             .last_mut()
             .ok_or("production record must not be empty")?;
         *final_byte ^= 1;
-        assert_eq!(
+        assert!(matches!(
             SystemCallFilter::from_selected_record(
                 &unbound,
                 authority.syscall_set_digest,
@@ -109,14 +108,14 @@ fn malformed_or_unbound_canonical_records_do_not_produce_properties() -> Result<
             Err(SystemCallFilterError::InvalidRecord(
                 SandboxProviderProtocolError::DigestMismatch
             ))
-        );
+        ));
     }
     Ok(())
 }
 
 #[test]
 fn every_readback_deviation_fails_without_normalization() -> Result<(), Box<dyn Error>> {
-    for (architecture, bytes) in records() {
+    for (architecture, bytes) in production_systemd_scs1_records() {
         let authority = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
         let filter = SystemCallFilter::from_selected_record(
             bytes,
