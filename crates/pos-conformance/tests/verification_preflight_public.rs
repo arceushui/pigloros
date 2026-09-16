@@ -291,6 +291,14 @@ fn exercises_manifest_profile_snapshot_and_binding_failures() -> TestResult {
     assert_eq!(error.code(), SafeErrorCodeV1::UnsupportedVersion);
 
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.request.report_bytes_limit = 0;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "request field bounds",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.execution_profile.profile_id.clear();
     let error = expect_failure(
         &preflight_verification_v1(&fixture.input()),
@@ -445,6 +453,17 @@ fn exercises_manifest_profile_snapshot_and_binding_failures() -> TestResult {
     assert_eq!(
         error.coordinate(),
         VerificationPreflightCoordinateV1::TrustContinuity
+    );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.trust_policy_snapshot.previous_snapshot_digest = Some([33; 32]);
+    fixture.refresh_snapshot_binding()?;
+    fixture.evidence.trust_continuity.previous_snapshot_digest = Some([33; 32]);
+    fixture.evidence.trust_continuity.previous_epoch = Some(0);
+    let result = preflight_verification_v1(&fixture.input())?;
+    assert_eq!(
+        result.reproducibility_class,
+        ReproducibilityClassV1::ProfileRecomputation
     );
 
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
