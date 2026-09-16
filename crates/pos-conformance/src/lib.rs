@@ -24,6 +24,7 @@ mod profile_contract;
 mod provider_contract;
 mod sandbox_provider_contract;
 mod trust_policy_snapshot;
+mod verification_preflight;
 mod verification_request;
 include!("wire_syntax.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
@@ -111,6 +112,16 @@ pub use trust_policy_snapshot::{
 pub use verification_request::{
     ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1, MAX_REPORT_BYTES_V1,
     MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1, REPRO_VERIFICATION_REQUEST_MAGIC_V1,
+};
+pub use verification_preflight::{
+    preflight_verification_v1, ArtifactClosureStatusV1, ArtifactRevocationStatusV1,
+    ProfileSupportStatusV1, TrustRootStatusV1, TrustSignatureStatusV1,
+    TrustSnapshotContinuityV1, VerificationPreflightCoordinateV1,
+    VerificationPreflightErrorV1, VerificationPreflightEvidenceV1,
+    VerificationPreflightInputV1, VerificationPreflightResultV1,
+    MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1,
+    MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1,
+    MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1,
 };
 
 fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {
