@@ -1,0 +1,32 @@
+{
+  "libseccomp": {
+    "source_archive_sha256": "501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be",
+    "syscalls_csv_sha256": "ab64e55719254d44bc279d967845568ab9940e81ed7800e9d1066f664a9f5231",
+    "version": "2.6.1"
+  },
+  "records": [
+    {
+      "architecture": "x86_64",
+      "byte_length": 8233,
+      "expected_effective_count": 392,
+      "file": "systemd-v260.2-x86_64.scs1.cbor",
+      "record_blake3": "8a6f0fb7e6a40f5cbb6af5533f02b1ce7a133499a0586e16345c90caa27db85d",
+      "requested_count": 392,
+      "syscall_set_digest": "dc8b5078110b81fb7486179f267c9ca59fc49f9f29a8e8cc6e3f0739a020cea2"
+    },
+    {
+      "architecture": "aarch64",
+      "byte_length": 8233,
+      "expected_effective_count": 392,
+      "file": "systemd-v260.2-aarch64.scs1.cbor",
+      "record_blake3": "a01ed8a48587d5fe2d353e7a93571557e37889b72d01b7bd3c191cc1d6421dcb",
+      "requested_count": 392,
+      "syscall_set_digest": "7f007803ea87b017333f6d56a5c29eae259149dc34d54fb3d9b1bef8f7c8b994"
+    }
+  ],
+  "systemd": {
+    "revision": "f1d0952a125b96b7ab2f1ff29a87448ade8ac29b",
+    "seccomp_util_sha256": "4242ae8aead8d2f0d9094449dfe039486edf0c0d8b32ba4cffc7991820590751",
+    "version": "260.2"
+  }
+}
