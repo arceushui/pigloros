@@ -203,6 +203,24 @@ fn returns_the_first_failure_in_adr_order() -> TestResult {
 }
 
 #[test]
+fn validates_all_canonical_shapes_before_later_digest_checks() -> TestResult {
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.execution_profile.profile_digest[0] ^= 1;
+    fixture.trust_policy_snapshot.epoch = 0;
+
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "TPS1 shape precedes EPF1 digest",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::TrustPolicySnapshot
+    );
+    Ok(())
+}
+
+#[test]
 fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.canonical_request_digest[0] ^= 1;

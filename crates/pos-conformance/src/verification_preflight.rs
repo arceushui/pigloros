@@ -237,9 +237,9 @@ pub fn preflight_verification_v1(
 ) -> Result<VerificationPreflightResultV1, VerificationPreflightErrorV1> {
     preflight_request(input)?;
     let manifest_digest = preflight_manifest(input)?;
-    preflight_profile(input)?;
+    let profile_digest = preflight_profile(input)?;
     let snapshot_digest = preflight_snapshot(input)?;
-    preflight_digest_bindings(input, manifest_digest, snapshot_digest)?;
+    preflight_digest_bindings(input, manifest_digest, profile_digest, snapshot_digest)?;
     preflight_trust(input)?;
     preflight_closure(input)?;
     preflight_profile_class(input)?;
@@ -261,17 +261,22 @@ fn preflight_request(
             VerificationPreflightCoordinateV1::Request,
         )
     })?;
-    let canonical = input
-        .request
-        .to_canonical_cbor()
-        .map_or(Vec::new(), preserve_bytes);
+    let canonical = input.request.to_canonical_cbor().map_err(|_| {
+        VerificationPreflightErrorV1::new(
+            SafeErrorCodeV1::InvalidEncoding,
+            VerificationPreflightCoordinateV1::Request,
+        )
+    })?;
     if canonical.as_slice() != input.canonical_request_bytes {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::InvalidEncoding,
             VerificationPreflightCoordinateV1::Request,
         ));
     }
-    let digest = input.request.digest().unwrap_or_default();
+    let digest = domain_digest(
+        b"PiglorOS.ReproVerificationRequest.v1",
+        input.canonical_request_bytes,
+    );
     if digest != input.canonical_request_digest {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::DigestMismatch,
@@ -285,10 +290,12 @@ fn preflight_manifest(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<[u8; 32], VerificationPreflightErrorV1> {
     validate_manifest_bounds(input.manifest)?;
-    let bytes = pos_crypto::canonical::encode(input.manifest).map_or(
-        pos_core::CanonicalBytes::from_static(b""),
-        preserve_canonical_bytes,
-    );
+    let bytes = pos_crypto::canonical::encode(input.manifest).map_err(|_| {
+        VerificationPreflightErrorV1::new(
+            SafeErrorCodeV1::InvalidEncoding,
+            VerificationPreflightCoordinateV1::Manifest,
+        )
+    })?;
     if bytes.len() > MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1 {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::FieldOutOfBounds,
@@ -337,24 +344,22 @@ fn validate_manifest_bounds(
     Ok(())
 }
 
-const fn preserve_canonical_bytes(bytes: pos_core::CanonicalBytes) -> pos_core::CanonicalBytes {
-    bytes
-}
-
-const fn preserve_bytes(bytes: Vec<u8>) -> Vec<u8> {
-    bytes
-}
-
 fn preflight_profile(
     input: &VerificationPreflightInputV1<'_>,
-) -> Result<(), VerificationPreflightErrorV1> {
-    input
-        .execution_profile
+) -> Result<[u8; 32], VerificationPreflightErrorV1> {
+    // EPF1's existing encoder validates its embedded digest before returning
+    // canonical bytes. Re-encode a digest-normalized copy here so structural
+    // validation remains in the canonical phase; compare the supplied digest
+    // only in the later digest phase.
+    let profile_digest = input.execution_profile.digest();
+    let mut canonical_profile = input.execution_profile.clone();
+    canonical_profile.profile_digest = profile_digest;
+    canonical_profile
         .to_canonical_cbor()
         .map_err(|error| {
             map_profile_error(error, VerificationPreflightCoordinateV1::ExecutionProfile)
         })?;
-    Ok(())
+    Ok(profile_digest)
 }
 
 fn preflight_snapshot(
@@ -375,6 +380,7 @@ fn preflight_snapshot(
 fn preflight_digest_bindings(
     input: &VerificationPreflightInputV1<'_>,
     manifest_digest: [u8; 32],
+    profile_digest: [u8; 32],
     snapshot_digest: [u8; 32],
 ) -> Result<(), VerificationPreflightErrorV1> {
     if manifest_digest != input.request.manifest_digest {
@@ -383,7 +389,8 @@ fn preflight_digest_bindings(
             VerificationPreflightCoordinateV1::Manifest,
         ));
     }
-    if input.execution_profile.digest() != input.request.execution_profile_digest
+    if profile_digest != input.request.execution_profile_digest
+        || input.execution_profile.profile_digest != profile_digest
         || input.manifest.execution_profile_digest != input.request.execution_profile_digest
     {
         return Err(VerificationPreflightErrorV1::new(
@@ -571,6 +578,8 @@ const fn map_profile_error(
     error: ExecutionProfileContractErrorV1,
     coordinate: VerificationPreflightCoordinateV1,
 ) -> VerificationPreflightErrorV1 {
+    // Keep this exhaustive table separate from the TPS1 mapping below: the
+    // upstream contracts intentionally expose different error enums.
     let code = match error {
         ExecutionProfileContractErrorV1::InvalidEncoding => SafeErrorCodeV1::InvalidEncoding,
         ExecutionProfileContractErrorV1::UnsupportedVersion => SafeErrorCodeV1::UnsupportedVersion,
@@ -617,6 +626,8 @@ const fn safe_error_name(code: SafeErrorCodeV1) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    // These tests cover private exhaustive adapters whose foreign error
+    // variants are not all constructible through the typed public seam.
     use super::*;
 
     #[test]
