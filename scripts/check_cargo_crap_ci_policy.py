@@ -24,22 +24,11 @@ SCOPED_CARGO_CRAP_JOB_IF = (
     "github.event_name != 'pull_request') }}"
 )
 TEST_ONLY_EXCLUSIONS = (
-    "apps/piglor-gateway/tests/**",
-    "apps/piglor-ledger/tests/**",
-    "apps/piglor-world-client/tests/**",
-    "apps/pos-cli/tests/**",
-    "apps/pos-experiment/tests/**",
-    "crates/pos-conformance/tests/**",
-    "crates/pos-core/tests/**",
-    "crates/pos-crypto/tests/**",
-    "crates/pos-reference/tests/**",
-    "crates/pos-runtime/tests/**",
-    "crates/pos-state/tests/**",
-    "crates/pos-store/benches/**",
-    "crates/pos-store/tests/**",
-    "crates/pos-time/tests/**",
-    "crates/pos-reference/src/selector/installation/tests/**",
-    "crates/pos-core/src/erasure_tests.rs",
+    "tests/**",
+    "benches/**",
+    "examples/**",
+    "src/selector/installation/tests/**",
+    "src/erasure_tests.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (

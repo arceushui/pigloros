@@ -21,22 +21,11 @@ CHECKER_PATH = ROOT / "scripts" / "check_cargo_crap_ci_policy.py"
 RESOLVER_PATH = ROOT / "scripts" / "resolve_cargo_crap_baseline.sh"
 EXAMPLE_BASE_SHA = "a" * 40
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
-    "apps/piglor-gateway/tests/**",
-    "apps/piglor-ledger/tests/**",
-    "apps/piglor-world-client/tests/**",
-    "apps/pos-cli/tests/**",
-    "apps/pos-experiment/tests/**",
-    "crates/pos-conformance/tests/**",
-    "crates/pos-core/tests/**",
-    "crates/pos-crypto/tests/**",
-    "crates/pos-reference/tests/**",
-    "crates/pos-runtime/tests/**",
-    "crates/pos-state/tests/**",
-    "crates/pos-store/benches/**",
-    "crates/pos-store/tests/**",
-    "crates/pos-time/tests/**",
-    "crates/pos-reference/src/selector/installation/tests/**",
-    "crates/pos-core/src/erasure_tests.rs",
+    "tests/**",
+    "benches/**",
+    "examples/**",
+    "src/selector/installation/tests/**",
+    "src/erasure_tests.rs",
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -179,9 +168,9 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_test_allowlist_does_not_match_adversarial_production_paths(self) -> None:
         production_paths = (
-            "crates/pos-reference/src/tests/engine.rs",
-            "crates/pos-reference/src/protocol_tests.rs",
-            "apps/pos-cli/src/examples/production.rs",
+            "src/tests/engine.rs",
+            "src/protocol_tests.rs",
+            "src/examples/production.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):
