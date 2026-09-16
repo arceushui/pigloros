@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -948,7 +948,10 @@ fn durable_commit_rejects_changed_inputs_and_successor_descriptors() -> TestResu
     fs::rename(&path, &held)?;
     fs::write(&path, bytes)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
-    assert_ne!(object.metadata()?.ino(), fs::metadata(&path)?.ino());
+    assert_ne!(
+        std::os::unix::fs::MetadataExt::ino(&object.metadata()?),
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path)?),
+    );
     assert!(Arc::new(admitted).commit_update(update, snapshot).is_err());
     Ok(())
 }
