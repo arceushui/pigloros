@@ -12,6 +12,6 @@ this component neither grants admission nor establishes kernel enforcement.
 
 Public integration tests use both checked-in production architecture records
 and the selected zbus closure's zvariant 5.14.0 serializer. Workspace GitHub
-tests, coverage, mutation and lint gates execute those tests. No daemon, test
-launcher, host group expansion, direct process fallback or runtime admission
-shortcut is supplied by this slice.
+test, coverage and mutation gates execute those tests; lint checks their code.
+No daemon, test launcher, host group expansion, direct process fallback or
+runtime admission shortcut is supplied by this slice.

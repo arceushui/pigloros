@@ -56,23 +56,24 @@ fn production_requests_have_exact_dbus_type_and_roundtrip() -> Result<(), Box<dy
 fn selected_digest_and_architecture_are_checked_before_compilation() -> Result<(), Box<dyn Error>> {
     for (architecture, bytes) in production_systemd_scs1_records() {
         let authority = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
-        assert!(matches!(
-            SystemCallFilter::from_selected_record(bytes, [0; 32], architecture),
-            Err(SystemCallFilterError::DigestMismatch)
-        ));
+        assert_eq!(
+            SystemCallFilter::from_selected_record(bytes, [0; 32], architecture).err(),
+            Some(SystemCallFilterError::DigestMismatch)
+        );
         let wrong_architecture = if architecture == SandboxArchitecture::X86_64 {
             SandboxArchitecture::Aarch64
         } else {
             SandboxArchitecture::X86_64
         };
-        assert!(matches!(
+        assert_eq!(
             SystemCallFilter::from_selected_record(
                 bytes,
                 authority.syscall_set_digest,
                 wrong_architecture
-            ),
-            Err(SystemCallFilterError::ArchitectureMismatch)
-        ));
+            )
+            .err(),
+            Some(SystemCallFilterError::ArchitectureMismatch)
+        );
     }
     Ok(())
 }
@@ -83,32 +84,34 @@ fn malformed_or_unbound_canonical_records_do_not_produce_properties() -> Result<
     for (architecture, bytes) in production_systemd_scs1_records() {
         let authority = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
         for malformed in [b"not canonical CBOR".to_vec(), [bytes, &[0]].concat()] {
-            assert!(matches!(
+            assert_eq!(
                 SystemCallFilter::from_selected_record(
                     &malformed,
                     authority.syscall_set_digest,
                     architecture
-                ),
-                Err(SystemCallFilterError::InvalidRecord(
+                )
+                .err(),
+                Some(SystemCallFilterError::InvalidRecord(
                     SandboxProviderProtocolError::InvalidEncoding
                 ))
-            ));
+            );
         }
         let mut unbound = bytes.to_vec();
         let final_byte = unbound
             .last_mut()
             .ok_or("production record must not be empty")?;
         *final_byte ^= 1;
-        assert!(matches!(
+        assert_eq!(
             SystemCallFilter::from_selected_record(
                 &unbound,
                 authority.syscall_set_digest,
                 architecture
-            ),
-            Err(SystemCallFilterError::InvalidRecord(
+            )
+            .err(),
+            Some(SystemCallFilterError::InvalidRecord(
                 SandboxProviderProtocolError::DigestMismatch
             ))
-        ));
+        );
     }
     Ok(())
 }
