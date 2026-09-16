@@ -103,6 +103,13 @@ impl ExecutionProfileV1 {
         encode_validated_profile(self)
     }
 
+    /// Encode the EPF1 shape without checking its embedded digest.
+    pub(crate) fn canonical_bytes_without_digest_validation(
+        &self,
+    ) -> Result<Vec<u8>, ExecutionProfileContractErrorV1> {
+        encode_profile_shape(self).map(|(_, encoded)| encoded)
+    }
+
     /// Decode and validate exact canonical EPF1 bytes.
     ///
     /// # Errors
@@ -130,20 +137,28 @@ impl ExecutionProfileV1 {
 fn encode_validated_profile(
     profile: &ExecutionProfileV1,
 ) -> Result<Vec<u8>, ExecutionProfileContractErrorV1> {
+    encode_profile_shape(profile).and_then(|(unsigned, encoded)| {
+        if domain_digest(b"PiglorOS.ExecutionProfile.v1", &unsigned) != profile.profile_digest {
+            Err(ExecutionProfileContractErrorV1::DigestMismatch)
+        } else {
+            Ok(encoded)
+        }
+    })
+}
+
+fn encode_profile_shape(
+    profile: &ExecutionProfileV1,
+) -> Result<(Vec<u8>, Vec<u8>), ExecutionProfileContractErrorV1> {
     validate_profile_fields(profile).and_then(|()| {
         encode_value(&encode_profile_fields(profile)).and_then(|unsigned| {
             if unsigned.len() > MAX_EXECUTION_PROFILE_BYTES_V1 {
                 Err(ExecutionProfileContractErrorV1::FieldOutOfBounds)
-            } else if domain_digest(b"PiglorOS.ExecutionProfile.v1", &unsigned)
-                != profile.profile_digest
-            {
-                Err(ExecutionProfileContractErrorV1::DigestMismatch)
             } else {
                 encode_value(&encode_profile(profile)).and_then(|encoded| {
                     if encoded.len() > MAX_EXECUTION_PROFILE_BYTES_V1 {
                         Err(ExecutionProfileContractErrorV1::FieldOutOfBounds)
                     } else {
-                        Ok(encoded)
+                        Ok((unsigned, encoded))
                     }
                 })
             }

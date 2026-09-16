@@ -236,10 +236,10 @@ pub fn preflight_verification_v1(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<VerificationPreflightResultV1, VerificationPreflightErrorV1> {
     preflight_request(input)?;
-    let manifest_digest = preflight_manifest(input)?;
-    let profile_digest = preflight_profile(input)?;
-    let snapshot_digest = preflight_snapshot(input)?;
-    preflight_digest_bindings(input, manifest_digest, profile_digest, snapshot_digest)?;
+    let manifest_bytes = preflight_manifest(input)?;
+    preflight_profile(input)?;
+    let snapshot_bytes = preflight_snapshot(input)?;
+    preflight_digest_bindings(input, &manifest_bytes, &snapshot_bytes)?;
     preflight_trust(input)?;
     preflight_closure(input)?;
     preflight_profile_class(input)?;
@@ -273,22 +273,12 @@ fn preflight_request(
             VerificationPreflightCoordinateV1::Request,
         ));
     }
-    let digest = domain_digest(
-        b"PiglorOS.ReproVerificationRequest.v1",
-        input.canonical_request_bytes,
-    );
-    if digest != input.canonical_request_digest {
-        return Err(VerificationPreflightErrorV1::new(
-            SafeErrorCodeV1::DigestMismatch,
-            VerificationPreflightCoordinateV1::Request,
-        ));
-    }
     Ok(())
 }
 
 fn preflight_manifest(
     input: &VerificationPreflightInputV1<'_>,
-) -> Result<[u8; 32], VerificationPreflightErrorV1> {
+) -> Result<pos_core::CanonicalBytes, VerificationPreflightErrorV1> {
     validate_manifest_bounds(input.manifest)?;
     let bytes = pos_crypto::canonical::encode(input.manifest).map_err(|_| {
         VerificationPreflightErrorV1::new(
@@ -302,10 +292,7 @@ fn preflight_manifest(
             VerificationPreflightCoordinateV1::Manifest,
         ));
     }
-    Ok(domain_digest(
-        b"PiglorOS.ReproManifest.v1",
-        bytes.as_slice(),
-    ))
+    Ok(bytes)
 }
 
 fn validate_manifest_bounds(
@@ -346,26 +333,19 @@ fn validate_manifest_bounds(
 
 fn preflight_profile(
     input: &VerificationPreflightInputV1<'_>,
-) -> Result<[u8; 32], VerificationPreflightErrorV1> {
-    // EPF1 validates bounds and canonical shape before checking its embedded
-    // digest. Defer only that digest result so every structural failure wins
-    // over later digest, trust, and closure failures.
-    match input.execution_profile.to_canonical_cbor() {
-        Ok(_) | Err(ExecutionProfileContractErrorV1::DigestMismatch) => {}
-        Err(error) => {
-            return Err(map_profile_error(
-                error,
-                VerificationPreflightCoordinateV1::ExecutionProfile,
-            ));
-        }
-    }
-    let profile_digest = input.execution_profile.digest();
-    Ok(profile_digest)
+) -> Result<(), VerificationPreflightErrorV1> {
+    input
+        .execution_profile
+        .canonical_bytes_without_digest_validation()
+        .map_err(|error| {
+            map_profile_error(error, VerificationPreflightCoordinateV1::ExecutionProfile)
+        })?;
+    Ok(())
 }
 
 fn preflight_snapshot(
     input: &VerificationPreflightInputV1<'_>,
-) -> Result<[u8; 32], VerificationPreflightErrorV1> {
+) -> Result<pos_core::CanonicalBytes, VerificationPreflightErrorV1> {
     let bytes = input
         .trust_policy_snapshot
         .to_canonical_cbor()
@@ -375,21 +355,32 @@ fn preflight_snapshot(
                 VerificationPreflightCoordinateV1::TrustPolicySnapshot,
             )
         })?;
-    Ok(*blake3::hash(&bytes).as_bytes())
+    Ok(pos_core::CanonicalBytes::from_vec(bytes))
 }
 
 fn preflight_digest_bindings(
     input: &VerificationPreflightInputV1<'_>,
-    manifest_digest: [u8; 32],
-    profile_digest: [u8; 32],
-    snapshot_digest: [u8; 32],
+    manifest_bytes: &pos_core::CanonicalBytes,
+    snapshot_bytes: &pos_core::CanonicalBytes,
 ) -> Result<(), VerificationPreflightErrorV1> {
+    let request_digest = domain_digest(
+        b"PiglorOS.ReproVerificationRequest.v1",
+        input.canonical_request_bytes,
+    );
+    if request_digest != input.canonical_request_digest {
+        return Err(VerificationPreflightErrorV1::new(
+            SafeErrorCodeV1::DigestMismatch,
+            VerificationPreflightCoordinateV1::Request,
+        ));
+    }
+    let manifest_digest = domain_digest(b"PiglorOS.ReproManifest.v1", manifest_bytes.as_slice());
     if manifest_digest != input.request.manifest_digest {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::DigestMismatch,
             VerificationPreflightCoordinateV1::Manifest,
         ));
     }
+    let profile_digest = input.execution_profile.digest();
     if profile_digest != input.request.execution_profile_digest
         || input.execution_profile.profile_digest != profile_digest
         || input.manifest.execution_profile_digest != input.request.execution_profile_digest
@@ -399,6 +390,7 @@ fn preflight_digest_bindings(
             VerificationPreflightCoordinateV1::ExecutionProfile,
         ));
     }
+    let snapshot_digest = *blake3::hash(snapshot_bytes.as_slice()).as_bytes();
     if snapshot_digest != input.request.trust_policy_snapshot_digest
         || input.manifest.trust_policy_snapshot_digest != input.request.trust_policy_snapshot_digest
     {
@@ -520,6 +512,12 @@ fn preflight_profile_class(
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::ProfileUnsupported,
             VerificationPreflightCoordinateV1::ExecutionProfile,
+        ));
+    }
+    if input.manifest.execution_profile != input.execution_profile.profile_id {
+        return Err(VerificationPreflightErrorV1::new(
+            SafeErrorCodeV1::ProfileClassMismatch,
+            VerificationPreflightCoordinateV1::ProfileClass,
         ));
     }
     if input.manifest.reproducibility_class != input.request.reproducibility_class {

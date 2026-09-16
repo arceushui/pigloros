@@ -457,6 +457,19 @@ fn exercises_digest_binding_and_profile_class_failures() -> TestResult {
     assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
 
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.manifest.execution_profile = "another-profile-v1".to_owned();
+    fixture.refresh_manifest_binding()?;
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "manifest names the selected profile",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::ProfileClassMismatch);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::ProfileClass
+    );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.execution_profile.reproducibility_classes =
         vec![ReproducibilityClassV1::RecordedReplay];
     fixture.refresh_profile_binding()?;
