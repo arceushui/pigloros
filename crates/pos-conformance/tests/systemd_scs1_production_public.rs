@@ -59,29 +59,69 @@ fn production_systemd_syscall_set_manifest_binds_exact_records() -> Result<(), B
     let manifest: serde_json::Value = serde_json::from_slice(include_bytes!(
         "../vectors/systemd-provider-v260.2/manifest.json"
     ))?;
+    assert_eq!(
+        manifest
+            .as_object()
+            .ok_or("manifest must be an object")?
+            .len(),
+        3
+    );
+    assert_eq!(
+        manifest["systemd"],
+        serde_json::json!({
+            "revision": "f1d0952a125b96b7ab2f1ff29a87448ade8ac29b",
+            "seccomp_util_sha256": "4242ae8aead8d2f0d9094449dfe039486edf0c0d8b32ba4cffc7991820590751",
+            "version": "260.2",
+        })
+    );
+    assert_eq!(
+        manifest["libseccomp"],
+        serde_json::json!({
+            "source_archive_sha256": "501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be",
+            "syscalls_csv_sha256": "ab64e55719254d44bc279d967845568ab9940e81ed7800e9d1066f664a9f5231",
+            "version": "2.6.1",
+        })
+    );
     let records = manifest["records"]
         .as_array()
         .ok_or("manifest records must be an array")?;
     assert_eq!(records.len(), 2);
 
-    for (record, bytes) in records.iter().zip([X86_64_BYTES, AARCH64_BYTES]) {
+    let expected_records = [
+        (
+            "x86_64",
+            "systemd-v260.2-x86_64.scs1.cbor",
+            SandboxArchitectureV1::X86_64,
+            X86_64_BYTES,
+        ),
+        (
+            "aarch64",
+            "systemd-v260.2-aarch64.scs1.cbor",
+            SandboxArchitectureV1::Aarch64,
+            AARCH64_BYTES,
+        ),
+    ];
+    for (record, (architecture, filename, expected_architecture, bytes)) in
+        records.iter().zip(expected_records)
+    {
         let byte_length = u64::try_from(bytes.len())?;
         let record_digest = blake3::hash(bytes).to_hex().to_string();
-        assert_eq!(record["requested_count"].as_u64(), Some(392));
-        assert_eq!(record["expected_effective_count"].as_u64(), Some(392));
-        assert_eq!(record["byte_length"].as_u64(), Some(byte_length));
-        assert_eq!(
-            record["record_blake3"].as_str(),
-            Some(record_digest.as_str())
-        );
-
         let decoded = SandboxSyscallSetV1::from_canonical_cbor(bytes)?;
+        assert_eq!(decoded.architecture, expected_architecture);
         let syscall_set_digest = blake3::Hash::from_bytes(decoded.syscall_set_digest)
             .to_hex()
             .to_string();
         assert_eq!(
-            record["syscall_set_digest"].as_str(),
-            Some(syscall_set_digest.as_str())
+            record,
+            &serde_json::json!({
+                "architecture": architecture,
+                "file": filename,
+                "requested_count": decoded.requested_names.len(),
+                "expected_effective_count": decoded.expected_effective_names.len(),
+                "byte_length": byte_length,
+                "record_blake3": record_digest,
+                "syscall_set_digest": syscall_set_digest,
+            })
         );
     }
     Ok(())

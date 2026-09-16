@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 import tempfile
 
 
@@ -89,17 +90,21 @@ def expand_group(
     return expanded
 
 
-def parse_libseccomp_interface(source: Path) -> dict[str, dict[str, str]]:
-    lines = source.read_text(encoding="utf-8").splitlines()
+def parse_libseccomp_interface(source: str) -> dict[str, dict[str, str]]:
+    lines = source.splitlines()
     if not lines or not lines[0].startswith("#syscall"):
         raise ValueError("pinned libseccomp syscall table has no expected header")
     header = lines[0][1:].split(",")
     header[0] = "syscall"
+    if len(set(header)) != len(header) or not set(ARCHITECTURES).issubset(header):
+        raise ValueError("pinned libseccomp syscall table has invalid architecture columns")
     rows: dict[str, dict[str, str]] = {}
     for row in csv.reader(lines[1:]):
         if len(row) != len(header):
             raise ValueError("pinned libseccomp syscall table has a malformed row")
         fields = dict(zip(header, row, strict=True))
+        if fields["syscall"] in rows:
+            raise ValueError("pinned libseccomp syscall table has a duplicate syscall")
         rows[fields["syscall"]] = fields
     return rows
 
@@ -107,6 +112,8 @@ def parse_libseccomp_interface(source: Path) -> dict[str, dict[str, str]]:
 def target_names(
     expanded: set[str], interface: dict[str, dict[str, str]], architecture: str
 ) -> list[str]:
+    if architecture not in ARCHITECTURES:
+        raise ValueError(f"unsupported architecture: {architecture}")
     names = sorted(
         name
         for name in expanded
@@ -196,15 +203,31 @@ def atomic_write(path: Path, content: bytes) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def materialize(systemd_root: Path, libseccomp_root: Path, output_root: Path) -> None:
+def materialize(
+    systemd_root: Path, libseccomp_archive: Path, output_root: Path, check: bool = False
+) -> None:
+    revision = subprocess.run(
+        ["git", "-C", str(systemd_root), "rev-parse", "--verify", "HEAD"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if revision != SYSTEMD_REVISION:
+        raise ValueError(f"systemd revision is not pinned: found {revision}")
     systemd_source = systemd_root / "src/shared/seccomp-util.c"
-    libseccomp_source = libseccomp_root / "src/syscalls.csv"
     require_source(systemd_source, SYSTEMD_SECCOMP_SHA256, "systemd seccomp-util.c")
     require_source(
-        libseccomp_source,
-        LIBSECCOMP_SYSCALLS_SHA256,
-        "libseccomp syscalls.csv",
+        libseccomp_archive, LIBSECCOMP_SOURCE_SHA256, "libseccomp source archive"
     )
+    with tarfile.open(libseccomp_archive, "r:gz") as archive:
+        source = archive.extractfile(f"libseccomp-{LIBSECCOMP_VERSION}/src/syscalls.csv")
+        if source is None:
+            raise ValueError("libseccomp archive has no regular syscall table")
+        with source:
+            syscall_bytes = source.read()
+    if hashlib.sha256(syscall_bytes).hexdigest() != LIBSECCOMP_SYSCALLS_SHA256:
+        raise ValueError("libseccomp syscalls.csv is not the pinned source")
 
     groups = parse_systemd_groups(systemd_source.read_text(encoding="utf-8"))
     expanded = set(expand_group("@system-service", groups))
@@ -213,14 +236,15 @@ def materialize(systemd_root: Path, libseccomp_root: Path, output_root: Path) ->
             f"@system-service expanded to {len(expanded)} names; "
             f"expected {EXPECTED_EXPANDED_NAMES}"
         )
-    interface = parse_libseccomp_interface(libseccomp_source)
+    interface = parse_libseccomp_interface(syscall_bytes.decode("utf-8"))
 
     records = []
+    outputs = {}
     for architecture in ARCHITECTURES:
         names = target_names(expanded, interface, architecture)
         encoded, record_digest = materialize_record(architecture, names)
         filename = f"systemd-v{SYSTEMD_VERSION}-{architecture}.scs1.cbor"
-        atomic_write(output_root / filename, encoded)
+        outputs[filename] = encoded
         records.append(
             {
                 "architecture": architecture,
@@ -246,22 +270,28 @@ def materialize(systemd_root: Path, libseccomp_root: Path, output_root: Path) ->
             "version": SYSTEMD_VERSION,
         },
     }
-    atomic_write(
-        output_root / "manifest.json",
-        (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(),
-    )
+    outputs["manifest.json"] = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode()
+    if check:
+        for filename, content in outputs.items():
+            if (output_root / filename).read_bytes() != content:
+                raise ValueError(f"checked-in output differs from pinned derivation: {filename}")
+    else:
+        for filename, content in outputs.items():
+            atomic_write(output_root / filename, content)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--systemd-source", type=Path, required=True)
-    parser.add_argument("--libseccomp-source", type=Path, required=True)
+    parser.add_argument("--libseccomp-archive", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--check", action="store_true", help="verify outputs without writing")
     arguments = parser.parse_args()
     materialize(
         arguments.systemd_source.resolve(),
-        arguments.libseccomp_source.resolve(),
+        arguments.libseccomp_archive.resolve(),
         arguments.output.resolve(),
+        arguments.check,
     )
 
 

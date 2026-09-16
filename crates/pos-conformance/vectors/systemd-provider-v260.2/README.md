@@ -13,19 +13,25 @@ v260.2 revision `f1d0952a125b96b7ab2f1ff29a87448ade8ac29b` and libseccomp
 v2.6.1 from nixpkgs revision `6713828a351efa628b025a1adf7f43cbf8597513`.
 
 Materialization is deliberately offline. Obtain and authenticate the pinned
-source trees separately, then run:
+systemd Git checkout and official libseccomp release archive separately, then run:
 
 ```bash
 python3 scripts/materialize-systemd-scs1.py \
   --systemd-source /path/to/systemd-v260.2 \
-  --libseccomp-source /path/to/libseccomp-2.6.1 \
+  --libseccomp-archive /path/to/libseccomp-2.6.1.tar.gz \
   --output crates/pos-conformance/vectors/systemd-provider-v260.2
 ```
 
-The materializer rejects source files whose SHA-256 digests differ from the
-pinned inputs. It recursively expands `@system-service`, maps names through
+The materializer requires the exact systemd Git HEAD and checks the source-file,
+libseccomp archive, and archive-contained syscall-table SHA-256 digests against
+the pinned inputs. It recursively expands `@system-service`, maps names through
 the pinned target interfaces, emits explicit sorted names, requires the six
 launcher/provider syscalls named by ADR-069, and writes canonical SCS1 bytes.
 Production code must consume these checked-in records through APT1/SIC1; it
 must never invoke `systemd-analyze`, expand groups, infer architecture, or add
 names from the running host.
+
+Add `--check` to verify all checked-in records and the complete manifest without
+writing files. The `conformance-fixtures` CI job obtains the pinned inputs,
+reproduces these outputs twice, and exercises revision, digest, parser, target,
+required-syscall, and output/provenance rejection boundaries.
