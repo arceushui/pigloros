@@ -182,7 +182,7 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
             FIELD_TRUST_ROOTS,
             oversized_roots,
         )?)
-            .map(|_| ()),
+        .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
 
@@ -196,7 +196,7 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
             FIELD_REVOKED_KEYS,
             oversized_keys,
         )?)
-            .map(|_| ()),
+        .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
 
@@ -228,7 +228,7 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
             FIELD_MINIMUM_VERSIONS,
             oversized_versions,
         )?)
-            .map(|_| ()),
+        .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
 
@@ -238,7 +238,7 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
             FIELD_REVOKED_KEYS,
             too_many_items,
         )?)
-            .map(|_| ()),
+        .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
     Ok(())
@@ -498,14 +498,14 @@ fn public_contract_rejects_invalid_values_and_root_algorithms() -> TestResult {
 
     let mut schema_valid_expiry = snapshot.clone();
     schema_valid_expiry.offline_valid_through = "2026-09-16T00:00:00+00:00".to_owned();
-    assert_eq!(
-        schema_valid_expiry.validate(),
-        Ok(())
-    );
+    assert_eq!(schema_valid_expiry.validate(), Ok(()));
 
     let mut empty_expiry = snapshot.clone();
     empty_expiry.offline_valid_through.clear();
-    assert_eq!(empty_expiry.validate(), Err(SnapshotError::FieldOutOfBounds));
+    assert_eq!(
+        empty_expiry.validate(),
+        Err(SnapshotError::FieldOutOfBounds)
+    );
 
     let mut oversized_expiry = snapshot.clone();
     oversized_expiry.offline_valid_through = "x".repeat(65);
@@ -563,7 +563,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
             FIELD_TRUST_ROOTS,
             unordered_roots,
         )?)
-            .map(|_| ()),
+        .map(|_| ()),
         Err(SnapshotError::NonCanonicalOrder)
     );
 
@@ -635,7 +635,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
             FIELD_MINIMUM_VERSIONS,
             unordered_versions,
         )?)
-            .map(|_| ()),
+        .map(|_| ()),
         Err(SnapshotError::NonCanonicalOrder)
     );
 
@@ -648,7 +648,7 @@ fn public_contract_rejects_unordered_or_duplicate_set_lists() -> TestResult {
             FIELD_MINIMUM_VERSIONS,
             duplicate_versions,
         )?)
-            .map(|_| ()),
+        .map(|_| ()),
         Err(SnapshotError::NonCanonicalOrder)
     );
     Ok(())
