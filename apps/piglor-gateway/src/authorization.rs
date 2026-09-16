@@ -833,7 +833,7 @@ mod tests {
             data_categories: vec!["private".to_owned()],
             purposes: vec!["action".to_owned()],
             audiences: vec!["gateway".to_owned()],
-            action_classes: vec!["world.action.submit".to_owned()],
+            action_classes: vec!["world.action.v1.submit".to_owned()],
             valid_from: WallTime::from_micros(1),
             valid_until: WallTime::from_micros(100),
             withdrawal_retention_policy: "erase".to_owned(),
@@ -865,8 +865,8 @@ mod tests {
     fn fixture_with_actor(actor: EntityId) -> Fixture {
         fixture_with_scope(
             actor,
-            vec!["timeline.events".to_owned(), "world.action".to_owned()],
-            vec!["read".to_owned(), "world.action.submit".to_owned()],
+            vec!["timeline.events".to_owned(), "world.action.v1".to_owned()],
+            vec!["read".to_owned(), "world.action.v1.submit".to_owned()],
             vec!["action".to_owned(), "read".to_owned()],
         )
     }
@@ -980,8 +980,8 @@ mod tests {
     ) -> GatewayAuthorization {
         fixture_with_scope(
             actor,
-            vec!["world.action".to_owned()],
-            vec!["world.action.submit".to_owned()],
+            vec!["world.action.v1".to_owned()],
+            vec!["world.action.v1.submit".to_owned()],
             vec!["action".to_owned()],
         )
         .authorization
@@ -1056,8 +1056,8 @@ mod tests {
         GatewayAuthorizationRequest::action(
             fixture.actor,
             fixture.target_timeline,
-            "world.action",
-            "world.action.submit",
+            "world.action.v1",
+            "world.action.v1.submit",
             WallTime::from_micros(10),
         )
     }

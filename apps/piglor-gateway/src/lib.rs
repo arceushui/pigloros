@@ -41,7 +41,9 @@ use pos_core::{
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
-use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
+use pos_plugin_world::{
+    ActionKindV1, WorldActionV1, WorldPlugin, EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
+};
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
 };
@@ -224,7 +226,7 @@ mod coverage_tests {
             .append_identified_action(
                 &timeline_id,
                 &entity_id,
-                "world.action",
+                "world.action.v1",
                 &serde_json::json!({"choice": "left"}),
                 "coverage-conflict",
             )
@@ -234,7 +236,7 @@ mod coverage_tests {
             .append_identified_action(
                 &timeline_id,
                 &entity_id,
-                "world.action",
+                "world.action.v1",
                 &serde_json::json!({"choice": "right"}),
                 "coverage-conflict",
             )
@@ -256,12 +258,12 @@ mod coverage_tests {
                 &[
                     EventDraft::new(
                         entity,
-                        Kind::new("world.action"),
+                        Kind::new("world.action.v1"),
                         CanonicalBytes::from_static(b"r1"),
                     ),
                     EventDraft::new(
                         entity,
-                        Kind::new("world.action"),
+                        Kind::new("world.action.v1"),
                         CanonicalBytes::from_static(b"r2"),
                     ),
                 ],
@@ -276,7 +278,7 @@ mod coverage_tests {
             .append_action(
                 &child.id().to_string(),
                 &entity.to_string(),
-                "world.action",
+                "world.action.v1",
                 &serde_json::json!({"choice": "child"}),
             )
             .await
@@ -288,7 +290,7 @@ mod coverage_tests {
             .append_identified_action(
                 &child.id().to_string(),
                 &entity.to_string(),
-                "world.action",
+                "world.action.v1",
                 &serde_json::json!({"choice": "identified"}),
                 "logical-child-action",
             )
@@ -301,7 +303,7 @@ mod coverage_tests {
             .append_identified_action(
                 &child.id().to_string(),
                 &entity.to_string(),
-                "world.action",
+                "world.action.v1",
                 &serde_json::json!({"choice": "identified"}),
                 "logical-child-action",
             )
@@ -2068,7 +2070,7 @@ impl Gateway {
         Ok(page.events)
     }
 
-    /// Append one `world.action` draft. `payload` is bounded JSON → CBOR.
+    /// Append one `world.action.v1` draft. `payload` is bounded JSON → CBOR.
     ///
     /// # Errors
     /// Returns store / id / unsupported-type errors.
@@ -2196,6 +2198,12 @@ impl Gateway {
             Ok(entity) => entity,
             Err(error) => return Err(error),
         };
+        let authorized_host = self.authorization.is_some();
+        #[cfg(test)]
+        let authorized_host = authorized_host || self.action_principal.is_some();
+        if !authorized_host {
+            return Err(GatewayError::ActionAuthorizationUnavailable);
+        }
         let proposal = match build_proposed_action(entity, event_type, payload, capability) {
             Ok(proposal) => proposal,
             Err(error) => return Err(error.into()),
@@ -2674,12 +2682,61 @@ fn build_proposed_action(
     payload: &serde_json::Value,
     capability: &str,
 ) -> Result<ProposedAction, ActionRejected> {
-    ProposedAction::try_new(
-        Kind::new(event_type),
-        entity,
-        json_to_cbor(payload),
-        Kind::new(capability),
-    )
+    if event_type != EVENT_TYPE_ACTION {
+        return Err(ActionRejected::UnknownEventType);
+    }
+    if capability != "world.action.v1.submit" {
+        return Err(ActionRejected::CapabilityNotGranted);
+    }
+    serde_json::from_value::<GatewayWorldActionPayload>(payload.clone())
+        .map_err(|_| {
+            ActionRejected::DomainValidationFailed("invalid world.action.v1 payload".to_owned())
+        })
+        .and_then(|action| action.encode())
+        .and_then(|bytes| {
+            ProposedAction::try_new(Kind::new(event_type), entity, bytes, Kind::new(capability))
+        })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayWorldActionPayload {
+    actor_entity_id: EntityId,
+    body_entity_id: EntityId,
+    action_kind: String,
+    params: Vec<u8>,
+    action_scope: u8,
+    catalogue_version: u32,
+    tick: u64,
+}
+
+impl GatewayWorldActionPayload {
+    fn encode(self) -> Result<CanonicalBytes, ActionRejected> {
+        match self.action_kind.as_str() {
+            "impulse" => Some(ActionKindV1::Impulse),
+            "target_velocity" => Some(ActionKindV1::TargetVelocity),
+            _ => None,
+        }
+        .ok_or_else(|| ActionRejected::DomainValidationFailed("unknown action kind".to_owned()))
+        .and_then(|action_kind| {
+            WorldActionV1 {
+                actor_entity_id: self.actor_entity_id,
+                body_entity_id: self.body_entity_id,
+                action_kind,
+                params_cbor: self.params,
+                action_scope: self.action_scope,
+                catalogue_version: self.catalogue_version,
+                tick: self.tick,
+            }
+            .encode()
+            .map_err(|error| match error {
+                pos_plugin_world::WorldCodecError::PayloadTooLarge { size, max } => {
+                    ActionRejected::PayloadTooLarge { size, max }
+                }
+                error => ActionRejected::DomainValidationFailed(error.to_string()),
+            })
+        })
+    }
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
@@ -2738,7 +2795,7 @@ pub struct CreateTimelineRequest {
 #[derive(Debug, Deserialize)]
 pub struct ActionRequest {
     pub entity_id: String,
-    /// Must be `world.action` in the current Gateway foundation.
+    /// Must be `world.action.v1` in the current Gateway foundation.
     #[serde(default = "default_action_type")]
     pub event_type: String,
     pub payload: serde_json::Value,
@@ -2884,7 +2941,9 @@ fn event_view_json(view: &EventView) -> serde_json::Value {
 }
 
 fn decode_cbor_json(bytes: &[u8]) -> Option<serde_json::Value> {
-    ciborium::from_reader(bytes).ok()
+    ciborium::from_reader::<ciborium::Value, _>(bytes)
+        .ok()
+        .and_then(|value| serde_json::to_value(value).ok())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -3090,7 +3149,7 @@ mod tests {
             Kind::new(EVENT_TYPE_ACTION),
             EntityId::new(),
             CanonicalBytes::from_static(b"payload"),
-            Kind::new("world.action.submit"),
+            Kind::new("world.action.v1.submit"),
         );
         assert!(matches!(
             gateway
@@ -3105,7 +3164,7 @@ mod tests {
                     "not-an-entity",
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                 )
                 .await,
             Err(GatewayError::InvalidId(_))
@@ -3117,7 +3176,7 @@ mod tests {
                     &EntityId::new().to_string(),
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "ingress-1",
                 )
                 .await,
@@ -3167,7 +3226,7 @@ mod tests {
                     &proposal.actor_entity_id.to_string(),
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({"data": "x".repeat(5000)}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                 )
                 .await,
             Err(GatewayError::ActionRejected(_))
@@ -3186,7 +3245,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-1",
                 )
                 .await,
@@ -3199,7 +3258,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "missing-timeline",
                 )
                 .await,
@@ -3212,7 +3271,7 @@ mod tests {
                     "not-an-entity",
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-2",
                 )
                 .await,
@@ -3226,7 +3285,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &oversized,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-3",
                 )
                 .await,
@@ -3239,7 +3298,7 @@ mod tests {
                     &EntityId::new().to_string(),
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-4",
                 )
                 .await,
@@ -3252,7 +3311,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-5",
                 )
                 .await,
@@ -3275,7 +3334,7 @@ mod tests {
             authorization: None,
             action_principal: Some(ActionPrincipal::new(
                 actor,
-                [Kind::new("world.action.submit")],
+                [Kind::new("world.action.v1.submit")],
             )),
         }
     }
@@ -3287,7 +3346,7 @@ mod tests {
         let gateway = Gateway::new_with_world_bodies_and_principal_for_test(
             open_store(StoreConfig::Memory).test_ok(),
             [body],
-            ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
+            ActionPrincipal::new(actor, [Kind::new("world.action.v1.submit")]),
         );
         let timeline = gateway.create_timeline("action-boundaries").await.test_ok();
         let valid_timeline = timeline.id().to_string();
@@ -3295,7 +3354,7 @@ mod tests {
             Kind::new(EVENT_TYPE_ACTION),
             actor,
             CanonicalBytes::from_static(b"payload"),
-            Kind::new("world.action.submit"),
+            Kind::new("world.action.v1.submit"),
         );
         assert_proposed_action_boundaries(&gateway, &valid_timeline, &proposal).await;
         assert_identified_action_boundaries(&gateway, &valid_timeline, actor).await;
@@ -3315,7 +3374,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &serde_json::json!({}),
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-error",
                 )
                 .await,
@@ -3354,7 +3413,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_ok();
@@ -3375,7 +3434,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_err();
@@ -3387,7 +3446,7 @@ mod tests {
                 &EntityId::new().to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_err();
@@ -3438,7 +3497,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_ok();
@@ -3451,7 +3510,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_err();
@@ -3467,7 +3526,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
                 "host-owned-action-1",
             )
             .await
@@ -3478,7 +3537,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
                 "host-owned-action-1",
             )
             .await
@@ -3521,7 +3580,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_err();
@@ -3564,7 +3623,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_err();
@@ -3613,7 +3672,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
                 "generic-action-success",
             )
             .await
@@ -3624,7 +3683,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
                 "generic-action-success",
             )
             .await
@@ -3640,7 +3699,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_err();
@@ -3654,7 +3713,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
                 "event-ceiling",
             )
             .await
@@ -3685,7 +3744,7 @@ mod tests {
             Kind::new(EVENT_TYPE_ACTION),
             actor,
             CanonicalBytes::from_static(b"payload"),
-            Kind::new("world.action.submit"),
+            Kind::new("world.action.v1.submit"),
         );
 
         assert!(matches!(
@@ -3704,7 +3763,7 @@ mod tests {
             Kind::new(EVENT_TYPE_ACTION),
             actor,
             CanonicalBytes::from_static(&[0xff]),
-            Kind::new("world.action.submit"),
+            Kind::new("world.action.v1.submit"),
         );
         assert!(matches!(
             gateway.submit_proposed_action(timeline_id, malformed).await,
@@ -3725,7 +3784,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-invalid-timeline",
                 )
                 .await,
@@ -3738,7 +3797,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-missing-timeline",
                 )
                 .await,
@@ -3751,7 +3810,7 @@ mod tests {
                     "not-an-entity",
                     EVENT_TYPE_ACTION,
                     payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-invalid-entity",
                 )
                 .await,
@@ -3764,7 +3823,7 @@ mod tests {
                     &EntityId::new().to_string(),
                     EVENT_TYPE_ACTION,
                     payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-denied-actor",
                 )
                 .await,
@@ -3778,7 +3837,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &malformed_payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-malformed-payload",
                 )
                 .await,
@@ -3792,7 +3851,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &oversized_payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "boundary-oversized-payload",
                 )
                 .await,
@@ -3832,7 +3891,7 @@ mod tests {
                 &actor.to_string(),
                 "",
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
             )
             .await
             .test_err();
@@ -3848,7 +3907,7 @@ mod tests {
                 &actor.to_string(),
                 EVENT_TYPE_ACTION,
                 &payload,
-                "world.action.submit",
+                "world.action.v1.submit",
                 "boundary-success",
             )
             .await
@@ -3889,7 +3948,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                 )
                 .await,
             Err(GatewayError::Store(_))
@@ -3901,7 +3960,7 @@ mod tests {
                     &actor.to_string(),
                     EVENT_TYPE_ACTION,
                     &payload,
-                    "world.action.submit",
+                    "world.action.v1.submit",
                     "append-failure",
                 )
                 .await,
@@ -3994,7 +4053,7 @@ mod tests {
             actor,
             timeline,
             EVENT_TYPE_ACTION,
-            "world.action.submit",
+            "world.action.v1.submit",
             WallTime::now(),
         );
         action_shaped_read.target = GatewayAuthorizationTarget::Read {
@@ -6303,7 +6362,7 @@ mod tests {
             Kind::new(EVENT_TYPE_ACTION),
             EntityId::new(),
             CanonicalBytes::from_static(b"blocked"),
-            Kind::new("world.action.submit"),
+            Kind::new("world.action.v1.submit"),
         );
         let consent_authority = ConsentAuthority::new();
         let missing = Gateway {
@@ -6645,27 +6704,26 @@ mod tests {
         let gw = Gateway::new_with_world_bodies_and_principal_for_test(
             open_store(StoreConfig::Memory).test_ok(),
             [body],
-            ActionPrincipal::new(actor, [Kind::new("world.action.submit")]),
+            ActionPrincipal::new(actor, [Kind::new("world.action.v1.submit")]),
         );
         let tl = gw.create_timeline("actions").await.test_ok();
-        let action = pos_plugin_world::WorldAction {
+        let action = WorldActionV1 {
             actor_entity_id: actor,
             body_entity_id: body,
-            action_kind: "impulse".to_owned(),
-            params: vec![1, 2, 3],
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: vec![0x83, 1, 2, 3],
             action_scope: 0,
             catalogue_version: 1,
             tick: 1,
         };
-        let mut payload = Vec::new();
-        ciborium::into_writer(&action, &mut payload).test_ok();
+        let payload = action.encode().test_ok();
 
         // Valid proposal
         let valid = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
             actor,
-            CanonicalBytes::from_vec(payload.clone()),
-            Kind::new("world.action.submit"),
+            payload,
+            Kind::new("world.action.v1.submit"),
         );
         let event = gw
             .submit_proposed_action(&tl.id().to_string(), valid)
@@ -6692,13 +6750,13 @@ mod tests {
             Kind::new(EVENT_TYPE_ACTION),
             actor,
             CanonicalBytes::from_vec(vec![0xff]),
-            Kind::new("world.action.submit"),
+            Kind::new("world.action.v1.submit"),
         );
         let err = gw
             .submit_proposed_action(&tl.id().to_string(), invalid)
             .await
             .test_err();
-        assert!(err.to_string().contains("malformed world.action payload"));
+        assert!(err.to_string().contains("domain validation failed"));
         drop(gw);
     }
 }
