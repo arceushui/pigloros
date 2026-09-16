@@ -216,7 +216,7 @@ fn validate_minimum_versions(
     }
 }
 
-fn valid_expiry(value: &str) -> bool {
+const fn valid_expiry(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_EXPIRY_BYTES
 }
 
