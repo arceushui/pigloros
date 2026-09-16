@@ -577,16 +577,20 @@ fn provider_socket(value: &Value) -> Result<String, ProtocolError> {
     };
     if path.len() > 107
         || path.contains('\0')
-        || matches!(path, SANDBOX_SELECTOR_SOCKET | SANDBOX_ADMIN_SOCKET)
-        || path == SANDBOX_RECOVERY_SOCKET_ROOT
-        || path
-            .strip_prefix(SANDBOX_RECOVERY_SOCKET_ROOT)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+        || reserved_provider_socket(path)
         || tail.split('/').any(|part| matches!(part, "" | "." | ".."))
     {
         return Err(ProtocolError::InvalidEncoding);
     }
     Ok(path.to_owned())
+}
+
+fn reserved_provider_socket(path: &str) -> bool {
+    matches!(path, SANDBOX_SELECTOR_SOCKET | SANDBOX_ADMIN_SOCKET)
+        || path == SANDBOX_RECOVERY_SOCKET_ROOT
+        || path
+            .strip_prefix(SANDBOX_RECOVERY_SOCKET_ROOT)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn required_host_features(value: &Value) -> Result<Vec<String>, ProtocolError> {

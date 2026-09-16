@@ -1364,6 +1364,27 @@ struct EvaluationNamespaceState {
     retired: bool,
 }
 
+impl EvaluationNamespaceState {
+    fn try_acquire(&mut self, request_digest: [u8; 32]) -> Option<bool> {
+        if self.retired {
+            return None;
+        }
+        if self.request_digest == request_digest {
+            self.live_requests += 1;
+            return Some(false);
+        }
+        self.retained.then_some(true)
+    }
+
+    fn release(&mut self, provider_retained: bool) -> bool {
+        self.live_requests -= 1;
+        if !self.retired {
+            self.retained |= provider_retained;
+        }
+        self.live_requests == 0 && (!self.retained || self.retired)
+    }
+}
+
 struct EvaluationNamespaceExecution {
     conflict: bool,
     result: Result<AuthenticatedProviderTerminal, ProviderTransportError>,
@@ -1412,30 +1433,11 @@ impl EvaluationNamespaceBindings {
         let mut states = self.states.lock().map_err(selector_unavailable)?;
         loop {
             if let Some(state) = states.get_mut(&namespace) {
-                if state.retired {
-                    #[cfg(test)]
-                    self.waiting.fetch_add(1, Ordering::Release);
-                    let waited = self.changed.wait(states);
-                    #[cfg(test)]
-                    self.waiting.fetch_sub(1, Ordering::Release);
-                    states = waited.map_err(selector_unavailable)?;
-                    continue;
-                }
-                if state.request_digest == request.request_digest {
-                    state.live_requests += 1;
+                if let Some(conflict) = state.try_acquire(request.request_digest) {
                     let lease = EvaluationNamespaceLease {
                         namespace,
                         request_digest: request.request_digest,
-                        conflict: false,
-                    };
-                    drop(states);
-                    return Ok(lease);
-                }
-                if state.retained {
-                    let lease = EvaluationNamespaceLease {
-                        namespace,
-                        request_digest: request.request_digest,
-                        conflict: true,
+                        conflict,
                     };
                     drop(states);
                     return Ok(lease);
@@ -1485,11 +1487,7 @@ impl EvaluationNamespaceBindings {
                 .get_mut(&lease.namespace)
                 .filter(|state| state.request_digest == lease.request_digest)
                 .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
-            state.live_requests -= 1;
-            if !state.retired {
-                state.retained |= provider_retained;
-            }
-            state.live_requests == 0 && (!state.retained || state.retired)
+            state.release(provider_retained)
         };
         if remove {
             states.remove(&lease.namespace);
