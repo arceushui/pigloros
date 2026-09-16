@@ -120,11 +120,11 @@ fn manifest_digest(manifest: &ReproManifestV1) -> TestResult<[u8; 32]> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn expect_failure<T>(
-    result: Result<T, VerificationPreflightErrorV1>,
+    result: &Result<T, VerificationPreflightErrorV1>,
     message: &'static str,
 ) -> VerificationPreflightErrorV1 {
     match result {
-        Err(error) => error,
+        Err(error) => *error,
         Ok(_) => std::panic::resume_unwind(Box::new(message)),
     }
 }
@@ -155,7 +155,7 @@ fn returns_the_first_failure_in_adr_order() -> TestResult {
     fixture.evidence.trust_signature = TrustSignatureStatusV1::Invalid;
     fixture.evidence.artifact_closure = ArtifactClosureStatusV1::Incomplete;
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "trust precedes closure",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::SignatureInvalid);
@@ -166,7 +166,7 @@ fn returns_the_first_failure_in_adr_order() -> TestResult {
 
     fixture.canonical_request_bytes.push(0);
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "canonical bytes first",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::InvalidEncoding);
@@ -182,7 +182,7 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.canonical_request_digest[0] ^= 1;
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "request digest mismatch",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
@@ -194,7 +194,7 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.manifest.evaluator_digest[0] ^= 1;
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "manifest mutation",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
@@ -208,7 +208,7 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
         .map(|index| (format!("plugin-{index}"), "1.0.0".to_owned()))
         .collect();
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "manifest bound",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
@@ -221,7 +221,7 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
     let mut input = fixture.input();
     let oversized_request = vec![0; MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1 + 1];
     input.canonical_request_bytes = &oversized_request;
-    let error = expect_failure(preflight_verification_v1(&input), "request bound");
+    let error = expect_failure(&preflight_verification_v1(&input), "request bound");
     assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
     assert_eq!(
         error.coordinate(),
@@ -234,18 +234,18 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
 fn enforces_trust_continuity_revocation_closure_profile_and_claim() -> TestResult {
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.evidence.trust_continuity.previous_epoch = Some(0);
-    let error = expect_failure(preflight_verification_v1(&fixture.input()), "rollback");
+    let error = expect_failure(&preflight_verification_v1(&fixture.input()), "rollback");
     assert_eq!(error.code(), SafeErrorCodeV1::TrustSnapshotRollback);
 
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.evidence.trust_root = TrustRootStatusV1::Unknown;
-    let error = expect_failure(preflight_verification_v1(&fixture.input()), "unknown root");
+    let error = expect_failure(&preflight_verification_v1(&fixture.input()), "unknown root");
     assert_eq!(error.code(), SafeErrorCodeV1::TrustRootUnknown);
 
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.evidence.artifact_revocation = ArtifactRevocationStatusV1::Revoked;
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "revoked artifact",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::ArtifactRevoked);
@@ -253,7 +253,7 @@ fn enforces_trust_continuity_revocation_closure_profile_and_claim() -> TestResul
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.evidence.artifact_closure = ArtifactClosureStatusV1::Incomplete;
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "incomplete closure",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::ClosureIncomplete);
@@ -261,7 +261,7 @@ fn enforces_trust_continuity_revocation_closure_profile_and_claim() -> TestResul
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.evidence.profile_support = ProfileSupportStatusV1::Unsupported;
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "unsupported profile",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::ProfileUnsupported);
@@ -272,7 +272,7 @@ fn enforces_trust_continuity_revocation_closure_profile_and_claim() -> TestResul
     fixture.canonical_request_bytes = fixture.request.to_canonical_cbor()?;
     fixture.canonical_request_digest = fixture.request.digest()?;
     let error = expect_failure(
-        preflight_verification_v1(&fixture.input()),
+        &preflight_verification_v1(&fixture.input()),
         "live exact claim",
     );
     assert_eq!(error.code(), SafeErrorCodeV1::ProfileClassMismatch);
