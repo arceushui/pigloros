@@ -317,6 +317,8 @@ fn public_codec_rejects_unsupported_magic_and_version() -> TestResult {
 #[test]
 fn public_codec_rejects_malformed_field_shapes() -> TestResult {
     for (index, value) in [
+        (0, Value::Null),
+        (1, Value::Text("one".to_owned())),
         (2, Value::Null),
         (3, Value::Text("one".to_owned())),
         (4, Value::Null),
@@ -357,6 +359,41 @@ fn public_codec_rejects_malformed_field_shapes() -> TestResult {
         Err(SnapshotError::InvalidEncoding)
     );
 
+    for root in [
+        Value::Array(vec![
+            Value::Null,
+            Value::Integer(1_u64.into()),
+            Value::Text("Ed25519".to_owned()),
+            Value::Bytes(vec![1; 32]),
+        ]),
+        Value::Array(vec![
+            Value::Text("root".to_owned()),
+            Value::Text("one".to_owned()),
+            Value::Text("Ed25519".to_owned()),
+            Value::Bytes(vec![1; 32]),
+        ]),
+        Value::Array(vec![
+            Value::Text("root".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Null,
+            Value::Bytes(vec![1; 32]),
+        ]),
+        Value::Array(vec![
+            Value::Text("root".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Text("Ed25519".to_owned()),
+            Value::Bytes(vec![1; 31]),
+        ]),
+    ] {
+        assert_eq!(
+            TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+                5,
+                Value::Array(vec![root]),
+            )?),
+            Err(SnapshotError::InvalidEncoding)
+        );
+    }
+
     let Value::Array(mut fields) = draft_value()? else {
         return Err("Draft TPS1 must be an array".into());
     };
@@ -365,6 +402,19 @@ fn public_codec_rejects_malformed_field_shapes() -> TestResult {
         TrustPolicySnapshotV1::from_canonical_cbor(&encode(&Value::Array(fields))?),
         Err(SnapshotError::InvalidEncoding)
     );
+
+    for version in [
+        Value::Array(vec![Value::Null, Value::Text("1.0.0".to_owned())]),
+        Value::Array(vec![Value::Text("kind".to_owned()), Value::Null]),
+    ] {
+        assert_eq!(
+            TrustPolicySnapshotV1::from_canonical_cbor(&draft_bytes_with_field(
+                8,
+                Value::Array(vec![version]),
+            )?),
+            Err(SnapshotError::InvalidEncoding)
+        );
+    }
 
     let Value::Array(mut fields) = draft_value()? else {
         return Err("Draft TPS1 must be an array".into());
@@ -375,6 +425,31 @@ fn public_codec_rejects_malformed_field_shapes() -> TestResult {
         Err(SnapshotError::InvalidEncoding)
     );
     Ok(())
+}
+
+#[test]
+fn public_error_types_have_stable_safe_messages() {
+    let errors = [
+        (
+            SnapshotError::InvalidEncoding,
+            "invalid TPS1 trust-policy snapshot encoding",
+        ),
+        (
+            SnapshotError::UnsupportedVersion,
+            "unsupported TPS1 trust-policy snapshot version",
+        ),
+        (
+            SnapshotError::FieldOutOfBounds,
+            "TPS1 trust-policy snapshot field is out of bounds",
+        ),
+        (
+            SnapshotError::NonCanonicalOrder,
+            "TPS1 trust-policy snapshot lists are not canonical",
+        ),
+    ];
+    for (error, message) in errors {
+        assert_eq!(error.to_string(), message);
+    }
 }
 
 #[test]

@@ -97,15 +97,7 @@ impl TrustPolicySnapshotV1 {
     ///
     /// Returns a closed safe error when validation or canonical encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, TrustPolicySnapshotContractErrorV1> {
-        validate_fields(self).and_then(|()| {
-            encode_value(&encode_snapshot(self)).and_then(|bytes| {
-                if bytes.len() > MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1 {
-                    Err(TrustPolicySnapshotContractErrorV1::FieldOutOfBounds)
-                } else {
-                    Ok(bytes)
-                }
-            })
-        })
+        validate_fields(self).and_then(|()| encode_value(&encode_snapshot(self)))
     }
 
     /// Decode and validate exact canonical TPS1 bytes.
