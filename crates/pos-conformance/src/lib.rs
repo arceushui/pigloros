@@ -88,11 +88,6 @@ pub use provider_contract::{
     FIXTURE_PROVIDER_REGISTRY_MAGIC_V1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
     MAX_PROVIDER_ARTIFACT_BYTES_V1,
 };
-pub use verification_request::{
-    ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1,
-    MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1, MAX_REPORT_BYTES_V1,
-    REPRO_VERIFICATION_REQUEST_MAGIC_V1,
-};
 pub use sandbox_provider_contract::{
     AdmissionAuthorityV1, AdmissionGrantV1, LaunchPolicyV1, NetworkCapabilityV1,
     NetworkExchangePlanV1, PartitionDescriptorV1, PartitionRoleV1, PayloadDescriptorV1,
@@ -112,6 +107,10 @@ pub use sandbox_provider_contract::{
 pub use trust_policy_snapshot::{
     MinimumArtifactVersionV1, TrustPolicyRootV1, TrustPolicySnapshotContractErrorV1,
     TrustPolicySnapshotV1, MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1, TRUST_POLICY_SNAPSHOT_MAGIC_V1,
+};
+pub use verification_request::{
+    ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1, MAX_REPORT_BYTES_V1,
+    MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1, REPRO_VERIFICATION_REQUEST_MAGIC_V1,
 };
 
 fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {

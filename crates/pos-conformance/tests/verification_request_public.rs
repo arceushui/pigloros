@@ -4,8 +4,8 @@
 
 use ciborium::value::Value;
 use pos_conformance::{
-    ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1,
-    ReproducibilityClassV1, MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1, MAX_REPORT_BYTES_V1,
+    ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1, ReproducibilityClassV1,
+    MAX_REPORT_BYTES_V1, MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -62,7 +62,10 @@ fn public_codec_roundtrips_and_hashes_the_closed_request() -> TestResult {
     let request = valid_request();
     let encoded = request.to_canonical_cbor()?;
 
-    assert_eq!(ReproVerificationRequestV1::from_canonical_cbor(&encoded)?, request);
+    assert_eq!(
+        ReproVerificationRequestV1::from_canonical_cbor(&encoded)?,
+        request
+    );
     assert_ne!(request.digest()?, [0; 32]);
     assert!(encoded.len() <= MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1);
 
@@ -75,7 +78,10 @@ fn public_codec_roundtrips_and_hashes_the_closed_request() -> TestResult {
         let mut candidate = request.clone();
         candidate.reproducibility_class = class;
         let encoded = candidate.to_canonical_cbor()?;
-        assert_eq!(ReproVerificationRequestV1::from_canonical_cbor(&encoded)?, candidate);
+        assert_eq!(
+            ReproVerificationRequestV1::from_canonical_cbor(&encoded)?,
+            candidate
+        );
     }
     Ok(())
 }
@@ -222,9 +228,7 @@ fn decoder_rejects_noncanonical_and_forbidden_cbor_forms() -> TestResult {
         vec![0x81, 0x81, 0x81, 0x00],       // excessive nesting
         vec![0x9a, 0x00, 0x00, 0x00, 0x0c], // excessive array count
     ] {
-        let expected = if raw == [0x81, 0x81, 0x81, 0x00]
-            || raw == [0x9a, 0x00, 0x00, 0x00, 0x0c]
-        {
+        let expected = if raw == [0x81, 0x81, 0x81, 0x00] || raw == [0x9a, 0x00, 0x00, 0x00, 0x0c] {
             ReproVerificationRequestContractErrorV1::FieldOutOfBounds
         } else {
             ReproVerificationRequestContractErrorV1::InvalidEncoding

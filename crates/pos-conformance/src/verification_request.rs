@@ -80,9 +80,7 @@ impl ReproVerificationRequestV1 {
     ///
     /// Returns a closed safe error when a request field is invalid or encoding
     /// fails.
-    pub fn to_canonical_cbor(
-        &self,
-    ) -> Result<Vec<u8>, ReproVerificationRequestContractErrorV1> {
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ReproVerificationRequestContractErrorV1> {
         validate_fields(self)?;
         encode_value(&encode_request(self))
     }
@@ -208,20 +206,16 @@ fn decode_value(bytes: &[u8]) -> Result<Value, ReproVerificationRequestContractE
 }
 
 fn preflight_cbor(bytes: &[u8]) -> Result<(), ReproVerificationRequestContractErrorV1> {
-    crate::preflight_array_cbor(
-        bytes,
-        MAX_NESTING_DEPTH,
-        FIELD_COUNT as u64 + 1,
-        false,
+    crate::preflight_array_cbor(bytes, MAX_NESTING_DEPTH, FIELD_COUNT as u64 + 1, false).map_err(
+        |error| match error {
+            crate::CborPreflightError::InvalidEncoding => {
+                ReproVerificationRequestContractErrorV1::InvalidEncoding
+            }
+            crate::CborPreflightError::FieldOutOfBounds => {
+                ReproVerificationRequestContractErrorV1::FieldOutOfBounds
+            }
+        },
     )
-    .map_err(|error| match error {
-        crate::CborPreflightError::InvalidEncoding => {
-            ReproVerificationRequestContractErrorV1::InvalidEncoding
-        }
-        crate::CborPreflightError::FieldOutOfBounds => {
-            ReproVerificationRequestContractErrorV1::FieldOutOfBounds
-        }
-    })
 }
 
 fn array(value: &Value) -> Result<&[Value], ReproVerificationRequestContractErrorV1> {
