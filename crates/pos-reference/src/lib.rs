@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(unix)]
-pub(crate) mod control_framing;
+mod control_framing;
 
 mod non_interference_report;
 
