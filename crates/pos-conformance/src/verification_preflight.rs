@@ -347,18 +347,19 @@ fn validate_manifest_bounds(
 fn preflight_profile(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<[u8; 32], VerificationPreflightErrorV1> {
-    // EPF1's existing encoder validates its embedded digest before returning
-    // canonical bytes. Re-encode a digest-normalized copy here so structural
-    // validation remains in the canonical phase; compare the supplied digest
-    // only in the later digest phase.
+    // EPF1 validates bounds and canonical shape before checking its embedded
+    // digest. Defer only that digest result so every structural failure wins
+    // over later digest, trust, and closure failures.
+    match input.execution_profile.to_canonical_cbor() {
+        Ok(_) | Err(ExecutionProfileContractErrorV1::DigestMismatch) => {}
+        Err(error) => {
+            return Err(map_profile_error(
+                error,
+                VerificationPreflightCoordinateV1::ExecutionProfile,
+            ));
+        }
+    }
     let profile_digest = input.execution_profile.digest();
-    let mut canonical_profile = input.execution_profile.clone();
-    canonical_profile.profile_digest = profile_digest;
-    canonical_profile
-        .to_canonical_cbor()
-        .map_err(|error| {
-            map_profile_error(error, VerificationPreflightCoordinateV1::ExecutionProfile)
-        })?;
     Ok(profile_digest)
 }
 

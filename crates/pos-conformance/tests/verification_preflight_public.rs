@@ -217,6 +217,22 @@ fn validates_all_canonical_shapes_before_later_digest_checks() -> TestResult {
         error.coordinate(),
         VerificationPreflightCoordinateV1::TrustPolicySnapshot
     );
+
+    let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
+    fixture.execution_profile.profile_digest[0] ^= 1;
+    fixture.execution_profile.scheduler_driver_order =
+        (0..=256).map(|index| format!("driver-{index}")).collect();
+    fixture.evidence.trust_signature = TrustSignatureStatusV1::Invalid;
+
+    let error = expect_failure(
+        &preflight_verification_v1(&fixture.input()),
+        "EPF1 shape precedes its digest and trust",
+    );
+    assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::ExecutionProfile
+    );
     Ok(())
 }
 
