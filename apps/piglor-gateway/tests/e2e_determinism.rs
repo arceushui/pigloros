@@ -350,8 +350,8 @@ fn gateway_authorization_for(
     let registry_digest = Hash::from_bytes([3; 32]);
     let policy_revision = Hash::from_bytes([4; 32]);
     let scope = CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-        resources: vec!["timeline.events".to_owned(), "world.action".to_owned()],
-        actions: vec!["read".to_owned(), "world.action.submit".to_owned()],
+        resources: vec!["timeline.events".to_owned(), "world.action.v1".to_owned()],
+        actions: vec!["read".to_owned(), "world.action.v1.submit".to_owned()],
         purposes: vec!["action".to_owned(), "read".to_owned()],
         audiences: vec!["gateway".to_owned()],
         actor_entity_ids: vec![actor],
@@ -659,8 +659,8 @@ async fn run_tick_boundaries(
         &format!("/v1/timelines/{}/actions", scenario.timeline),
         Some(json!({
             "entity_id": scenario.human_entity.to_string(),
-            "event_type": "world.action",
-            "capability": "world.action.submit",
+            "event_type": "world.action.v1",
+            "capability": "world.action.v1.submit",
             "payload": {
                 "actor_entity_id": scenario.human_entity.to_string(),
                 "body_entity_id": scenario.human_body.to_string(),
@@ -758,7 +758,7 @@ fn assert_event_order(
     let human_seq = polled
         .iter()
         .find(|event| {
-            event["event_type"] == "world.action" && event["entity"] == human_entity.to_string()
+            event["event_type"] == "world.action.v1" && event["entity"] == human_entity.to_string()
         })
         .and_then(|event| event["seq"].as_u64())
         .test_ok()?;

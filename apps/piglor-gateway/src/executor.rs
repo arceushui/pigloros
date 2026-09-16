@@ -3128,7 +3128,7 @@ mod tests {
         let drafts = [
             EventDraft::new(
                 EntityId::new(),
-                Kind::new("world.action"),
+                Kind::new("world.action.v1"),
                 CanonicalBytes::from_static(b"action"),
             ),
             EventDraft::new(
@@ -3742,15 +3742,15 @@ mod tests {
         let decision = authorization.authorize(GatewayAuthorizationRequest::action(
             actor,
             timeline,
-            "world.action",
-            "world.action.submit",
+            "world.action.v1",
+            "world.action.v1.submit",
             WallTime::now(),
         ))?;
         let proposal = ProposedAction::new(
-            Kind::new("world.action"),
+            Kind::new("world.action.v1"),
             actor,
             CanonicalBytes::from_static(b"payload"),
-            Kind::new("world.action.submit"),
+            Kind::new("world.action.v1.submit"),
         );
         Ok((authorization, decision, proposal))
     }

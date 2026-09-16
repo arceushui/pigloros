@@ -443,7 +443,6 @@ impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let status = match &self {
             Self::InvalidId(_)
-            | Self::UnsupportedAction(_)
             | Self::InvalidPageLimit { .. }
             | Self::InvalidEventsQuery(_)
             | Self::InvalidAuthorizationRequest
@@ -543,7 +542,7 @@ mod tests {
     }
 
     fn test_action_principal() -> ActionPrincipal {
-        ActionPrincipal::new(test_action_actor(), [Kind::new("world.action.submit")])
+        ActionPrincipal::new(test_action_actor(), [Kind::new("world.action.v1.submit")])
     }
 
     fn test_app() -> Router {
@@ -594,6 +593,111 @@ mod tests {
             "catalogue_version": 1,
             "tick": u64::from(marker)
         })
+    }
+
+    #[tokio::test]
+    async fn versioned_action_contract_validates_typed_payload_and_rejects_legacy() {
+        let app = test_app();
+        let (_, created) = json_request(
+            app.clone(),
+            "POST",
+            "/v1/timelines",
+            Some(json!({"name": "versioned-actions"})),
+        )
+        .await;
+        let path = format!("/v1/timelines/{}/actions", created["id"].as_str().test_ok());
+        let actor = test_action_actor().to_string();
+        let body = test_world_body().to_string();
+        let payload = world_action_payload(&actor, &body, 1);
+        let request = json!({
+            "entity_id": actor,
+            "event_type": "world.action.v1",
+            "capability": "world.action.v1.submit",
+            "payload": payload,
+        });
+        let (status, event) = json_request(app.clone(), "POST", &path, Some(request.clone())).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(event["event_type"], "world.action.v1");
+        assert_eq!(event["payload"][0], json!([87, 65, 67, 49]));
+        assert_eq!(event["payload"][1], 1);
+        assert_eq!(event["entity"], actor);
+        assert_eq!(
+            event["payload"][2],
+            json!(test_action_actor().inner().to_bytes())
+        );
+        assert_eq!(
+            event["payload"][3],
+            json!(test_world_body().inner().to_bytes())
+        );
+        assert_eq!(event["payload"][4], "impulse");
+        assert_eq!(event["payload"][5], json!([1]));
+        assert_eq!(event["payload"][6], 0);
+        assert_eq!(event["payload"][7], 1);
+        assert_eq!(event["payload"][8], 1);
+
+        let mut target_velocity = request.clone();
+        target_velocity["payload"]["action_kind"] = json!("target_velocity");
+        let (status, _) = json_request(app.clone(), "POST", &path, Some(target_velocity)).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        for (field, value, expected) in [
+            ("event_type", json!("world.action"), StatusCode::BAD_REQUEST),
+            (
+                "capability",
+                json!("world.action.submit"),
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let mut rejected = request.clone();
+            rejected[field] = value;
+            let (status, _) = json_request(app.clone(), "POST", &path, Some(rejected)).await;
+            assert_eq!(status, expected);
+        }
+        for (field, value) in [
+            ("actor_entity_id", json!(EntityId::new().to_string())),
+            ("body_entity_id", json!(EntityId::new().to_string())),
+            ("body_entity_id", json!("not-an-id")),
+            ("action_kind", json!("unsupported")),
+            ("action_scope", json!(1)),
+            ("catalogue_version", json!(2)),
+            ("params", json!([0xff])),
+            ("params", json!([1, 2])),
+            ("params", json!([0x18, 1])),
+            ("params", json!([0xf9, 0x7e, 0])),
+            ("params", json!([0xf9, 0x7c, 0])),
+            ("params", json!([0x81, 0xf9, 0xfc, 0])),
+            ("params", json!([0xa1, 0xf9, 0x7e, 0, 1])),
+            ("params", json!([0xa1, 1, 0xf9, 0x7e, 0])),
+            ("params", json!([0xc0, 0xf9, 0x7e, 0])),
+            ("params", json!([0xa2, 2, 2, 1, 1])),
+            ("params", json!([0xa2, 1, 1, 1, 2])),
+            ("tick", json!(-1)),
+            ("unexpected", json!(true)),
+        ] {
+            let mut rejected = request.clone();
+            rejected["payload"][field] = value;
+            let (status, _) = json_request(app.clone(), "POST", &path, Some(rejected)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}");
+        }
+        for params in [
+            vec![0x81, 1],
+            vec![0xa1, 1, 2],
+            vec![0xa2, 1, 1, 2, 2],
+            vec![0xa2, 0x20, 2, 0x18, 24, 1],
+            vec![0xc0, 1],
+            vec![0xf9, 0x3c, 0],
+        ] {
+            let mut accepted = request.clone();
+            accepted["payload"]["params"] = json!(params);
+            let (status, _) = json_request(app.clone(), "POST", &path, Some(accepted)).await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let mut oversized = request;
+        let mut params = vec![0x59, 0x13, 0x88];
+        params.extend(vec![0; 5000]);
+        oversized["payload"]["params"] = json!(params);
+        let (status, _) = json_request(app, "POST", &path, Some(oversized)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     fn spectator_test_app() -> Router {
@@ -993,7 +1097,7 @@ osf_link = \"https://osf.io/example\"\n";
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
                 "entity_id": entity,
-                "capability": "world.action.submit",
+                "capability": "world.action.v1.submit",
                 "payload": world_action_payload(&entity, &body, 1)
             })),
         )
@@ -1009,7 +1113,8 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed["events"].as_array().test_ok().len(), 1);
-        assert_eq!(listed["events"][0]["payload"]["action_kind"], "impulse");
+        assert_eq!(listed["events"][0]["event_type"], "world.action.v1");
+        assert_eq!(listed["events"][0]["payload"][4], "impulse");
         assert!(listed["next_from_seq"].is_null());
     }
 
@@ -1030,7 +1135,7 @@ osf_link = \"https://osf.io/example\"\n";
         let body = test_world_body().to_string();
         let request = json!({
             "entity_id": entity,
-            "capability": "world.action.submit",
+            "capability": "world.action.v1.submit",
             "ingress_id": "device-1-42",
             "payload": world_action_payload(&entity, &body, 1)
         });
@@ -1057,7 +1162,7 @@ osf_link = \"https://osf.io/example\"\n";
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
                 "entity_id": entity,
-                "capability": "world.action.submit",
+                "capability": "world.action.v1.submit",
                 "ingress_id": "device-1-42",
                 "payload": world_action_payload(&entity, &body, 2)
             })),
@@ -1089,7 +1194,7 @@ osf_link = \"https://osf.io/example\"\n";
                 &format!("/v1/timelines/{id}/actions"),
                 Some(json!({
                     "entity_id": entity,
-                    "capability": "world.action.submit",
+                    "capability": "world.action.v1.submit",
                     "payload": world_action_payload(&entity, &body, dx)
                 })),
             )
@@ -1298,13 +1403,16 @@ osf_link = \"https://osf.io/example\"\n";
             Some(json!({
                 "entity_id": test_action_actor().to_string(),
                 "event_type": "world.observation",
-                "capability": "world.action.submit",
+                "capability": "world.action.v1.submit",
                 "payload": {}
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(err["error"].as_str().test_ok().contains("capability"));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(err["error"]
+            .as_str()
+            .test_ok()
+            .contains("unknown event type"));
     }
 
     #[tokio::test]
@@ -1340,8 +1448,8 @@ osf_link = \"https://osf.io/example\"\n";
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
                 "entity_id": entity,
-                "capability": "world.action.submit",
-                "payload": {}
+                "capability": "world.action.v1.submit",
+                "payload": world_action_payload(&entity, &test_world_body().to_string(), 1)
             })),
         )
         .await;
@@ -1844,7 +1952,7 @@ osf_link = \"https://osf.io/example\"\n";
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
                 "entity_id": other_actor,
-                "capability": "world.action.submit",
+                "capability": "world.action.v1.submit",
                 "payload": world_action_payload(&other_actor, &test_world_body().to_string(), 7)
             })),
         )
