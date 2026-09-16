@@ -621,8 +621,20 @@ mod tests {
         assert_eq!(event["event_type"], "world.action.v1");
         assert_eq!(event["payload"][0], json!([87, 65, 67, 49]));
         assert_eq!(event["payload"][1], 1);
+        assert_eq!(event["entity"], actor);
+        assert_eq!(
+            event["payload"][2],
+            json!(test_action_actor().inner().to_bytes())
+        );
+        assert_eq!(
+            event["payload"][3],
+            json!(test_world_body().inner().to_bytes())
+        );
         assert_eq!(event["payload"][4], "impulse");
         assert_eq!(event["payload"][5], json!([1]));
+        assert_eq!(event["payload"][6], 0);
+        assert_eq!(event["payload"][7], 1);
+        assert_eq!(event["payload"][8], 1);
 
         let mut target_velocity = request.clone();
         target_velocity["payload"]["action_kind"] = json!("target_velocity");
@@ -1434,7 +1446,7 @@ osf_link = \"https://osf.io/example\"\n";
             Some(json!({
                 "entity_id": entity,
                 "capability": "world.action.v1.submit",
-                "payload": {}
+                "payload": world_action_payload(&entity, &test_world_body().to_string(), 1)
             })),
         )
         .await;

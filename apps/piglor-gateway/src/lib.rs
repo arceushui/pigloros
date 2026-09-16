@@ -3927,7 +3927,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             malformed_request,
-            GatewayError::InvalidAuthorizationRequest
+            GatewayError::ActionRejected(ActionRejected::UnknownEventType)
         ));
         assert_authority_identified_action_boundaries(&gateway, &timeline_id, actor, &payload)
             .await;
