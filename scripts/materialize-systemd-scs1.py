@@ -29,11 +29,14 @@ LIBSECCOMP_SYSCALLS_SHA256 = (
 )
 SCS1_DOMAIN = b"PiglorOS.SCS1.v1\0"
 EXPECTED_EXPANDED_NAMES = 395
-EXPECTED_MATERIALIZED_NAMES = 392
+EXPECTED_MATERIALIZED_NAMES = {"x86_64": 315, "aarch64": 275}
 REQUIRED_NAMES = frozenset(
     {"execveat", "getsockopt", "poll", "recvmsg", "sendto", "socket"}
 )
 ARCHITECTURES = {"x86_64": 0, "aarch64": 1}
+# ADR-069 expressly retains poll in the aarch64 D-Bus filter property even
+# though libseccomp represents it as PNR, not a native kernel syscall.
+PNR_RETENTION_EXCEPTIONS = {"x86_64": frozenset(), "aarch64": frozenset({"poll"})}
 
 
 def sha256(path: Path) -> str:
@@ -117,13 +120,15 @@ def target_names(
     names = sorted(
         name
         for name in expanded
-        if name in interface and interface[name][architecture] not in {"", "KV_UNDEF"}
-    )
-    if len(names) != EXPECTED_MATERIALIZED_NAMES:
-        raise ValueError(
-            f"{architecture} materialized {len(names)} names; "
-            f"expected {EXPECTED_MATERIALIZED_NAMES}"
+        if name in interface
+        and (
+            interface[name][architecture].isdecimal()
+            or (
+                interface[name][architecture] == "PNR"
+                and name in PNR_RETENTION_EXCEPTIONS[architecture]
+            )
         )
+    )
     missing = sorted(REQUIRED_NAMES.difference(names))
     if missing:
         raise ValueError(f"{architecture} omits required syscalls: {', '.join(missing)}")
@@ -242,6 +247,11 @@ def materialize(
     outputs = {}
     for architecture in ARCHITECTURES:
         names = target_names(expanded, interface, architecture)
+        expected_count = EXPECTED_MATERIALIZED_NAMES[architecture]
+        if len(names) != expected_count:
+            raise ValueError(
+                f"{architecture} materialized {len(names)} names; expected {expected_count}"
+            )
         encoded, record_digest = materialize_record(architecture, names)
         filename = f"systemd-v{SYSTEMD_VERSION}-{architecture}.scs1.cbor"
         outputs[filename] = encoded

@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -152,21 +153,58 @@ class MaterializerPolicyTests(unittest.TestCase):
 
     def test_target_filtering_architecture_and_required_syscalls(self) -> None:
         required = {"execveat", "getsockopt", "poll", "recvmsg", "sendto", "socket"}
-        names = required | {f"name{index:03}" for index in range(386)}
+        names = required | {"name000"}
         interface = {name: {"x86_64": "1", "aarch64": "1"} for name in names}
         interface["undefined"] = {"x86_64": "KV_UNDEF", "aarch64": ""}
+        interface["pseudo"] = {"x86_64": "PNR", "aarch64": "PNR"}
+        interface["invalid"] = {"x86_64": "not-a-number", "aarch64": "-1"}
+        interface["access"] = {"x86_64": "21", "aarch64": "PNR"}
+        interface["poll"] = {"x86_64": "7", "aarch64": "PNR"}
         for architecture in ("x86_64", "aarch64"):
-            self.assertEqual(MATERIALIZER.target_names(names | {"undefined", "unknown"}, interface, architecture), sorted(names))
+            expected = names | {"access"} if architecture == "x86_64" else names
+            self.assertEqual(MATERIALIZER.target_names(names | {"undefined", "unknown", "pseudo", "invalid", "access"}, interface, architecture), sorted(expected))
         with self.assertRaisesRegex(ValueError, "unsupported architecture"):
             MATERIALIZER.target_names(names, interface, "riscv64")
-        with self.assertRaisesRegex(ValueError, "materialized 391"):
-            MATERIALIZER.target_names(names - {"socket"}, interface, "x86_64")
-        interface["replacement"] = {"x86_64": "1"}
         with self.assertRaisesRegex(ValueError, "omits required syscalls: socket"):
-            MATERIALIZER.target_names((names - {"socket"}) | {"replacement"}, interface, "x86_64")
+            MATERIALIZER.target_names(names - {"socket"}, interface, "x86_64")
+        interface["poll"]["x86_64"] = "PNR"
+        with self.assertRaisesRegex(ValueError, "omits required syscalls: poll"):
+            MATERIALIZER.target_names(names, interface, "x86_64")
+        interface["poll"]["x86_64"] = "7"
+        interface["sendto"]["aarch64"] = "PNR"
+        with self.assertRaisesRegex(ValueError, "omits required syscalls: sendto"):
+            MATERIALIZER.target_names(names, interface, "aarch64")
+        interface["sendto"]["aarch64"] = "206"
         interface["@retained"] = {"x86_64": "1"}
         with self.assertRaisesRegex(ValueError, "retained a systemd syscall group"):
             MATERIALIZER.target_names((names - {"name000"}) | {"@retained"}, interface, "x86_64")
+
+    def test_pinned_target_names_have_no_non_required_pseudo_syscalls(self) -> None:
+        systemd_source = (self.systemd / "src/shared/seccomp-util.c").read_text(encoding="utf-8")
+        expanded = set(MATERIALIZER.expand_group("@system-service", MATERIALIZER.parse_systemd_groups(systemd_source)))
+        with tarfile.open(self.archive, "r:gz") as archive:
+            with archive.extractfile("libseccomp-2.6.1/src/syscalls.csv") as source:
+                interface = MATERIALIZER.parse_libseccomp_interface(source.read().decode("utf-8"))
+        expected_counts = {"x86_64": 315, "aarch64": 275}
+        self.assertEqual(MATERIALIZER.EXPECTED_MATERIALIZED_NAMES, expected_counts)
+        for architecture, count in expected_counts.items():
+            names = MATERIALIZER.target_names(expanded, interface, architecture)
+            self.assertEqual(len(names), count)
+            pseudo = {name for name in names if interface[name][architecture] == "PNR"}
+            self.assertEqual(pseudo, {"poll"} if architecture == "aarch64" else set())
+            # Independently classify the entire pinned expansion, not just a
+            # few invalid-name examples. The explicit poll rule is D-Bus-only.
+            native = set()
+            for name in expanded & interface.keys():
+                try:
+                    number = int(interface[name][architecture])
+                except ValueError:
+                    continue
+                if number >= 0:
+                    native.add(name)
+            if architecture == "aarch64":
+                native.add("poll")
+            self.assertEqual(set(names), native)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,11 @@ libseccomp archive, and archive-contained syscall-table SHA-256 digests against
 the pinned inputs. It recursively expands `@system-service`, maps names through
 the pinned target interfaces, emits explicit sorted names, requires the six
 launcher/provider syscalls named by ADR-069, and writes canonical SCS1 bytes.
+Target materialization includes native syscall numbers, not libseccomp `PNR`
+pseudo-syscall names. The only exception is aarch64 `poll`, expressly retained
+by ADR-069. It describes the required systemd `SystemCallFilter` D-Bus property
+readback, not a native aarch64 kernel rule. The pinned expansion yields 315
+x86_64 names and 275 aarch64 names; the two arrays are architecture-specific.
 Production code must consume these checked-in records through APT1/SIC1; it
 must never invoke `systemd-analyze`, expand groups, infer architecture, or add
 names from the running host.

@@ -13,7 +13,6 @@ const REQUIRED_SYSCALLS: [&str; 6] = [
     "sendto",
     "socket",
 ];
-const EXPECTED_NAME_COUNT: usize = 392;
 const X86_64_BYTES: &[u8] =
     include_bytes!("../vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor");
 const AARCH64_BYTES: &[u8] =
@@ -37,8 +36,8 @@ fn production_systemd_syscall_sets_match_both_public_decoders() -> Result<(), Bo
         IndependentArchitecture::Aarch64
     );
 
-    assert_record(&x86_64);
-    assert_record(&aarch64);
+    assert_record(&x86_64, 315);
+    assert_record(&aarch64, 275);
     assert_eq!(x86_64.requested_names, independent_x86_64.requested_names);
     assert_eq!(
         x86_64.expected_effective_names,
@@ -49,7 +48,33 @@ fn production_systemd_syscall_sets_match_both_public_decoders() -> Result<(), Bo
         aarch64.expected_effective_names,
         independent_aarch64.expected_effective_names
     );
-    assert_eq!(x86_64.requested_names, aarch64.requested_names);
+    assert_ne!(x86_64.requested_names, aarch64.requested_names);
+    for name in ["_llseek", "_newselect", "chown32", "mmap2", "socketcall"] {
+        assert!(!x86_64
+            .requested_names
+            .iter()
+            .any(|candidate| candidate == name));
+    }
+    for name in [
+        "_llseek",
+        "_newselect",
+        "access",
+        "arch_prctl",
+        "open",
+        "select",
+        "socketcall",
+    ] {
+        assert!(!aarch64
+            .requested_names
+            .iter()
+            .any(|candidate| candidate == name));
+    }
+    for name in ["access", "arch_prctl", "open", "select"] {
+        assert!(x86_64
+            .requested_names
+            .iter()
+            .any(|candidate| candidate == name));
+    }
     assert_ne!(x86_64.syscall_set_digest, aarch64.syscall_set_digest);
     Ok(())
 }
@@ -127,9 +152,9 @@ fn production_systemd_syscall_set_manifest_binds_exact_records() -> Result<(), B
     Ok(())
 }
 
-fn assert_record(record: &SandboxSyscallSetV1) {
-    assert_eq!(record.requested_names.len(), EXPECTED_NAME_COUNT);
-    assert_eq!(record.expected_effective_names.len(), EXPECTED_NAME_COUNT);
+fn assert_record(record: &SandboxSyscallSetV1, expected_count: usize) {
+    assert_eq!(record.requested_names.len(), expected_count);
+    assert_eq!(record.expected_effective_names.len(), expected_count);
     assert_eq!(record.requested_names, record.expected_effective_names);
     assert!(record
         .requested_names
