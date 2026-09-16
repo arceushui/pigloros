@@ -12,7 +12,7 @@ const AARCH64: &[u8] = include_bytes!(
     "../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-aarch64.scs1.cbor"
 );
 
-fn records() -> [(SandboxArchitecture, &'static [u8]); 2] {
+const fn records() -> [(SandboxArchitecture, &'static [u8]); 2] {
     [
         (SandboxArchitecture::X86_64, X86_64),
         (SandboxArchitecture::Aarch64, AARCH64),
