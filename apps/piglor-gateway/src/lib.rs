@@ -2217,17 +2217,25 @@ impl Gateway {
             Ok(entity) => entity,
             Err(error) => return Err(error),
         };
+        let proposal = match self.require_action_authorization().and_then(|()| {
+            build_proposed_action(entity, event_type, payload, capability)
+                .map_err(GatewayError::from)
+        }) {
+            Ok(proposal) => proposal,
+            Err(error) => return Err(error),
+        };
+        self.submit_proposed_action(timeline_id, proposal).await
+    }
+
+    fn require_action_authorization(&self) -> Result<(), GatewayError> {
         let authorized_host = self.authorization.is_some();
         #[cfg(test)]
         let authorized_host = authorized_host || self.action_principal.is_some();
-        if !authorized_host {
-            return Err(GatewayError::ActionAuthorizationUnavailable);
+        if authorized_host {
+            Ok(())
+        } else {
+            Err(GatewayError::ActionAuthorizationUnavailable)
         }
-        let proposal = match build_proposed_action(entity, event_type, payload, capability) {
-            Ok(proposal) => proposal,
-            Err(error) => return Err(error.into()),
-        };
-        self.submit_proposed_action(timeline_id, proposal).await
     }
 
     /// Submit an identified JSON action through the Gateway-owned action registry.
@@ -2703,20 +2711,26 @@ fn build_proposed_action(
     payload: &serde_json::Value,
     capability: &str,
 ) -> Result<ProposedAction, ActionRejected> {
+    validate_world_action_route(event_type, capability).and_then(|()| {
+        serde_json::from_value::<GatewayWorldActionPayload>(payload.clone())
+            .map_err(|_| {
+                ActionRejected::DomainValidationFailed("invalid world.action.v1 payload".to_owned())
+            })
+            .and_then(GatewayWorldActionPayload::encode)
+            .and_then(|bytes| {
+                ProposedAction::try_new(Kind::new(event_type), entity, bytes, Kind::new(capability))
+            })
+    })
+}
+
+fn validate_world_action_route(event_type: &str, capability: &str) -> Result<(), ActionRejected> {
     if event_type != EVENT_TYPE_ACTION {
         return Err(ActionRejected::UnknownEventType);
     }
     if capability != "world.action.v1.submit" {
         return Err(ActionRejected::CapabilityNotGranted);
     }
-    serde_json::from_value::<GatewayWorldActionPayload>(payload.clone())
-        .map_err(|_| {
-            ActionRejected::DomainValidationFailed("invalid world.action.v1 payload".to_owned())
-        })
-        .and_then(GatewayWorldActionPayload::encode)
-        .and_then(|bytes| {
-            ProposedAction::try_new(Kind::new(event_type), entity, bytes, Kind::new(capability))
-        })
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -3900,6 +3914,19 @@ mod tests {
                 )
                 .await,
             Err(GatewayError::AuthorizationDenied)
+        ));
+        assert!(matches!(
+            gateway
+                .submit_identified_json_action(
+                    timeline_id,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    payload,
+                    "",
+                    "boundary-empty-capability",
+                )
+                .await,
+            Err(GatewayError::InvalidAuthorizationRequest)
         ));
         let malformed_payload = serde_json::json!({"malformed": true});
         assert!(matches!(
