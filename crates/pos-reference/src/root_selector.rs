@@ -1237,6 +1237,7 @@ impl SelectorAdmission {
         self.provider_entry_changed.notify_all();
     }
 
+    #[cfg(test)]
     fn retain_provider_state(&self, attempt_id: [u8; 16]) -> Result<(), SelectorBoundaryError> {
         let mut state = self.state.lock().map_err(selector_unavailable)?;
         let attempt = state
@@ -1290,6 +1291,7 @@ impl SelectorAdmissionLease<'_> {
         self.owner.begin_provider_execution(self.attempt_id)
     }
 
+    #[cfg(test)]
     fn retain_provider_state(&self) -> Result<(), SelectorBoundaryError> {
         self.owner.retain_provider_state(self.attempt_id)
     }
@@ -4035,6 +4037,8 @@ mod tests {
             )))),
             peer_uid: fs::metadata(".")?.uid(),
             evaluation_namespaces,
+            recovery_directory: test_recovery_directory()?,
+            recovery_owner: fs::metadata(".")?.uid(),
         };
         assert_service_error(
             &service,
