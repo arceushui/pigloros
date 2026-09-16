@@ -120,10 +120,7 @@ fn public_contract_accepts_every_declared_list_bound() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
-    let (_, snapshot) = draft_snapshot()?;
-
+fn assert_oversized_typed_lists(snapshot: &TrustPolicySnapshotV1) {
     let mut oversized_roots = snapshot.clone();
     oversized_roots.trust_roots = (0_u8..65)
         .map(|index| TrustPolicyRootV1 {
@@ -160,7 +157,7 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
         Err(SnapshotError::FieldOutOfBounds)
     );
 
-    let mut oversized_versions = snapshot;
+    let mut oversized_versions = snapshot.clone();
     oversized_versions.minimum_versions = (0..257)
         .map(|index| MinimumArtifactVersionV1 {
             artifact_kind: format!("kind-{index:03}"),
@@ -171,7 +168,9 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
         oversized_versions.validate(),
         Err(SnapshotError::FieldOutOfBounds)
     );
+}
 
+fn assert_oversized_encoded_lists() -> TestResult {
     let oversized_roots = Value::Array(
         (0_u8..65)
             .map(|index| encoded_root(&format!("root-{index:03}"), index))
@@ -241,6 +240,14 @@ fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
         .map(|_| ()),
         Err(SnapshotError::FieldOutOfBounds)
     );
+    Ok(())
+}
+
+#[test]
+fn public_contract_rejects_each_list_above_its_bound() -> TestResult {
+    let (_, snapshot) = draft_snapshot()?;
+    assert_oversized_typed_lists(&snapshot);
+    assert_oversized_encoded_lists()?;
     Ok(())
 }
 
