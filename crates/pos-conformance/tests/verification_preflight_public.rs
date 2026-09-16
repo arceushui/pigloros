@@ -5,10 +5,10 @@
 use pos_conformance::{
     draft_execution_profile_bytes_v1, draft_trust_policy_snapshot_bytes_v1,
     preflight_verification_v1, ArtifactClosureStatusV1, ArtifactRevocationStatusV1,
-    ExecutionModeV1, ExecutionProfileV1, ProfileSupportStatusV1, ReproManifestV1,
-    ReproVerificationRequestV1, ReproducibilityClassV1, ReplayClaimV1, SafeErrorCodeV1,
-    TrustPolicySnapshotV1, TrustRootStatusV1, TrustSignatureStatusV1,
-    TrustSnapshotContinuityV1, VerificationPreflightCoordinateV1, VerificationPreflightEvidenceV1,
+    ExecutionModeV1, ExecutionProfileV1, ProfileSupportStatusV1, ReplayClaimV1, ReproManifestV1,
+    ReproVerificationRequestV1, ReproducibilityClassV1, SafeErrorCodeV1, TrustPolicySnapshotV1,
+    TrustRootStatusV1, TrustSignatureStatusV1, TrustSnapshotContinuityV1,
+    VerificationPreflightCoordinateV1, VerificationPreflightEvidenceV1,
     VerificationPreflightInputV1, MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1,
     MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1,
 };
@@ -31,9 +31,8 @@ impl Fixture {
         let execution_profile = ExecutionProfileV1::from_canonical_cbor(
             &draft_execution_profile_bytes_v1("deterministic-local-v1")?,
         )?;
-        let trust_policy_snapshot = TrustPolicySnapshotV1::from_canonical_cbor(
-            &draft_trust_policy_snapshot_bytes_v1()?,
-        )?;
+        let trust_policy_snapshot =
+            TrustPolicySnapshotV1::from_canonical_cbor(&draft_trust_policy_snapshot_bytes_v1()?)?;
         let mut execution_profile = execution_profile;
         execution_profile.reproducibility_classes = vec![class];
         execution_profile.profile_digest = execution_profile.digest();
@@ -154,7 +153,10 @@ fn returns_the_first_failure_in_adr_order() -> TestResult {
     fixture.canonical_request_bytes.push(0);
     let error = preflight_verification_v1(&fixture.input()).expect_err("canonical bytes first");
     assert_eq!(error.code(), SafeErrorCodeV1::InvalidEncoding);
-    assert_eq!(error.coordinate(), VerificationPreflightCoordinateV1::Request);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::Request
+    );
     Ok(())
 }
 
@@ -164,13 +166,19 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
     fixture.canonical_request_digest[0] ^= 1;
     let error = preflight_verification_v1(&fixture.input()).expect_err("request digest mismatch");
     assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
-    assert_eq!(error.coordinate(), VerificationPreflightCoordinateV1::Request);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::Request
+    );
 
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.manifest.evaluator_digest[0] ^= 1;
     let error = preflight_verification_v1(&fixture.input()).expect_err("manifest mutation");
     assert_eq!(error.code(), SafeErrorCodeV1::DigestMismatch);
-    assert_eq!(error.coordinate(), VerificationPreflightCoordinateV1::Manifest);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::Manifest
+    );
 
     let mut fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     fixture.manifest.plugin_versions = (0..=MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1)
@@ -178,7 +186,10 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
         .collect();
     let error = preflight_verification_v1(&fixture.input()).expect_err("manifest bound");
     assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
-    assert_eq!(error.coordinate(), VerificationPreflightCoordinateV1::Manifest);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::Manifest
+    );
 
     let fixture = Fixture::new(ReproducibilityClassV1::ProfileRecomputation)?;
     let mut input = fixture.input();
@@ -186,7 +197,10 @@ fn enforces_digest_bounds_and_mutation_sensitivity() -> TestResult {
     input.canonical_request_bytes = &oversized_request;
     let error = preflight_verification_v1(&input).expect_err("request bound");
     assert_eq!(error.code(), SafeErrorCodeV1::FieldOutOfBounds);
-    assert_eq!(error.coordinate(), VerificationPreflightCoordinateV1::Request);
+    assert_eq!(
+        error.coordinate(),
+        VerificationPreflightCoordinateV1::Request
+    );
     Ok(())
 }
 

@@ -6,8 +6,8 @@
 //! boundary and cannot be hidden behind this function.
 
 use crate::{
-    domain_digest, ExecutionProfileContractErrorV1, ExecutionProfileV1, ReproManifestV1,
-    ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1, ReplayClaimV1,
+    domain_digest, ExecutionProfileContractErrorV1, ExecutionProfileV1, ReplayClaimV1,
+    ReproManifestV1, ReproVerificationRequestContractErrorV1, ReproVerificationRequestV1,
     ReproducibilityClassV1, SafeErrorCodeV1, TrustPolicySnapshotContractErrorV1,
     TrustPolicySnapshotV1, MAX_EXECUTION_PROFILE_BYTES_V1, MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1,
     MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1,
@@ -96,7 +96,12 @@ impl VerificationPreflightErrorV1 {
 
 impl std::fmt::Display for VerificationPreflightErrorV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} at {}", safe_error_name(self.code), self.coordinate)
+        write!(
+            formatter,
+            "{} at {}",
+            safe_error_name(self.code),
+            self.coordinate
+        )
     }
 }
 
@@ -189,11 +194,13 @@ impl VerificationPreflightResultV1 {
     /// but it can never produce an exact verification claim.
     #[must_use]
     pub const fn can_claim_exact_verification(self) -> bool {
-        !matches!(self.reproducibility_class, ReproducibilityClassV1::LiveUnverified)
-            && matches!(
-                self.replay_claim,
-                ReplayClaimV1::Exact | ReplayClaimV1::ExactAuthoritativeWithRedactedViews
-            )
+        !matches!(
+            self.reproducibility_class,
+            ReproducibilityClassV1::LiveUnverified
+        ) && matches!(
+            self.replay_claim,
+            ReplayClaimV1::Exact | ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        )
     }
 }
 
@@ -249,21 +256,24 @@ fn preflight_request(
             VerificationPreflightCoordinateV1::Request,
         ));
     }
-    input.request.validate().map_err(|error| {
-        map_request_error(error, VerificationPreflightCoordinateV1::Request)
-    })?;
-    let canonical = input.request.to_canonical_cbor().map_err(|error| {
-        map_request_error(error, VerificationPreflightCoordinateV1::Request)
-    })?;
+    input
+        .request
+        .validate()
+        .map_err(|error| map_request_error(error, VerificationPreflightCoordinateV1::Request))?;
+    let canonical = input
+        .request
+        .to_canonical_cbor()
+        .map_err(|error| map_request_error(error, VerificationPreflightCoordinateV1::Request))?;
     if canonical.as_slice() != input.canonical_request_bytes {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::InvalidEncoding,
             VerificationPreflightCoordinateV1::Request,
         ));
     }
-    let digest = input.request.digest().map_err(|error| {
-        map_request_error(error, VerificationPreflightCoordinateV1::Request)
-    })?;
+    let digest = input
+        .request
+        .digest()
+        .map_err(|error| map_request_error(error, VerificationPreflightCoordinateV1::Request))?;
     if digest != input.canonical_request_digest {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::DigestMismatch,
@@ -308,15 +318,12 @@ fn validate_manifest_bounds(
         || manifest.execution_profile.len() > MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1
         || manifest.resource_limit == 0
         || manifest.plugin_versions.len() > MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1
-        || manifest
-            .plugin_versions
-            .iter()
-            .any(|(name, version)| {
-                name.is_empty()
-                    || name.len() > MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1
-                    || version.is_empty()
-                    || version.len() > MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1
-            })
+        || manifest.plugin_versions.iter().any(|(name, version)| {
+            name.is_empty()
+                || name.len() > MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1
+                || version.is_empty()
+                || version.len() > MAX_VERIFICATION_PREFLIGHT_IDENTIFIER_BYTES_V1
+        })
         || manifest.input_digest == [0; 32]
         || manifest.execution_profile_digest == [0; 32]
         || manifest.trust_policy_snapshot_digest == [0; 32]
@@ -337,9 +344,12 @@ fn validate_manifest_bounds(
 fn preflight_profile(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<(), VerificationPreflightErrorV1> {
-    let bytes = input.execution_profile.to_canonical_cbor().map_err(|error| {
-        map_profile_error(error, VerificationPreflightCoordinateV1::ExecutionProfile)
-    })?;
+    let bytes = input
+        .execution_profile
+        .to_canonical_cbor()
+        .map_err(|error| {
+            map_profile_error(error, VerificationPreflightCoordinateV1::ExecutionProfile)
+        })?;
     if bytes.len() > MAX_EXECUTION_PROFILE_BYTES_V1 {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::FieldOutOfBounds,
@@ -356,7 +366,10 @@ fn preflight_snapshot(
         .trust_policy_snapshot
         .to_canonical_cbor()
         .map_err(|error| {
-            map_snapshot_error(error, VerificationPreflightCoordinateV1::TrustPolicySnapshot)
+            map_snapshot_error(
+                error,
+                VerificationPreflightCoordinateV1::TrustPolicySnapshot,
+            )
         })?;
     if bytes.len() > MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1 {
         return Err(VerificationPreflightErrorV1::new(
@@ -387,8 +400,7 @@ fn preflight_digest_bindings(
         ));
     }
     if snapshot_digest != input.request.trust_policy_snapshot_digest
-        || input.manifest.trust_policy_snapshot_digest
-            != input.request.trust_policy_snapshot_digest
+        || input.manifest.trust_policy_snapshot_digest != input.request.trust_policy_snapshot_digest
     {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::DigestMismatch,
@@ -501,7 +513,10 @@ fn preflight_closure(
 fn preflight_profile_class(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<(), VerificationPreflightErrorV1> {
-    if matches!(input.evidence.profile_support, ProfileSupportStatusV1::Unsupported) {
+    if matches!(
+        input.evidence.profile_support,
+        ProfileSupportStatusV1::Unsupported
+    ) {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::ProfileUnsupported,
             VerificationPreflightCoordinateV1::ExecutionProfile,
