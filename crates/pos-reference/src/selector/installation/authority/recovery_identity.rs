@@ -506,6 +506,7 @@ mod tests {
             endpoint,
         )
         .is_err());
+        assert!(reservation.verify().is_err());
 
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))?;
         assert!(reservation.verify().is_err());

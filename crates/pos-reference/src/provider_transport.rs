@@ -3122,6 +3122,25 @@ mod tests {
         let (stream, _) = UnixStream::pair()?;
         assert_eq!(expired.set_read(&stream), Err(ReceiveFailure::Incomplete));
         assert_eq!(expired.set_write(&stream), Err(ReceiveFailure::Incomplete));
+        let (mut stream, _) = UnixStream::pair()?;
+        let mut expired_stream = DeadlineStream {
+            stream: &mut stream,
+            deadline: &expired,
+        };
+        assert_eq!(
+            expired_stream.read(&mut [0]).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::TimedOut)
+        );
+        assert_eq!(
+            expired_stream.write(&[0]).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::TimedOut)
+        );
+        let deadline = Deadline::new(Duration::from_secs(1))?;
+        let mut live_stream = DeadlineStream {
+            stream: &mut stream,
+            deadline: &deadline,
+        };
+        live_stream.flush()?;
         assert_eq!(
             wait_for_connection(&UnixStream::pair()?.0, Duration::MAX),
             Err(rustix::io::Errno::INVAL)

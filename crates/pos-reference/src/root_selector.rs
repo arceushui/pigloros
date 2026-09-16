@@ -3098,9 +3098,11 @@ mod tests {
             assert!(read_control_frame(&mut std::io::Cursor::new(length.to_be_bytes())).is_err());
         }
         assert!(read_control_frame(&mut std::io::Cursor::new([0, 0, 0, 1])).is_err());
+        assert!(read_control_frame(&mut FailingReader).is_err());
         let mut truncated = std::io::Cursor::new(1_u32.to_be_bytes()).chain(FailingReader);
         assert!(read_control_frame(&mut truncated).is_err());
         assert!(require_stream_eof(&mut std::io::Cursor::new([1])).is_err());
+        assert!(require_stream_eof(&mut FailingReader).is_err());
         assert!(write_control_frame(&mut FailingWriter, b"update").is_err());
         assert!(write_control_frame(
             &mut NthFailWriter {
@@ -3319,6 +3321,37 @@ mod tests {
     }
 
     #[test]
+    fn selector_admission_retires_only_the_closed_current_provider() -> TestResult {
+        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let current = admission.current()?;
+        admission.release([9; 16]);
+
+        let (_, foreign, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let foreign = Arc::new(foreign);
+        assert!(admission
+            .finish_provider_state([9; 16], &foreign, false)
+            .is_ok());
+        assert!(admission
+            .finish_provider_state([9; 16], &current, false)
+            .is_err());
+
+        let lease = admission.acquire([1; 16])?;
+        let closed = admission.close_and_snapshot()?;
+        assert!(admission.retire_previous(&foreign).is_err());
+        admission.retire_previous(&closed.admitted)?;
+        assert!(admission.current().is_err());
+        assert!(admission
+            .state
+            .lock()
+            .map_err(|_| "admission lock poisoned")?
+            .attempts
+            .is_empty());
+        drop(lease);
+        Ok(())
+    }
+
+    #[test]
     fn evaluation_namespace_binding_tracks_only_live_or_retained_requests() -> TestResult {
         let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let bindings = EvaluationNamespaceBindings::default();
@@ -3366,14 +3399,24 @@ mod tests {
     #[test]
     fn namespace_generation_retirement_preserves_live_leases_until_release() -> TestResult {
         let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
-        let bindings = EvaluationNamespaceBindings::default();
+        let bindings = Arc::new(EvaluationNamespaceBindings::default());
         let lease = bindings.acquire(&request)?;
 
         bindings.retire_previous_generation()?;
+        let waiting_bindings = Arc::clone(&bindings);
+        let waiter = std::thread::spawn(move || {
+            let lease = waiting_bindings.acquire(&request)?;
+            waiting_bindings.release(lease, false)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while bindings.waiting.load(Ordering::Acquire) == 0 {
+            if std::time::Instant::now() >= deadline {
+                return Err("retired namespace waiter did not block".into());
+            }
+            std::thread::yield_now();
+        }
         bindings.release(lease, true)?;
-
-        let successor_lease = bindings.acquire(&request)?;
-        bindings.release(successor_lease, false)?;
+        waiter.join().map_err(|_| "namespace waiter panicked")??;
         Ok(())
     }
 
@@ -3553,6 +3596,7 @@ mod tests {
             Err(ProviderTransportError::BeforeAdmission)
         ));
         assert!(poisoned.retain_provider_state([1; 16]).is_err());
+        poisoned.finish_provider_entry([1; 16], false);
         poisoned.release([1; 16]);
 
         let poisoned_namespaces = EvaluationNamespaceBindings::default();

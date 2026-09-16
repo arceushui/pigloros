@@ -737,6 +737,30 @@ mod tests {
     }
 
     #[test]
+    fn recovery_removal_fails_closed_before_unlink_and_when_marker_disappears() -> TestResult {
+        let (directory, root, owner) = durable_root()?;
+        let recovery = directory.path().join(RECOVERY_NAME);
+        fs::write(&recovery, b"sir1")?;
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o400))?;
+        assert_eq!(
+            remove_recovery_durably_with(&root, owner, |_| Err(SelectorBoundaryError::Io)),
+            Err(SelectorBoundaryError::Io)
+        );
+        assert_eq!(fs::read(&recovery)?, b"sir1");
+
+        let calls = Cell::new(0_usize);
+        let result = remove_recovery_durably_with(&root, owner, |_| {
+            if calls.replace(calls.get() + 1) == 0 {
+                fs::remove_file(&recovery).map_err(|_| SelectorBoundaryError::Io)?;
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(SelectorBoundaryError::Io));
+        assert!(!recovery.exists());
+        Ok(())
+    }
+
+    #[test]
     fn staging_directory_rejects_occupied_and_unsafe_entries() -> TestResult {
         let (occupied, root, owner) = durable_root()?;
         fs::write(occupied.path().join(STAGING_NAME), b"occupied")?;
