@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import copy
+import fnmatch
 import importlib.util
 import os
 import pathlib
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +20,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_cargo_crap_ci_policy.py"
 RESOLVER_PATH = ROOT / "scripts" / "resolve_cargo_crap_baseline.sh"
 EXAMPLE_BASE_SHA = "a" * 40
+EXPECTED_TEST_ONLY_EXCLUSIONS = (
+    "tests/**",
+    "benches/**",
+    "examples/**",
+    "src/selector/installation/tests/**",
+    "src/erasure_tests.rs",
+)
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load {CHECKER_PATH}")
@@ -134,8 +143,52 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             if step.get("name") == name
         )
 
+    def cargo_crap_exclusions(self, step_name: str) -> tuple[str, ...]:
+        tokens = shlex.split(self.cargo_crap_step(self.workflow, step_name)["run"])
+        return tuple(
+            tokens[index + 1]
+            for index, token in enumerate(tokens[:-1])
+            if token == "--exclude"
+        )
+
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github/workflows/ci.yml")
+
+    def test_exclusions_are_the_literal_test_owned_allowlist(self) -> None:
+        for step_name in (
+            "Generate trusted current baseline",
+            "Analyze CRAP score changes",
+        ):
+            with self.subTest(step=step_name):
+                self.assertEqual(
+                    self.cargo_crap_exclusions(step_name),
+                    EXPECTED_TEST_ONLY_EXCLUSIONS,
+                )
+                self.assertNotIn("**/src/**", self.cargo_crap_exclusions(step_name))
+
+    def test_test_allowlist_does_not_match_adversarial_production_paths(self) -> None:
+        production_paths = (
+            "src/tests/engine.rs",
+            "src/protocol_tests.rs",
+            "src/examples/production.rs",
+        )
+        for path in production_paths:
+            with self.subTest(path=path):
+                self.assertFalse(
+                    any(
+                        fnmatch.fnmatchcase(path, pattern)
+                        for pattern in EXPECTED_TEST_ONLY_EXCLUSIONS
+                    )
+                )
+
+    def test_rejects_excluding_production_source(self) -> None:
+        def exclude_production(workflow: dict) -> None:
+            step = self.cargo_crap_step(workflow, "Analyze CRAP score changes")
+            step["run"] = step["run"].replace(
+                "--format json", "--exclude '**/src/**' --format json"
+            )
+
+        self.assert_rejected(exclude_production)
 
     def test_resolver_executes_the_exact_trusted_artifact_query(self) -> None:
         result, logs = self.run_resolver("4242\n")

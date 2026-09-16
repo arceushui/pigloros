@@ -1,10 +1,15 @@
 //! Public trust-root authentication and malformed-snapshot tests.
 
+#[path = "sandbox_trust_public/policy_transition.rs"]
+mod policy_transition;
+
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
+    RecoveryCancellationContext, RevocationAcknowledgement, RevocationUpdateRequest,
     SandboxAdministratorPolicy, SandboxProviderProtocolError as ProtocolError,
-    SandboxRevocationSnapshot, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    SandboxRevocationSnapshot, SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole,
+    SandboxTrustSnapshot,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -147,6 +152,77 @@ fn trusted_registry(role: u64) -> TestResult<SandboxTrustSnapshot> {
         "root",
         &root.verifying_key(),
     )?)
+}
+
+fn update_registry() -> TestResult<SandboxTrustSnapshot> {
+    let root = SigningKey::from_bytes(&[1; 32]);
+    let bytes = sign_trust_snapshot(
+        snapshot(
+            vec![key_record("policy", 1), key_record("runtime", 3)],
+            vec![],
+            "root",
+        ),
+        &root,
+    )?;
+    Ok(SandboxTrustSnapshot::authenticate(
+        &bytes,
+        "root",
+        &root.verifying_key(),
+    )?)
+}
+
+fn revocation_update(
+    current: &SandboxRevocationSnapshot,
+    next_bytes: &[u8],
+    next: &SandboxRevocationSnapshot,
+    signer: &SigningKey,
+    nonce: [u8; 16],
+) -> TestResult<Vec<u8>> {
+    sign_record(
+        "RCU1",
+        Value::Array(vec![
+            Value::Text("RCU1".to_owned()),
+            integer(1),
+            Value::Bytes(vec![21; 16]),
+            Value::Bytes(current.snapshot_digest().to_vec()),
+            Value::Bytes(next_bytes.to_vec()),
+            Value::Bytes(next.snapshot_digest().to_vec()),
+            Value::Bytes(nonce.to_vec()),
+            Value::Text("policy".to_owned()),
+        ]),
+        signer,
+    )
+}
+
+fn random_nonzero_nonce() -> [u8; 16] {
+    loop {
+        let nonce = rand::random();
+        if nonce != [0; 16] {
+            return nonce;
+        }
+    }
+}
+
+fn revocation_acknowledgement(
+    next: &SandboxRevocationSnapshot,
+    signer: &SigningKey,
+    remaining: u64,
+) -> TestResult<Vec<u8>> {
+    sign_record(
+        "RCA1",
+        Value::Array(vec![
+            Value::Text("RCA1".to_owned()),
+            integer(1),
+            Value::Bytes(vec![21; 16]),
+            Value::Bytes(next.snapshot_digest().to_vec()),
+            Value::Bytes(vec![31; 32]),
+            Value::Bytes(vec![32; 32]),
+            Value::Array(vec![Value::Bytes(vec![23; 16])]),
+            integer(remaining),
+            Value::Text("runtime".to_owned()),
+        ]),
+        signer,
+    )
 }
 
 fn policy_fields(
@@ -662,5 +738,163 @@ fn administrator_policy_rejects_each_malformed_field_and_collection() -> TestRes
         SandboxAdministratorPolicy::authenticate(&encode(&Value::Null)?, &trust, &revocation)
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn revocation_update_authenticates_the_immediate_successor_and_selector_nonce() -> TestResult {
+    let trust = update_registry()?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let current = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?,
+        &trust,
+    )?;
+    let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
+    let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
+    let selector_nonce = random_nonzero_nonce();
+    let update = revocation_update(&current, &next_bytes, &next, &signer, selector_nonce)?;
+    let authenticated = RevocationUpdateRequest::authenticate(&update, &trust, &current)?;
+    assert_eq!(authenticated.request_id, [21; 16]);
+    assert_eq!(
+        authenticated.previous_revocation_digest,
+        current.snapshot_digest()
+    );
+    assert_eq!(authenticated.next_revocation, next);
+    assert_eq!(authenticated.selector_nonce, selector_nonce);
+    assert_eq!(authenticated.policy_signer_key_id, "policy");
+    assert_ne!(authenticated.request_digest, [0; 32]);
+    Ok(())
+}
+
+#[test]
+fn revocation_acknowledgement_binds_the_committed_recovery_transaction() -> TestResult {
+    let trust = update_registry()?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let next = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?,
+        &trust,
+    )?;
+    let bytes = revocation_acknowledgement(&next, &signer, 0)?;
+    let acknowledgement =
+        RevocationAcknowledgement::authenticate(&bytes, "runtime", &signer.verifying_key())?;
+    assert_eq!(acknowledgement.request_id, [21; 16]);
+    assert_eq!(acknowledgement.revocation_digest, next.snapshot_digest());
+    assert_eq!(acknowledgement.sir1_digest, [31; 32]);
+    assert_eq!(acknowledgement.previous_provider_binding_digest, [32; 32]);
+    assert_eq!(acknowledgement.cancelled_attempt_ids, vec![[23; 16]]);
+    assert_eq!(acknowledgement.runtime_attestation_key_id, "runtime");
+    assert_ne!(acknowledgement.acknowledgement_digest, [0; 32]);
+    assert_eq!(
+        RevocationAcknowledgement::authenticate(&bytes, "another-runtime", &signer.verifying_key(),),
+        Err(SandboxRevocationUpdateError::AcknowledgementMismatch)
+    );
+    assert!(RevocationAcknowledgement::authenticate(
+        &revocation_acknowledgement(&next, &signer, 1)?,
+        "runtime",
+        &signer.verifying_key(),
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() -> TestResult {
+    let trust = update_registry()?;
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let current = SandboxRevocationSnapshot::authenticate(
+        &sign_record("RVS1", revocation(&trust, 5, vec![]), &signer)?,
+        &trust,
+    )?;
+    let next_bytes = sign_record("RVS1", revocation(&trust, 6, vec![]), &signer)?;
+    let next = SandboxRevocationSnapshot::authenticate(&next_bytes, &trust)?;
+    let rcu1 = revocation_update(
+        &current,
+        &next_bytes,
+        &next,
+        &signer,
+        random_nonzero_nonce(),
+    )?;
+    let authenticated_rcu1 = RevocationUpdateRequest::authenticate(&rcu1, &trust, &current)?;
+    let context = RecoveryCancellationContext::for_committed_recovery(
+        [31; 32],
+        [32; 32],
+        &authenticated_rcu1,
+        vec![[22; 16], [23; 16]],
+        vec![[23; 16]],
+    )?;
+    let encoded = context.to_canonical_cbor()?;
+    assert_eq!(
+        RecoveryCancellationContext::from_canonical_cbor(&encoded)?,
+        context
+    );
+
+    let acknowledgement = revocation_acknowledgement(&next, &signer, 0)?;
+    let authenticated = RevocationAcknowledgement::authenticate_for_context(
+        &acknowledgement,
+        "runtime",
+        &signer.verifying_key(),
+        &context,
+        [21; 16],
+        next.snapshot_digest(),
+    )?;
+    assert_ne!(authenticated.acknowledgement_digest(), [0; 32]);
+
+    for invalid in [
+        RecoveryCancellationContext::for_committed_recovery(
+            [0; 32],
+            [32; 32],
+            &authenticated_rcu1,
+            Vec::new(),
+            Vec::new(),
+        ),
+        RecoveryCancellationContext::for_committed_recovery(
+            [31; 32],
+            [32; 32],
+            &authenticated_rcu1,
+            vec![[23; 16]],
+            vec![[22; 16]],
+        ),
+        RecoveryCancellationContext::for_committed_recovery(
+            [31; 32],
+            [32; 32],
+            &authenticated_rcu1,
+            vec![[0; 16]],
+            Vec::new(),
+        ),
+        RecoveryCancellationContext::for_committed_recovery(
+            [31; 32],
+            [32; 32],
+            &authenticated_rcu1,
+            vec![[23; 16], [22; 16]],
+            Vec::new(),
+        ),
+    ] {
+        assert!(invalid.is_err());
+    }
+
+    assert!(RecoveryCancellationContext::for_committed_recovery(
+        [31; 32],
+        [32; 32],
+        &authenticated_rcu1,
+        (1_u32..=257)
+            .map(|value| {
+                let mut id = <[u8; 16]>::default();
+                id[..4].copy_from_slice(&value.to_be_bytes());
+                id
+            })
+            .collect(),
+        Vec::new(),
+    )
+    .is_err());
+
+    assert!(RevocationAcknowledgement::authenticate_for_context(
+        &acknowledgement,
+        "runtime",
+        &signer.verifying_key(),
+        &context,
+        [99; 16],
+        next.snapshot_digest(),
+    )
+    .is_err());
     Ok(())
 }

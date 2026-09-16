@@ -1,13 +1,73 @@
 //! Authentication of SIC1's pinned bootstrap authority.
 
+mod recovery_identity;
+mod update;
+
+pub use recovery_identity::{
+    AdmittedProviderRuntime, InstallationRecoverySnapshot, ProviderRuntimeSlot,
+};
+pub use update::{CommittedInstallationUpdate, InstallationChallenge, ValidatedInstallationUpdate};
+
 use ed25519_dalek::VerifyingKey;
+use rustix::rand::{getrandom, GetRandomFlags};
+use std::path::Path;
 
 use super::{InstallationObjectKind, InstalledSelectorState, MANIFEST_LIMIT};
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxProvider, ProviderConformanceReport, SandboxAdministratorPolicy,
-    SandboxProviderAdmissionInputs, SandboxRevocationSnapshot, SandboxTrustSnapshot,
+    SandboxProviderAdmissionInputs, SandboxRevocationSnapshot, SandboxTrustKey, SandboxTrustRole,
+    SandboxTrustSnapshot,
 };
 use crate::selector::SelectorBoundaryError;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InstallationUpdateCommitError {
+    #[error(transparent)]
+    BeforeRecovery(SelectorBoundaryError),
+    #[error(transparent)]
+    RecoveryPending(SelectorBoundaryError),
+}
+
+pub(crate) fn fresh_selector_id() -> Result<[u8; 16], SelectorBoundaryError> {
+    fill_nonzero_id(|remaining| {
+        getrandom(remaining, GetRandomFlags::empty())
+            .map_err(|_| SelectorBoundaryError::SelectorUnavailable)
+    })
+}
+
+fn fresh_distinct_selector_id(excluded: &[[u8; 16]]) -> Result<[u8; 16], SelectorBoundaryError> {
+    fresh_distinct_selector_id_with(excluded, fresh_selector_id)
+}
+
+fn fresh_distinct_selector_id_with(
+    excluded: &[[u8; 16]],
+    mut generate: impl FnMut() -> Result<[u8; 16], SelectorBoundaryError>,
+) -> Result<[u8; 16], SelectorBoundaryError> {
+    loop {
+        let candidate = generate()?;
+        if !excluded.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+}
+
+fn fill_nonzero_id(
+    mut fill: impl FnMut(&mut [u8]) -> Result<usize, SelectorBoundaryError>,
+) -> Result<[u8; 16], SelectorBoundaryError> {
+    let mut id = <[u8; 16]>::default();
+    let mut remaining = id.as_mut_slice();
+    while !remaining.is_empty() {
+        let read = fill(&mut *remaining)?;
+        if read == 0 || read > remaining.len() {
+            return Err(SelectorBoundaryError::SelectorUnavailable);
+        }
+        remaining = &mut remaining[read..];
+    }
+    id.iter()
+        .any(|byte| *byte != u8::default())
+        .then_some(id)
+        .ok_or(SelectorBoundaryError::SelectorUnavailable)
+}
 
 /// Root-authenticated installation state ready for provider admission.
 ///
@@ -33,8 +93,10 @@ impl InstalledSelectorState {
     /// Authenticates the pinned TRS1, RVS1, and APT1 bootstrap chain.
     ///
     /// # Errors
-    /// Returns an error for forged or inconsistent authority, revoked selected
-    /// artifacts, or any APT1-selected provider artifact absent from SIC1.
+    /// Returns an error for forged or inconsistent authority, revoked authority
+    /// signers, or any APT1-selected provider artifact absent from SIC1. A
+    /// revoked selected provider remains authenticated installed state but
+    /// cannot pass [`AuthenticatedSelectorBootstrap::admit_provider`].
     pub fn authenticate_bootstrap(
         self,
     ) -> Result<AuthenticatedSelectorBootstrap, SelectorBoundaryError> {
@@ -60,7 +122,7 @@ impl InstalledSelectorState {
             .and_then(|(trust, revocation)| {
                 self.control_record(InstallationObjectKind(2), policy_digest)
                     .and_then(|policy_record| {
-                        SandboxAdministratorPolicy::authenticate(
+                        SandboxAdministratorPolicy::authenticate_installed(
                             &policy_record,
                             &trust,
                             &revocation,
@@ -86,7 +148,7 @@ impl InstalledSelectorState {
             })
     }
 
-    fn control_record(
+    pub(super) fn control_record(
         &self,
         kind: InstallationObjectKind,
         identity: [u8; 32],
@@ -215,6 +277,24 @@ impl AdmittedSelectorProvider {
     pub const fn provider(&self) -> &AdmittedSandboxProvider {
         &self.provider
     }
+
+    pub(crate) fn selected_provider_sockets(&self) -> (&Path, &Path) {
+        self.bootstrap.installed.manifest().provider_sockets()
+    }
+
+    pub(crate) fn runtime_attestation_key(
+        &self,
+    ) -> Result<&SandboxTrustKey, SelectorBoundaryError> {
+        let key_id = &self.provider.manifest().runtime_attestation_key_id;
+        self.bootstrap
+            .trust
+            .keys()
+            .iter()
+            .find(|key| {
+                key.key_id == *key_id && key.role == SandboxTrustRole::ProviderRuntimeAttestation
+            })
+            .ok_or(SelectorBoundaryError::ArtifactInvalid)
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +307,61 @@ mod tests {
 
     fn bootstrap() -> Result<AuthenticatedSelectorBootstrap, Box<dyn std::error::Error>> {
         Ok(admitted_state()?.authenticate_bootstrap()?)
+    }
+
+    #[test]
+    fn selector_ids_reject_failed_short_and_zero_entropy() {
+        assert_eq!(
+            fill_nonzero_id(|_| Err(SelectorBoundaryError::Io)),
+            Err(SelectorBoundaryError::Io)
+        );
+        assert_eq!(
+            fill_nonzero_id(|_| Ok(0)),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            fill_nonzero_id(|remaining| Ok(remaining.len() + 1)),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+        assert_eq!(
+            fill_nonzero_id(|remaining| {
+                remaining.fill(0);
+                Ok(remaining.len())
+            }),
+            Err(SelectorBoundaryError::SelectorUnavailable)
+        );
+    }
+
+    #[test]
+    fn selector_ids_accept_partial_nonzero_entropy() -> TestResult {
+        let mut value = 0_u8;
+        let id = fill_nonzero_id(|remaining| {
+            value = value.saturating_add(1);
+            let written = remaining.len().min(3);
+            remaining[..written].fill(value);
+            Ok(written)
+        })?;
+        assert_ne!(id, [0; 16]);
+        assert_eq!(&id[..3], &[1; 3]);
+        assert_eq!(&id[15..], &[6]);
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_selector_ids_retry_collisions_and_propagate_entropy_failure() {
+        assert_eq!(
+            fresh_distinct_selector_id_with(&[], || Err(SelectorBoundaryError::Io)),
+            Err(SelectorBoundaryError::Io)
+        );
+        let mut candidates = [[7; 16], [8; 16]].into_iter();
+        assert_eq!(
+            fresh_distinct_selector_id_with(&[[7; 16]], || {
+                candidates
+                    .next()
+                    .ok_or(SelectorBoundaryError::SelectorUnavailable)
+            }),
+            Ok([8; 16])
+        );
     }
 
     #[test]
