@@ -10,7 +10,7 @@ use pos_conformance::{
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn valid_request() -> ReproVerificationRequestV1 {
+const fn valid_request() -> ReproVerificationRequestV1 {
     ReproVerificationRequestV1 {
         request_digest: [1; 32],
         manifest_digest: [2; 32],
@@ -109,7 +109,7 @@ fn digest_changes_when_any_bound_reference_or_budget_changes() -> TestResult {
 }
 
 #[test]
-fn validation_rejects_zero_references_and_unbounded_budgets() -> TestResult {
+fn validation_rejects_zero_references_and_unbounded_budgets() {
     for index in 0..6 {
         let mut candidate = valid_request();
         match index {
@@ -142,7 +142,6 @@ fn validation_rejects_zero_references_and_unbounded_budgets() -> TestResult {
             Err(ReproVerificationRequestContractErrorV1::FieldOutOfBounds)
         );
     }
-    Ok(())
 }
 
 #[test]
@@ -160,14 +159,14 @@ fn decoder_rejects_unknown_missing_trailing_and_oversized_input() -> TestResult 
         ReproVerificationRequestContractErrorV1::InvalidEncoding,
     );
 
-    let mut unknown = fields.clone();
+    let mut unknown = fields;
     unknown.push(Value::Null);
     assert_decode_error(
         &encode_value(&Value::Array(unknown))?,
         ReproVerificationRequestContractErrorV1::InvalidEncoding,
     );
 
-    let mut trailing = valid.clone();
+    let mut trailing = valid;
     trailing.push(0);
     assert_decode_error(
         &trailing,
