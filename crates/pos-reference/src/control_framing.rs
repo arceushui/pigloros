@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControlFrameError {
     Invalid,
     Io,

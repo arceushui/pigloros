@@ -1443,7 +1443,7 @@ fn deadline_io_error(_: ReceiveFailure) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, "control deadline expired")
 }
 
-fn frame_receive_failure(error: ControlFrameError) -> ReceiveFailure {
+const fn frame_receive_failure(error: ControlFrameError) -> ReceiveFailure {
     match error {
         ControlFrameError::Invalid => ReceiveFailure::Invalid,
         ControlFrameError::Io => ReceiveFailure::Incomplete,

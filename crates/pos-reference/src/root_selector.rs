@@ -892,7 +892,7 @@ fn require_stream_eof(stream: &mut impl Read) -> Result<(), SelectorBoundaryErro
     control_framing::require_eof(stream).map_err(control_frame_error)
 }
 
-fn control_frame_error(error: ControlFrameError) -> SelectorBoundaryError {
+const fn control_frame_error(error: ControlFrameError) -> SelectorBoundaryError {
     match error {
         ControlFrameError::Invalid => SelectorBoundaryError::ArtifactInvalid,
         ControlFrameError::Io => SelectorBoundaryError::Io,
@@ -1176,6 +1176,7 @@ impl SelectorAdmission {
             return Err(SelectorBoundaryError::ArtifactInvalid);
         }
         state.attempts.clear();
+        drop(state);
         Ok(())
     }
 
@@ -1268,6 +1269,7 @@ impl SelectorAdmission {
             .ok_or(SelectorBoundaryError::SelectorUnavailable)?;
         attempt.provider_owned = retained;
         attempt.provider_retained = retained;
+        drop(state);
         Ok(())
     }
 }
