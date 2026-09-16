@@ -793,6 +793,17 @@ mod tests {
     }
 
     #[test]
+    fn recovery_restoration_rejects_a_missing_backup_link() -> TestResult {
+        let (_directory, root, owner) = durable_root()?;
+        let staging = open_staging_directory(&root, owner)?;
+        assert_eq!(
+            restore_recovery_marker(&root, &staging, "missing.cbor", &mut |_| Ok(())),
+            Err(SelectorBoundaryError::Io)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn staging_directory_rejects_occupied_and_unsafe_entries() -> TestResult {
         let (occupied, root, owner) = durable_root()?;
         fs::write(occupied.path().join(STAGING_NAME), b"occupied")?;

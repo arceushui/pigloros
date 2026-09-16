@@ -3448,6 +3448,15 @@ mod tests {
         fs::remove_file(&administrator_fixture.socket)?;
         let administrator_replacement = UnixListener::bind(&administrator_fixture.socket)?;
         assert!(serve_administrator(&administrator, &composition, &running).is_err());
+        let mut workers = EvaluatorWorkers::default();
+        assert!(serve_evaluator_connections(
+            &evaluator,
+            &administrator,
+            &composition,
+            &running,
+            &mut workers,
+        )
+        .is_err());
         drop(administrator_replacement);
         fs::remove_file(&administrator_fixture.socket)?;
 
