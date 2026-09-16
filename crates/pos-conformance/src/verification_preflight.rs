@@ -24,7 +24,7 @@ pub const MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1: usize = 16 * 1024;
 pub enum VerificationPreflightCoordinateV1 {
     /// The RVR1 schema, size, canonical bytes, or digest.
     Request,
-    /// The ReproManifest schema or digest binding.
+    /// The `ReproManifest` schema or digest binding.
     Manifest,
     /// The EPF1 schema or digest binding.
     ExecutionProfile,
@@ -44,7 +44,7 @@ pub enum VerificationPreflightCoordinateV1 {
     ArtifactClosure,
     /// Compatibility between the selected profile and reproducibility class.
     ProfileClass,
-    /// ReplayClaim eligibility for the selected reproducibility class.
+    /// `ReplayClaim` eligibility for the selected reproducibility class.
     ReplayClaim,
 }
 
@@ -226,7 +226,7 @@ pub struct VerificationPreflightInputV1<'a> {
 ///
 /// Checks are intentionally ordered as schema/size, canonical bytes, digest,
 /// trust continuity/epoch/signature/revocation, closure, profile/class, then
-/// ReplayClaim eligibility.  The first failure is returned with one closed
+/// `ReplayClaim` eligibility.  The first failure is returned with one closed
 /// safe error code and one bounded coordinate.  No Driver, provider, append,
 /// evaluator, or network operation is invoked.
 ///
@@ -495,7 +495,7 @@ fn preflight_trust(
     Ok(())
 }
 
-fn preflight_closure(
+const fn preflight_closure(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<(), VerificationPreflightErrorV1> {
     if matches!(
@@ -541,7 +541,7 @@ fn preflight_profile_class(
     Ok(())
 }
 
-fn preflight_replay_claim(
+const fn preflight_replay_claim(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<VerificationPreflightResultV1, VerificationPreflightErrorV1> {
     let claim = input.manifest.replay_claim;
@@ -575,7 +575,7 @@ fn preflight_replay_claim(
     })
 }
 
-fn map_request_error(
+const fn map_request_error(
     error: ReproVerificationRequestContractErrorV1,
     coordinate: VerificationPreflightCoordinateV1,
 ) -> VerificationPreflightErrorV1 {
@@ -593,7 +593,7 @@ fn map_request_error(
     VerificationPreflightErrorV1::new(code, coordinate)
 }
 
-fn map_profile_error(
+const fn map_profile_error(
     error: ExecutionProfileContractErrorV1,
     coordinate: VerificationPreflightCoordinateV1,
 ) -> VerificationPreflightErrorV1 {
@@ -607,7 +607,7 @@ fn map_profile_error(
     VerificationPreflightErrorV1::new(code, coordinate)
 }
 
-fn map_snapshot_error(
+const fn map_snapshot_error(
     error: TrustPolicySnapshotContractErrorV1,
     coordinate: VerificationPreflightCoordinateV1,
 ) -> VerificationPreflightErrorV1 {
@@ -622,7 +622,7 @@ fn map_snapshot_error(
     VerificationPreflightErrorV1::new(code, coordinate)
 }
 
-fn safe_error_name(code: SafeErrorCodeV1) -> &'static str {
+const fn safe_error_name(code: SafeErrorCodeV1) -> &'static str {
     match code {
         SafeErrorCodeV1::InvalidEncoding => "invalid_encoding",
         SafeErrorCodeV1::UnsupportedVersion => "unsupported_version",
