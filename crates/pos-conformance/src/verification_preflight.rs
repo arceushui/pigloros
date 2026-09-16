@@ -261,7 +261,10 @@ fn preflight_request(
             VerificationPreflightCoordinateV1::Request,
         )
     })?;
-    let canonical = input.request.to_canonical_cbor().unwrap_or_default();
+    let canonical = input.request.to_canonical_cbor().map_or(
+        pos_core::CanonicalBytes::from_static(b""),
+        preserve_canonical_bytes,
+    );
     if canonical.as_slice() != input.canonical_request_bytes {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::InvalidEncoding,
@@ -282,7 +285,10 @@ fn preflight_manifest(
     input: &VerificationPreflightInputV1<'_>,
 ) -> Result<[u8; 32], VerificationPreflightErrorV1> {
     validate_manifest_bounds(input.manifest)?;
-    let bytes = pos_crypto::canonical::encode(input.manifest).unwrap_or_default();
+    let bytes = pos_crypto::canonical::encode(input.manifest).map_or(
+        pos_core::CanonicalBytes::from_static(b""),
+        preserve_canonical_bytes,
+    );
     if bytes.len() > MAX_VERIFICATION_PREFLIGHT_MANIFEST_BYTES_V1 {
         return Err(VerificationPreflightErrorV1::new(
             SafeErrorCodeV1::FieldOutOfBounds,
@@ -329,6 +335,10 @@ fn validate_manifest_bounds(
         ));
     }
     Ok(())
+}
+
+fn preserve_canonical_bytes(bytes: pos_core::CanonicalBytes) -> pos_core::CanonicalBytes {
+    bytes
 }
 
 fn preflight_profile(
