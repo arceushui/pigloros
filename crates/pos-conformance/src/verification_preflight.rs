@@ -337,11 +337,11 @@ fn validate_manifest_bounds(
     Ok(())
 }
 
-fn preserve_canonical_bytes(bytes: pos_core::CanonicalBytes) -> pos_core::CanonicalBytes {
+const fn preserve_canonical_bytes(bytes: pos_core::CanonicalBytes) -> pos_core::CanonicalBytes {
     bytes
 }
 
-fn preserve_bytes(bytes: Vec<u8>) -> Vec<u8> {
+const fn preserve_bytes(bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
