@@ -2876,11 +2876,14 @@ mod tests {
     }
 
     fn assert_recovery_directory_activation_failures() -> TestResult {
+        let recovery_directory = Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE);
         fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o755))?;
         assert!(RootSelectorRuntime::activate().is_err());
         fs::set_permissions(RUNTIME_DIRECTORY, fs::Permissions::from_mode(0o700))?;
+        if recovery_directory.try_exists()? {
+            fs::remove_dir(&recovery_directory)?;
+        }
 
-        let recovery_directory = Path::new("/").join(SANDBOX_RECOVERY_DIRECTORY_RELATIVE);
         fs::write(&recovery_directory, b"occupied")?;
         assert!(RootSelectorRuntime::activate().is_err());
         fs::remove_file(&recovery_directory)?;
