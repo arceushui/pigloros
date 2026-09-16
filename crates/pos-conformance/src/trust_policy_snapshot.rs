@@ -185,22 +185,22 @@ fn validate_revoked_keys(keys: &[String]) -> Result<(), TrustPolicySnapshotContr
     {
         return Err(TrustPolicySnapshotContractErrorV1::FieldOutOfBounds);
     }
-    if !strictly_ordered_by(keys, |previous, next| previous.as_bytes() < next.as_bytes()) {
-        Err(TrustPolicySnapshotContractErrorV1::NonCanonicalOrder)
-    } else {
+    if strictly_ordered_by(keys, |previous, next| previous.as_bytes() < next.as_bytes()) {
         Ok(())
+    } else {
+        Err(TrustPolicySnapshotContractErrorV1::NonCanonicalOrder)
     }
 }
 
 fn validate_revoked_artifacts(
     digests: &[[u8; 32]],
 ) -> Result<(), TrustPolicySnapshotContractErrorV1> {
-    if !strictly_ordered_by(digests, |previous, next| {
+    if strictly_ordered_by(digests, |previous, next| {
         previous.as_slice() < next.as_slice()
     }) {
-        Err(TrustPolicySnapshotContractErrorV1::NonCanonicalOrder)
-    } else {
         Ok(())
+    } else {
+        Err(TrustPolicySnapshotContractErrorV1::NonCanonicalOrder)
     }
 }
 
@@ -213,12 +213,12 @@ fn validate_minimum_versions(
     }) {
         return Err(TrustPolicySnapshotContractErrorV1::FieldOutOfBounds);
     }
-    if !strictly_ordered_by(versions, |previous, next| {
+    if strictly_ordered_by(versions, |previous, next| {
         previous.artifact_kind.as_bytes() < next.artifact_kind.as_bytes()
     }) {
-        Err(TrustPolicySnapshotContractErrorV1::NonCanonicalOrder)
-    } else {
         Ok(())
+    } else {
+        Err(TrustPolicySnapshotContractErrorV1::NonCanonicalOrder)
     }
 }
 
