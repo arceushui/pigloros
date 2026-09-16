@@ -91,9 +91,12 @@ fn digest_changes_when_any_bound_reference_or_budget_changes() -> TestResult {
     let request = valid_request();
     let original_digest = request.digest()?;
 
-    let mutations: [fn(&mut ReproVerificationRequestV1); 7] = [
+    let mutations: [fn(&mut ReproVerificationRequestV1); 8] = [
         |candidate: &mut ReproVerificationRequestV1| candidate.request_digest[0] ^= 1,
         |candidate: &mut ReproVerificationRequestV1| candidate.manifest_digest[0] ^= 1,
+        |candidate: &mut ReproVerificationRequestV1| {
+            candidate.reproducibility_class = ReproducibilityClassV1::RecordedReplay;
+        },
         |candidate: &mut ReproVerificationRequestV1| candidate.execution_profile_digest[0] ^= 1,
         |candidate: &mut ReproVerificationRequestV1| candidate.trust_policy_snapshot_digest[0] ^= 1,
         |candidate: &mut ReproVerificationRequestV1| candidate.artifact_closure_digest[0] ^= 1,
