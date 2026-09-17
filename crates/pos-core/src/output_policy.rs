@@ -390,16 +390,14 @@ impl<'a> Reader<'a> {
 
     fn blob<const N: usize>(&mut self) -> Result<[u8; N], OutputPolicyErrorV1> {
         let length = self.head(2, 32)?;
-        let data =
-            self.take(usize::try_from(length).map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)?)?;
+        let data = self.take(usize::from(length.to_le_bytes()[0]))?;
         data.try_into()
             .map_err(|_| OutputPolicyErrorV1::InvalidEncoding)
     }
 
-    fn text(&mut self, maximum: u32) -> Result<String, OutputPolicyErrorV1> {
-        let length = self.head(3, maximum)?;
-        let data =
-            self.take(usize::try_from(length).map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)?)?;
+    fn text(&mut self, maximum: u8) -> Result<String, OutputPolicyErrorV1> {
+        let length = self.head(3, u32::from(maximum))?;
+        let data = self.take(usize::from(length.to_le_bytes()[0]))?;
         std::str::from_utf8(data)
             .map(str::to_owned)
             .map_err(|_| OutputPolicyErrorV1::InvalidEncoding)
