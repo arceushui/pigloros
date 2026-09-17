@@ -135,6 +135,15 @@ fn public_constructor_enforces_bounds_addresses_and_raw_order(
         optional_view_roots: Vec::new(),
     });
     assert!(opaque_zero.is_ok());
+    assert_eq!(
+        WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+            scope: hash(1),
+            consumers: vec![consumer("a", 2)?],
+            producers: vec![producer(4)?],
+            optional_view_roots: vec![hash(6), Hash::zero()],
+        }),
+        Err(WorldConsumerSetErrorV1::ZeroContentAddress)
+    );
     Ok(())
 }
 

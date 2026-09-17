@@ -187,6 +187,7 @@ impl WorldConsumerSetV1 {
     }
 
     /// Encode the unique preferred WCS1 CBOR representation.
+    #[must_use]
     pub fn encode(&self) -> CanonicalBytes {
         let mut bytes = Vec::with_capacity(WORLD_CONSUMER_SET_MAX_BYTES.min(256));
         array(&mut bytes, 6);
@@ -229,10 +230,10 @@ impl WorldConsumerSetV1 {
                 return Err(WorldConsumerSetErrorV1::InvalidEncoding);
             }
             Self::new(input).and_then(|record| {
-                if record.encode().as_slice() != bytes.as_slice() {
-                    Err(WorldConsumerSetErrorV1::NonCanonicalEncoding)
-                } else {
+                if record.encode().as_slice() == bytes.as_slice() {
                     Ok(record)
+                } else {
+                    Err(WorldConsumerSetErrorV1::NonCanonicalEncoding)
                 }
             })
         })
@@ -278,7 +279,7 @@ fn validate_address(address: Hash) -> Result<(), WorldConsumerSetErrorV1> {
     }
 }
 
-fn validate_consumer_id(id: &str) -> Result<(), WorldConsumerSetErrorV1> {
+const fn validate_consumer_id(id: &str) -> Result<(), WorldConsumerSetErrorV1> {
     if id.is_empty() || id.len() > WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES {
         Err(WorldConsumerSetErrorV1::FieldOutOfBounds)
     } else {
@@ -314,10 +315,8 @@ fn validate_views(roots: &[Hash]) -> Result<(), WorldConsumerSetErrorV1> {
     if roots.len() > WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS {
         return Err(WorldConsumerSetErrorV1::FieldOutOfBounds);
     }
-    for root in roots {
-        if let Err(error) = validate_address(*root) {
-            return Err(error);
-        }
+    if roots.iter().any(|root| *root == Hash::zero()) {
+        return Err(WorldConsumerSetErrorV1::ZeroContentAddress);
     }
     for pair in roots.windows(2) {
         if pair[0].as_bytes() >= pair[1].as_bytes() {
@@ -379,10 +378,10 @@ impl<'a> Parser<'a> {
             .and_then(|()| self.magic())
             .and_then(|()| {
                 self.unsigned().and_then(|version| {
-                    if version != u64::from(VERSION) {
-                        Err(WorldConsumerSetErrorV1::WrongVersion)
-                    } else {
+                    if version == u64::from(VERSION) {
                         Ok(())
+                    } else {
+                        Err(WorldConsumerSetErrorV1::WrongVersion)
                     }
                 })
             })
