@@ -571,23 +571,19 @@ impl<'a> Parser<'a> {
     }
 
     fn fixed_raw<const N: usize>(&mut self) -> Result<[u8; N], WorldConsumerSetErrorV1> {
-        match self.take(N) {
-            Ok(value) => value
-                .try_into()
-                .map_err(|_| WorldConsumerSetErrorV1::InvalidEncoding),
-            Err(error) => Err(error),
-        }
+        self.take(N).map(|value| {
+            let mut result = [0; N];
+            result.copy_from_slice(value);
+            result
+        })
     }
 
     fn take(&mut self, length: usize) -> Result<&'a [u8], WorldConsumerSetErrorV1> {
-        match self.position.checked_add(length) {
-            Some(end) => match self.bytes.get(self.position..end) {
-                Some(value) => {
-                    self.position = end;
-                    Ok(value)
-                }
-                None => Err(WorldConsumerSetErrorV1::InvalidEncoding),
-            },
+        match self.bytes[self.position..].get(..length) {
+            Some(value) => {
+                self.position += length;
+                Ok(value)
+            }
             None => Err(WorldConsumerSetErrorV1::InvalidEncoding),
         }
     }

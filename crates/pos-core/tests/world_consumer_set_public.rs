@@ -164,6 +164,40 @@ fn public_closed_error_display_variants_are_stable() {
 }
 
 #[test]
+fn public_rejects_producer_order_and_malformed_record_and_text_headers(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for producers in [
+        vec![producer(4)?, producer(4)?],
+        vec![producer(5)?, producer(4)?],
+    ] {
+        assert_eq!(
+            WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+                scope: hash(1),
+                consumers: vec![consumer("a", 2)?],
+                producers,
+                optional_view_roots: Vec::new(),
+            }),
+            Err(WorldConsumerSetErrorV1::NonCanonicalOrder),
+        );
+    }
+    let valid = record()?.encode();
+    for (offset, replacement, error) in [
+        (0, 0x85, WorldConsumerSetErrorV1::InvalidEncoding),
+        (42, 0x83, WorldConsumerSetErrorV1::InvalidEncoding),
+        (43, 0x60, WorldConsumerSetErrorV1::FieldOutOfBounds),
+        (43, 0x41, WorldConsumerSetErrorV1::InvalidEncoding),
+    ] {
+        let mut bytes = valid.as_slice().to_vec();
+        bytes[offset] = replacement;
+        assert_eq!(
+            WorldConsumerSetV1::decode(&CanonicalBytes::from_vec(bytes)),
+            Err(error),
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn public_constructor_accepts_exact_limits_and_rejects_one_more(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let max_id = "a".repeat(128);
