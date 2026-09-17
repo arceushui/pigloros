@@ -31,6 +31,16 @@ the prerequisite check. A passing check proves neither guest creation nor
 resource, egress or destruction enforcement and never authorizes activation.
 Mocked boundary tests do not replace the hosted observations.
 
+This checks the KVM candidate, not a normative requirement that every permitted
+guest use hardware acceleration. Accepted ADR-069 section 9.2 retains prior
+aarch64 same-architecture TCG feasibility evidence. Same-architecture TCG is
+distinct from cross-architecture emulation; the former must not be rejected
+merely because `/dev/kvm` is absent. Historical success nevertheless supplies
+neither the current profiling guest/tool closure nor enforcement/destruction
+proof. Record the actual accelerator in any future experiment and evaluate it
+against all approved probe criteria and fixed ceilings without silently
+changing the evidence claim.
+
 The [Linux KVM API documentation](https://docs.kernel.org/6.18/virt/kvm/api.html)
 specifies the system version ioctl and requires API 12. GitHub's
 [hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
