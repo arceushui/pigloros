@@ -72,7 +72,7 @@ impl WorldArtifactKindV1 {
     ///
     /// # Errors
     /// Rejects unknown kind codes, including unapproved proposed extensions.
-    pub fn from_code(code: u8) -> Result<Self, WorldArtifactErrorV1> {
+    pub const fn from_code(code: u8) -> Result<Self, WorldArtifactErrorV1> {
         match code {
             0 => Ok(Self::OutputPolicy),
             1 => Ok(Self::ExecutableBudgetPolicy),
