@@ -99,7 +99,7 @@ impl WorldRetentionPolicyV1 {
     /// Rejects malformed, unsupported, incompatible, oversized or noncanonical bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, WorldRetentionErrorV1> {
         let mut reader = Reader::new(bytes)?;
-        reader.record_header(10, b"RTP1")?;
+        reader.record_header(10, *b"RTP1")?;
         let input = WorldRetentionPolicyInputV1 {
             policy_revision: reader.uint32()?,
             purpose: reader.text()?,
@@ -198,7 +198,7 @@ impl WorldRetentionLeaseV1 {
         policy: &WorldRetentionPolicyV1,
     ) -> Result<Self, WorldRetentionErrorV1> {
         let mut reader = Reader::new(bytes)?;
-        reader.record_header(7, b"RLS1")?;
+        reader.record_header(7, *b"RLS1")?;
         let input = WorldRetentionLeaseInputV1 {
             timeline_id: TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(reader.blob()?))),
             policy_hash: Hash::from_bytes(reader.blob()?),
@@ -264,7 +264,7 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Result<Self, WorldRetentionErrorV1> {
+    const fn new(bytes: &'a [u8]) -> Result<Self, WorldRetentionErrorV1> {
         if bytes.len() > MAX_WORLD_RETENTION_RECORD_BYTES_V1 {
             Err(WorldRetentionErrorV1::FieldOutOfBounds)
         } else {
@@ -295,8 +295,8 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn record_header(&mut self, count: u64, magic: &[u8; 4]) -> Result<(), WorldRetentionErrorV1> {
-        if self.head(4)? != count || self.blob::<4>()? != *magic {
+    fn record_header(&mut self, count: u64, magic: [u8; 4]) -> Result<(), WorldRetentionErrorV1> {
+        if self.head(4)? != count || self.blob::<4>()? != magic {
             return Err(WorldRetentionErrorV1::InvalidEncoding);
         }
         if self.head(0)? != 1 {
