@@ -662,16 +662,25 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     );
     assert_eq!(
         test_stage(
-            "retry frozen timeline fork",
+            "exactly retry frozen timeline fork",
             commands.fork_timeline_identified(
                 operation,
                 timeline.id(),
                 pos_core::Seq::ZERO,
-                "ignored-on-retry",
+                "frozen-child",
             ),
         )?
         .id(),
         child.id()
+    );
+    assert_eq!(
+        commands.fork_timeline_identified(
+            operation,
+            timeline.id(),
+            pos_core::Seq::ZERO,
+            "changed-on-retry",
+        ),
+        Err(ErasureHostErrorV1::Conflict)
     );
     Ok(())
 }
@@ -1827,9 +1836,9 @@ fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventor
                 operation,
                 parent.id(),
                 pos_core::Seq::ZERO,
-                "ignored-stale-retry-name",
+                "stale-fork-child",
             ),
-            Err(ErasureHostErrorV1::Conflict)
+            Err(ErasureHostErrorV1::StaleGeneration)
         ));
     }
     assert!(host.read_sender().is_ok());
