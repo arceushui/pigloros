@@ -369,6 +369,13 @@ fn malformed_wire_fields_reject_through_public_decoder() -> TestResult {
             Err(error)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn forbidden_wire_types_and_outer_cardinalities_reject() -> TestResult {
+    let bytes = OutputPolicyV1::new(input(vec![declaration("a")?]))?.to_canonical_cbor();
+    let base: Value = ciborium::from_reader(bytes.as_slice())?;
     for replacement in [
         Value::Map(Vec::new()),
         Value::Tag(1, Box::new(Value::Null)),
