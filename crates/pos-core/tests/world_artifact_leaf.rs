@@ -426,10 +426,7 @@ fn nested_key_rows_and_counts_are_bounded_before_allocation() -> TestResult {
     for position in [11, 12] {
         let mut bytes = encode(wire())?;
         let offset = bytes.len() - if position == 11 { 2 } else { 1 };
-        bytes.splice(
-            offset..=offset,
-            [0x9b, 255, 255, 255, 255, 255, 255, 255, 255],
-        );
+        bytes.splice(offset..=offset, [0x9b, 255, 255, 255, 255, 255, 255, 255, 255]);
         assert_eq!(
             WorldArtifactLeafV1::from_canonical_cbor(&bytes),
             Err(WorldArtifactErrorV1::FieldOutOfBounds)
