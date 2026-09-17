@@ -28,6 +28,7 @@ pub mod hasher;
 pub mod ids;
 pub mod key_registry;
 pub mod manifest;
+pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
