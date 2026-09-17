@@ -105,22 +105,34 @@ impl OutputDeclarationV1 {
 
     /// Owned output type requiring separate host registration verification.
     #[must_use]
-    pub fn event_type(&self) -> &str { &self.event_type }
+    pub fn event_type(&self) -> &str {
+        &self.event_type
+    }
     /// Declared replay obligation.
     #[must_use]
-    pub const fn authority(&self) -> OutputAuthorityV1 { self.authority }
+    pub const fn authority(&self) -> OutputAuthorityV1 {
+        self.authority
+    }
     /// Declared fidelity.
     #[must_use]
-    pub const fn fidelity(&self) -> OutputFidelityV1 { self.fidelity }
+    pub const fn fidelity(&self) -> OutputFidelityV1 {
+        self.fidelity
+    }
     /// Declared per-output ceiling.
     #[must_use]
-    pub const fn max_bytes(&self) -> u32 { self.max_bytes }
+    pub const fn max_bytes(&self) -> u32 {
+        self.max_bytes
+    }
     /// Stride for L1, absent otherwise.
     #[must_use]
-    pub const fn stride_ticks(&self) -> Option<u32> { self.stride_ticks }
+    pub const fn stride_ticks(&self) -> Option<u32> {
+        self.stride_ticks
+    }
     /// Minimum group for L2, absent otherwise.
     #[must_use]
-    pub const fn aggregate_min_group(&self) -> Option<u32> { self.aggregate_min_group }
+    pub const fn aggregate_min_group(&self) -> Option<u32> {
+        self.aggregate_min_group
+    }
 }
 
 /// Untrusted construction input. Hashes are references, not proof of trust,
@@ -155,14 +167,25 @@ impl OutputPolicyV1 {
     /// # Errors
     /// Rejects invalid bounds, zero identity references and unsorted/duplicate kinds.
     pub fn new(input: OutputPolicyInputV1) -> Result<Self, OutputPolicyErrorV1> {
-        if input.plugin_version.is_empty() || input.plugin_version.len() > 64
-            || input.policy_revision == 0 || input.output_declarations.len() > MAX_OUTPUT_DECLARATIONS_V1
-            || [input.implementation_hash, input.base_configuration_digest,
-                input.executable_profile_hash, input.retention_policy_hash].contains(&Hash::zero())
+        if input.plugin_version.is_empty()
+            || input.plugin_version.len() > 64
+            || input.policy_revision == 0
+            || input.output_declarations.len() > MAX_OUTPUT_DECLARATIONS_V1
+            || [
+                input.implementation_hash,
+                input.base_configuration_digest,
+                input.executable_profile_hash,
+                input.retention_policy_hash,
+            ]
+            .contains(&Hash::zero())
         {
             return Err(OutputPolicyErrorV1::FieldOutOfBounds);
         }
-        if input.output_declarations.windows(2).any(|pair| pair[0].event_type >= pair[1].event_type) {
+        if input
+            .output_declarations
+            .windows(2)
+            .any(|pair| pair[0].event_type >= pair[1].event_type)
+        {
             return Err(OutputPolicyErrorV1::NonCanonical);
         }
         Ok(Self(input))
@@ -170,7 +193,9 @@ impl OutputPolicyV1 {
 
     /// Immutable validated fields. No mutable reference is exposed.
     #[must_use]
-    pub const fn fields(&self) -> &OutputPolicyInputV1 { &self.0 }
+    pub const fn fields(&self) -> &OutputPolicyInputV1 {
+        &self.0
+    }
 
     /// Exact deterministic EOP1 representation, without an allocation-time decoder.
     #[must_use]
@@ -178,8 +203,12 @@ impl OutputPolicyV1 {
         let mut out = vec![0x8a, 0x44, b'E', b'O', b'P', b'1', 1, 0x50];
         out.extend_from_slice(&self.0.plugin_id.inner().to_bytes());
         encode_text(&mut out, &self.0.plugin_version);
-        for hash in [self.0.implementation_hash, self.0.base_configuration_digest,
-            self.0.executable_profile_hash, self.0.retention_policy_hash] {
+        for hash in [
+            self.0.implementation_hash,
+            self.0.base_configuration_digest,
+            self.0.executable_profile_hash,
+            self.0.retention_policy_hash,
+        ] {
             out.extend_from_slice(&[0x58, 32]);
             out.extend_from_slice(hash.as_bytes());
         }
@@ -205,8 +234,11 @@ impl OutputPolicyV1 {
             });
             encode_uint(&mut out, declaration.max_bytes);
             for optional in [declaration.stride_ticks, declaration.aggregate_min_group] {
-                if let Some(value) = optional { encode_uint(&mut out, value); }
-                else { out.push(0xf6); }
+                if let Some(value) = optional {
+                    encode_uint(&mut out, value);
+                } else {
+                    out.push(0xf6);
+                }
             }
         }
         out
@@ -227,12 +259,19 @@ impl OutputPolicyV1 {
     /// # Errors
     /// Rejects malformed, oversized, unsupported, incompatible or noncanonical input.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, OutputPolicyErrorV1> {
-        if bytes.len() > MAX_OUTPUT_POLICY_BYTES_V1 { return Err(OutputPolicyErrorV1::FieldOutOfBounds); }
+        if bytes.len() > MAX_OUTPUT_POLICY_BYTES_V1 {
+            return Err(OutputPolicyErrorV1::FieldOutOfBounds);
+        }
         let mut reader = Reader { bytes, offset: 0 };
         reader.exact_array(10)?;
-        if reader.blob::<4>()? != *b"EOP1" { return Err(OutputPolicyErrorV1::InvalidEncoding); }
-        if reader.head(0, u32::MAX)? != 1 { return Err(OutputPolicyErrorV1::UnsupportedValue); }
-        let plugin_id = PluginId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(reader.blob::<16>()?)));
+        if reader.blob::<4>()? != *b"EOP1" {
+            return Err(OutputPolicyErrorV1::InvalidEncoding);
+        }
+        if reader.head(0, u32::MAX)? != 1 {
+            return Err(OutputPolicyErrorV1::UnsupportedValue);
+        }
+        let plugin_id =
+            PluginId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(reader.blob::<16>()?)));
         let plugin_version = reader.text(64)?;
         let implementation_hash = Hash::from_bytes(reader.blob()?);
         let base_configuration_digest = Hash::from_bytes(reader.blob()?);
@@ -241,19 +280,33 @@ impl OutputPolicyV1 {
         let policy_revision = reader.head(0, u32::MAX)?;
         let count = reader.head(4, 256)?;
         let mut output_declarations = Vec::new();
-        for _ in 0..count { output_declarations.push(reader.declaration()?); }
-        let policy = Self::new(OutputPolicyInputV1 { plugin_id, plugin_version, implementation_hash,
-            base_configuration_digest, executable_profile_hash, retention_policy_hash,
-            policy_revision, output_declarations })?;
-        if policy.to_canonical_cbor() != bytes { return Err(OutputPolicyErrorV1::NonCanonical); }
+        for _ in 0..count {
+            output_declarations.push(reader.declaration()?);
+        }
+        let policy = Self::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version,
+            implementation_hash,
+            base_configuration_digest,
+            executable_profile_hash,
+            retention_policy_hash,
+            policy_revision,
+            output_declarations,
+        })?;
+        if policy.to_canonical_cbor() != bytes {
+            return Err(OutputPolicyErrorV1::NonCanonical);
+        }
         Ok(policy)
     }
 }
 
 fn encode_text(out: &mut Vec<u8>, text: &str) {
     let length = text.len().to_le_bytes()[0];
-    if length <= 23 { out.push(0x60 | length); }
-    else { out.extend_from_slice(&[0x78, length]); }
+    if length <= 23 {
+        out.push(0x60 | length);
+    } else {
+        out.extend_from_slice(&[0x78, length]);
+    }
     out.extend_from_slice(text.as_bytes());
 }
 
@@ -262,74 +315,127 @@ fn encode_uint(out: &mut Vec<u8>, value: u32) {
     match value {
         0..=23 => out.push(bytes[3]),
         24..=255 => out.extend_from_slice(&[0x18, bytes[3]]),
-        256..=65_535 => { out.push(0x19); out.extend_from_slice(&bytes[2..]); }
-        _ => { out.push(0x1a); out.extend_from_slice(&bytes); }
+        256..=65_535 => {
+            out.push(0x19);
+            out.extend_from_slice(&bytes[2..]);
+        }
+        _ => {
+            out.push(0x1a);
+            out.extend_from_slice(&bytes);
+        }
     }
 }
 
-struct Reader<'a> { bytes: &'a [u8], offset: usize }
+struct Reader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
 
 impl<'a> Reader<'a> {
     fn take(&mut self, length: usize) -> Result<&'a [u8], OutputPolicyErrorV1> {
         let end = self.offset + length;
-        self.bytes.get(self.offset..end).ok_or(OutputPolicyErrorV1::InvalidEncoding)
+        self.bytes
+            .get(self.offset..end)
+            .ok_or(OutputPolicyErrorV1::InvalidEncoding)
             .inspect(|_| self.offset = end)
     }
 
     fn head(&mut self, major: u8, maximum: u32) -> Result<u32, OutputPolicyErrorV1> {
         let initial = self.take(1)?[0];
-        if initial >> 5 != major { return Err(OutputPolicyErrorV1::InvalidEncoding); }
+        if initial >> 5 != major {
+            return Err(OutputPolicyErrorV1::InvalidEncoding);
+        }
         let argument = initial & 31;
         let (value, minimum) = match argument {
             0..=23 => (u64::from(argument), 0),
             24..=27 => {
                 let length = 1usize << (argument - 24);
                 let data = self.take(length)?;
-                let value = data.iter().fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte));
-                let minimum = match length { 1 => 24, 2 => 256, 4 => 65_536, _ => 4_294_967_296 };
+                let value = data
+                    .iter()
+                    .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte));
+                let minimum = match length {
+                    1 => 24,
+                    2 => 256,
+                    4 => 65_536,
+                    _ => 4_294_967_296,
+                };
                 (value, minimum)
             }
             _ => return Err(OutputPolicyErrorV1::InvalidEncoding),
         };
-        if value < minimum { return Err(OutputPolicyErrorV1::NonCanonical); }
-        u32::try_from(value).map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)
-            .and_then(|value| if value <= maximum { Ok(value) } else { Err(OutputPolicyErrorV1::FieldOutOfBounds) })
+        if value < minimum {
+            return Err(OutputPolicyErrorV1::NonCanonical);
+        }
+        u32::try_from(value)
+            .map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)
+            .and_then(|value| {
+                if value <= maximum {
+                    Ok(value)
+                } else {
+                    Err(OutputPolicyErrorV1::FieldOutOfBounds)
+                }
+            })
     }
 
     fn exact_array(&mut self, count: u32) -> Result<(), OutputPolicyErrorV1> {
-        self.head(4, u32::MAX).and_then(|actual| if actual == count { Ok(()) }
-            else { Err(OutputPolicyErrorV1::InvalidEncoding) })
+        self.head(4, u32::MAX).and_then(|actual| {
+            if actual == count {
+                Ok(())
+            } else {
+                Err(OutputPolicyErrorV1::InvalidEncoding)
+            }
+        })
     }
 
     fn blob<const N: usize>(&mut self) -> Result<[u8; N], OutputPolicyErrorV1> {
         let length = self.head(2, 32)?;
-        let data = self.take(usize::try_from(length).map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)?)?;
-        data.try_into().map_err(|_| OutputPolicyErrorV1::InvalidEncoding)
+        let data =
+            self.take(usize::try_from(length).map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)?)?;
+        data.try_into()
+            .map_err(|_| OutputPolicyErrorV1::InvalidEncoding)
     }
 
     fn text(&mut self, maximum: u32) -> Result<String, OutputPolicyErrorV1> {
         let length = self.head(3, maximum)?;
-        let data = self.take(usize::try_from(length).map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)?)?;
-        std::str::from_utf8(data).map(str::to_owned).map_err(|_| OutputPolicyErrorV1::InvalidEncoding)
+        let data =
+            self.take(usize::try_from(length).map_err(|_| OutputPolicyErrorV1::FieldOutOfBounds)?)?;
+        std::str::from_utf8(data)
+            .map(str::to_owned)
+            .map_err(|_| OutputPolicyErrorV1::InvalidEncoding)
     }
 
     fn optional_uint(&mut self) -> Result<Option<u32>, OutputPolicyErrorV1> {
-        if self.bytes.get(self.offset) == Some(&0xf6) { self.offset += 1; Ok(None) }
-        else { self.head(0, u32::MAX).map(Some) }
+        if self.bytes.get(self.offset) == Some(&0xf6) {
+            self.offset += 1;
+            Ok(None)
+        } else {
+            self.head(0, u32::MAX).map(Some)
+        }
     }
 
     fn declaration(&mut self) -> Result<OutputDeclarationV1, OutputPolicyErrorV1> {
         self.exact_array(6)?;
         let event_type = self.text(128)?;
         let authority = match self.head(0, u32::MAX)? {
-            0 => OutputAuthorityV1::Authoritative, 1 => OutputAuthorityV1::ReproducibleDerived,
-            2 => OutputAuthorityV1::Ephemeral, _ => return Err(OutputPolicyErrorV1::UnsupportedValue),
+            0 => OutputAuthorityV1::Authoritative,
+            1 => OutputAuthorityV1::ReproducibleDerived,
+            2 => OutputAuthorityV1::Ephemeral,
+            _ => return Err(OutputPolicyErrorV1::UnsupportedValue),
         };
         let fidelity = match self.head(0, u32::MAX)? {
-            0 => OutputFidelityV1::L0, 1 => OutputFidelityV1::L1,
-            2 => OutputFidelityV1::L2, _ => return Err(OutputPolicyErrorV1::UnsupportedValue),
+            0 => OutputFidelityV1::L0,
+            1 => OutputFidelityV1::L1,
+            2 => OutputFidelityV1::L2,
+            _ => return Err(OutputPolicyErrorV1::UnsupportedValue),
         };
-        OutputDeclarationV1::new(event_type, authority, fidelity, self.head(0, u32::MAX)?,
-            self.optional_uint()?, self.optional_uint()?)
+        OutputDeclarationV1::new(
+            event_type,
+            authority,
+            fidelity,
+            self.head(0, u32::MAX)?,
+            self.optional_uint()?,
+            self.optional_uint()?,
+        )
     }
 }
