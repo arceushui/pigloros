@@ -200,15 +200,16 @@ impl WorldRetentionLeaseV1 {
         let mut reader = Reader::new(bytes)?;
         reader.record_header(7, *b"RLS1")?;
         let input = WorldRetentionLeaseInputV1 {
-            timeline_id: TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(reader.blob()?))),
+            timeline_id: TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(
+                reader.blob()?,
+            ))),
             policy_hash: Hash::from_bytes(reader.blob()?),
             started_at_micros: reader.head(0)?,
             admission_closes_at_micros: reader.head(0)?,
             retention_deadline_micros: reader.head(0)?,
         };
-        Self::new(policy, input).and_then(|lease| {
-            require_canonical(bytes, &lease.to_canonical_cbor()).map(|()| lease)
-        })
+        Self::new(policy, input)
+            .and_then(|lease| require_canonical(bytes, &lease.to_canonical_cbor()).map(|()| lease))
     }
 }
 
@@ -289,7 +290,9 @@ impl<'a> Reader<'a> {
         match initial & 31 {
             argument @ 0..=23 => Ok(u64::from(argument)),
             argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
-                bytes.iter().fold(0, |value, byte| (value << 8) | u64::from(*byte))
+                bytes
+                    .iter()
+                    .fold(0, |value, byte| (value << 8) | u64::from(*byte))
             }),
             _ => Err(WorldRetentionErrorV1::InvalidEncoding),
         }
@@ -330,10 +333,11 @@ impl<'a> Reader<'a> {
         if length > 128 {
             return Err(WorldRetentionErrorV1::FieldOutOfBounds);
         }
-        self.take(usize::from(length.to_le_bytes()[0])).and_then(|bytes| {
-            std::str::from_utf8(bytes)
-                .map(str::to_owned)
-                .map_err(|_| WorldRetentionErrorV1::InvalidEncoding)
-        })
+        self.take(usize::from(length.to_le_bytes()[0]))
+            .and_then(|bytes| {
+                std::str::from_utf8(bytes)
+                    .map(str::to_owned)
+                    .map_err(|_| WorldRetentionErrorV1::InvalidEncoding)
+            })
     }
 }

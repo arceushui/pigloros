@@ -76,14 +76,23 @@ fn policy_and_lease_match_independent_wire_and_digest_oracles() -> TestResult {
     assert_eq!(policy.to_canonical_cbor(), bytes);
     assert_eq!(policy.as_input(), &input);
     assert_eq!(WorldRetentionPolicyV1::from_canonical_cbor(&bytes)?, policy);
-    assert_eq!(policy.digest(), digest(b"pigloros.retention-policy.v1\0", &bytes));
+    assert_eq!(
+        policy.digest(),
+        digest(b"pigloros.retention-policy.v1\0", &bytes)
+    );
     let input = lease_input(&policy);
     let lease = WorldRetentionLeaseV1::new(&policy, input)?;
     let bytes = encode(&lease_wire(&input))?;
     assert_eq!(lease.to_canonical_cbor(), bytes);
     assert_eq!(lease.as_input(), &input);
-    assert_eq!(WorldRetentionLeaseV1::from_canonical_cbor(&bytes, &policy)?, lease);
-    assert_eq!(lease.digest(), digest(b"pigloros.retention-lease.v1\0", &bytes));
+    assert_eq!(
+        WorldRetentionLeaseV1::from_canonical_cbor(&bytes, &policy)?,
+        lease
+    );
+    assert_eq!(
+        lease.digest(),
+        digest(b"pigloros.retention-lease.v1\0", &bytes)
+    );
     assert_ne!(policy.digest(), lease.digest());
     Ok(())
 }
@@ -106,7 +115,10 @@ fn every_policy_field_changes_identity_without_mutating_the_original() -> TestRe
         let policy = WorldRetentionPolicyV1::new(changed)?;
         assert_ne!(original.digest(), policy.digest());
         assert_eq!(original.as_input(), &original_input);
-        assert_eq!(WorldRetentionPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor())?, policy);
+        assert_eq!(
+            WorldRetentionPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor())?,
+            policy
+        );
     }
     Ok(())
 }
@@ -134,19 +146,36 @@ fn every_lease_field_changes_identity_and_policy_reference_is_exact() -> TestRes
     let mut other = policy_input();
     other.policy_revision = 2;
     let other = WorldRetentionPolicyV1::new(other)?;
-    assert_eq!(WorldRetentionLeaseV1::new(&other, input), Err(WorldRetentionErrorV1::PolicyMismatch));
-    assert_eq!(WorldRetentionLeaseV1::from_canonical_cbor(&original.to_canonical_cbor(), &other), Err(WorldRetentionErrorV1::PolicyMismatch));
+    assert_eq!(
+        WorldRetentionLeaseV1::new(&other, input),
+        Err(WorldRetentionErrorV1::PolicyMismatch)
+    );
+    assert_eq!(
+        WorldRetentionLeaseV1::from_canonical_cbor(&original.to_canonical_cbor(), &other),
+        Err(WorldRetentionErrorV1::PolicyMismatch)
+    );
     input.policy_hash = other.digest();
-    assert_ne!(WorldRetentionLeaseV1::new(&other, input)?.digest(), original.digest());
+    assert_ne!(
+        WorldRetentionLeaseV1::new(&other, input)?.digest(),
+        original.digest()
+    );
     input.policy_hash = Hash::zero();
-    assert_eq!(WorldRetentionLeaseV1::new(&policy, input), Err(WorldRetentionErrorV1::PolicyMismatch));
+    assert_eq!(
+        WorldRetentionLeaseV1::new(&policy, input),
+        Err(WorldRetentionErrorV1::PolicyMismatch)
+    );
     Ok(())
 }
 
 #[test]
 fn policy_utf8_integer_widths_and_larger_finite_purposes_are_supported() -> TestResult {
     for revision in [1, 23, 24, 255, 256, 65_535, 65_536, u32::MAX] {
-        for purpose in ["x".to_owned(), "x".repeat(23), "x".repeat(24), "é".repeat(64)] {
+        for purpose in [
+            "x".to_owned(),
+            "x".repeat(23),
+            "x".repeat(24),
+            "é".repeat(64),
+        ] {
             let mut input = policy_input();
             input.policy_revision = revision;
             input.purpose = purpose;
@@ -155,7 +184,10 @@ fn policy_utf8_integer_widths_and_larger_finite_purposes_are_supported() -> Test
             input.maximum_total_days = 465;
             let policy = WorldRetentionPolicyV1::new(input.clone())?;
             assert_eq!(policy.to_canonical_cbor(), encode(&policy_wire(&input))?);
-            assert_eq!(WorldRetentionPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor())?, policy);
+            assert_eq!(
+                WorldRetentionPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor())?,
+                policy
+            );
         }
     }
     let mut input = policy_input();
@@ -166,7 +198,10 @@ fn policy_utf8_integer_widths_and_larger_finite_purposes_are_supported() -> Test
     let policy = WorldRetentionPolicyV1::new(input)?;
     assert!(policy.to_canonical_cbor().len() <= 187);
     assert!(policy.to_canonical_cbor().len() <= MAX_WORLD_RETENTION_RECORD_BYTES_V1);
-    assert_eq!(WorldRetentionPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor())?, policy);
+    assert_eq!(
+        WorldRetentionPolicyV1::from_canonical_cbor(&policy.to_canonical_cbor())?,
+        policy
+    );
     Ok(())
 }
 
@@ -189,7 +224,9 @@ fn invalid_policy_terms_fail_through_construction_and_decode() -> TestResult {
             }
         }
         assert!(WorldRetentionPolicyV1::new(input.clone()).is_err());
-        assert!(WorldRetentionPolicyV1::from_canonical_cbor(&encode(&policy_wire(&input))?).is_err());
+        assert!(
+            WorldRetentionPolicyV1::from_canonical_cbor(&encode(&policy_wire(&input))?).is_err()
+        );
     }
     Ok(())
 }
@@ -197,7 +234,18 @@ fn invalid_policy_terms_fail_through_construction_and_decode() -> TestResult {
 #[test]
 fn lease_windows_support_shorter_admission_and_extreme_absolute_times() -> TestResult {
     let policy = WorldRetentionPolicyV1::new(policy_input())?;
-    for start in [0, 23, 24, 255, 256, 65_535, 65_536, u64::from(u32::MAX), u64::from(u32::MAX) + 1, u64::MAX - 120 * DAY] {
+    for start in [
+        0,
+        23,
+        24,
+        255,
+        256,
+        65_535,
+        65_536,
+        u64::from(u32::MAX),
+        u64::from(u32::MAX) + 1,
+        u64::MAX - 120 * DAY,
+    ] {
         for active in [1, 30 * DAY] {
             let input = WorldRetentionLeaseInputV1 {
                 started_at_micros: start,
@@ -208,7 +256,10 @@ fn lease_windows_support_shorter_admission_and_extreme_absolute_times() -> TestR
             let lease = WorldRetentionLeaseV1::new(&policy, input)?;
             assert_eq!(lease.to_canonical_cbor(), encode(&lease_wire(&input))?);
             assert!(lease.to_canonical_cbor().len() <= 85);
-            assert_eq!(WorldRetentionLeaseV1::from_canonical_cbor(&lease.to_canonical_cbor(), &policy)?, lease);
+            assert_eq!(
+                WorldRetentionLeaseV1::from_canonical_cbor(&lease.to_canonical_cbor(), &policy)?,
+                lease
+            );
         }
     }
     Ok(())
@@ -227,8 +278,14 @@ fn lease_span_violations_reject_without_wrapping_arithmetic() -> TestResult {
             4 => input.retention_deadline_micros += 1,
             _ => input.retention_deadline_micros -= 1,
         }
-        assert_eq!(WorldRetentionLeaseV1::new(&policy, input), Err(WorldRetentionErrorV1::InvalidWindow));
-        assert_eq!(WorldRetentionLeaseV1::from_canonical_cbor(&encode(&lease_wire(&input))?, &policy), Err(WorldRetentionErrorV1::InvalidWindow));
+        assert_eq!(
+            WorldRetentionLeaseV1::new(&policy, input),
+            Err(WorldRetentionErrorV1::InvalidWindow)
+        );
+        assert_eq!(
+            WorldRetentionLeaseV1::from_canonical_cbor(&encode(&lease_wire(&input))?, &policy),
+            Err(WorldRetentionErrorV1::InvalidWindow)
+        );
     }
     Ok(())
 }
@@ -253,12 +310,16 @@ fn wrong_policy_wire_fields_and_rules_fail_closed() -> TestResult {
     for (index, value) in cases {
         let mut changed = fields.clone();
         changed[index] = value;
-        assert!(WorldRetentionPolicyV1::from_canonical_cbor(&encode(&Value::Array(changed))?).is_err());
+        assert!(
+            WorldRetentionPolicyV1::from_canonical_cbor(&encode(&Value::Array(changed))?).is_err()
+        );
     }
     for index in 0..fields.len() {
         let mut changed = fields.clone();
         changed[index] = Value::Null;
-        assert!(WorldRetentionPolicyV1::from_canonical_cbor(&encode(&Value::Array(changed))?).is_err());
+        assert!(
+            WorldRetentionPolicyV1::from_canonical_cbor(&encode(&Value::Array(changed))?).is_err()
+        );
     }
     Ok(())
 }
@@ -280,12 +341,20 @@ fn wrong_lease_wire_fields_fail_closed() -> TestResult {
     ] {
         let mut changed = fields.clone();
         changed[index] = value;
-        assert!(WorldRetentionLeaseV1::from_canonical_cbor(&encode(&Value::Array(changed))?, &policy).is_err());
+        assert!(WorldRetentionLeaseV1::from_canonical_cbor(
+            &encode(&Value::Array(changed))?,
+            &policy
+        )
+        .is_err());
     }
     for index in 0..fields.len() {
         let mut changed = fields.clone();
         changed[index] = Value::Null;
-        assert!(WorldRetentionLeaseV1::from_canonical_cbor(&encode(&Value::Array(changed))?, &policy).is_err());
+        assert!(WorldRetentionLeaseV1::from_canonical_cbor(
+            &encode(&Value::Array(changed))?,
+            &policy
+        )
+        .is_err());
     }
     Ok(())
 }
@@ -302,7 +371,16 @@ fn truncation_oversize_and_wrong_outer_shapes_reject() -> TestResult {
     for end in 0..lease_bytes.len() {
         assert!(WorldRetentionLeaseV1::from_canonical_cbor(&lease_bytes[..end], &policy).is_err());
     }
-    for bytes in [vec![0; 513], vec![0x89], vec![0x88], vec![0x9f, 0xff], vec![0xbf, 0xff], vec![0x9c], vec![0x9d], vec![0x9e]] {
+    for bytes in [
+        vec![0; 513],
+        vec![0x89],
+        vec![0x88],
+        vec![0x9f, 0xff],
+        vec![0xbf, 0xff],
+        vec![0x9c],
+        vec![0x9d],
+        vec![0x9e],
+    ] {
         assert!(WorldRetentionPolicyV1::from_canonical_cbor(&bytes).is_err());
         assert!(WorldRetentionLeaseV1::from_canonical_cbor(&bytes, &policy).is_err());
     }
@@ -334,7 +412,10 @@ fn wrong_cardinality_rejects_an_otherwise_complete_valid_body() -> TestResult {
 fn nonpreferred_encodings_and_trailing_bytes_reject() -> TestResult {
     let policy = WorldRetentionPolicyV1::new(policy_input())?;
     let lease = WorldRetentionLeaseV1::new(&policy, lease_input(&policy))?;
-    for (original, is_policy) in [(policy.to_canonical_cbor(), true), (lease.to_canonical_cbor(), false)] {
+    for (original, is_policy) in [
+        (policy.to_canonical_cbor(), true),
+        (lease.to_canonical_cbor(), false),
+    ] {
         let mut variants = Vec::new();
         let mut trailing = original.clone();
         trailing.push(0);
@@ -345,7 +426,12 @@ fn nonpreferred_encodings_and_trailing_bytes_reject() -> TestResult {
         let mut long_magic = vec![original[0], 0x58, 4];
         long_magic.extend_from_slice(&original[2..]);
         variants.push(long_magic);
-        for version in [vec![0x18, 1], vec![0x19, 0, 1], vec![0x1a, 0, 0, 0, 1], vec![0x1b, 0, 0, 0, 0, 0, 0, 0, 1]] {
+        for version in [
+            vec![0x18, 1],
+            vec![0x19, 0, 1],
+            vec![0x1a, 0, 0, 0, 1],
+            vec![0x1b, 0, 0, 0, 0, 0, 0, 0, 1],
+        ] {
             let mut bytes = original[..6].to_vec();
             bytes.extend(version);
             bytes.extend_from_slice(&original[7..]);
@@ -353,9 +439,15 @@ fn nonpreferred_encodings_and_trailing_bytes_reject() -> TestResult {
         }
         for bytes in variants {
             if is_policy {
-                assert_eq!(WorldRetentionPolicyV1::from_canonical_cbor(&bytes), Err(WorldRetentionErrorV1::NonCanonical));
+                assert_eq!(
+                    WorldRetentionPolicyV1::from_canonical_cbor(&bytes),
+                    Err(WorldRetentionErrorV1::NonCanonical)
+                );
             } else {
-                assert_eq!(WorldRetentionLeaseV1::from_canonical_cbor(&bytes, &policy), Err(WorldRetentionErrorV1::NonCanonical));
+                assert_eq!(
+                    WorldRetentionLeaseV1::from_canonical_cbor(&bytes, &policy),
+                    Err(WorldRetentionErrorV1::NonCanonical)
+                );
             }
         }
     }
@@ -366,7 +458,11 @@ fn nonpreferred_encodings_and_trailing_bytes_reject() -> TestResult {
 fn huge_claimed_nested_lengths_and_invalid_utf8_reject_before_allocation() -> TestResult {
     let policy = WorldRetentionPolicyV1::new(policy_input())?;
     let lease = WorldRetentionLeaseV1::new(&policy, lease_input(&policy))?;
-    for (prefix, head) in [(Vec::new(), 0x9b), (vec![0x8a], 0x5b), (policy.to_canonical_cbor()[..8].to_vec(), 0x7b)] {
+    for (prefix, head) in [
+        (Vec::new(), 0x9b),
+        (vec![0x8a], 0x5b),
+        (policy.to_canonical_cbor()[..8].to_vec(), 0x7b),
+    ] {
         let mut bytes = prefix;
         bytes.push(head);
         bytes.extend_from_slice(&u64::MAX.to_be_bytes());
@@ -374,12 +470,22 @@ fn huge_claimed_nested_lengths_and_invalid_utf8_reject_before_allocation() -> Te
     }
     let mut bytes = policy.to_canonical_cbor()[..8].to_vec();
     bytes.extend_from_slice(&[0x61, 0xff]);
-    assert_eq!(WorldRetentionPolicyV1::from_canonical_cbor(&bytes), Err(WorldRetentionErrorV1::InvalidEncoding));
+    assert_eq!(
+        WorldRetentionPolicyV1::from_canonical_cbor(&bytes),
+        Err(WorldRetentionErrorV1::InvalidEncoding)
+    );
     let mut bytes = lease.to_canonical_cbor()[..7].to_vec();
     bytes.push(0x5b);
     bytes.extend_from_slice(&u64::MAX.to_be_bytes());
     assert!(WorldRetentionLeaseV1::from_canonical_cbor(&bytes, &policy).is_err());
-    for error in [WorldRetentionErrorV1::InvalidEncoding, WorldRetentionErrorV1::NonCanonical, WorldRetentionErrorV1::UnsupportedValue, WorldRetentionErrorV1::FieldOutOfBounds, WorldRetentionErrorV1::InvalidWindow, WorldRetentionErrorV1::PolicyMismatch] {
+    for error in [
+        WorldRetentionErrorV1::InvalidEncoding,
+        WorldRetentionErrorV1::NonCanonical,
+        WorldRetentionErrorV1::UnsupportedValue,
+        WorldRetentionErrorV1::FieldOutOfBounds,
+        WorldRetentionErrorV1::InvalidWindow,
+        WorldRetentionErrorV1::PolicyMismatch,
+    ] {
         assert!(!error.to_string().is_empty());
     }
     Ok(())
