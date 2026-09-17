@@ -22,7 +22,7 @@ fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips
     Ok(())
 }
 
-fn expected_static_hardening_properties(
+const fn expected_static_hardening_properties(
 ) -> [(&'static str, &'static str, SystemdHardeningValue); 29] {
     [
         ("Type", "s", SystemdHardeningValue::String("exec")),
