@@ -236,3 +236,51 @@ fn truncation_nonpreferred_widths_and_outer_bounds_reject() -> TestResult {
     assert_eq!(OutputPolicyV1::from_canonical_cbor(&trailing), Err(OutputPolicyErrorV1::FieldOutOfBounds));
     Ok(())
 }
+
+#[test]
+fn nested_cardinalities_and_declared_allocation_bounds_reject() -> TestResult {
+    let bytes = OutputPolicyV1::new(input(vec![declaration("a")?]))?.to_canonical_cbor();
+    let base: Value = ciborium::from_reader(bytes.as_slice())?;
+    for count in [5, 7] {
+        let mut value = base.clone();
+        let Value::Array(fields) = &mut value else { return Err("fixture shape".into()); };
+        let Value::Array(rows) = &mut fields[9] else { return Err("fixture rows".into()); };
+        let Value::Array(row) = &mut rows[0] else { return Err("fixture row".into()); };
+        if count == 5 { row.pop(); } else { row.push(Value::Null); }
+        assert_eq!(OutputPolicyV1::from_canonical_cbor(&encode(&value)?), Err(OutputPolicyErrorV1::InvalidEncoding));
+    }
+    for (path, replacement) in [
+        (vec![0], Value::Bytes(vec![1; 3])),
+        (vec![4], Value::Bytes(vec![1; 31])),
+        (vec![9, 0, 0], Value::Text(String::new())),
+        (vec![9, 0, 4], Value::Bool(false)),
+    ] {
+        let mut value = base.clone(); replace(&mut value, &path, replacement)?;
+        assert!(OutputPolicyV1::from_canonical_cbor(&encode(&value)?).is_err());
+    }
+    let mut value = base.clone();
+    let Value::Array(fields) = &mut value else { return Err("fixture shape".into()); };
+    let row = fields[9].clone();
+    let Value::Array(rows) = row else { return Err("fixture rows".into()); };
+    fields[9] = Value::Array(vec![rows[0].clone(); 257]);
+    assert_eq!(OutputPolicyV1::from_canonical_cbor(&encode(&value)?), Err(OutputPolicyErrorV1::FieldOutOfBounds));
+    // A huge definite array is rejected from its header without materializing it.
+    let empty = OutputPolicyV1::new(input(Vec::new()))?.to_canonical_cbor();
+    let mut huge = empty[..empty.len() - 1].to_vec();
+    huge.extend_from_slice(&[0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(OutputPolicyV1::from_canonical_cbor(&huge), Err(OutputPolicyErrorV1::FieldOutOfBounds));
+    Ok(())
+}
+
+#[test]
+fn structural_errors_have_closed_safe_diagnostics() {
+    for (error, expected) in [
+        (OutputPolicyErrorV1::InvalidEncoding, "invalid output policy encoding"),
+        (OutputPolicyErrorV1::UnsupportedValue, "unsupported output policy value"),
+        (OutputPolicyErrorV1::FieldOutOfBounds, "output policy field out of bounds"),
+        (OutputPolicyErrorV1::NonCanonical, "noncanonical output policy"),
+        (OutputPolicyErrorV1::IncompatibleDeclaration, "incompatible output declaration"),
+    ] {
+        assert_eq!(error.to_string(), expected);
+    }
+}
