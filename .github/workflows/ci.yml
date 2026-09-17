@@ -1064,6 +1064,10 @@ jobs:
         run: |
           python scripts/test_check_cargo_crap_ci_policy.py
           python scripts/test_check_cargo_crap_report.py
+      - name: Check native profiling diagnostic policy
+        run: python scripts/check_native_profiling_ci_policy.py
+      - name: Test native profiling diagnostic policy
+        run: python scripts/test_check_native_profiling_ci_policy.py
 
   modules-structure:
     name: modules-structure (reports only)

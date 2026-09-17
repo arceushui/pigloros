@@ -1,7 +1,10 @@
 """Public read-only inspection boundaries, including fail-closed negative cases."""
 
 import errno
+import hashlib
 import json
+import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -14,7 +17,7 @@ class KvmInspectionTests(unittest.TestCase):
             with patch("native_profiling_host_preflight.fcntl.ioctl", return_value=12) as ioctl:
                 with patch("native_profiling_host_preflight.os.close") as closed:
                     self.assertEqual(inspect_kvm(), {"api_version": 12, "errno": None})
-        opened.assert_called_once()
+        opened.assert_called_once_with("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
         ioctl.assert_called_once_with(17, 0xAE00, 0)
         closed.assert_called_once_with(17)
 
@@ -47,20 +50,33 @@ class KvmInspectionTests(unittest.TestCase):
         ])
 
     def test_entry_point_binds_sources_but_never_authorizes_activation(self):
-        for version, expected_status in ((12, False), (None, True)):
+        for version, expected_failure in ((12, False), (None, True)):
             with self.subTest(version=version):
                 with patch("sys.argv", ["preflight", "--expected-arch", "x86_64", "--source-sha", "a" * 40]):
                     with patch("native_profiling_host_preflight.platform.machine", return_value="x86_64"):
                         with patch("native_profiling_host_preflight.os.geteuid", return_value=1001):
                             with patch("native_profiling_host_preflight.inspect_kvm", return_value={"api_version": version}):
                                 with patch("builtins.print") as printed:
-                                    self.assertEqual(main(), expected_status)
+                                    self.assertEqual(main(), expected_failure)
                 report = json.loads(printed.call_args.args[0])
                 self.assertFalse(report["privileged_activation_authorized"])
                 self.assertFalse(report["vm_created"])
                 self.assertEqual(report["source_sha"], "a" * 40)
-                self.assertEqual(len(report["source_file_sha256"]), 4)
-                self.assertEqual(report["kvm_prerequisite_pass"], not expected_status)
+                root = Path(__file__).resolve().parent.parent
+                expected_sources = (
+                    "docs/research/native-profiling-probe-preflight.json",
+                    ".github/workflows/native-profiling-preflight.yml",
+                    "scripts/native_profiling_host_preflight.py",
+                    "scripts/test_native_profiling_host_preflight.py",
+                    "scripts/check_native_profiling_ci_policy.py",
+                    "scripts/test_check_native_profiling_ci_policy.py",
+                    ".github/workflows/ci.yml",
+                )
+                self.assertEqual(report["source_file_sha256"], {
+                    source: hashlib.sha256((root / source).read_bytes()).hexdigest()
+                    for source in expected_sources
+                })
+                self.assertEqual(report["kvm_prerequisite_pass"], not expected_failure)
 
     def test_entry_point_rejects_abbreviated_source_identity(self):
         with patch("sys.argv", ["preflight", "--expected-arch", "x86_64", "--source-sha", "abc"]):

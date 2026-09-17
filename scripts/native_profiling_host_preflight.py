@@ -10,6 +10,9 @@ import platform
 import re
 import sys
 
+KVM_GET_API_VERSION = 0xAE00
+KVM_API_VERSION = 12
+
 
 def inspect_kvm():
     """KVM's stable system ioctl requires API 12; close the descriptor on all paths."""
@@ -19,7 +22,7 @@ def inspect_kvm():
         return {"api_version": None, "errno": error.errno}
     try:
         try:
-            return {"api_version": fcntl.ioctl(descriptor, 0xAE00, 0), "errno": None}
+            return {"api_version": fcntl.ioctl(descriptor, KVM_GET_API_VERSION, 0), "errno": None}
         except OSError as error:
             return {"api_version": None, "errno": error.errno}
     finally:
@@ -32,7 +35,7 @@ def prerequisite_failures(expected_arch, machine, uid, kvm):
         failures.append("native-architecture-mismatch")
     if uid == 0:
         failures.append("host-inspection-must-be-unprivileged")
-    if kvm["api_version"] != 12:
+    if kvm["api_version"] != KVM_API_VERSION:
         failures.append("usable-kvm-api-12-not-established")
     return failures
 
@@ -51,6 +54,9 @@ def main():
         ".github/workflows/native-profiling-preflight.yml",
         "scripts/native_profiling_host_preflight.py",
         "scripts/test_native_profiling_host_preflight.py",
+        "scripts/check_native_profiling_ci_policy.py",
+        "scripts/test_check_native_profiling_ci_policy.py",
+        ".github/workflows/ci.yml",
     ):
         identities[relative] = hashlib.sha256((repository / relative).read_bytes()).hexdigest()
     machine = platform.machine()

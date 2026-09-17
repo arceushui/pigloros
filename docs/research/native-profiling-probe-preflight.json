@@ -7,6 +7,7 @@
     "guest_vcpus": 2,
     "guest_memory_bytes": 4294967296,
     "guest_writable_disk_bytes": 17179869184,
+    "host_build_vcpus": 2,
     "host_build_memory_bytes": 12884901888,
     "host_build_disk_bytes": 85899345920,
     "host_build_timeout_seconds": 2700,

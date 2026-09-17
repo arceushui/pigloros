@@ -7,6 +7,9 @@ on:
       - .github/workflows/native-profiling-preflight.yml
       - scripts/native_profiling_host_preflight.py
       - scripts/test_native_profiling_host_preflight.py
+      - scripts/check_native_profiling_ci_policy.py
+      - scripts/test_check_native_profiling_ci_policy.py
+      - .github/workflows/ci.yml
       - docs/research/native-profiling-probe-preflight.*
   workflow_dispatch:
 

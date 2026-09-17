@@ -31,6 +31,15 @@ the prerequisite check. A passing check proves neither guest creation nor
 resource, egress or destruction enforcement and never authorizes activation.
 Mocked boundary tests do not replace the hosted observations.
 
+The ordinary CI pinned-dependencies job also runs the diagnostic workflow's
+closed executable policy check and adversarial fixtures. They bind the two
+native runner entries, unprivileged command sequence, exact source identity,
+failure propagation and unconditional bounded artifact retention. The retained
+source inventory includes that CI workflow and both policy/test scripts.
+The KVM descriptor is opened read/write as a candidate-access diagnostic;
+"read-only" describes the sole version query, not the descriptor's access mode.
+The mocked boundary test fixes the exact open flags and sole ioctl.
+
 This checks the KVM candidate, not a normative requirement that every permitted
 guest use hardware acceleration. Accepted ADR-069 section 9.2 retains prior
 aarch64 same-architecture TCG feasibility evidence. Same-architecture TCG is
@@ -51,7 +60,9 @@ substitute cross-architecture emulation or root execution on the runner.
 For each native class, use one fresh VM and no more than two native jobs in
 parallel. Guest writable disk limits must cover every writable backing store,
 not just a filesystem inside the guest. Host build ceilings include all build
-and provisioning subprocesses. Reporter limits are imposed by an unprivileged
+and provisioning subprocesses, including a two-vCPU aggregate CPU ceiling.
+This is an explicit initial safety budget, not an implemented enforcement
+mechanism or measured sizing result. Reporter limits are imposed by an unprivileged
 outside-guest owner before parsing any guest-produced input. Artifact ceilings
 apply before allocation or extraction, including expanded bytes and duplicate
 entries, and encompass profiles, observations and logs. Inventory/object tools
