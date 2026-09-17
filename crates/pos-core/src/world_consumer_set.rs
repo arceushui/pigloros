@@ -375,26 +375,31 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn record(&mut self) -> Result<WorldConsumerSetInputV1, WorldConsumerSetErrorV1> {
-        self.array_exact(6).and_then(|()| self.magic()).and_then(|()| {
-            self.unsigned().and_then(|version| {
-                if version != u64::from(VERSION) {
-                    Err(WorldConsumerSetErrorV1::WrongVersion)
-                } else {
-                    Ok(())
-                }
+        self.array_exact(6)
+            .and_then(|()| self.magic())
+            .and_then(|()| {
+                self.unsigned().and_then(|version| {
+                    if version != u64::from(VERSION) {
+                        Err(WorldConsumerSetErrorV1::WrongVersion)
+                    } else {
+                        Ok(())
+                    }
+                })
             })
-        }).and_then(|()| self.hash()).and_then(|scope| {
-            self.consumers().and_then(|consumers| {
-                self.producers().and_then(|producers| {
-                    self.views().map(|optional_view_roots| WorldConsumerSetInputV1 {
-                        scope: Hash::from_bytes(scope),
-                        consumers,
-                        producers,
-                        optional_view_roots,
+            .and_then(|()| self.hash())
+            .and_then(|scope| {
+                self.consumers().and_then(|consumers| {
+                    self.producers().and_then(|producers| {
+                        self.views()
+                            .map(|optional_view_roots| WorldConsumerSetInputV1 {
+                                scope: Hash::from_bytes(scope),
+                                consumers,
+                                producers,
+                                optional_view_roots,
+                            })
                     })
                 })
             })
-        })
     }
 
     fn magic(&mut self) -> Result<(), WorldConsumerSetErrorV1> {
@@ -434,17 +439,21 @@ impl<'a> Parser<'a> {
     }
 
     fn producer(&mut self) -> Result<WorldProducerV1, WorldConsumerSetErrorV1> {
-        self.array_exact(2).and_then(|()| self.fixed::<16>(2, 16)).and_then(|plugin| {
-            self.hash().and_then(|policy| {
-                WorldProducerV1::new(plugin_id_from_bytes(plugin), Hash::from_bytes(policy))
+        self.array_exact(2)
+            .and_then(|()| self.fixed::<16>(2, 16))
+            .and_then(|plugin| {
+                self.hash().and_then(|policy| {
+                    WorldProducerV1::new(plugin_id_from_bytes(plugin), Hash::from_bytes(policy))
+                })
             })
-        })
     }
 
     fn views(&mut self) -> Result<Vec<Hash>, WorldConsumerSetErrorV1> {
         self.array_bounded(0, WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS)
             .and_then(|count| {
-                (0..count).map(|_| self.hash().map(Hash::from_bytes)).collect()
+                (0..count)
+                    .map(|_| self.hash().map(Hash::from_bytes))
+                    .collect()
             })
     }
 
@@ -501,7 +510,9 @@ impl<'a> Parser<'a> {
     ) -> Result<[u8; N], WorldConsumerSetErrorV1> {
         match self.header(kind) {
             Ok(length) if length == expected as u64 => match self.take(expected) {
-                Ok(slice) => slice.try_into().map_err(|_| WorldConsumerSetErrorV1::InvalidEncoding),
+                Ok(slice) => slice
+                    .try_into()
+                    .map_err(|_| WorldConsumerSetErrorV1::InvalidEncoding),
                 Err(error) => Err(error),
             },
             Ok(_) => Err(WorldConsumerSetErrorV1::InvalidEncoding),
@@ -536,9 +547,15 @@ impl<'a> Parser<'a> {
         let decoded = match code {
             0..=23 => Ok((u64::from(code), 0)),
             24 => self.take(1).map(|value| (u64::from(value[0]), 1)),
-            25 => self.fixed_raw::<2>().map(|value| (u64::from(u16::from_be_bytes(value)), 2)),
-            26 => self.fixed_raw::<4>().map(|value| (u64::from(u32::from_be_bytes(value)), 4)),
-            27 => self.fixed_raw::<8>().map(|value| (u64::from_be_bytes(value), 8)),
+            25 => self
+                .fixed_raw::<2>()
+                .map(|value| (u64::from(u16::from_be_bytes(value)), 2)),
+            26 => self
+                .fixed_raw::<4>()
+                .map(|value| (u64::from(u32::from_be_bytes(value)), 4)),
+            27 => self
+                .fixed_raw::<8>()
+                .map(|value| (u64::from_be_bytes(value), 8)),
             _ => Err(WorldConsumerSetErrorV1::InvalidEncoding),
         };
         decoded.and_then(|(length, width)| {
@@ -556,7 +573,9 @@ impl<'a> Parser<'a> {
 
     fn fixed_raw<const N: usize>(&mut self) -> Result<[u8; N], WorldConsumerSetErrorV1> {
         match self.take(N) {
-            Ok(value) => value.try_into().map_err(|_| WorldConsumerSetErrorV1::InvalidEncoding),
+            Ok(value) => value
+                .try_into()
+                .map_err(|_| WorldConsumerSetErrorV1::InvalidEncoding),
             Err(error) => Err(error),
         }
     }
