@@ -147,8 +147,14 @@ impl WorldArtifactLeafV1 {
         {
             return Err(WorldArtifactErrorV1::FieldOutOfBounds);
         }
-        if input.key_dependencies.windows(2).any(|pair| pair[0] >= pair[1])
-            || input.child_node_hashes.windows(2).any(|pair| pair[0] >= pair[1])
+        if input
+            .key_dependencies
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+            || input
+                .child_node_hashes
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
         {
             return Err(WorldArtifactErrorV1::InvalidDependencyOrder);
         }
@@ -210,76 +216,42 @@ impl WorldArtifactLeafV1 {
             return Err(WorldArtifactErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader { bytes, offset: 0 };
-        reader.array(13)?;
-        if reader.blob::<4>()? != *b"WAL1" {
-            return Err(WorldArtifactErrorV1::InvalidEncoding);
-        }
-        if reader.head(0)? != 1 {
-            return Err(WorldArtifactErrorV1::UnsupportedValue);
-        }
-        let scope = Hash::from_bytes(reader.blob()?);
-        let kind = WorldArtifactKindV1::from_code(reader.code()?)?;
-        let native_digest = Hash::from_bytes(reader.blob()?);
-        let native_byte_length = reader.head(0)?;
-        let owner = reader.blob()?;
-        let data_class = decode_code(
-            reader.code()?,
-            &[
-                ArtifactDataClassV1::PrivateSubjectData,
-                ArtifactDataClassV1::ConsentedSharedData,
-                ArtifactDataClassV1::PublicRecord,
-                ArtifactDataClassV1::AggregateData,
-                ArtifactDataClassV1::StructuralAuditMetadata,
-            ],
-        )?;
-        let optionality = decode_code(
-            reader.code()?,
-            &[ArtifactOptionalityV1::Required, ArtifactOptionalityV1::Optional],
-        )?;
-        let transition = decode_code(
-            reader.code()?,
-            &[
-                ArtifactTransitionRuleV1::PreserveExact,
-                ArtifactTransitionRuleV1::RedactViews,
-                ArtifactTransitionRuleV1::RetainStructure,
-                ArtifactTransitionRuleV1::Remove,
-            ],
-        )?;
-        let source_lease_hash = Hash::from_bytes(reader.blob()?);
-        let key_count = reader.bounded_count(MAX_WORLD_ARTIFACT_KEYS_V1 as u64)?;
-        let key_dependencies = (0..key_count)
-            .map(|_| {
-                reader.array(3)?;
-                let role = KeyRoleV1::from_code(reader.code()?)
-                    .map_err(|_| WorldArtifactErrorV1::UnsupportedValue)?;
-                Ok(WorldArtifactKeyDependencyV1 {
-                    role,
-                    identity_digest: Hash::from_bytes(reader.blob()?),
-                    owner: reader.blob()?,
+        reader
+            .array(13)
+            .and_then(|()| reader.magic())
+            .and_then(|()| reader.version())
+            .and_then(|()| reader.native_header())
+            .and_then(|header| reader.policy_lease().map(|policy| (header, policy)))
+            .and_then(|(header, policy)| {
+                reader
+                    .key_dependencies()
+                    .map(|key_dependencies| (header, policy, key_dependencies))
+            })
+            .and_then(|(header, policy, key_dependencies)| {
+                reader.child_node_hashes().map(|child_node_hashes| {
+                    WorldArtifactLeafInputV1 {
+                        scope: header.scope,
+                        kind: header.kind,
+                        native_digest: header.native_digest,
+                        native_byte_length: header.native_byte_length,
+                        owner: header.owner,
+                        data_class: policy.data_class,
+                        optionality: policy.optionality,
+                        transition: policy.transition,
+                        source_lease_hash: policy.source_lease_hash,
+                        key_dependencies,
+                        child_node_hashes,
+                    }
                 })
             })
-            .collect::<Result<Vec<_>, WorldArtifactErrorV1>>()?;
-        let child_count = reader.bounded_count(MAX_WORLD_ARTIFACT_CHILDREN_V1 as u64)?;
-        let child_node_hashes = (0..child_count)
-            .map(|_| reader.blob().map(Hash::from_bytes))
-            .collect::<Result<Vec<_>, _>>()?;
-        let leaf = Self::new(WorldArtifactLeafInputV1 {
-            scope,
-            kind,
-            native_digest,
-            native_byte_length,
-            owner,
-            data_class,
-            optionality,
-            transition,
-            source_lease_hash,
-            key_dependencies,
-            child_node_hashes,
-        })?;
-        if bytes != leaf.to_canonical_cbor() {
-            return Err(WorldArtifactErrorV1::NonCanonical);
-        }
-        Ok(leaf)
+            .and_then(Self::new)
+            .and_then(|leaf| {
+                if bytes == leaf.to_canonical_cbor() {
+                    Ok(leaf)
+                } else {
+                    Err(WorldArtifactErrorV1::NonCanonical)
+                }
+            })
     }
 }
 
@@ -348,7 +320,159 @@ struct Reader<'a> {
     offset: usize,
 }
 
+struct NativeHeaderV1 {
+    scope: Hash,
+    kind: WorldArtifactKindV1,
+    native_digest: Hash,
+    native_byte_length: u64,
+    owner: [u8; 32],
+}
+
+struct PolicyLeaseV1 {
+    data_class: ArtifactDataClassV1,
+    optionality: ArtifactOptionalityV1,
+    transition: ArtifactTransitionRuleV1,
+    source_lease_hash: Hash,
+}
+
 impl<'a> Reader<'a> {
+    fn magic(&mut self) -> Result<(), WorldArtifactErrorV1> {
+        self.blob::<4>().and_then(|magic| {
+            if magic == *b"WAL1" {
+                Ok(())
+            } else {
+                Err(WorldArtifactErrorV1::InvalidEncoding)
+            }
+        })
+    }
+
+    fn version(&mut self) -> Result<(), WorldArtifactErrorV1> {
+        self.head(0).and_then(|version| {
+            if version == 1 {
+                Ok(())
+            } else {
+                Err(WorldArtifactErrorV1::UnsupportedValue)
+            }
+        })
+    }
+
+    fn native_header(&mut self) -> Result<NativeHeaderV1, WorldArtifactErrorV1> {
+        self.blob()
+            .map(Hash::from_bytes)
+            .and_then(|scope| {
+                self.code()
+                    .and_then(WorldArtifactKindV1::from_code)
+                    .map(|kind| (scope, kind))
+            })
+            .and_then(|(scope, kind)| {
+                self.blob()
+                    .map(Hash::from_bytes)
+                    .map(|native_digest| (scope, kind, native_digest))
+            })
+            .and_then(|(scope, kind, native_digest)| {
+                self.head(0)
+                    .map(|native_byte_length| (scope, kind, native_digest, native_byte_length))
+            })
+            .and_then(|(scope, kind, native_digest, native_byte_length)| {
+                self.blob().map(|owner| NativeHeaderV1 {
+                    scope,
+                    kind,
+                    native_digest,
+                    native_byte_length,
+                    owner,
+                })
+            })
+    }
+
+    fn policy_lease(&mut self) -> Result<PolicyLeaseV1, WorldArtifactErrorV1> {
+        self.code()
+            .and_then(|code| {
+                decode_code(
+                    code,
+                    &[
+                        ArtifactDataClassV1::PrivateSubjectData,
+                        ArtifactDataClassV1::ConsentedSharedData,
+                        ArtifactDataClassV1::PublicRecord,
+                        ArtifactDataClassV1::AggregateData,
+                        ArtifactDataClassV1::StructuralAuditMetadata,
+                    ],
+                )
+            })
+            .and_then(|data_class| {
+                self.code()
+                    .and_then(|code| {
+                        decode_code(
+                            code,
+                            &[
+                                ArtifactOptionalityV1::Required,
+                                ArtifactOptionalityV1::Optional,
+                            ],
+                        )
+                    })
+                    .map(|optionality| (data_class, optionality))
+            })
+            .and_then(|(data_class, optionality)| {
+                self.code()
+                    .and_then(|code| {
+                        decode_code(
+                            code,
+                            &[
+                                ArtifactTransitionRuleV1::PreserveExact,
+                                ArtifactTransitionRuleV1::RedactViews,
+                                ArtifactTransitionRuleV1::RetainStructure,
+                                ArtifactTransitionRuleV1::Remove,
+                            ],
+                        )
+                    })
+                    .map(|transition| (data_class, optionality, transition))
+            })
+            .and_then(|(data_class, optionality, transition)| {
+                self.blob()
+                    .map(Hash::from_bytes)
+                    .map(|source_lease_hash| PolicyLeaseV1 {
+                        data_class,
+                        optionality,
+                        transition,
+                        source_lease_hash,
+                    })
+            })
+    }
+
+    fn key_dependencies(&mut self) -> Result<Vec<WorldArtifactKeyDependencyV1>, WorldArtifactErrorV1> {
+        self.bounded_count(MAX_WORLD_ARTIFACT_KEYS_V1 as u64)
+            .and_then(|count| {
+                (0..count)
+                    .map(|_| self.key_dependency())
+                    .collect::<Result<Vec<_>, WorldArtifactErrorV1>>()
+            })
+    }
+
+    fn key_dependency(&mut self) -> Result<WorldArtifactKeyDependencyV1, WorldArtifactErrorV1> {
+        self.array(3)
+            .and_then(|()| self.code())
+            .and_then(|code| {
+                KeyRoleV1::from_code(code).map_err(|_| WorldArtifactErrorV1::UnsupportedValue)
+            })
+            .and_then(|role| {
+                self.blob().map(Hash::from_bytes).and_then(|identity_digest| {
+                    self.blob().map(|owner| WorldArtifactKeyDependencyV1 {
+                        role,
+                        identity_digest,
+                        owner,
+                    })
+                })
+            })
+    }
+
+    fn child_node_hashes(&mut self) -> Result<Vec<Hash>, WorldArtifactErrorV1> {
+        self.bounded_count(MAX_WORLD_ARTIFACT_CHILDREN_V1 as u64)
+            .and_then(|count| {
+                (0..count)
+                    .map(|_| self.blob().map(Hash::from_bytes))
+                    .collect::<Result<Vec<_>, WorldArtifactErrorV1>>()
+            })
+    }
+
     fn take(&mut self, length: usize) -> Result<&'a [u8], WorldArtifactErrorV1> {
         // offset<=16384; requested fixed native widths are at most32.
         let end = self.offset + length;
@@ -359,50 +483,59 @@ impl<'a> Reader<'a> {
     }
 
     fn head(&mut self, major: u8) -> Result<u64, WorldArtifactErrorV1> {
-        let initial = self.take(1)?[0];
-        if initial >> 5 != major {
-            return Err(WorldArtifactErrorV1::InvalidEncoding);
-        }
-        match initial & 31 {
-            value @ 0..=23 => Ok(u64::from(value)),
-            argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
-                bytes
-                    .iter()
-                    .fold(0, |value, byte| (value << 8) | u64::from(*byte))
-            }),
-            _ => Err(WorldArtifactErrorV1::InvalidEncoding),
-        }
+        self.take(1).and_then(|bytes| {
+            let initial = bytes[0];
+            if initial >> 5 != major {
+                return Err(WorldArtifactErrorV1::InvalidEncoding);
+            }
+            match initial & 31 {
+                value @ 0..=23 => Ok(u64::from(value)),
+                argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
+                    bytes
+                        .iter()
+                        .fold(0, |value, byte| (value << 8) | u64::from(*byte))
+                }),
+                _ => Err(WorldArtifactErrorV1::InvalidEncoding),
+            }
+        })
     }
 
     fn code(&mut self) -> Result<u8, WorldArtifactErrorV1> {
-        u8::try_from(self.head(0)?).map_err(|_| WorldArtifactErrorV1::FieldOutOfBounds)
+        self.head(0).and_then(|value| {
+            u8::try_from(value).map_err(|_| WorldArtifactErrorV1::FieldOutOfBounds)
+        })
     }
 
     fn array(&mut self, count: u64) -> Result<(), WorldArtifactErrorV1> {
-        if self.head(4)? == count {
-            Ok(())
-        } else {
-            Err(WorldArtifactErrorV1::InvalidEncoding)
-        }
+        self.head(4).and_then(|actual| {
+            if actual == count {
+                Ok(())
+            } else {
+                Err(WorldArtifactErrorV1::InvalidEncoding)
+            }
+        })
     }
 
     fn bounded_count(&mut self, maximum: u64) -> Result<u64, WorldArtifactErrorV1> {
-        let count = self.head(4)?;
-        if count > maximum {
-            Err(WorldArtifactErrorV1::FieldOutOfBounds)
-        } else {
-            Ok(count)
-        }
+        self.head(4).and_then(|count| {
+            if count > maximum {
+                Err(WorldArtifactErrorV1::FieldOutOfBounds)
+            } else {
+                Ok(count)
+            }
+        })
     }
 
     fn blob<const N: usize>(&mut self) -> Result<[u8; N], WorldArtifactErrorV1> {
-        if self.head(2)? != N as u64 {
-            return Err(WorldArtifactErrorV1::InvalidEncoding);
-        }
-        self.take(N).map(|bytes| {
-            let mut out = [0; N];
-            out.copy_from_slice(bytes);
-            out
+        self.head(2).and_then(|length| {
+            if length != N as u64 {
+                return Err(WorldArtifactErrorV1::InvalidEncoding);
+            }
+            self.take(N).map(|bytes| {
+                let mut out = [0; N];
+                out.copy_from_slice(bytes);
+                out
+            })
         })
     }
 }
