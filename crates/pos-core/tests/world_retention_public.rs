@@ -310,6 +310,27 @@ fn truncation_oversize_and_wrong_outer_shapes_reject() -> TestResult {
 }
 
 #[test]
+fn wrong_cardinality_rejects_an_otherwise_complete_valid_body() -> TestResult {
+    let policy = WorldRetentionPolicyV1::new(policy_input())?;
+    let lease = WorldRetentionLeaseV1::new(&policy, lease_input(&policy))?;
+    for count in [0, 6, 8, 9, 11, 23] {
+        let mut bytes = policy.to_canonical_cbor();
+        bytes[0] = 0x80 | count;
+        assert_eq!(
+            WorldRetentionPolicyV1::from_canonical_cbor(&bytes),
+            Err(WorldRetentionErrorV1::InvalidEncoding)
+        );
+        let mut bytes = lease.to_canonical_cbor();
+        bytes[0] = 0x80 | count;
+        assert_eq!(
+            WorldRetentionLeaseV1::from_canonical_cbor(&bytes, &policy),
+            Err(WorldRetentionErrorV1::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn nonpreferred_encodings_and_trailing_bytes_reject() -> TestResult {
     let policy = WorldRetentionPolicyV1::new(policy_input())?;
     let lease = WorldRetentionLeaseV1::new(&policy, lease_input(&policy))?;
