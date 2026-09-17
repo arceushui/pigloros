@@ -228,8 +228,9 @@ impl WorldArtifactLeafV1 {
                     .map(|key_dependencies| (header, policy, key_dependencies))
             })
             .and_then(|(header, policy, key_dependencies)| {
-                reader.child_node_hashes().map(|child_node_hashes| {
-                    WorldArtifactLeafInputV1 {
+                reader
+                    .child_node_hashes()
+                    .map(|child_node_hashes| WorldArtifactLeafInputV1 {
                         scope: header.scope,
                         kind: header.kind,
                         native_digest: header.native_digest,
@@ -241,8 +242,7 @@ impl WorldArtifactLeafV1 {
                         source_lease_hash: policy.source_lease_hash,
                         key_dependencies,
                         child_node_hashes,
-                    }
-                })
+                    })
             })
             .and_then(Self::new)
             .and_then(|leaf| {
@@ -438,7 +438,9 @@ impl<'a> Reader<'a> {
             })
     }
 
-    fn key_dependencies(&mut self) -> Result<Vec<WorldArtifactKeyDependencyV1>, WorldArtifactErrorV1> {
+    fn key_dependencies(
+        &mut self,
+    ) -> Result<Vec<WorldArtifactKeyDependencyV1>, WorldArtifactErrorV1> {
         self.bounded_count(MAX_WORLD_ARTIFACT_KEYS_V1 as u64)
             .and_then(|count| {
                 (0..count)
@@ -454,13 +456,15 @@ impl<'a> Reader<'a> {
                 KeyRoleV1::from_code(code).map_err(|_| WorldArtifactErrorV1::UnsupportedValue)
             })
             .and_then(|role| {
-                self.blob().map(Hash::from_bytes).and_then(|identity_digest| {
-                    self.blob().map(|owner| WorldArtifactKeyDependencyV1 {
-                        role,
-                        identity_digest,
-                        owner,
+                self.blob()
+                    .map(Hash::from_bytes)
+                    .and_then(|identity_digest| {
+                        self.blob().map(|owner| WorldArtifactKeyDependencyV1 {
+                            role,
+                            identity_digest,
+                            owner,
+                        })
                     })
-                })
             })
     }
 
