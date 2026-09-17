@@ -50,7 +50,22 @@ impl WorldArtifactKindV1 {
     /// Exact accepted wire code, independent of native owner verification.
     #[must_use]
     pub const fn code(self) -> u8 {
-        self as u8
+        match self {
+            Self::OutputPolicy => 0,
+            Self::ExecutableBudgetPolicy => 1,
+            Self::RetentionPolicy => 2,
+            Self::RetentionLease => 3,
+            Self::BaseConfiguration => 4,
+            Self::ExecutionProfile => 5,
+            Self::AudiencePolicy => 6,
+            Self::Schema => 7,
+            Self::ReducerImplementation => 8,
+            Self::RuntimeIdentity => 9,
+            Self::PluginImplementationIdentity => 10,
+            Self::KeyDependencyEvidence => 11,
+            Self::TimelinePayload => 12,
+            Self::OptionalView => 13,
+        }
     }
 
     /// Decode only the accepted closed artifact kinds.
@@ -58,26 +73,23 @@ impl WorldArtifactKindV1 {
     /// # Errors
     /// Rejects unknown kind codes, including unapproved proposed extensions.
     pub fn from_code(code: u8) -> Result<Self, WorldArtifactErrorV1> {
-        const KINDS: [WorldArtifactKindV1; 14] = [
-            WorldArtifactKindV1::OutputPolicy,
-            WorldArtifactKindV1::ExecutableBudgetPolicy,
-            WorldArtifactKindV1::RetentionPolicy,
-            WorldArtifactKindV1::RetentionLease,
-            WorldArtifactKindV1::BaseConfiguration,
-            WorldArtifactKindV1::ExecutionProfile,
-            WorldArtifactKindV1::AudiencePolicy,
-            WorldArtifactKindV1::Schema,
-            WorldArtifactKindV1::ReducerImplementation,
-            WorldArtifactKindV1::RuntimeIdentity,
-            WorldArtifactKindV1::PluginImplementationIdentity,
-            WorldArtifactKindV1::KeyDependencyEvidence,
-            WorldArtifactKindV1::TimelinePayload,
-            WorldArtifactKindV1::OptionalView,
-        ];
-        KINDS
-            .get(usize::from(code))
-            .copied()
-            .ok_or(WorldArtifactErrorV1::UnsupportedValue)
+        match code {
+            0 => Ok(Self::OutputPolicy),
+            1 => Ok(Self::ExecutableBudgetPolicy),
+            2 => Ok(Self::RetentionPolicy),
+            3 => Ok(Self::RetentionLease),
+            4 => Ok(Self::BaseConfiguration),
+            5 => Ok(Self::ExecutionProfile),
+            6 => Ok(Self::AudiencePolicy),
+            7 => Ok(Self::Schema),
+            8 => Ok(Self::ReducerImplementation),
+            9 => Ok(Self::RuntimeIdentity),
+            10 => Ok(Self::PluginImplementationIdentity),
+            11 => Ok(Self::KeyDependencyEvidence),
+            12 => Ok(Self::TimelinePayload),
+            13 => Ok(Self::OptionalView),
+            _ => Err(WorldArtifactErrorV1::UnsupportedValue),
+        }
     }
 }
 
