@@ -32,6 +32,7 @@ pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
 pub mod plugin;
+pub mod retention;
 pub mod state;
 pub mod store;
 pub mod timeline;
