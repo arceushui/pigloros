@@ -1,0 +1,49 @@
+{
+  "scope": "adr079-probe-only",
+  "native_classes": ["aarch64", "x86_64"],
+  "limits": {
+    "max_vms_per_job": 1,
+    "max_parallel_native_jobs": 2,
+    "guest_vcpus": 2,
+    "guest_memory_bytes": 4294967296,
+    "guest_writable_disk_bytes": 17179869184,
+    "host_build_memory_bytes": 12884901888,
+    "host_build_disk_bytes": 85899345920,
+    "host_build_timeout_seconds": 2700,
+    "probe_timeout_seconds": 900,
+    "job_timeout_seconds": 5400,
+    "max_artifact_files": 128,
+    "max_individual_artifact_bytes": 134217728,
+    "max_aggregate_artifact_bytes": 536870912,
+    "max_expanded_artifact_bytes": 536870912,
+    "max_path_depth": 8,
+    "max_path_bytes": 256,
+    "reporter_vcpus": 2,
+    "reporter_memory_bytes": 2147483648,
+    "reporter_timeout_seconds": 300,
+    "external_cleanup_timeout_seconds": 120
+  },
+  "artifact_policy": {
+    "allow_symlinks": false,
+    "allow_hardlinks": false,
+    "allow_special_files": false,
+    "allow_sparse_files": false,
+    "allow_absolute_paths": false,
+    "allow_parent_components": false,
+    "allow_duplicate_paths": false,
+    "allow_nested_archives": false,
+    "reject_missing_corrupt_mismatched_inventory": true
+  },
+  "activation_requirements": [
+    "exact-source-workflow-and-preflight-identities",
+    "digest-pinned-complete-guest-image-and-runtime-closure",
+    "exact-rust-llvm-runtime-tools-and-object-inventory",
+    "verified-resource-enforcement-and-negative-controls",
+    "read-only-source-and-unprivileged-secretless-build",
+    "restricted-build-egress-and-disabled-privileged-test-egress",
+    "outside-guest-destruction-owner-and-independent-verifier"
+  ],
+  "on_unproved_requirement": "do-not-start-privileged-execution",
+  "on_limit_exceeded": "fail-and-destroy-guest",
+  "on_unverified_destruction": "fail-with-retained-residual-state-evidence"
+}
