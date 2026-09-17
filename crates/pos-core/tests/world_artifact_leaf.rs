@@ -217,7 +217,10 @@ fn maximum_lists_and_full_triple_order_are_preserved() -> TestResult {
         key(KeyRoleV1::SubjectAttributionSigning, ordered_hash(1), 0),
     ];
     let leaf = WorldArtifactLeafV1::new(fields)?;
-    assert_eq!(WorldArtifactLeafV1::from_canonical_cbor(&leaf.to_canonical_cbor())?, leaf);
+    assert_eq!(
+        WorldArtifactLeafV1::from_canonical_cbor(&leaf.to_canonical_cbor())?,
+        leaf
+    );
     Ok(())
 }
 
@@ -236,16 +239,25 @@ fn zero_content_addresses_and_excessive_lists_are_rejected() {
             )),
             _ => fields.child_node_hashes.push(Hash::zero()),
         }
-        assert_eq!(WorldArtifactLeafV1::new(fields), Err(WorldArtifactErrorV1::FieldOutOfBounds));
+        assert_eq!(
+            WorldArtifactLeafV1::new(fields),
+            Err(WorldArtifactErrorV1::FieldOutOfBounds)
+        );
     }
     let mut fields = input();
     fields.key_dependencies = (1..=17)
         .map(|ordinal| key(KeyRoleV1::SubjectDataEncryption, ordered_hash(ordinal), 9))
         .collect();
-    assert_eq!(WorldArtifactLeafV1::new(fields), Err(WorldArtifactErrorV1::FieldOutOfBounds));
+    assert_eq!(
+        WorldArtifactLeafV1::new(fields),
+        Err(WorldArtifactErrorV1::FieldOutOfBounds)
+    );
     let mut fields = input();
     fields.child_node_hashes = (1..=257).map(ordered_hash).collect();
-    assert_eq!(WorldArtifactLeafV1::new(fields), Err(WorldArtifactErrorV1::FieldOutOfBounds));
+    assert_eq!(
+        WorldArtifactLeafV1::new(fields),
+        Err(WorldArtifactErrorV1::FieldOutOfBounds)
+    );
 }
 
 #[test]
@@ -383,7 +395,10 @@ fn nested_key_rows_and_counts_are_bounded_before_allocation() -> TestResult {
         row[0] = Value::Integer(role.into());
         let mut fields = wire();
         fields[11] = Value::Array(vec![Value::Array(row)]);
-        assert_eq!(WorldArtifactLeafV1::from_canonical_cbor(&encode(fields)?), Err(error));
+        assert_eq!(
+            WorldArtifactLeafV1::from_canonical_cbor(&encode(fields)?),
+            Err(error)
+        );
     }
     for (position, count) in [(11, 17), (12, 257)] {
         let mut fields = wire();
@@ -520,7 +535,10 @@ fn structural_registration_is_not_native_verification() -> TestResult {
     // IDs are opaque fixed-width bytes, not content addresses. Actual owner,
     // native length, source lease and reference membership need native proofs.
     let leaf = WorldArtifactLeafV1::new(fields)?;
-    assert_eq!(WorldArtifactLeafV1::from_canonical_cbor(&leaf.to_canonical_cbor())?, leaf);
+    assert_eq!(
+        WorldArtifactLeafV1::from_canonical_cbor(&leaf.to_canonical_cbor())?,
+        leaf
+    );
     for error in [
         WorldArtifactErrorV1::InvalidEncoding,
         WorldArtifactErrorV1::NonCanonical,
