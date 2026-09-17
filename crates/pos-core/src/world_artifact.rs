@@ -299,17 +299,17 @@ fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     let tag = major << 5;
     match value {
         0..=23 => out.push(tag | bytes[7]),
-        24..=255 => out.extend_from_slice(&[tag | 24, bytes[7]]),
+        24..=255 => out.extend_from_slice(&[tag | 0x18, bytes[7]]),
         256..=65_535 => {
-            out.push(tag | 25);
+            out.push(tag | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
         65_536..=4_294_967_295 => {
-            out.push(tag | 26);
+            out.push(tag | 0x1a);
             out.extend_from_slice(&bytes[4..]);
         }
         _ => {
-            out.push(tag | 27);
+            out.push(tag | 0x1b);
             out.extend_from_slice(&bytes);
         }
     }
