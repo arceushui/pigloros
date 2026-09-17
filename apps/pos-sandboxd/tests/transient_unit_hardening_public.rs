@@ -10,14 +10,77 @@ use zvariant::{serialized::Context, to_bytes, Value, LE};
 fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips(
 ) -> Result<(), Box<dyn Error>> {
     let properties = TransientUnitHardening::requested_properties();
-    assert_eq!(properties.len(), 29);
-    assert_eq!(properties[0], SystemdHardeningProperty::TypeExec);
-    assert_eq!(properties[28], SystemdHardeningProperty::SendSigKill);
+    let expected = [
+        ("Type", "s", SystemdHardeningValue::String("exec")),
+        ("DynamicUser", "b", SystemdHardeningValue::Bool(true)),
+        ("NoNewPrivileges", "b", SystemdHardeningValue::Bool(true)),
+        ("PrivateDevices", "b", SystemdHardeningValue::Bool(true)),
+        ("PrivateIPC", "b", SystemdHardeningValue::Bool(true)),
+        ("PrivateMounts", "b", SystemdHardeningValue::Bool(true)),
+        ("PrivateNetwork", "b", SystemdHardeningValue::Bool(true)),
+        ("PrivatePIDs", "s", SystemdHardeningValue::String("yes")),
+        ("PrivateUsersEx", "s", SystemdHardeningValue::String("self")),
+        ("CapabilityBoundingSet", "t", SystemdHardeningValue::U64(0)),
+        ("AmbientCapabilities", "t", SystemdHardeningValue::U64(0)),
+        (
+            "ProtectSystem",
+            "s",
+            SystemdHardeningValue::String("strict"),
+        ),
+        ("ProtectHome", "s", SystemdHardeningValue::String("yes")),
+        (
+            "ProtectControlGroupsEx",
+            "s",
+            SystemdHardeningValue::String("strict"),
+        ),
+        (
+            "ProtectKernelTunables",
+            "b",
+            SystemdHardeningValue::Bool(true),
+        ),
+        (
+            "ProtectKernelModules",
+            "b",
+            SystemdHardeningValue::Bool(true),
+        ),
+        ("ProtectKernelLogs", "b", SystemdHardeningValue::Bool(true)),
+        ("ProtectClock", "b", SystemdHardeningValue::Bool(true)),
+        ("ProtectHostname", "b", SystemdHardeningValue::Bool(true)),
+        (
+            "ProtectProc",
+            "s",
+            SystemdHardeningValue::String("invisible"),
+        ),
+        ("ProcSubset", "s", SystemdHardeningValue::String("pid")),
+        (
+            "RestrictNamespaces",
+            "t",
+            SystemdHardeningValue::U64(0x7e02_0080),
+        ),
+        ("RestrictSUIDSGID", "b", SystemdHardeningValue::Bool(true)),
+        ("RestrictRealtime", "b", SystemdHardeningValue::Bool(true)),
+        ("LockPersonality", "b", SystemdHardeningValue::Bool(true)),
+        (
+            "SystemCallArchitectures",
+            "as",
+            SystemdHardeningValue::StringArray(&["native"]),
+        ),
+        ("UMask", "u", SystemdHardeningValue::U32(0o077)),
+        (
+            "KillMode",
+            "s",
+            SystemdHardeningValue::String("control-group"),
+        ),
+        ("SendSIGKILL", "b", SystemdHardeningValue::Bool(true)),
+    ];
+    assert_eq!(properties.len(), expected.len());
 
-    for property in properties {
+    for (property, (name, signature, value)) in properties.iter().zip(expected) {
+        assert_eq!(property.name(), name);
+        assert_eq!(property.value(), value);
+        assert_eq!(property.value().dbus_signature(), signature);
         match property.value() {
             SystemdHardeningValue::Bool(value) => {
-                assert_eq!(property.value().dbus_signature(), "b");
                 assert_eq!(Value::from(value).value_signature().to_string(), "b");
                 let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
                 let (decoded, consumed): (bool, usize) = encoded.deserialize()?;
@@ -25,7 +88,6 @@ fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips
                 assert_eq!(consumed, encoded.len());
             }
             SystemdHardeningValue::String(value) => {
-                assert_eq!(property.value().dbus_signature(), "s");
                 assert_eq!(Value::from(value).value_signature().to_string(), "s");
                 let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
                 let (decoded, consumed): (String, usize) = encoded.deserialize()?;
@@ -33,7 +95,6 @@ fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips
                 assert_eq!(consumed, encoded.len());
             }
             SystemdHardeningValue::U64(value) => {
-                assert_eq!(property.value().dbus_signature(), "t");
                 assert_eq!(Value::from(value).value_signature().to_string(), "t");
                 let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
                 let (decoded, consumed): (u64, usize) = encoded.deserialize()?;
@@ -41,7 +102,6 @@ fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips
                 assert_eq!(consumed, encoded.len());
             }
             SystemdHardeningValue::U32(value) => {
-                assert_eq!(property.value().dbus_signature(), "u");
                 assert_eq!(Value::from(value).value_signature().to_string(), "u");
                 let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
                 let (decoded, consumed): (u32, usize) = encoded.deserialize()?;
@@ -49,7 +109,6 @@ fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips
                 assert_eq!(consumed, encoded.len());
             }
             SystemdHardeningValue::StringArray(value) => {
-                assert_eq!(property.value().dbus_signature(), "as");
                 let value = value.iter().map(ToString::to_string).collect::<Vec<_>>();
                 assert_eq!(
                     Value::from(value.clone()).value_signature().to_string(),
