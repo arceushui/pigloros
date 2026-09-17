@@ -160,7 +160,7 @@ fn public_constructor_accepts_exact_limits_and_rejects_one_more(
     let max_id = "a".repeat(128);
     assert!(WorldConsumerV1::new(max_id, hash(1), hash(2), hash(3)).is_ok());
     let consumers = (0_u8..64)
-        .map(|value| consumer(&format!("{value:03}"), value + 1))
+        .map(|value| consumer(&format!("{value:03}{}", "a".repeat(125)), value + 1))
         .collect::<Result<Vec<_>, _>>()?;
     let producers = (0_u16..256)
         .map(|value| {
@@ -177,7 +177,12 @@ fn public_constructor_accepts_exact_limits_and_rejects_one_more(
         producers,
         optional_view_roots: views,
     })?;
-    assert_eq!(WorldConsumerSetV1::decode(&maximum.encode()), Ok(maximum));
+    let encoded_maximum = maximum.encode();
+    // Independent preferred-CBOR size: header41 + consumer-array2 +
+    // 64*(row1 + text130 + 3*hash34) + producer-array3 +
+    // 256*(row1 + plugin17 + hash34) + view-array3 + 256*hash34.
+    assert_eq!(encoded_maximum.len(), 36_977);
+    assert_eq!(WorldConsumerSetV1::decode(&encoded_maximum), Ok(maximum));
     let too_many = (0_u8..65)
         .map(|value| consumer(&format!("{value:03}"), value + 1))
         .collect::<Result<Vec<_>, _>>()?;
