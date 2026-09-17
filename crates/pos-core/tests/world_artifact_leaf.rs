@@ -8,7 +8,7 @@ use pos_core::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn input() -> WorldArtifactLeafInputV1 {
+const fn input() -> WorldArtifactLeafInputV1 {
     WorldArtifactLeafInputV1 {
         scope: Hash::from_bytes([1; 32]),
         kind: WorldArtifactKindV1::TimelinePayload,
@@ -247,7 +247,7 @@ fn zero_content_addresses_and_excessive_lists_are_rejected() {
             3 => {
                 fields
                     .key_dependencies
-                    .push(key(KeyRoleV1::SubjectDataEncryption, Hash::zero(), 1))
+                    .push(key(KeyRoleV1::SubjectDataEncryption, Hash::zero(), 1));
             }
             _ => fields.child_node_hashes.push(Hash::zero()),
         }
@@ -427,7 +427,7 @@ fn nested_key_rows_and_counts_are_bounded_before_allocation() -> TestResult {
         let mut bytes = encode(wire())?;
         let offset = bytes.len() - if position == 11 { 2 } else { 1 };
         bytes.splice(
-            offset..offset + 1,
+            offset..=offset,
             [0x9b, 255, 255, 255, 255, 255, 255, 255, 255],
         );
         assert_eq!(
