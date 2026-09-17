@@ -4,7 +4,7 @@ use pos_core::{
 };
 use ulid::Ulid;
 
-fn hash(byte: u8) -> Hash {
+const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 fn indexed_hash(index: u16) -> Hash {
