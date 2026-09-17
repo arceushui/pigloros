@@ -245,9 +245,11 @@ fn zero_content_addresses_and_excessive_lists_are_rejected() {
             1 => fields.native_digest = Hash::zero(),
             2 => fields.source_lease_hash = Hash::zero(),
             3 => {
-                fields
-                    .key_dependencies
-                    .push(key(KeyRoleV1::SubjectDataEncryption, Hash::zero(), 1));
+                fields.key_dependencies.push(key(
+                    KeyRoleV1::SubjectDataEncryption,
+                    Hash::zero(),
+                    1,
+                ));
             }
             _ => fields.child_node_hashes.push(Hash::zero()),
         }
@@ -426,7 +428,10 @@ fn nested_key_rows_and_counts_are_bounded_before_allocation() -> TestResult {
     for position in [11, 12] {
         let mut bytes = encode(wire())?;
         let offset = bytes.len() - if position == 11 { 2 } else { 1 };
-        bytes.splice(offset..=offset, [0x9b, 255, 255, 255, 255, 255, 255, 255, 255]);
+        bytes.splice(
+            offset..=offset,
+            [0x9b, 255, 255, 255, 255, 255, 255, 255, 255],
+        );
         assert_eq!(
             WorldArtifactLeafV1::from_canonical_cbor(&bytes),
             Err(WorldArtifactErrorV1::FieldOutOfBounds)
