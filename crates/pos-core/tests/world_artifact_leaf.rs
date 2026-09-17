@@ -114,7 +114,16 @@ fn all_closed_kind_codes_and_integer_width_boundaries_roundtrip() -> TestResult 
         assert_eq!(kind.code(), code);
         assert_eq!(WorldArtifactKindV1::from_code(code)?, kind);
         for length in [
-            0, 23, 24, 255, 256, 65_535, 65_536, 4_294_967_295, 4_294_967_296, u64::MAX,
+            0,
+            23,
+            24,
+            255,
+            256,
+            65_535,
+            65_536,
+            4_294_967_295,
+            4_294_967_296,
+            u64::MAX,
         ] {
             let mut fields = input();
             fields.kind = kind;
@@ -146,7 +155,10 @@ fn classifications_and_registry_roles_keep_their_exact_wire_codes() -> TestResul
         ArtifactDataClassV1::AggregateData,
         ArtifactDataClassV1::StructuralAuditMetadata,
     ];
-    let optionalities = [ArtifactOptionalityV1::Required, ArtifactOptionalityV1::Optional];
+    let optionalities = [
+        ArtifactOptionalityV1::Required,
+        ArtifactOptionalityV1::Optional,
+    ];
     let transitions = [
         ArtifactTransitionRuleV1::PreserveExact,
         ArtifactTransitionRuleV1::RedactViews,
@@ -232,11 +244,11 @@ fn zero_content_addresses_and_excessive_lists_are_rejected() {
             0 => fields.scope = Hash::zero(),
             1 => fields.native_digest = Hash::zero(),
             2 => fields.source_lease_hash = Hash::zero(),
-            3 => fields.key_dependencies.push(key(
-                KeyRoleV1::SubjectDataEncryption,
-                Hash::zero(),
-                1,
-            )),
+            3 => {
+                fields
+                    .key_dependencies
+                    .push(key(KeyRoleV1::SubjectDataEncryption, Hash::zero(), 1))
+            }
             _ => fields.child_node_hashes.push(Hash::zero()),
         }
         assert_eq!(
@@ -283,7 +295,10 @@ fn duplicate_and_reversed_lists_are_not_sorted_or_deduplicated() -> TestResult {
             Err(WorldArtifactErrorV1::InvalidDependencyOrder)
         );
     }
-    for children in [vec![ordered_hash(2), ordered_hash(1)], vec![ordered_hash(1); 2]] {
+    for children in [
+        vec![ordered_hash(2), ordered_hash(1)],
+        vec![ordered_hash(1); 2],
+    ] {
         let mut changed = fields.clone();
         changed.child_node_hashes = children;
         assert_eq!(
@@ -411,7 +426,10 @@ fn nested_key_rows_and_counts_are_bounded_before_allocation() -> TestResult {
     for position in [11, 12] {
         let mut bytes = encode(wire())?;
         let offset = bytes.len() - if position == 11 { 2 } else { 1 };
-        bytes.splice(offset..offset + 1, [0x9b, 255, 255, 255, 255, 255, 255, 255, 255]);
+        bytes.splice(
+            offset..offset + 1,
+            [0x9b, 255, 255, 255, 255, 255, 255, 255, 255],
+        );
         assert_eq!(
             WorldArtifactLeafV1::from_canonical_cbor(&bytes),
             Err(WorldArtifactErrorV1::FieldOutOfBounds)
