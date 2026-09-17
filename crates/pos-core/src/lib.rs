@@ -30,6 +30,7 @@ pub mod key_registry;
 pub mod manifest;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
+pub mod output_policy;
 pub mod pipeline;
 pub mod plugin;
 pub mod state;
