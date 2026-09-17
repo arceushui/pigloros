@@ -32,6 +32,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install pinned formatter for isolated diagnostics
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt
+
+      - name: Report exact artifact-leaf formatting diff
+        run: |
+          rustfmt --edition 2021 --check \
+            crates/pos-core/src/world_artifact.rs \
+            crates/pos-core/tests/world_artifact_leaf.rs
+
       - name: Trunk Check
         uses: trunk-io/trunk-action@e1234e67a86010d61ddac8d8ebf4b783e2ffd2fa # v2.0.0
         with:
