@@ -35,6 +35,7 @@ pub mod plugin;
 pub mod state;
 pub mod store;
 pub mod timeline;
+pub mod world_consumer_set;
 pub mod world_transform;
 
 // Re-export commonly used types at the crate root.
@@ -186,6 +187,11 @@ pub use store::{
     EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
+pub use world_consumer_set::{
+    WorldConsumerSetErrorV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldProducerV1, WORLD_CONSUMER_SET_MAX_BYTES, WORLD_CONSUMER_SET_MAX_CONSUMERS,
+    WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES, WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS,
+};
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
     WorldOriginReferenceV1, WorldOriginRegistryV1, WorldOriginV1, WorldTransformError,
