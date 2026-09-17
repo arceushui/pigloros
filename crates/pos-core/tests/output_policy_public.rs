@@ -95,7 +95,7 @@ fn declaration_counts_and_utf8_bounds_are_exact() -> TestResult {
     }
     let over = (0..257).map(|index| declaration(&format!("{index:03}"))).collect::<Result<Vec<_>, _>>()?;
     assert_eq!(OutputPolicyV1::new(input(over)), Err(OutputPolicyErrorV1::FieldOutOfBounds));
-    for kind in ["".to_owned(), "é".repeat(65)] {
+    for kind in [String::new(), "é".repeat(65)] {
         assert_eq!(declaration(&kind), Err(OutputPolicyErrorV1::FieldOutOfBounds));
     }
     let unicode = declaration(&"é".repeat(64))?;
@@ -258,7 +258,7 @@ fn nested_cardinalities_and_declared_allocation_bounds_reject() -> TestResult {
         let mut value = base.clone(); replace(&mut value, &path, replacement)?;
         assert!(OutputPolicyV1::from_canonical_cbor(&encode(&value)?).is_err());
     }
-    let mut value = base.clone();
+    let mut value = base;
     let Value::Array(fields) = &mut value else { return Err("fixture shape".into()); };
     let row = fields[9].clone();
     let Value::Array(rows) = row else { return Err("fixture rows".into()); };
