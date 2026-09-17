@@ -1347,7 +1347,7 @@ impl ErasureExecutionHostV1 {
         let HostStateV1::Ready {
             generation,
             maximum_requests,
-            ..
+            request_count,
         } = self.state
         else {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
@@ -1361,6 +1361,9 @@ impl ErasureExecutionHostV1 {
             .filter(|inventory| inventory.generation() == generation)
             .cloned()
             .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+        if inventory.request_count() != request_count {
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
+        }
         Ok((generation, maximum_requests, inventory))
     }
 
@@ -1441,30 +1444,55 @@ impl ErasureExecutionHostV1 {
         &mut self,
         change: impl FnOnce(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        let HostStateV1::Ready {
-            maximum_requests: _maximum_requests,
-            request_count: 0,
-            ..
-        } = self.state
-        else {
-            return Err(ErasureHostErrorV1::RecoveryUnavailable);
-        };
+        self.apply_unaffected_topology_change(None, change)
+    }
+
+    fn apply_unaffected_topology_change(
+        &mut self,
+        parent: Option<TimelineId>,
+        change: impl FnOnce(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>,
+    ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
+        let (_generation, _maximum_requests, inventory) = self.ready_state()?;
+        if let Some(parent) = parent {
+            self.store
+                .host_store()
+                .get_timeline(parent)
+                .map_store_error()?
+                .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+            if !inventory
+                .fork_scope_requirements(parent)
+                .map_err(map_erasure_error)?
+                .is_empty()
+            {
+                return Err(ErasureHostErrorV1::Conflict);
+            }
+        }
         let limits = self.recovery_limits;
+        if inventory.request_count() != 0
+            && (self.authority.is_none() || self.coordinator.is_none())
+        {
+            return Err(ErasureHostErrorV1::AuthorizationDenied);
+        }
         let timeline = change(self.store.host_store()).map_store_error()?;
-        let Ok(inventory) = self
-            .store
-            .host_store()
-            .complete_erasure_inventory_snapshot_with_limits(limits)
-            .and_then(|snapshot| {
-                ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
-                    .verified_inventory_with_limits(limits)
-            })
-        else {
-            self.poison();
-            return Err(ErasureHostErrorV1::RecoveryUnavailable);
-        };
-        self.publish_inventory_with_limits(inventory, limits)
-            .map(|generation| (timeline, generation))
+        if inventory.request_count() == 0 {
+            let Ok(inventory) = self
+                .store
+                .host_store()
+                .complete_erasure_inventory_snapshot_with_limits(limits)
+                .and_then(|snapshot| {
+                    ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+                        .verified_inventory_with_limits(limits)
+                })
+            else {
+                self.poison();
+                return Err(ErasureHostErrorV1::RecoveryUnavailable);
+            };
+            self.publish_inventory_with_limits(inventory, limits)
+                .map(|generation| (timeline, generation))
+        } else {
+            self.install_inventory_from_coordinator_with_limits(limits)
+                .map(|generation| (timeline, generation))
+        }
     }
 
     #[cfg(test)]
@@ -1542,6 +1570,7 @@ impl ErasureExecutionHostV1 {
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureHostErrorV1> {
         let gate = Arc::clone(&self.gate);
         let mut transition_error = None;
+        let mut transition_host_error = None;
         let publication = {
             let mut fenced_transition = || {
                 let transition = (|| {
@@ -1550,7 +1579,15 @@ impl ErasureExecutionHostV1 {
                         .host_store()
                         .recover_fork_admission(input.operation)?
                     {
+                        if recovered.child().mode != input.child.mode
+                            || recovered.child().name != input.child.name
+                            || recovered.child().owner != input.child.owner
+                            || recovered.child().fork_point != input.child.fork_point
+                        {
+                            return Err(ErasureErrorV1::PolicyConflict);
+                        }
                         if recovered.successor_generation() != input.current_generation {
+                            transition_host_error = Some(ErasureHostErrorV1::StaleGeneration);
                             return Err(ErasureErrorV1::PolicyConflict);
                         }
                         return Ok((
@@ -1613,6 +1650,7 @@ impl ErasureExecutionHostV1 {
             Ok(publication) => Ok(publication),
             Err(error) => Err(self.handle_transition_failure(
                 transition_error,
+                transition_host_error,
                 error.into(),
                 self.recovery_limits,
             )),
@@ -1658,7 +1696,12 @@ impl ErasureExecutionHostV1 {
         let (inventory, result) = match publication {
             Ok(publication) => publication,
             Err(error) => {
-                return Err(self.handle_transition_failure(transition_error, error.into(), limits));
+                return Err(self.handle_transition_failure(
+                    transition_error,
+                    None,
+                    error.into(),
+                    limits,
+                ));
             }
         };
         let generation = inventory.generation();
@@ -1675,10 +1718,13 @@ impl ErasureExecutionHostV1 {
     fn handle_transition_failure(
         &mut self,
         transition_error: Option<ErasureErrorV1>,
+        transition_host_error: Option<ErasureHostErrorV1>,
         publication_error: ErasureHostErrorV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> ErasureHostErrorV1 {
-        let mapped = transition_error.map_or(publication_error, map_erasure_error);
+        let mapped = transition_host_error
+            .or_else(|| transition_error.map(map_erasure_error))
+            .unwrap_or(publication_error);
         if transition_error.is_some_and(is_non_poisoning_transition_error)
             && self
                 .install_inventory_from_coordinator_with_limits(limits)
@@ -1943,9 +1989,9 @@ impl ErasureCommandSenderV1<'_> {
 
     /// Create a root Timeline and publish its successor inventory generation.
     ///
-    /// Topology changes are admitted only for a positively verified empty
-    /// active-request inventory. Once any erasure request exists, topology
-    /// changes require the atomic scope-extension path rather than this seam.
+    /// A new root is positively checked against the complete inventory before
+    /// its successor generation is published. Active requests therefore remain
+    /// safe when the new root is proven unaffected.
     ///
     /// # Errors
     /// Returns a payload-free host error. If persistence succeeds but successor
@@ -1980,9 +2026,9 @@ impl ErasureCommandSenderV1<'_> {
 
     /// Fork a Timeline and publish its successor inventory generation.
     ///
-    /// This seam is limited to the positively verified empty active-request
-    /// case. Active erasure requests require atomic ERSE1 admission and are
-    /// rejected before the child can be persisted.
+    /// An ordinary Fork is admitted only when the complete inventory proves
+    /// that every active request is unaffected by that parent. A Fork which
+    /// needs ERSE1 extensions must use the identified atomic admission seam.
     ///
     /// # Errors
     /// Returns a payload-free host error and fails closed if successor
@@ -1996,7 +2042,9 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         let (timeline, generation) = self
             .host
-            .apply_empty_topology_change(|store| store.fork(parent, at_seq, name))?;
+            .apply_unaffected_topology_change(Some(parent), |store| {
+                store.fork(parent, at_seq, name)
+            })?;
         self.generation = generation;
         Ok(timeline)
     }
@@ -5185,7 +5233,7 @@ mod tests {
                 child: TimelineMeta {
                     id: child,
                     mode: TimelineMode::Historical,
-                    name: None,
+                    name: Some("recovered-name-is-ignored".to_owned()),
                     owner: None,
                     fork_point: Some((parent, Seq::ZERO)),
                 },
