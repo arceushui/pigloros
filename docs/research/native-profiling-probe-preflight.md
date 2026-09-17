@@ -36,6 +36,11 @@ closed executable policy check and adversarial fixtures. They bind the two
 native runner entries, unprivileged command sequence, exact source identity,
 failure propagation and unconditional bounded artifact retention. The retained
 source inventory includes that CI workflow and both policy/test scripts.
+The same checker fixes the complete JSON safety contract, including every
+ceiling, native class, extraction rejection rule, activation requirement and
+failure action. Adversarial fixtures reject changed or missing/unknown fields,
+wrong types and weakened policies. Static validation preserves the reviewed
+budget; it does not establish resource enforcement or authorize a VM run.
 The KVM descriptor is opened read/write as a candidate-access diagnostic;
 "read-only" describes the sole version query, not the descriptor's access mode.
 The mocked boundary test fixes the exact open flags and sole ioctl.
