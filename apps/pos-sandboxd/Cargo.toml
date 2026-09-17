@@ -1,0 +1,18 @@
+[package]
+name = "pos-sandboxd"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pos-reference = { path = "../../crates/pos-reference" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pos-conformance = { path = "../../crates/pos-conformance" }
+zvariant = "=5.14.0"
+
+[lints]
+workspace = true
