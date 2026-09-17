@@ -21,6 +21,23 @@ nixpkgs input or historical #211 requisite closure is not a complete current
 guest image/runtime identity. The current repository has no VM harness to
 inherit as validated execution infrastructure.
 
+The `native-profiling-preflight` workflow performs only unprivileged, read-only
+host inspection on each native runner. It records the exact checked-out source
+SHA, configuration/workflow/inspection/test file hashes, native architecture,
+host kernel and KVM API result. It opens `/dev/kvm`, asks only for the stable
+`KVM_GET_API_VERSION`, and closes the descriptor; it never creates a VM. Missing
+access, an architecture mismatch, root execution or any API other than 12 fails
+the prerequisite check. A passing check proves neither guest creation nor
+resource, egress or destruction enforcement and never authorizes activation.
+Mocked boundary tests do not replace the hosted observations.
+
+The [Linux KVM API documentation](https://docs.kernel.org/6.18/virt/kvm/api.html)
+specifies the system version ioctl and requires API 12. GitHub's
+[hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+documents the native runner labels, not usable KVM on each selected host.
+Retained negative observations determine the next infrastructure action; do not
+substitute cross-architecture emulation or root execution on the runner.
+
 For each native class, use one fresh VM and no more than two native jobs in
 parallel. Guest writable disk limits must cover every writable backing store,
 not just a filesystem inside the guest. Host build ceilings include all build
