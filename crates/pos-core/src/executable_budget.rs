@@ -143,17 +143,13 @@ impl ExecutableBudgetPolicyV1 {
             return Err(ExecutableBudgetErrorV1::NonCanonical);
         }
         for level in 0..3 {
-            let plugin_sum = input
+            let plugin_sum: u64 = input
                 .plugin_cpu_reservations
                 .iter()
                 .map(|row| u64::from(row.cpu_reservations_us[level]))
-                .try_fold(0_u64, u64::checked_add)
-                .ok_or(ExecutableBudgetErrorV1::FieldOutOfBounds)?;
+                .sum();
             let total = plugin_sum
-                .checked_add(u64::from(
-                    input.fidelity_budgets[level].shared_host_cpu_reservation_us,
-                ))
-                .ok_or(ExecutableBudgetErrorV1::FieldOutOfBounds)?;
+                + u64::from(input.fidelity_budgets[level].shared_host_cpu_reservation_us);
             if total > u64::from(input.fidelity_budgets[level].max_cpu_us) {
                 return Err(ExecutableBudgetErrorV1::FieldOutOfBounds);
             }
@@ -438,5 +434,322 @@ impl<'a> Reader<'a> {
             });
         }
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn input() -> ExecutableBudgetPolicyInputV1 {
+        ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 100,
+                    max_bytes: 100_000,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 100,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 100,
+                    max_bytes: 100_000,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 100,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 100,
+                    max_bytes: 100_000,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 100,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id: PluginId::from_ulid(ulid::Ulid::from(1)),
+                cpu_reservations_us: [100, 100, 100],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([7; 32]),
+            max_pass_wall_duration_us: 1_000,
+        }
+    }
+
+    #[test]
+    fn profile_codes_and_limits_are_closed() {
+        assert_eq!(WorkloadProfileV1::Interactive.code(), 0);
+        assert_eq!(WorkloadProfileV1::Fork.code(), 1);
+        assert_eq!(WorkloadProfileV1::Research.code(), 2);
+        assert_eq!(WorkloadProfileV1::Interactive.max_event_bytes(), 4096);
+        assert_eq!(WorkloadProfileV1::Fork.max_event_bytes(), 4096);
+        assert_eq!(WorkloadProfileV1::Research.max_event_bytes(), 16_384);
+        assert_eq!(
+            WorkloadProfileV1::from_code(0),
+            Ok(WorkloadProfileV1::Interactive)
+        );
+        assert_eq!(WorkloadProfileV1::from_code(1), Ok(WorkloadProfileV1::Fork));
+        assert_eq!(
+            WorkloadProfileV1::from_code(2),
+            Ok(WorkloadProfileV1::Research)
+        );
+        assert_eq!(
+            WorkloadProfileV1::from_code(3),
+            Err(ExecutableBudgetErrorV1::UnsupportedValue)
+        );
+    }
+
+    #[test]
+    fn encoder_covers_all_integer_and_row_widths() {
+        let mut bytes = Vec::new();
+        encode_uint(&mut bytes, 23);
+        encode_uint(&mut bytes, 24);
+        encode_uint(&mut bytes, 256);
+        encode_uint(&mut bytes, 65_536);
+        encode_uint(&mut bytes, 1_u64 << 32);
+        let row = PluginCpuReservationV1 {
+            plugin_id: PluginId::from_ulid(ulid::Ulid::from(1)),
+            cpu_reservations_us: [1, 2, 3],
+        };
+        let mut rows = Vec::new();
+        encode_rows(&mut bytes, &[]);
+        encode_rows(&mut bytes, std::slice::from_ref(&row));
+        rows.resize(24, row);
+        encode_rows(&mut bytes, &rows);
+        rows.resize(256, row);
+        encode_rows(&mut bytes, &rows);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn reader_covers_heads_and_shape_errors() {
+        let cases: &[(&[u8], u8, Result<(u8, u64), ExecutableBudgetErrorV1>)] = &[
+            (&[0x00], 0, Ok((0, 0))),
+            (&[0x18, 24], 0, Ok((1, 24))),
+            (&[0x19, 1, 0], 0, Ok((2, 256))),
+            (&[0x1a, 0, 1, 0, 0], 0, Ok((4, 65_536))),
+            (&[0x1b, 0, 0, 0, 1, 0, 0, 0, 0], 0, Ok((8, 4_294_967_296))),
+            (&[0x20], 0, Err(ExecutableBudgetErrorV1::InvalidEncoding)),
+            (&[0x1c], 0, Err(ExecutableBudgetErrorV1::InvalidEncoding)),
+            (&[0x18, 23], 0, Err(ExecutableBudgetErrorV1::NonCanonical)),
+            (
+                &[0x19, 0, 255],
+                0,
+                Err(ExecutableBudgetErrorV1::NonCanonical),
+            ),
+            (
+                &[0x1a, 0, 0, 255, 255],
+                0,
+                Err(ExecutableBudgetErrorV1::NonCanonical),
+            ),
+            (
+                &[0x1b, 0, 0, 0, 0, 0, 0, 0, 1],
+                0,
+                Err(ExecutableBudgetErrorV1::NonCanonical),
+            ),
+            (&[0x00], 1, Err(ExecutableBudgetErrorV1::InvalidEncoding)),
+        ];
+        for (bytes, major, expected) in cases {
+            let mut reader = Reader { bytes, offset: 0 };
+            assert_eq!(reader.head(*major), *expected);
+        }
+        assert_eq!(
+            Reader {
+                bytes: &[],
+                offset: 0
+            }
+            .uint(),
+            Err(ExecutableBudgetErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            Reader {
+                bytes: &[0x1b],
+                offset: 0
+            }
+            .uint(),
+            Err(ExecutableBudgetErrorV1::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn reader_covers_scalar_array_blob_and_rows_errors() {
+        assert_eq!(
+            Reader {
+                bytes: &[0x1b, 0, 0, 0, 0, 0, 0, 1, 0],
+                offset: 0
+            }
+            .uint_u8(),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        assert_eq!(
+            Reader {
+                bytes: &[0x1b, 0, 0, 0, 1, 0, 0, 0, 0],
+                offset: 0
+            }
+            .uint_u32(),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        assert_eq!(
+            Reader {
+                bytes: &[0x81],
+                offset: 0
+            }
+            .array(2),
+            Err(ExecutableBudgetErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            Reader {
+                bytes: &[0x41, 0],
+                offset: 0
+            }
+            .blob::<2>(),
+            Err(ExecutableBudgetErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            Reader {
+                bytes: &[0x80],
+                offset: 0
+            }
+            .rows(),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        assert_eq!(
+            Reader {
+                bytes: &[0x19, 1, 1],
+                offset: 0
+            }
+            .rows(),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn validation_rejects_each_structural_boundary() {
+        let mut invalid = input();
+        invalid.revision = 0;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.cut_budget_family = 1;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.accounting_semantics = 1;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.execution_profile_hash = Hash::zero();
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.max_pass_wall_duration_us = 0;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.max_event_bytes = 0;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.max_event_bytes = 4097;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.plugin_cpu_reservations.clear();
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.plugin_cpu_reservations = vec![input().plugin_cpu_reservations[0]; 257];
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].level = 1;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].max_events = 0;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].max_events = 65_537;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].max_bytes = 0;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].max_bytes = 64 * 1024 * 1024 + 1;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].max_cpu_us = 0;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].max_cpu_us = 500_001;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].shared_host_cpu_reservation_us = 500_001;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
+
+        let mut invalid = input();
+        invalid
+            .plugin_cpu_reservations
+            .push(PluginCpuReservationV1 {
+                plugin_id: PluginId::from_ulid(ulid::Ulid::from(1)),
+                cpu_reservations_us: [1, 1, 1],
+            });
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::NonCanonical)
+        );
+        let mut invalid = input();
+        invalid.fidelity_budgets[0].max_cpu_us = 150;
+        assert_eq!(
+            ExecutableBudgetPolicyV1::new(invalid),
+            Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+        );
     }
 }
