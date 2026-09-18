@@ -207,6 +207,18 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: false,
             },
             ErasureSchemaColumn {
+                name: "expected_generation",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "child_scope",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
                 name: "child_id",
                 kind: "TEXT",
                 not_null: true,
@@ -258,6 +270,8 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
         constraints: &[
             "CHECK (length(operation_digest) = 32)",
             "CHECK (length(binding_digest) = 32)",
+            "CHECK (length(expected_generation) = 32)",
+            "CHECK (length(child_scope) = 32)",
             "CHECK (length(successor_generation) = 32)",
             "CHECK (length(receipt_digest) = 32)",
             "CHECK (fork_seq >= 0)",
@@ -4947,12 +4961,15 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             self.conn
                 .execute(
                     "INSERT INTO erasure_fork_admissions
-                     (operation_digest, binding_digest, child_id, child_name, child_mode,
-                      parent_id, fork_seq, owner_id, successor_generation, receipt_digest)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     (operation_digest, binding_digest, expected_generation, child_scope,
+                      child_id, child_name, child_mode, parent_id, fork_seq, owner_id,
+                      successor_generation, receipt_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         admission.operation().digest().as_slice(),
                         admission.binding_digest().digest().as_slice(),
+                        recovery.expected_inventory_generation().digest().as_slice(),
+                        recovery.child_scope().digest().as_slice(),
                         child.id.to_string(),
                         child.name.as_deref(),
                         mode_str(child.mode),
@@ -4994,6 +5011,8 @@ fn sqlite_timeline_exists(conn: &Connection, timeline: TimelineId) -> Result<boo
 
 struct SqliteForkAdmissionReceiptV1 {
     binding: ErasureReferenceV1,
+    expected_generation: ErasureReferenceV1,
+    child_scope: ErasureReferenceV1,
     child_id: String,
     child_name: Option<String>,
     child_mode: String,
@@ -5006,6 +5025,8 @@ struct SqliteForkAdmissionReceiptV1 {
 
 struct SqliteForkAdmissionReceiptRow {
     binding: Vec<u8>,
+    expected_generation: Vec<u8>,
+    child_scope: Vec<u8>,
     child_id: String,
     child_name: Option<String>,
     child_mode: String,
@@ -5042,6 +5063,8 @@ impl SqliteForkAdmissionReceiptV1 {
         ErasureForkRecoveryV1::from_persisted(
             operation,
             self.binding,
+            reference_from_sql(self.expected_generation)?,
+            reference_from_sql(self.child_scope)?,
             self.successor,
             child,
             self.receipt,
@@ -5054,22 +5077,25 @@ fn sqlite_fork_admission_receipt(
     operation: ErasureReferenceV1,
 ) -> Result<Option<SqliteForkAdmissionReceiptV1>, ErasureErrorV1> {
     conn.query_row(
-        "SELECT binding_digest, child_id, child_name, child_mode, parent_id, fork_seq,
-                owner_id, successor_generation, receipt_digest
+        "SELECT binding_digest, expected_generation, child_scope, child_id, child_name,
+                child_mode, parent_id, fork_seq, owner_id, successor_generation,
+                receipt_digest
          FROM erasure_fork_admissions
          WHERE operation_digest=?1",
         params![operation.digest().as_slice()],
         |row| {
             Ok(SqliteForkAdmissionReceiptRow {
                 binding: row.get(0)?,
-                child_id: row.get(1)?,
-                child_name: row.get(2)?,
-                child_mode: row.get(3)?,
-                parent_id: row.get(4)?,
-                fork_seq: row.get(5)?,
-                owner_id: row.get(6)?,
-                successor: row.get(7)?,
-                receipt: row.get(8)?,
+                expected_generation: row.get(1)?,
+                child_scope: row.get(2)?,
+                child_id: row.get(3)?,
+                child_name: row.get(4)?,
+                child_mode: row.get(5)?,
+                parent_id: row.get(6)?,
+                fork_seq: row.get(7)?,
+                owner_id: row.get(8)?,
+                successor: row.get(9)?,
+                receipt: row.get(10)?,
             })
         },
     )
@@ -5078,6 +5104,8 @@ fn sqlite_fork_admission_receipt(
     .map(|row| {
         Ok(SqliteForkAdmissionReceiptV1 {
             binding: reference_from_sql(row.binding)?,
+            expected_generation: reference_from_sql(row.expected_generation)?,
+            child_scope: reference_from_sql(row.child_scope)?,
             child_id: row.child_id,
             child_name: row.child_name,
             child_mode: row.child_mode,

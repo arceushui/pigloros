@@ -118,7 +118,6 @@ fn coordinator_composition_rejects_zero_identity_at_every_public_entry() {
     }
 }
 
-#[derive(Default)]
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
     frozen: AtomicBool,
@@ -134,6 +133,29 @@ struct TestAuthority {
     allow_receipt: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
     use_closed_scope_resolution: AtomicBool,
+    fork_child_scope: std::sync::atomic::AtomicU8,
+}
+
+impl Default for TestAuthority {
+    fn default() -> Self {
+        Self {
+            timelines: Mutex::new(Vec::new()),
+            frozen: AtomicBool::new(false),
+            deny_authentication: AtomicBool::new(false),
+            deny_topology: AtomicBool::new(false),
+            deny_scope_extension: AtomicBool::new(false),
+            allow_rejection: AtomicBool::new(false),
+            allow_corrected: AtomicBool::new(false),
+            allow_administrative_resolution: AtomicBool::new(false),
+            allow_attempt: AtomicBool::new(false),
+            allow_dispatch: AtomicBool::new(false),
+            allow_ack: AtomicBool::new(false),
+            allow_receipt: AtomicBool::new(false),
+            fail_fork_scope_extension: AtomicBool::new(false),
+            use_closed_scope_resolution: AtomicBool::new(false),
+            fork_child_scope: std::sync::atomic::AtomicU8::new(19),
+        }
+    }
 }
 
 impl TestAuthority {
@@ -150,6 +172,10 @@ impl TestAuthority {
         self.allow_dispatch.store(true, Ordering::Release);
         self.allow_ack.store(true, Ordering::Release);
         self.allow_receipt.store(true, Ordering::Release);
+    }
+
+    fn set_fork_child_scope(&self, scope: u8) {
+        self.fork_child_scope.store(scope, Ordering::Release);
     }
 
     fn topology(
@@ -326,7 +352,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             .lock()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .push((child.id, reference(19)));
-        Ok(reference(19))
+        Ok(reference(self.fork_child_scope.load(Ordering::Acquire)))
     }
 
     fn resolve_fork_scope_extension(
@@ -677,6 +703,17 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         .id(),
         child.id()
     );
+    authority.set_fork_child_scope(21);
+    assert_eq!(
+        commands.fork_timeline_identified(
+            operation,
+            timeline.id(),
+            pos_core::Seq::ZERO,
+            "frozen-child",
+        ),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    authority.set_fork_child_scope(19);
     assert_eq!(
         commands.fork_timeline_identified(
             operation,
@@ -1293,6 +1330,32 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         ErasureHostStatusV1::Ready
     );
     assert_recovered_fork_is_frozen(&mut original_authority_recovery, parent, child)?;
+    {
+        let mut commands = test_stage(
+            "open persistent retry sender",
+            original_authority_recovery.command_sender(),
+        )?;
+        let recovered_child = test_stage(
+            "retry persistent fork after restart",
+            commands.fork_timeline_identified(
+                reference(41),
+                parent,
+                pos_core::Seq::ZERO,
+                "restart-child",
+            ),
+        )?;
+        assert_eq!(recovered_child.id(), child);
+        authority.set_fork_child_scope(21);
+        assert_eq!(
+            commands.fork_timeline_identified(
+                reference(41),
+                parent,
+                pos_core::Seq::ZERO,
+                "restart-child",
+            ),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+    }
     drop(original_authority_recovery);
     authority.deny_topology.store(true, Ordering::Release);
     let denied_recovery = open_read_only_with_authority(

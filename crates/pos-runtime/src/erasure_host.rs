@@ -1594,6 +1594,32 @@ impl ErasureExecutionHostV1 {
                             transition_host_error = Some(ErasureHostErrorV1::StaleGeneration);
                             return Err(ErasureErrorV1::PolicyConflict);
                         }
+                        let retry_child = recovered.child().clone();
+                        let child_scope = input
+                            .authority
+                            .resolve_fork_child_scope(input.parent, &retry_child)?;
+                        if child_scope != recovered.child_scope() {
+                            return Err(ErasureErrorV1::PolicyConflict);
+                        }
+                        let retry_input = ErasureForkAdmissionInputV1 {
+                            operation: input.operation,
+                            expected_inventory_generation: recovered
+                                .expected_inventory_generation(),
+                            child_scope,
+                            child: retry_child,
+                        };
+                        for requirement in input
+                            .current_inventory
+                            .fork_retry_scope_requirements(input.parent, recovered.child().id)?
+                        {
+                            let extension = input.authority.resolve_fork_scope_extension(
+                                requirement.requirement(),
+                                &retry_input,
+                            )?;
+                            if extension != *requirement.extension() {
+                                return Err(ErasureErrorV1::PolicyConflict);
+                            }
+                        }
                         return Ok((
                             input.current_inventory.clone(),
                             Timeline::new(recovered.child().clone()),
