@@ -528,7 +528,12 @@ mod tests {
 
     #[test]
     fn reader_covers_heads_and_shape_errors() {
-        let cases: &[(&[u8], u8, Result<(u8, u64), ExecutableBudgetErrorV1>)] = &[
+        type ReaderCase = (
+            &'static [u8],
+            u8,
+            Result<(u8, u64), ExecutableBudgetErrorV1>,
+        );
+        let cases: &[ReaderCase] = &[
             (&[0x00], 0, Ok((0, 0))),
             (&[0x18, 24], 0, Ok((1, 24))),
             (&[0x19, 1, 0], 0, Ok((2, 256))),
@@ -629,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_each_structural_boundary() {
+    fn validation_rejects_global_boundaries() {
         let mut invalid = input();
         invalid.revision = 0;
         assert_eq!(
@@ -684,7 +689,10 @@ mod tests {
             ExecutableBudgetPolicyV1::new(invalid),
             Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
         );
+    }
 
+    #[test]
+    fn validation_rejects_fidelity_boundaries() {
         let mut invalid = input();
         invalid.fidelity_budgets[0].level = 1;
         assert_eq!(
