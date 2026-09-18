@@ -129,11 +129,25 @@ fn public_decoder_closes_truncation_and_envelope_boundaries(
         Err(ExecutableBudgetErrorV1::UnsupportedValue)
     );
 
-    let mut trailing = bytes;
+    let mut trailing = bytes.clone();
     trailing.push(0);
     assert_eq!(
         ExecutableBudgetPolicyV1::from_canonical_cbor(&trailing),
         Err(ExecutableBudgetErrorV1::NonCanonical)
+    );
+
+    let mut unsupported_profile = bytes.clone();
+    unsupported_profile[8] = 3;
+    assert_eq!(
+        ExecutableBudgetPolicyV1::from_canonical_cbor(&unsupported_profile),
+        Err(ExecutableBudgetErrorV1::UnsupportedValue)
+    );
+
+    let mut invalid_revision = bytes;
+    invalid_revision[7] = 0;
+    assert_eq!(
+        ExecutableBudgetPolicyV1::from_canonical_cbor(&invalid_revision),
+        Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
     );
     Ok(())
 }
