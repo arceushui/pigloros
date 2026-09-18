@@ -3,7 +3,7 @@ use std::{error::Error, fs::File};
 use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
 use pos_sandboxd::{
-    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter,
+    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter, SystemdManagerReadback,
     SystemdManagerReadbackOnlyProperty, SystemdTransientUnitReadback,
     SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
     TransientUnitRequest, TransientUnitRequestError,
@@ -66,6 +66,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         EXPECTED_PROPERTY_NAMES
     );
     assert_eq!(properties[1].value().dbus_signature(), "s");
+    assert_eq!(properties[0].value().dbus_signature(), "s");
     assert_eq!(properties[2].value().dbus_signature(), "a(ssbt)");
     assert_eq!(properties[28].value().dbus_signature(), "(bas)");
     assert_eq!(properties[29].value().dbus_signature(), "(bas)");
@@ -149,6 +150,10 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
         match properties[29].value() {
             SystemdTransientUnitValue::RestrictAddressFamilies(value) => {
                 assert_eq!(value, &(true, Vec::new()));
+                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+                let (decoded, consumed): ((bool, Vec<String>), usize) = encoded.deserialize()?;
+                assert_eq!(decoded, *value);
+                assert_eq!(consumed, encoded.len());
             }
             value => panic!("unexpected RestrictAddressFamilies value: {value:?}"),
         }
@@ -156,6 +161,11 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
             SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                 assert_eq!(value.len(), 1);
                 assert_eq!(value[0].1, "piglor-release-v1");
+                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+                let (decoded, consumed): (Vec<(OwnedFd, String)>, usize) = encoded.deserialize()?;
+                assert_eq!(decoded.len(), 1);
+                assert_eq!(decoded[0].1, "piglor-release-v1");
+                assert_eq!(consumed, encoded.len());
             }
             value => panic!("unexpected ExtraFileDescriptors value: {value:?}"),
         }
@@ -178,7 +188,7 @@ fn only_normalized_bounded_provider_paths_can_compile() {
             Err(TransientUnitRequestError::InvalidRootDirectory)
         );
     }
-    let oversized = format!("/run/{}", "a".repeat(4096));
+    let oversized = format!("/run/{}", "a".repeat(4091));
     assert_eq!(
         ActivatedRootDirectory::new(oversized),
         Err(TransientUnitRequestError::InvalidRootDirectory)
@@ -193,6 +203,11 @@ fn only_normalized_bounded_provider_paths_can_compile() {
             Err(TransientUnitRequestError::InvalidLauncherSource)
         );
     }
+    let oversized_launcher = format!("/{}", "a".repeat(4095));
+    assert_eq!(
+        LauncherSource::new(oversized_launcher),
+        Err(TransientUnitRequestError::InvalidLauncherSource)
+    );
 }
 
 #[test]
@@ -295,6 +310,20 @@ fn manager_only_root_image_policy_is_not_a_request_property() -> Result<(), Box<
         .requested_properties()
         .iter()
         .all(|property| property.name() != "RootImagePolicy"));
+    let readback = SystemdManagerReadback::new(
+        SystemdManagerReadbackOnlyProperty::RootImagePolicy,
+        "root=verity+signed",
+    );
+    assert_eq!(
+        readback.property(),
+        SystemdManagerReadbackOnlyProperty::RootImagePolicy
+    );
+    assert_eq!(readback.value(), "root=verity+signed");
+    let root_image_policy = readback.value().to_owned();
+    let encoded = to_bytes(Context::new_dbus(LE, 0), &root_image_policy)?;
+    let (decoded, consumed): (String, usize) = encoded.deserialize()?;
+    assert_eq!(decoded, readback.value());
+    assert_eq!(consumed, encoded.len());
     Ok(())
 }
 

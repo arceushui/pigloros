@@ -3,7 +3,8 @@
 use zvariant::OwnedFd;
 
 use crate::{
-    SystemCallFilter, SystemdHardeningReadbackValue, SystemdHardeningValue, TransientUnitHardening,
+    SystemCallFilter, SystemdHardeningProperty, SystemdHardeningReadbackValue,
+    SystemdHardeningValue, TransientUnitHardening,
 };
 
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
@@ -177,6 +178,36 @@ pub struct SystemdTransientUnitReadback {
     value: SystemdTransientUnitReadbackValue,
 }
 
+/// One manager-only property observed separately from the requested bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemdManagerReadback {
+    property: SystemdManagerReadbackOnlyProperty,
+    value: String,
+}
+
+impl SystemdManagerReadback {
+    /// Record one typed effective manager default without making it a request.
+    #[must_use]
+    pub fn new(property: SystemdManagerReadbackOnlyProperty, value: impl Into<String>) -> Self {
+        Self {
+            property,
+            value: value.into(),
+        }
+    }
+
+    /// Return the observed manager-only property identity.
+    #[must_use]
+    pub const fn property(&self) -> SystemdManagerReadbackOnlyProperty {
+        self.property
+    }
+
+    /// Return the observed manager-default D-Bus `s` value.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
 impl SystemdTransientUnitReadback {
     /// Construct one typed manager readback property.
     #[must_use]
@@ -274,33 +305,33 @@ impl TransientUnitRequest {
                 ],
             ),
             LaunchMode::AirGapped | LaunchMode::Replay | LaunchMode::Fork => (
-                true,
-                Vec::new(),
+                (true, Vec::new()),
                 vec![(release, RELEASE_DESCRIPTOR_NAME.to_owned())],
             ),
         };
-        let mut properties = Vec::with_capacity(34);
+        let mut properties =
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 5);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 property.name(),
                 SystemdTransientUnitValue::Static(property.value()),
             ));
-            if property.name() == "Type" {
+            if *property == SystemdHardeningProperty::TypeExec {
                 properties.push(SystemdTransientUnitProperty::new(
                     "RootDirectory",
-                    SystemdTransientUnitValue::RootDirectory(root_directory.0.clone()),
+                    SystemdTransientUnitValue::RootDirectory(root_directory.as_str().to_owned()),
                 ));
                 properties.push(SystemdTransientUnitProperty::new(
                     "BindReadOnlyPaths",
                     SystemdTransientUnitValue::BindReadOnlyPaths(vec![(
-                        launcher_source.0.clone(),
+                        launcher_source.as_str().to_owned(),
                         LAUNCHER_DESTINATION.to_owned(),
                         false,
                         0,
                     )]),
                 ));
             }
-            if property.name() == "SystemCallArchitectures" {
+            if *property == SystemdHardeningProperty::SystemCallArchitectures {
                 properties.push(SystemdTransientUnitProperty::new(
                     "SystemCallFilter",
                     SystemdTransientUnitValue::SystemCallFilter(
@@ -390,7 +421,7 @@ impl TransientUnitRequest {
 }
 
 fn is_normalized_absolute_path(path: &str) -> bool {
-    path.len() <= MAX_PROVIDER_PATH_BYTES
+    path.len() < MAX_PROVIDER_PATH_BYTES
         && path.starts_with('/')
         && path.len() > 1
         && !path.ends_with('/')
