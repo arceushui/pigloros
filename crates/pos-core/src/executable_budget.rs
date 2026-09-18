@@ -585,7 +585,7 @@ mod tests {
     fn reader_covers_scalar_array_blob_and_rows_errors() {
         assert_eq!(
             Reader {
-                bytes: &[0x1b, 0, 0, 0, 0, 0, 0, 1, 0],
+                bytes: &[0x19, 1, 0],
                 offset: 0
             }
             .uint_u8(),
