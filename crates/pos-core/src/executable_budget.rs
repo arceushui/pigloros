@@ -400,7 +400,8 @@ impl<'a> Reader<'a> {
         if count == 0 || count > MAX_PLUGIN_CPU_RESERVATIONS_V1 as u64 {
             return Err(ExecutableBudgetErrorV1::FieldOutOfBounds);
         }
-        let count = count as usize;
+        // The bound above proves this conversion cannot fail on any target.
+        let count = usize::from(u16::try_from(count).unwrap_or_default());
         let mut rows = Vec::with_capacity(count);
         for _ in 0..count {
             self.array(2)?;
