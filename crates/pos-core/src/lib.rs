@@ -21,6 +21,7 @@ pub mod entity;
 pub mod erasure;
 pub mod error;
 pub mod event;
+pub mod executable_budget;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
@@ -146,6 +147,11 @@ pub use erasure::{
 };
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
+pub use executable_budget::{
+    ExecutableBudgetErrorV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
+    MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
+};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
 pub use geo_cell_admission::{
