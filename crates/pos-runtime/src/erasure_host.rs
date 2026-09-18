@@ -1492,6 +1492,10 @@ impl ErasureExecutionHostV1 {
         } else {
             self.install_inventory_from_coordinator_with_limits(limits)
                 .map(|generation| (timeline, generation))
+                .map_err(|error| {
+                    self.poison();
+                    error
+                })
         }
     }
 
@@ -4401,6 +4405,13 @@ mod tests {
         assert!(host
             .apply_empty_topology_change(|_| Ok(Timeline::new(TimelineMeta::root("unaffected"))))
             .is_ok());
+
+        host.authority = Some(Arc::new(ForkChildAuthorityV1));
+        assert_eq!(
+            host.apply_empty_topology_change(|_| Ok(Timeline::new(TimelineMeta::root("failed")))),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]
