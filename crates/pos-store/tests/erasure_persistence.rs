@@ -934,6 +934,8 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureForkRecoveryV1::from_persisted(
             operation,
             prepared.binding_digest(),
+            prepared.expected_inventory_generation(),
+            prepared.child_scope(),
             prepared.successor_inventory().generation(),
             prepared.child().clone(),
             reference(249),
@@ -946,6 +948,8 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureForkRecoveryV1::from_persisted(
             operation,
             prepared.binding_digest(),
+            prepared.expected_inventory_generation(),
+            prepared.child_scope(),
             prepared.successor_inventory().generation(),
             invalid_child,
             expected_result.receipt_digest(),
@@ -958,6 +962,8 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureForkRecoveryV1::from_persisted(
             operation,
             prepared.binding_digest(),
+            prepared.expected_inventory_generation(),
+            prepared.child_scope(),
             prepared.successor_inventory().generation(),
             root_child,
             expected_result.receipt_digest(),
@@ -1373,6 +1379,8 @@ fn fork_recovery_receipt_digest(
     hasher.update(b"pigloros/erasure-fork-recovery/v1");
     hasher.update(&prepared.operation().digest());
     hasher.update(&prepared.binding_digest().digest());
+    hasher.update(&prepared.expected_inventory_generation().digest());
+    hasher.update(&prepared.child_scope().digest());
     hasher.update(&prepared.successor_inventory().generation().digest());
     hasher.update(&child.id.inner().to_bytes());
     hasher.update(b"historical");

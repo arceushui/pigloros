@@ -2441,6 +2441,92 @@ impl ErasureVerifiedInventoryV1 {
             .collect()
     }
 
+    /// Return the committed ERSE1 admissions for a child already present in
+    /// this successor inventory.
+    ///
+    /// The returned requirements describe the predecessor state that was in
+    /// force before the child was admitted. This lets the host re-run only
+    /// authority resolution during an identified retry and compare the
+    /// resulting ERSE1 bytes without attempting another durable mutation.
+    ///
+    /// # Errors
+    /// Returns a closed provenance error when the parent/child classification
+    /// or the committed extension chain is incomplete or inconsistent.
+    pub fn fork_retry_scope_requirements(
+        &self,
+        parent: TimelineId,
+        child: TimelineId,
+    ) -> Result<Vec<ErasureForkRetryScopeRequirementV1>, ErasureErrorV1> {
+        let parent_classifications = self
+            .classification_for(parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let child_classifications = self
+            .classification_for(child)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if parent_classifications.len() != self.request_heads.len()
+            || child_classifications.len() != self.request_heads.len()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let mut retry_requirements = Vec::new();
+        retry_requirements
+            .try_reserve(self.request_heads.len())
+            .map_err(allocation_failure)?;
+        for ((state, _), parent_classification) in self.members.iter().zip(parent_classifications) {
+            let request = state.request().reference();
+            if parent_classification.request != request {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let parent_scope = parent_classification.membership.included_scope();
+            if parent_scope.is_some() && state.scope().is_none() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let child_classification = child_classifications
+                .iter()
+                .find(|classification| classification.request == request)
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let requires_extension = parent_scope.is_some()
+                && state
+                    .scope()
+                    .and_then(ErasureScopeCommitmentV1::lineage_rule)
+                    .is_some();
+            if !requires_extension {
+                if child_classification.membership.included_scope().is_some() {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+                continue;
+            }
+            let child_scope = child_classification
+                .membership
+                .included_scope()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let scope = state.scope().ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let extensions = state.scope_extensions();
+            let extension = extensions
+                .last()
+                .filter(|extension| extension.fork() == child_scope)
+                .cloned()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let requirement = ErasureForkScopeRequirementV1 {
+                request,
+                scope_commitment: scope.reference(),
+                lineage_rule: scope
+                    .lineage_rule()
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+                predecessor_extension: extensions
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .map(ErasureScopeExtensionV1::reference),
+            };
+            retry_requirements.push(ErasureForkRetryScopeRequirementV1 {
+                requirement,
+                extension,
+            });
+        }
+        Ok(retry_requirements)
+    }
+
     /// Prepare the complete successor inventory for one future-Fork command.
     ///
     /// Every active request whose verified parent membership carries a
@@ -3342,6 +3428,28 @@ impl ErasureForkScopeRequirementV1 {
     }
 }
 
+/// One previously committed ERSE1 admission that must match an identified
+/// Fork retry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureForkRetryScopeRequirementV1 {
+    requirement: ErasureForkScopeRequirementV1,
+    extension: ErasureScopeExtensionV1,
+}
+
+impl ErasureForkRetryScopeRequirementV1 {
+    /// Return the authority input for the original ERSE1 admission.
+    #[must_use]
+    pub const fn requirement(&self) -> ErasureForkScopeRequirementV1 {
+        self.requirement
+    }
+
+    /// Return the exact committed ERSE1 admission.
+    #[must_use]
+    pub const fn extension(&self) -> &ErasureScopeExtensionV1 {
+        &self.extension
+    }
+}
+
 /// Durable, payload-free result of one committed future-Fork operation.
 ///
 /// This value lets a restarted host answer a retry after the original reply
@@ -3351,6 +3459,8 @@ impl ErasureForkScopeRequirementV1 {
 pub struct ErasureForkRecoveryV1 {
     operation: ErasureReferenceV1,
     binding_digest: ErasureReferenceV1,
+    expected_inventory_generation: ErasureReferenceV1,
+    child_scope: ErasureReferenceV1,
     successor_generation: ErasureReferenceV1,
     child: crate::TimelineMeta,
     receipt_digest: ErasureReferenceV1,
@@ -3360,6 +3470,8 @@ impl ErasureForkRecoveryV1 {
     fn new(
         operation: ErasureReferenceV1,
         binding_digest: ErasureReferenceV1,
+        expected_inventory_generation: ErasureReferenceV1,
+        child_scope: ErasureReferenceV1,
         successor_generation: ErasureReferenceV1,
         child: crate::TimelineMeta,
     ) -> Result<Self, ErasureErrorV1> {
@@ -3372,6 +3484,8 @@ impl ErasureForkRecoveryV1 {
         let receipt_digest = Self::compute_receipt_digest(
             operation,
             binding_digest,
+            expected_inventory_generation,
+            child_scope,
             successor_generation,
             &child,
             fork_point,
@@ -3379,6 +3493,8 @@ impl ErasureForkRecoveryV1 {
         Ok(Self {
             operation,
             binding_digest,
+            expected_inventory_generation,
+            child_scope,
             successor_generation,
             child,
             receipt_digest,
@@ -3393,11 +3509,20 @@ impl ErasureForkRecoveryV1 {
     pub fn from_persisted(
         operation: ErasureReferenceV1,
         binding_digest: ErasureReferenceV1,
+        expected_inventory_generation: ErasureReferenceV1,
+        child_scope: ErasureReferenceV1,
         successor_generation: ErasureReferenceV1,
         child: crate::TimelineMeta,
         receipt_digest: ErasureReferenceV1,
     ) -> Result<Self, ErasureErrorV1> {
-        let recovered = Self::new(operation, binding_digest, successor_generation, child)?;
+        let recovered = Self::new(
+            operation,
+            binding_digest,
+            expected_inventory_generation,
+            child_scope,
+            successor_generation,
+            child,
+        )?;
         if recovered.receipt_digest != receipt_digest {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -3407,6 +3532,8 @@ impl ErasureForkRecoveryV1 {
     fn compute_receipt_digest(
         operation: ErasureReferenceV1,
         binding_digest: ErasureReferenceV1,
+        expected_inventory_generation: ErasureReferenceV1,
+        child_scope: ErasureReferenceV1,
         successor_generation: ErasureReferenceV1,
         child: &crate::TimelineMeta,
         fork_point: (TimelineId, Seq),
@@ -3415,6 +3542,8 @@ impl ErasureForkRecoveryV1 {
         hasher.update(b"pigloros/erasure-fork-recovery/v1");
         hasher.update(&operation.digest());
         hasher.update(&binding_digest.digest());
+        hasher.update(&expected_inventory_generation.digest());
+        hasher.update(&child_scope.digest());
         hasher.update(&successor_generation.digest());
         hasher.update(&child.id.inner().to_bytes());
         hasher.update(b"historical");
@@ -3453,6 +3582,19 @@ impl ErasureForkRecoveryV1 {
     #[must_use]
     pub const fn binding_digest(&self) -> ErasureReferenceV1 {
         self.binding_digest
+    }
+
+    /// Return the complete inventory generation used to prepare the original
+    /// Fork admission.
+    #[must_use]
+    pub const fn expected_inventory_generation(&self) -> ErasureReferenceV1 {
+        self.expected_inventory_generation
+    }
+
+    /// Return the canonical scope reference assigned to the original child.
+    #[must_use]
+    pub const fn child_scope(&self) -> ErasureReferenceV1 {
+        self.child_scope
     }
 
     /// Return the complete successor inventory generation committed with it.
@@ -3727,6 +3869,8 @@ impl PreparedErasureForkBatchV1 {
         ErasureForkRecoveryV1::new(
             self.operation(),
             self.binding_digest(),
+            self.expected_inventory_generation(),
+            self.input.child_scope,
             self.successor_inventory().generation(),
             self.child().clone(),
         )
