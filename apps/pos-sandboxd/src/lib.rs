@@ -4,6 +4,13 @@
 //! The existing signed admission boundary must supply the selected SCS1 digest
 //! and architecture before these requested-state components are used.
 
+mod hardening;
+
+pub use hardening::{
+    SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
+    SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
+};
+
 use pos_reference::sandbox_provider_protocol::{
     SandboxArchitecture, SandboxProviderProtocolError, SandboxSyscallSet,
 };
