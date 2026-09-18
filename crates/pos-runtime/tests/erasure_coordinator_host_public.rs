@@ -646,6 +646,10 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         commands.timeline(timeline.id()),
         Err(ErasureHostErrorV1::AccessFrozen)
     );
+    assert_eq!(
+        commands.fork_timeline(timeline.id(), pos_core::Seq::ZERO, "affected-ordinary-fork",),
+        Err(ErasureHostErrorV1::Conflict)
+    );
     let operation = reference(40);
     let child = test_stage(
         "fork frozen timeline",
