@@ -625,7 +625,7 @@ mod tests {
         );
         assert_eq!(
             Reader {
-                bytes: &[0x19, 1, 1],
+                bytes: &[0x99, 1, 1],
                 offset: 0
             }
             .rows(),
