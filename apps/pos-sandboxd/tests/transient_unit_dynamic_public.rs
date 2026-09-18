@@ -174,6 +174,24 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
 }
 
 #[test]
+fn swapped_descriptor_name_and_fd_shape_is_rejected_before_transport() -> Result<(), Box<dyn Error>>
+{
+    let swapped = vec![("piglor-release-v1".to_owned(), descriptor()?)];
+    assert_eq!(
+        <Vec<(String, OwnedFd)> as Type>::SIGNATURE.to_string(),
+        "a(sh)"
+    );
+    assert_ne!(
+        <Vec<(String, OwnedFd)> as Type>::SIGNATURE,
+        <Vec<(OwnedFd, String)> as Type>::SIGNATURE
+    );
+    let encoded = to_bytes(Context::new_dbus(LE, 0), &swapped)?;
+    let rejected: zvariant::Result<(Vec<(OwnedFd, String)>, usize)> = encoded.deserialize();
+    assert!(rejected.is_err());
+    Ok(())
+}
+
+#[test]
 fn only_normalized_bounded_provider_paths_can_compile() {
     for path in [
         "relative/root",
