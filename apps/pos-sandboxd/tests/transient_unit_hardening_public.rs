@@ -146,7 +146,7 @@ fn only_the_complete_ordered_static_bundle_is_accepted() {
     extra.push(readback[0].clone());
     let mut reordered = readback.clone();
     reordered.swap(0, 1);
-    let mut renamed = readback.clone();
+    let mut renamed = readback;
     renamed[0] = SystemdHardeningReadback::new(
         "NotType",
         SystemdHardeningReadbackValue::String("exec".to_owned()),
