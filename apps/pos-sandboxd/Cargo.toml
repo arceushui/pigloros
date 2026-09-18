@@ -12,7 +12,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }
-zvariant = "=5.14.0"
+zvariant = "=5.15.0"
 
 [lints]
 workspace = true
