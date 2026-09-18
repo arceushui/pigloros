@@ -240,9 +240,6 @@ impl ExecutableBudgetPolicyV1 {
             execution_profile_hash,
             max_pass_wall_duration_us,
         })?;
-        if policy.to_canonical_cbor() != bytes {
-            return Err(ExecutableBudgetErrorV1::NonCanonical);
-        }
         Ok(policy)
     }
 
@@ -316,10 +313,7 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn take(&mut self, length: usize) -> Result<&'a [u8], ExecutableBudgetErrorV1> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(ExecutableBudgetErrorV1::InvalidEncoding)?;
+        let end = self.offset + length;
         let value = self
             .bytes
             .get(self.offset..end)
@@ -329,10 +323,7 @@ impl<'a> Reader<'a> {
     }
 
     fn head(&mut self, major: u8) -> Result<(u8, u64), ExecutableBudgetErrorV1> {
-        let initial = *self
-            .take(1)?
-            .first()
-            .ok_or(ExecutableBudgetErrorV1::InvalidEncoding)?;
+        let initial = self.take(1)?[0];
         if initial >> 5 != major {
             return Err(ExecutableBudgetErrorV1::InvalidEncoding);
         }
@@ -363,14 +354,7 @@ impl<'a> Reader<'a> {
             }
             _ => return Err(ExecutableBudgetErrorV1::InvalidEncoding),
         };
-        let minimum = match width {
-            0 => 0,
-            1 => 24,
-            2 => 256,
-            4 => 65_536,
-            8 => 1_u64 << 32,
-            _ => return Err(ExecutableBudgetErrorV1::InvalidEncoding),
-        };
+        let minimum = [0, 24, 256, 0, 65_536, 0, 0, 0, 1_u64 << 32][width as usize];
         if value < minimum {
             return Err(ExecutableBudgetErrorV1::NonCanonical);
         }
@@ -413,12 +397,10 @@ impl<'a> Reader<'a> {
 
     fn rows(&mut self) -> Result<Vec<PluginCpuReservationV1>, ExecutableBudgetErrorV1> {
         let count = self.head(4)?.1;
-        let count: usize = count
-            .try_into()
-            .map_err(|_| ExecutableBudgetErrorV1::FieldOutOfBounds)?;
-        if count == 0 || count > MAX_PLUGIN_CPU_RESERVATIONS_V1 {
+        if count == 0 || count > MAX_PLUGIN_CPU_RESERVATIONS_V1 as u64 {
             return Err(ExecutableBudgetErrorV1::FieldOutOfBounds);
         }
+        let count = count as usize;
         let mut rows = Vec::with_capacity(count);
         for _ in 0..count {
             self.array(2)?;
