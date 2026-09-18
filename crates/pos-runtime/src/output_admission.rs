@@ -60,6 +60,10 @@ pub struct OutputAdmissionV1 {
 
 impl OutputAdmissionV1 {
     /// Bind a structural output policy to its exact executable budget identity.
+    ///
+    /// # Errors
+    /// Returns an identity or budget error when the policy does not describe
+    /// the registered Plugin and its executable reservation.
     pub fn try_new(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -102,6 +106,10 @@ impl OutputAdmissionV1 {
     }
 
     /// Validate every draft against declarations and the complete step budget.
+    ///
+    /// # Errors
+    /// Returns a declaration or resource-limit error when any draft exceeds
+    /// the bound policy.
     pub fn validate_batch(&self, drafts: &[EventDraft]) -> Result<(), OutputAdmissionErrorV1> {
         let mut counts = [0_u64; 3];
         let mut bytes = [0_u64; 3];
@@ -148,14 +156,14 @@ impl OutputAdmissionV1 {
             let budget = self.budget.fields().fidelity_budgets[level];
             if counts[level] > u64::from(budget.max_events) {
                 return Err(OutputAdmissionErrorV1::EventCountExceeded {
-                    level: level as u8,
+                    level: u8::try_from(level).expect("fidelity level index is bounded"),
                     requested: counts[level],
                     limit: budget.max_events,
                 });
             }
             if bytes[level] > budget.max_bytes {
                 return Err(OutputAdmissionErrorV1::BatchBytesExceeded {
-                    level: level as u8,
+                    level: u8::try_from(level).expect("fidelity level index is bounded"),
                     requested: bytes[level],
                     limit: budget.max_bytes,
                 });
@@ -164,7 +172,7 @@ impl OutputAdmissionV1 {
                 counts[level].saturating_mul(u64::from(reservations.cpu_reservations_us[level]));
             if cpu > u64::from(budget.max_cpu_us) {
                 return Err(OutputAdmissionErrorV1::CpuExceeded {
-                    level: level as u8,
+                    level: u8::try_from(level).expect("fidelity level index is bounded"),
                     requested: cpu,
                     limit: budget.max_cpu_us,
                 });

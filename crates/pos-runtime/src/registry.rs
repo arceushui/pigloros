@@ -2163,6 +2163,10 @@ impl PluginRegistry {
     ///
     /// A Plugin that emits drafts without this binding is rejected at the
     /// production Driver boundary; there is no implicit allow-all policy.
+    ///
+    /// # Errors
+    /// Returns an identity, registration, or capability error when the policy
+    /// cannot be bound to the Plugin.
     pub fn register_with_output_policy(
         &mut self,
         plugin: &dyn Plugin,
@@ -2191,6 +2195,10 @@ impl PluginRegistry {
     }
 
     /// Register a pinned Plugin with its complete host-verified output policy.
+    ///
+    /// # Errors
+    /// Returns an identity, registration, or capability error when the policy
+    /// cannot be bound to the Plugin.
     pub fn register_pinned_with_output_policy(
         &mut self,
         plugin: &dyn Plugin,
