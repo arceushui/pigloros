@@ -21,6 +21,7 @@ members = [
   "plugins/ledger",
   "apps/pos-experiment",
   "apps/pos-cli",
+  "apps/pos-sandboxd",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
   "apps/piglor-world-client",
