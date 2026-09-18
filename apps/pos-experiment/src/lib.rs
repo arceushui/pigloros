@@ -1162,6 +1162,27 @@ impl Experiment {
         self.registry.register(plugin, reducer, driver)
     }
 
+    /// Register a Plugin with its host-verified output policy and executable budget.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or output-admission error.
+    pub fn register_with_output_policy(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        output_policy: pos_core::output_policy::OutputPolicyV1,
+        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry.register_with_output_policy(
+            plugin,
+            output_policy,
+            executable_budget,
+            reducer,
+            driver,
+        )
+    }
+
     /// Register a plugin with an optional action approver.
     ///
     /// # Errors

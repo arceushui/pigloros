@@ -696,6 +696,11 @@ struct PluginEntry {
     output_admission: Option<OutputAdmissionV1>,
 }
 
+struct RegistrationOptions {
+    registration: Option<PluginRegistrationV1>,
+    output_admission: Option<OutputAdmissionV1>,
+}
+
 const fn plugin_name(entry: &PluginEntry) -> &str {
     entry.name.as_str()
 }
@@ -2126,8 +2131,10 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
-            None,
-            None,
+            RegistrationOptions {
+                registration: None,
+                output_admission: None,
+            },
         )
     }
 
@@ -2154,8 +2161,10 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
-            Some(registration),
-            None,
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: None,
+            },
         )
     }
 
@@ -2189,8 +2198,10 @@ impl PluginRegistry {
             None,
             &[],
             context,
-            None,
-            Some(admission),
+            RegistrationOptions {
+                registration: None,
+                output_admission: Some(admission),
+            },
         )
     }
 
@@ -2223,8 +2234,10 @@ impl PluginRegistry {
             None,
             &[],
             context,
-            Some(registration),
-            Some(admission),
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: Some(admission),
+            },
         )
     }
 
@@ -2267,8 +2280,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: &[Kind],
         context: (PluginId, String, Capability),
-        registration: Option<PluginRegistrationV1>,
-        output_admission: Option<OutputAdmissionV1>,
+        options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
         if let Some(kind) = cap
@@ -2371,8 +2383,8 @@ impl PluginRegistry {
                 approver,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
-                registration,
-                output_admission,
+                registration: options.registration,
+                output_admission: options.output_admission,
             },
         );
         Ok(())

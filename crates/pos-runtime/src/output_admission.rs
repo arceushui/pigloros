@@ -152,18 +152,22 @@ impl OutputAdmissionV1 {
             .iter()
             .find(|row| row.plugin_id == self.plugin_id)
             .ok_or(OutputAdmissionErrorV1::MissingCpuReservation)?;
-        for level in 0..3 {
-            let budget = self.budget.fields().fidelity_budgets[level];
+        for (level_index, budget) in self.budget.fields().fidelity_budgets.iter().enumerate() {
+            let level = match level_index {
+                0 => 0,
+                1 => 1,
+                _ => 2,
+            };
             if counts[level] > u64::from(budget.max_events) {
                 return Err(OutputAdmissionErrorV1::EventCountExceeded {
-                    level: u8::try_from(level).expect("fidelity level index is bounded"),
+                    level,
                     requested: counts[level],
                     limit: budget.max_events,
                 });
             }
             if bytes[level] > budget.max_bytes {
                 return Err(OutputAdmissionErrorV1::BatchBytesExceeded {
-                    level: u8::try_from(level).expect("fidelity level index is bounded"),
+                    level,
                     requested: bytes[level],
                     limit: budget.max_bytes,
                 });
@@ -172,7 +176,7 @@ impl OutputAdmissionV1 {
                 counts[level].saturating_mul(u64::from(reservations.cpu_reservations_us[level]));
             if cpu > u64::from(budget.max_cpu_us) {
                 return Err(OutputAdmissionErrorV1::CpuExceeded {
-                    level: u8::try_from(level).expect("fidelity level index is bounded"),
+                    level,
                     requested: cpu,
                     limit: budget.max_cpu_us,
                 });
