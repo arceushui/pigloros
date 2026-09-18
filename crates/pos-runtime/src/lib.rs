@@ -28,6 +28,7 @@ pub mod composition;
 pub mod driver;
 pub mod erasure_host;
 pub mod error;
+pub mod output_admission;
 pub mod recorder;
 pub mod registry;
 pub mod scheduler;
@@ -49,6 +50,7 @@ pub use erasure_host::{
     ErasureReadSenderV1,
 };
 pub use error::{ActionSubmissionError, RuntimeError};
+pub use output_admission::{OutputAdmissionErrorV1, OutputAdmissionV1};
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
 pub use scheduler::TickScheduler;

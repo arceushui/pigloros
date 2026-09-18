@@ -19,6 +19,9 @@ pub enum ActionSubmissionError {
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error(transparent)]
+    OutputAdmission(#[from] crate::OutputAdmissionErrorV1),
+
+    #[error(transparent)]
     Composition(#[from] crate::PluginCompositionErrorV1),
 
     #[error("plugin '{name}' (id={id}) is already registered")]
