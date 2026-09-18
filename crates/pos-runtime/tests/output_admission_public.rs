@@ -201,12 +201,10 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() {
             Some(Box::new(FixtureDriver)),
         )
         .expect("policy-bound registration succeeds");
-    assert_eq!(
-        admitted
-            .step_all_anchored(timeline, pos_core::Seq::ZERO)
-            .map(|d| d.len()),
-        Ok(1)
-    );
+    assert!(matches!(
+        admitted.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        Ok(drafts) if drafts.len() == 1
+    ));
 
     let mut missing = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
