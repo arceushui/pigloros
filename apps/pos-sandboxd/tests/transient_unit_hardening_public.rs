@@ -1,8 +1,8 @@
 use std::error::Error;
 
 use pos_sandboxd::{
-    SystemdHardeningProperty, SystemdHardeningValue, TransientUnitHardening,
-    TransientUnitHardeningError,
+    SystemdHardeningReadback, SystemdHardeningReadbackValue, SystemdHardeningValue,
+    TransientUnitHardening, TransientUnitHardeningError,
 };
 use zvariant::{serialized::Context, to_bytes, Value, LE};
 
@@ -137,18 +137,22 @@ fn assert_dbus_roundtrip(value: SystemdHardeningValue) -> Result<(), Box<dyn Err
 #[test]
 fn only_the_complete_ordered_static_bundle_is_accepted() {
     let expected = TransientUnitHardening::requested_properties();
-    assert_eq!(TransientUnitHardening::verify_readback(expected), Ok(()));
+    let readback = exact_readback(expected);
+    assert_eq!(TransientUnitHardening::verify_readback(&readback), Ok(()));
 
-    let mut missing = expected.to_vec();
+    let mut missing = readback.clone();
     missing.pop();
-    let mut extra = expected.to_vec();
-    extra.push(SystemdHardeningProperty::TypeExec);
-    let mut reordered = expected.to_vec();
+    let mut extra = readback.clone();
+    extra.push(readback[0].clone());
+    let mut reordered = readback.clone();
     reordered.swap(0, 1);
-    let mut substituted = expected.to_vec();
-    substituted[0] = SystemdHardeningProperty::PrivateNetwork;
+    let mut renamed = readback.clone();
+    renamed[0] = SystemdHardeningReadback::new(
+        "NotType",
+        SystemdHardeningReadbackValue::String("exec".to_owned()),
+    );
 
-    for readback in [missing, extra, reordered, substituted] {
+    for readback in [missing, extra, reordered, renamed] {
         assert_eq!(
             TransientUnitHardening::verify_readback(&readback),
             Err(TransientUnitHardeningError::ReadbackMismatch)
@@ -157,7 +161,45 @@ fn only_the_complete_ordered_static_bundle_is_accepted() {
 }
 
 #[test]
-fn public_type_cannot_represent_dynamic_or_untyped_properties() {
+fn every_static_readback_value_and_signature_must_match() {
+    let expected = TransientUnitHardening::requested_properties();
+
+    for (index, property) in expected.iter().enumerate() {
+        let mut readback = exact_readback(expected);
+        readback[index] = SystemdHardeningReadback::new(
+            property.name(),
+            substituted_readback_value(property.value()),
+        );
+        assert_eq!(
+            TransientUnitHardening::verify_readback(&readback),
+            Err(TransientUnitHardeningError::ReadbackMismatch)
+        );
+    }
+}
+
+fn exact_readback(
+    properties: &[pos_sandboxd::SystemdHardeningProperty],
+) -> Vec<SystemdHardeningReadback> {
+    properties
+        .iter()
+        .map(|property| SystemdHardeningReadback::new(property.name(), property.value().into()))
+        .collect()
+}
+
+fn substituted_readback_value(value: SystemdHardeningValue) -> SystemdHardeningReadbackValue {
+    match value {
+        SystemdHardeningValue::Bool(_) => SystemdHardeningReadbackValue::Bool(false),
+        SystemdHardeningValue::String(_) => SystemdHardeningReadbackValue::U64(0),
+        SystemdHardeningValue::U64(_) => SystemdHardeningReadbackValue::U32(0),
+        SystemdHardeningValue::U32(_) => SystemdHardeningReadbackValue::String("0".to_owned()),
+        SystemdHardeningValue::StringArray(_) => {
+            SystemdHardeningReadbackValue::StringArray(vec!["not-native".to_owned()])
+        }
+    }
+}
+
+#[test]
+fn requested_bundle_excludes_dynamic_properties() {
     let names = TransientUnitHardening::requested_properties()
         .iter()
         .map(|property| property.name())

@@ -90,6 +90,80 @@ impl SystemdHardeningValue {
             Self::StringArray(_) => "as",
         }
     }
+
+    fn matches_readback(self, readback: &SystemdHardeningReadbackValue) -> bool {
+        match (self, readback) {
+            (Self::Bool(expected), SystemdHardeningReadbackValue::Bool(actual)) => {
+                expected == *actual
+            }
+            (Self::String(expected), SystemdHardeningReadbackValue::String(actual)) => {
+                expected == actual
+            }
+            (Self::U64(expected), SystemdHardeningReadbackValue::U64(actual)) => {
+                expected == *actual
+            }
+            (Self::U32(expected), SystemdHardeningReadbackValue::U32(actual)) => {
+                expected == *actual
+            }
+            (Self::StringArray(expected), SystemdHardeningReadbackValue::StringArray(actual)) => {
+                expected
+                    .iter()
+                    .copied()
+                    .eq(actual.iter().map(String::as_str))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// An observed systemd D-Bus value with one of the signatures this bundle permits.
+///
+/// The typed systemd proxy must reject every other D-Bus shape before constructing
+/// this value, so untyped D-Bus values cannot reach the verifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SystemdHardeningReadbackValue {
+    /// A D-Bus `b` value.
+    Bool(bool),
+    /// A D-Bus `s` value.
+    String(String),
+    /// A D-Bus `t` value.
+    U64(u64),
+    /// A D-Bus `u` value.
+    U32(u32),
+    /// A D-Bus `as` value.
+    StringArray(Vec<String>),
+}
+
+impl From<SystemdHardeningValue> for SystemdHardeningReadbackValue {
+    fn from(value: SystemdHardeningValue) -> Self {
+        match value {
+            SystemdHardeningValue::Bool(value) => Self::Bool(value),
+            SystemdHardeningValue::String(value) => Self::String(value.to_owned()),
+            SystemdHardeningValue::U64(value) => Self::U64(value),
+            SystemdHardeningValue::U32(value) => Self::U32(value),
+            SystemdHardeningValue::StringArray(value) => {
+                Self::StringArray(value.iter().map(ToString::to_string).collect())
+            }
+        }
+    }
+}
+
+/// One named, typed property returned by a systemd D-Bus readback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemdHardeningReadback {
+    name: String,
+    value: SystemdHardeningReadbackValue,
+}
+
+impl SystemdHardeningReadback {
+    /// Construct one typed observed property for verification.
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: SystemdHardeningReadbackValue) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
 }
 
 impl SystemdHardeningProperty {
@@ -223,12 +297,21 @@ impl TransientUnitHardening {
     /// intentionally absent: they require separate authority-bearing seams.
     ///
     /// # Errors
-    /// Rejects a missing, extra, reordered, or substituted property before a
-    /// later execution or release transition can use this requested state.
+    /// Rejects a missing, extra, reordered, renamed, mistyped, inverted, or
+    /// substituted property before a later execution or release transition can
+    /// use this requested state.
     pub fn verify_readback(
-        readback: &[SystemdHardeningProperty],
+        readback: &[SystemdHardeningReadback],
     ) -> Result<(), TransientUnitHardeningError> {
-        if readback == Self::requested_properties() {
+        if readback.len() == Self::requested_properties().len()
+            && readback
+                .iter()
+                .zip(Self::requested_properties())
+                .all(|(observed, expected)| {
+                    observed.name == expected.name()
+                        && expected.value().matches_readback(&observed.value)
+                })
+        {
             Ok(())
         } else {
             Err(TransientUnitHardeningError::ReadbackMismatch)

@@ -7,8 +7,8 @@
 mod hardening;
 
 pub use hardening::{
-    SystemdHardeningProperty, SystemdHardeningValue, TransientUnitHardening,
-    TransientUnitHardeningError,
+    SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
+    SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
 };
 
 use pos_reference::sandbox_provider_protocol::{
