@@ -99,6 +99,11 @@ pub struct ExecutableBudgetPolicyV1(ExecutableBudgetPolicyInputV1);
 
 impl ExecutableBudgetPolicyV1 {
     /// Construct and validate an EBP1 policy without sorting or defaulting.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when any field, ordering, cap, or reservation
+    /// invariant is invalid.
     pub fn new(input: ExecutableBudgetPolicyInputV1) -> Result<Self, ExecutableBudgetErrorV1> {
         if input.revision == 0
             || input.cut_budget_family != 0
@@ -117,7 +122,7 @@ impl ExecutableBudgetPolicyV1 {
             .iter()
             .enumerate()
             .any(|(index, budget)| {
-                budget.level != u8::try_from(index).expect("fidelity index fits in u8")
+                budget.level != [0_u8, 1, 2][index]
                     || budget.max_events == 0
                     || budget.max_events > MAX_FIDELITY_EVENTS_V1[index]
                     || budget.max_bytes == 0
@@ -142,7 +147,7 @@ impl ExecutableBudgetPolicyV1 {
                 .plugin_cpu_reservations
                 .iter()
                 .map(|row| u64::from(row.cpu_reservations_us[level]))
-                .try_fold(0_u64, |sum, value| sum.checked_add(value))
+                .try_fold(0_u64, u64::checked_add)
                 .ok_or(ExecutableBudgetErrorV1::FieldOutOfBounds)?;
             let total = plugin_sum
                 .checked_add(u64::from(
@@ -187,6 +192,11 @@ impl ExecutableBudgetPolicyV1 {
     }
 
     /// Decode a bounded canonical EBP1 value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the input is oversized, malformed,
+    /// noncanonical, or violates any EBP1 policy invariant.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ExecutableBudgetErrorV1> {
         if bytes.len() > MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1 {
             return Err(ExecutableBudgetErrorV1::FieldOutOfBounds);
@@ -279,20 +289,17 @@ fn encode_uint(out: &mut Vec<u8>, value: u64) {
 }
 
 fn byte(value: u64) -> u8 {
-    u8::try_from(value & 0xff).expect("masked value fits in u8")
+    value.to_le_bytes()[0]
 }
 
 fn encode_rows(out: &mut Vec<u8>, rows: &[PluginCpuReservationV1]) {
     match rows.len() {
-        0..=23 => out.push(0x80 | u8::try_from(rows.len()).expect("row count fits in u8")),
-        24..=255 => out.extend_from_slice(&[
-            0x98,
-            u8::try_from(rows.len()).expect("row count fits in u8"),
-        ]),
+        0..=23 => out.push(0x80 | rows.len().to_le_bytes()[0]),
+        24..=255 => out.extend_from_slice(&[0x98, rows.len().to_le_bytes()[0]]),
         _ => out.extend_from_slice(&[
             0x99,
-            u8::try_from(rows.len() >> 8).expect("row count high byte fits in u8"),
-            u8::try_from(rows.len()).expect("row count fits in u8"),
+            rows.len().to_le_bytes()[1],
+            rows.len().to_le_bytes()[0],
         ]),
     }
     for row in rows {
