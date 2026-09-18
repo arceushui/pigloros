@@ -1454,11 +1454,6 @@ impl ErasureExecutionHostV1 {
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let (_generation, _maximum_requests, inventory) = self.ready_state()?;
         if let Some(parent) = parent {
-            self.store
-                .host_store()
-                .get_timeline(parent)
-                .map_store_error()?
-                .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
             if !inventory
                 .fork_scope_requirements(parent)
                 .map_err(map_erasure_error)?
@@ -1466,6 +1461,11 @@ impl ErasureExecutionHostV1 {
             {
                 return Err(ErasureHostErrorV1::Conflict);
             }
+            self.store
+                .host_store()
+                .get_timeline(parent)
+                .map_store_error()?
+                .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
         }
         let limits = self.recovery_limits;
         if inventory.request_count() != 0
@@ -4377,6 +4377,30 @@ mod tests {
             host.install_inventory_from_coordinator(4),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
+    }
+
+    #[test]
+    fn active_topology_changes_require_both_recovery_credentials() {
+        let RejectedHostFixtureV1 { mut host, .. } = rejected_host_with_resolve_control()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+
+        host.authority = None;
+        assert_eq!(
+            host.apply_empty_topology_change(|store| store.create_timeline("missing-authority")),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+
+        host.authority = Some(Arc::new(RejectedCoordinatorAuthorityV1));
+        host.coordinator = None;
+        assert_eq!(
+            host.apply_empty_topology_change(|store| store.create_timeline("missing-coordinator")),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+
+        host.coordinator = Some(reference(31));
+        assert!(host
+            .apply_empty_topology_change(|_| Ok(Timeline::new(TimelineMeta::root("unaffected"))))
+            .is_ok());
     }
 
     #[test]
