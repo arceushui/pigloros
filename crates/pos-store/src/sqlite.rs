@@ -5063,8 +5063,8 @@ impl SqliteForkAdmissionReceiptV1 {
         ErasureForkRecoveryV1::from_persisted(
             operation,
             self.binding,
-            reference_from_sql(self.expected_generation)?,
-            reference_from_sql(self.child_scope)?,
+            self.expected_generation,
+            self.child_scope,
             self.successor,
             child,
             self.receipt,
