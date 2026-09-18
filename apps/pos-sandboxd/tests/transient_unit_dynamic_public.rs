@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File};
+use std::{error::Error, fs::File, os::fd::OwnedFd as StdOwnedFd};
 
 use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
@@ -123,7 +123,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     match properties[33].value() {
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
             assert_eq!(
-                <(Vec<(OwnedFd, String)>) as Type>::SIGNATURE.to_string(),
+                <Vec<(OwnedFd, String)> as Type>::SIGNATURE.to_string(),
                 "a(hs)"
             );
             assert_eq!(value.len(), 2);
@@ -217,7 +217,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
     let request = request(LaunchMode::Local {
         host_service: descriptor()?,
     })?;
-    let readback = exact_readback(&request, authority.expected_effective_names);
+    let readback = exact_readback(&request, authority.expected_effective_names.clone());
     assert_eq!(request.verify_readback(&readback), Ok(()));
 
     let mut missing = readback.clone();
@@ -344,7 +344,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
 }
 
 fn descriptor() -> Result<OwnedFd, std::io::Error> {
-    File::open("/dev/null").map(OwnedFd::from)
+    File::open("/dev/null").map(|file| OwnedFd::from(StdOwnedFd::from(file)))
 }
 
 fn exact_readback(

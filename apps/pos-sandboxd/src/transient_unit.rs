@@ -100,7 +100,7 @@ pub struct TransientUnitLaunchInputs {
 impl TransientUnitLaunchInputs {
     /// Combine already-validated per-attempt launch inputs.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         root_directory: ActivatedRootDirectory,
         launcher_source: LauncherSource,
         mode: LaunchMode,
@@ -154,7 +154,7 @@ pub struct SystemdTransientUnitProperty {
 }
 
 impl SystemdTransientUnitProperty {
-    fn new(name: &'static str, value: SystemdTransientUnitValue) -> Self {
+    const fn new(name: &'static str, value: SystemdTransientUnitValue) -> Self {
         Self { name, value }
     }
 
