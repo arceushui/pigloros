@@ -18,6 +18,7 @@ pub mod clock;
 pub mod consent;
 pub mod crypto;
 pub mod entity;
+pub mod executable_budget;
 pub mod erasure;
 pub mod error;
 pub mod event;
@@ -84,6 +85,11 @@ pub use consent::{
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
+pub use executable_budget::{
+    ExecutableBudgetErrorV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
+    MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
+};
 pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, selected_obligations_reference, ArtifactClaimInputV1,
