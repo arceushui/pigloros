@@ -61,7 +61,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     assert_eq!(
         properties
             .iter()
-            .map(|property| property.name())
+            .map(pos_sandboxd::SystemdTransientUnitProperty::name)
             .collect::<Vec<_>>(),
         EXPECTED_PROPERTY_NAMES
     );
@@ -80,7 +80,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
             assert_eq!(consumed, encoded.len());
             assert_eq!(value, "/run/pigloros/attempt-42/root");
         }
-        value => panic!("unexpected RootDirectory value: {value:?}"),
+        _value => return Err("RootDirectory must have a string value".into()),
     }
     match properties[2].value() {
         SystemdTransientUnitValue::BindReadOnlyPaths(value) => {
@@ -99,7 +99,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
                 )]
             );
         }
-        value => panic!("unexpected BindReadOnlyPaths value: {value:?}"),
+        _value => return Err("BindReadOnlyPaths must have an a(ssbt) value".into()),
     }
     match properties[29].value() {
         SystemdTransientUnitValue::RestrictAddressFamilies(value) => {
@@ -109,7 +109,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
             assert_eq!(consumed, encoded.len());
             assert_eq!(value, &(true, vec!["AF_UNIX".to_owned()]));
         }
-        value => panic!("unexpected RestrictAddressFamilies value: {value:?}"),
+        _value => return Err("RestrictAddressFamilies must have a (bas) value".into()),
     }
     match properties[28].value() {
         SystemdTransientUnitValue::SystemCallFilter(value) => {
@@ -118,7 +118,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
             assert_eq!(decoded, *value);
             assert_eq!(consumed, encoded.len());
         }
-        value => panic!("unexpected SystemCallFilter value: {value:?}"),
+        _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
     match properties[33].value() {
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
@@ -136,7 +136,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
             assert_eq!(decoded[1].1, "piglor-release-v1");
             assert_eq!(consumed, encoded.len());
         }
-        value => panic!("unexpected ExtraFileDescriptors value: {value:?}"),
+        _value => return Err("ExtraFileDescriptors must have an a(hs) value".into()),
     }
     Ok(())
 }
@@ -155,7 +155,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
                 assert_eq!(decoded, *value);
                 assert_eq!(consumed, encoded.len());
             }
-            value => panic!("unexpected RestrictAddressFamilies value: {value:?}"),
+            _value => return Err("RestrictAddressFamilies must have a (bas) value".into()),
         }
         match properties[33].value() {
             SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
@@ -167,7 +167,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
                 assert_eq!(decoded[0].1, "piglor-release-v1");
                 assert_eq!(consumed, encoded.len());
             }
-            value => panic!("unexpected ExtraFileDescriptors value: {value:?}"),
+            _value => return Err("ExtraFileDescriptors must have an a(hs) value".into()),
         }
     }
     Ok(())
@@ -217,7 +217,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
     let request = request(LaunchMode::Local {
         host_service: descriptor()?,
     })?;
-    let readback = exact_readback(&request, authority.expected_effective_names.clone());
+    let readback = exact_readback(&request, &authority.expected_effective_names);
     assert_eq!(request.verify_readback(&readback), Ok(()));
 
     let mut missing = readback.clone();
@@ -231,13 +231,12 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         "SystemCallFilter",
         SystemdTransientUnitReadbackValue::BoolStringArray((true, authority.requested_names)),
     );
-    let mut missing_descriptor =
-        exact_readback(&request, authority.expected_effective_names.clone());
+    let mut missing_descriptor = exact_readback(&request, &authority.expected_effective_names);
     missing_descriptor[33] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(Vec::new()),
     );
-    let mut extra_descriptor = exact_readback(&request, authority.expected_effective_names.clone());
+    let mut extra_descriptor = exact_readback(&request, &authority.expected_effective_names);
     extra_descriptor[33] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
@@ -246,7 +245,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
             "unexpected".to_owned(),
         ]),
     );
-    let mut reordered_descriptor = exact_readback(&request, authority.expected_effective_names);
+    let mut reordered_descriptor = exact_readback(&request, &authority.expected_effective_names);
     reordered_descriptor[33] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
@@ -282,7 +281,7 @@ fn verifier_rejects_the_wrong_address_family_or_allow_list_mode() -> Result<(), 
         (true, Vec::new()),
         (true, vec!["AF_INET".to_owned()]),
     ] {
-        let mut readback = exact_readback(&request, authority.expected_effective_names.clone());
+        let mut readback = exact_readback(&request, &authority.expected_effective_names);
         readback[29] = SystemdTransientUnitReadback::new(
             "RestrictAddressFamilies",
             SystemdTransientUnitReadbackValue::BoolStringArray(value),
@@ -349,7 +348,7 @@ fn descriptor() -> Result<OwnedFd, std::io::Error> {
 
 fn exact_readback(
     request: &TransientUnitRequest,
-    expected_system_calls: Vec<String>,
+    expected_system_calls: &[String],
 ) -> Vec<SystemdTransientUnitReadback> {
     request
         .requested_properties()
@@ -368,7 +367,7 @@ fn exact_readback(
                 SystemdTransientUnitValue::SystemCallFilter(_) => {
                     SystemdTransientUnitReadbackValue::BoolStringArray((
                         true,
-                        expected_system_calls.clone(),
+                        expected_system_calls.to_vec(),
                     ))
                 }
                 SystemdTransientUnitValue::RestrictAddressFamilies(value) => {
