@@ -103,3 +103,37 @@ fn public_policy_rejects_noncanonical_integer_width() -> Result<(), Box<dyn std:
     );
     Ok(())
 }
+
+#[test]
+fn public_decoder_closes_truncation_and_envelope_boundaries(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = policy()?.to_canonical_cbor();
+    for end in 0..bytes.len() {
+        assert!(
+            ExecutableBudgetPolicyV1::from_canonical_cbor(&bytes[..end]).is_err(),
+            "truncated EBP1 prefix unexpectedly decoded at {end}"
+        );
+    }
+
+    let mut oversized = bytes.clone();
+    oversized.resize(65_537, 0);
+    assert_eq!(
+        ExecutableBudgetPolicyV1::from_canonical_cbor(&oversized),
+        Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
+    );
+
+    let mut unsupported = bytes.clone();
+    unsupported[2] = b'X';
+    assert_eq!(
+        ExecutableBudgetPolicyV1::from_canonical_cbor(&unsupported),
+        Err(ExecutableBudgetErrorV1::UnsupportedValue)
+    );
+
+    let mut trailing = bytes;
+    trailing.push(0);
+    assert_eq!(
+        ExecutableBudgetPolicyV1::from_canonical_cbor(&trailing),
+        Err(ExecutableBudgetErrorV1::NonCanonical)
+    );
+    Ok(())
+}
