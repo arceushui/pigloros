@@ -117,7 +117,7 @@ impl ExecutableBudgetPolicyV1 {
             .iter()
             .enumerate()
             .any(|(index, budget)| {
-                budget.level != index as u8
+                budget.level != u8::try_from(index).expect("fidelity index fits in u8")
                     || budget.max_events == 0
                     || budget.max_events > MAX_FIDELITY_EVENTS_V1[index]
                     || budget.max_bytes == 0
@@ -254,35 +254,46 @@ impl ExecutableBudgetPolicyV1 {
 fn encode_uint(out: &mut Vec<u8>, value: u64) {
     const MAX_U32: u64 = u32::MAX as u64;
     match value {
-        0..=23 => out.push(value as u8),
-        24..=255 => out.extend_from_slice(&[0x18, value as u8]),
-        256..=65_535 => out.extend_from_slice(&[0x19, (value >> 8) as u8, value as u8]),
+        0..=23 => out.push(byte(value)),
+        24..=255 => out.extend_from_slice(&[0x18, byte(value)]),
+        256..=65_535 => out.extend_from_slice(&[0x19, byte(value >> 8), byte(value)]),
         65_536..=MAX_U32 => out.extend_from_slice(&[
             0x1a,
-            (value >> 24) as u8,
-            (value >> 16) as u8,
-            (value >> 8) as u8,
-            value as u8,
+            byte(value >> 24),
+            byte(value >> 16),
+            byte(value >> 8),
+            byte(value),
         ]),
         _ => out.extend_from_slice(&[
             0x1b,
-            (value >> 56) as u8,
-            (value >> 48) as u8,
-            (value >> 40) as u8,
-            (value >> 32) as u8,
-            (value >> 24) as u8,
-            (value >> 16) as u8,
-            (value >> 8) as u8,
-            value as u8,
+            byte(value >> 56),
+            byte(value >> 48),
+            byte(value >> 40),
+            byte(value >> 32),
+            byte(value >> 24),
+            byte(value >> 16),
+            byte(value >> 8),
+            byte(value),
         ]),
     }
 }
 
+fn byte(value: u64) -> u8 {
+    u8::try_from(value & 0xff).expect("masked value fits in u8")
+}
+
 fn encode_rows(out: &mut Vec<u8>, rows: &[PluginCpuReservationV1]) {
     match rows.len() {
-        0..=23 => out.push(0x80 | rows.len() as u8),
-        24..=255 => out.extend_from_slice(&[0x98, rows.len() as u8]),
-        _ => out.extend_from_slice(&[0x99, (rows.len() >> 8) as u8, rows.len() as u8]),
+        0..=23 => out.push(0x80 | u8::try_from(rows.len()).expect("row count fits in u8")),
+        24..=255 => out.extend_from_slice(&[
+            0x98,
+            u8::try_from(rows.len()).expect("row count fits in u8"),
+        ]),
+        _ => out.extend_from_slice(&[
+            0x99,
+            u8::try_from(rows.len() >> 8).expect("row count high byte fits in u8"),
+            u8::try_from(rows.len()).expect("row count fits in u8"),
+        ]),
     }
     for row in rows {
         out.push(0x82);
