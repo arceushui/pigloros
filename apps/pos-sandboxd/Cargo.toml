@@ -9,10 +9,10 @@ publish.workspace = true
 [dependencies]
 pos-reference = { path = "../../crates/pos-reference" }
 thiserror = { workspace = true }
+zvariant = "=5.15.0"
 
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }
-zvariant = "=5.15.0"
 
 [lints]
 workspace = true

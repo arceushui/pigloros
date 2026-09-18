@@ -5,10 +5,17 @@
 //! and architecture before these requested-state components are used.
 
 mod hardening;
+mod transient_unit;
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
+};
+pub use transient_unit::{
+    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadbackOnlyProperty,
+    SystemdTransientUnitProperty, SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue,
+    SystemdTransientUnitValue, TransientUnitLaunchInputs, TransientUnitRequest,
+    TransientUnitRequestError,
 };
 
 use pos_reference::sandbox_provider_protocol::{
