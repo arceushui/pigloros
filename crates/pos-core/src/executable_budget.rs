@@ -11,6 +11,10 @@ pub const MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1: usize = 65_536;
 /// Maximum Plugin rows in one policy.
 pub const MAX_PLUGIN_CPU_RESERVATIONS_V1: usize = 256;
 
+const MAX_FIDELITY_EVENTS_V1: [u32; 3] = [65_536, 131_072, 32_768];
+const MAX_FIDELITY_BYTES_V1: [u64; 3] = [64 * 1024 * 1024, 128 * 1024 * 1024, 16 * 1024 * 1024];
+const MAX_FIDELITY_CPU_US_V1: [u32; 3] = [500_000, 250_000, 50_000];
+
 /// Workload profile selected by the host policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkloadProfileV1 {
@@ -115,8 +119,11 @@ impl ExecutableBudgetPolicyV1 {
             .any(|(index, budget)| {
                 budget.level != index as u8
                     || budget.max_events == 0
+                    || budget.max_events > MAX_FIDELITY_EVENTS_V1[index]
                     || budget.max_bytes == 0
+                    || budget.max_bytes > MAX_FIDELITY_BYTES_V1[index]
                     || budget.max_cpu_us == 0
+                    || budget.max_cpu_us > MAX_FIDELITY_CPU_US_V1[index]
                     || u64::from(budget.shared_host_cpu_reservation_us)
                         > u64::from(budget.max_cpu_us)
             })
@@ -216,7 +223,7 @@ impl ExecutableBudgetPolicyV1 {
         if reader.offset != bytes.len() {
             return Err(ExecutableBudgetErrorV1::NonCanonical);
         }
-        Self::new(ExecutableBudgetPolicyInputV1 {
+        let policy = Self::new(ExecutableBudgetPolicyInputV1 {
             revision,
             workload_profile,
             cut_budget_family,
@@ -226,7 +233,11 @@ impl ExecutableBudgetPolicyV1 {
             accounting_semantics,
             execution_profile_hash,
             max_pass_wall_duration_us,
-        })
+        })?;
+        if policy.to_canonical_cbor() != bytes {
+            return Err(ExecutableBudgetErrorV1::NonCanonical);
+        }
+        Ok(policy)
     }
 
     /// Ordinary BLAKE3 identity of the exact canonical policy bytes.
@@ -338,7 +349,15 @@ impl<'a> Reader<'a> {
             }
             _ => return Err(ExecutableBudgetErrorV1::InvalidEncoding),
         };
-        if width != 0 && value < (1_u64 << (8 * (width - 1))) {
+        let minimum = match width {
+            0 => 0,
+            1 => 24,
+            2 => 256,
+            4 => 65_536,
+            8 => 1_u64 << 32,
+            _ => return Err(ExecutableBudgetErrorV1::InvalidEncoding),
+        };
+        if value < minimum {
             return Err(ExecutableBudgetErrorV1::NonCanonical);
         }
         Ok((width, value))

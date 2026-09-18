@@ -50,7 +50,12 @@ fn public_policy_round_trips_and_has_stable_identity() -> Result<(), Box<dyn std
         ExecutableBudgetPolicyV1::from_canonical_cbor(&bytes)?,
         policy
     );
-    assert_eq!(policy.digest(), policy.digest());
+    let mut changed = policy.fields().clone();
+    changed.execution_profile_hash = Hash::from_bytes([8; 32]);
+    assert_ne!(
+        policy.digest(),
+        ExecutableBudgetPolicyV1::new(changed)?.digest()
+    );
     Ok(())
 }
 
@@ -70,6 +75,16 @@ fn public_policy_rejects_noncanonical_plugin_order() {
     assert_eq!(
         ExecutableBudgetPolicyV1::new(input),
         Err(ExecutableBudgetErrorV1::NonCanonical)
+    );
+}
+
+#[test]
+fn public_policy_rejects_fidelity_values_above_adr049_caps() {
+    let mut input = policy().expect("fixture").fields().clone();
+    input.fidelity_budgets[0].max_events = 65_537;
+    assert_eq!(
+        ExecutableBudgetPolicyV1::new(input),
+        Err(ExecutableBudgetErrorV1::FieldOutOfBounds)
     );
 }
 
