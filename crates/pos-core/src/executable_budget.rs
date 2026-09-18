@@ -288,7 +288,7 @@ fn encode_uint(out: &mut Vec<u8>, value: u64) {
     }
 }
 
-fn byte(value: u64) -> u8 {
+const fn byte(value: u64) -> u8 {
     value.to_le_bytes()[0]
 }
 
