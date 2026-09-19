@@ -44,7 +44,13 @@ use pos_core::{
     crypto::Hash,
     ids::{PluginId, TimelineId},
     manifest::AdapterRecord,
+    output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    },
     store::SeqRange,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
+    PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_experiment::{
     Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
@@ -714,8 +720,14 @@ fn run_builtin_reference_experiment(
     // Register reference plugins
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
-    exp.register(
+    let (agent_policy, agent_budget) = reference_output_binding(
+        agent_plugin.id(),
+        pos_plugin_rule_agent::EVENT_TYPE_DECISION,
+    )?;
+    exp.register_with_output_policy(
         &agent_plugin,
+        agent_policy,
+        agent_budget,
         Some(Box::new(RuleAgentReducer)),
         Some(Box::new(RuleAgentDriver::new(
             agent_entity,
@@ -725,13 +737,78 @@ fn run_builtin_reference_experiment(
 
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
-    exp.register(
+    let (obs_policy, obs_budget) =
+        reference_output_binding(obs_plugin.id(), pos_plugin_synthetic_obs::EVENT_TYPE)?;
+    exp.register_with_output_policy(
         &obs_plugin,
+        obs_policy,
+        obs_budget,
         Some(Box::new(SyntheticReducer)),
         Some(Box::new(SyntheticDriver::new(obs_entity))),
     )?;
 
     exp.run().map_err(Into::into)
+}
+
+fn reference_output_binding(
+    plugin_id: PluginId,
+    event_type: &str,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 4096,
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id,
+            cpu_reservations_us: [10; 3],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash: Hash::from_bytes([21; 32]),
+        max_pass_wall_duration_us: 1_000,
+    })?;
+    let declaration = OutputDeclarationV1::new(
+        event_type.to_owned(),
+        OutputAuthorityV1::Authoritative,
+        OutputFidelityV1::L0,
+        4096,
+        None,
+        None,
+    )?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: "0.1.0".to_owned(),
+        implementation_hash: Hash::from_bytes([22; 32]),
+        base_configuration_digest: Hash::from_bytes([23; 32]),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: Hash::from_bytes([24; 32]),
+        policy_revision: 1,
+        output_declarations: vec![declaration],
+    })?;
+    Ok((policy, budget))
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
