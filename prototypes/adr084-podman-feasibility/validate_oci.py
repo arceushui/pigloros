@@ -81,8 +81,11 @@ def main() -> None:
         {"annotations", "schemaVersion", "mediaType", "config", "layers"},
         "manifest",
     )
-    if manifest.get("annotations") != annotations:
-        raise ValueError("manifest transport annotation differs from index")
+    if manifest.get("annotations") != {
+        "org.opencontainers.image.base.digest": "",
+        "org.opencontainers.image.base.name": "",
+    }:
+        raise ValueError("unexpected manifest provenance annotations")
     if manifest.get("schemaVersion") != 2:
         raise ValueError("unexpected manifest schema version")
     if manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
