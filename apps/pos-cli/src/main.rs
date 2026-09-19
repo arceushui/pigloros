@@ -790,7 +790,7 @@ fn reference_output_binding(
         execution_profile_hash: Hash::from_bytes([21; 32]),
         max_pass_wall_duration_us: 1_000,
     })
-    .unwrap_or_else(|error| panic!("reference executable budget constants are valid: {error}"));
+    .unwrap_or_else(|_| std::process::abort());
     let declaration = OutputDeclarationV1::new(
         event_type.to_owned(),
         OutputAuthorityV1::Authoritative,
@@ -799,7 +799,7 @@ fn reference_output_binding(
         None,
         None,
     )
-    .unwrap_or_else(|error| panic!("reference output declaration constants are valid: {error}"));
+    .unwrap_or_else(|_| std::process::abort());
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id,
         plugin_version: "0.1.0".to_owned(),
@@ -810,7 +810,7 @@ fn reference_output_binding(
         policy_revision: 1,
         output_declarations: vec![declaration],
     })
-    .unwrap_or_else(|error| panic!("reference output policy constants are valid: {error}"));
+    .unwrap_or_else(|_| std::process::abort());
     (policy, budget)
 }
 
