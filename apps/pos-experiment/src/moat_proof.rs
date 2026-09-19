@@ -507,7 +507,7 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        registry.register_legacy(
+        registry.register(
             &topology.agent_plugin,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
@@ -515,7 +515,7 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        registry.register_legacy(
+        registry.register(
             &topology.society_plugin,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
