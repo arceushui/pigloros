@@ -1492,10 +1492,7 @@ impl ErasureExecutionHostV1 {
         } else {
             self.install_inventory_from_coordinator_with_limits(limits)
                 .map(|generation| (timeline, generation))
-                .map_err(|error| {
-                    self.poison();
-                    error
-                })
+                .inspect_err(|_| self.poison())
         }
     }
 
@@ -1577,98 +1574,8 @@ impl ErasureExecutionHostV1 {
         let mut transition_host_error = None;
         let publication = {
             let mut fenced_transition = || {
-                let transition = (|| {
-                    if let Some(recovered) = self
-                        .store
-                        .host_store()
-                        .recover_fork_admission(input.operation)?
-                    {
-                        if recovered.child().mode != input.child.mode
-                            || recovered.child().name != input.child.name
-                            || recovered.child().owner != input.child.owner
-                            || recovered.child().fork_point != input.child.fork_point
-                        {
-                            return Err(ErasureErrorV1::PolicyConflict);
-                        }
-                        if recovered.successor_generation() != input.current_generation {
-                            transition_host_error = Some(ErasureHostErrorV1::StaleGeneration);
-                            return Err(ErasureErrorV1::PolicyConflict);
-                        }
-                        let retry_child = recovered.child().clone();
-                        let child_scope = input
-                            .authority
-                            .resolve_fork_child_scope(input.parent, &retry_child)?;
-                        if child_scope != recovered.child_scope() {
-                            return Err(ErasureErrorV1::PolicyConflict);
-                        }
-                        let retry_input = ErasureForkAdmissionInputV1 {
-                            operation: input.operation,
-                            expected_inventory_generation: recovered
-                                .expected_inventory_generation(),
-                            child_scope,
-                            child: retry_child,
-                        };
-                        for requirement in input
-                            .current_inventory
-                            .fork_retry_scope_requirements(input.parent, recovered.child().id)?
-                        {
-                            let extension = input.authority.resolve_fork_scope_extension(
-                                requirement.requirement(),
-                                &retry_input,
-                            )?;
-                            if extension != *requirement.extension() {
-                                return Err(ErasureErrorV1::PolicyConflict);
-                            }
-                        }
-                        return Ok((
-                            input.current_inventory.clone(),
-                            Timeline::new(recovered.child().clone()),
-                        ));
-                    }
-                    let requirements = input
-                        .current_inventory
-                        .fork_scope_requirements(input.parent)?;
-                    let child_scope = input
-                        .authority
-                        .resolve_fork_child_scope(input.parent, input.child)?;
-                    let admission_input = ErasureForkAdmissionInputV1 {
-                        operation: input.operation,
-                        expected_inventory_generation: input.current_generation,
-                        child_scope,
-                        child: input.child.clone(),
-                    };
-                    let admissions = {
-                        let port =
-                            HostedCoordinatorPortV1::new(self.store.host_store(), input.authority);
-                        let mut state_machine =
-                            ErasureCoordinatorStateMachineV1::new(port, input.coordinator);
-                        requirements
-                            .into_iter()
-                            .map(|requirement| {
-                                input
-                                    .authority
-                                    .resolve_fork_scope_extension(requirement, &admission_input)
-                                    .and_then(|extension| {
-                                        state_machine.prepare_fork_admission(
-                                            requirement.request(),
-                                            extension,
-                                            admission_input.clone(),
-                                        )
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
-                    };
-                    let batch = input
-                        .current_inventory
-                        .clone()
-                        .prepare_fork_batch(admission_input, admissions)?;
-                    let successor = batch.successor_inventory().clone();
-                    match self.store.host_store().commit_fork_admission(batch)? {
-                        ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
-                            Ok((successor, Timeline::new(input.child.clone())))
-                        }
-                    }
-                })();
+                let transition =
+                    self.run_identified_fork_transition(input, &mut transition_host_error);
                 if let Err(error) = transition {
                     transition_error = Some(error);
                 }
@@ -1684,6 +1591,116 @@ impl ErasureExecutionHostV1 {
                 error.into(),
                 self.recovery_limits,
             )),
+        }
+    }
+
+    fn run_identified_fork_transition(
+        &mut self,
+        input: &IdentifiedForkTransitionInput<'_>,
+        transition_host_error: &mut Option<ErasureHostErrorV1>,
+    ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
+        if let Some(recovered) = self
+            .store
+            .host_store()
+            .recover_fork_admission(input.operation)?
+        {
+            return self.recover_identified_fork(input, recovered, transition_host_error);
+        }
+        self.prepare_identified_fork(input)
+    }
+
+    fn recover_identified_fork(
+        &self,
+        input: &IdentifiedForkTransitionInput<'_>,
+        recovered: ErasureForkRecoveryV1,
+        transition_host_error: &mut Option<ErasureHostErrorV1>,
+    ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
+        let recovered_child = recovered.child();
+        if recovered_child.mode != input.child.mode
+            || recovered_child.name != input.child.name
+            || recovered_child.owner != input.child.owner
+            || recovered_child.fork_point != input.child.fork_point
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if recovered.successor_generation() != input.current_generation {
+            *transition_host_error = Some(ErasureHostErrorV1::StaleGeneration);
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let retry_child = recovered_child.clone();
+        let child_scope = input
+            .authority
+            .resolve_fork_child_scope(input.parent, &retry_child)?;
+        if child_scope != recovered.child_scope() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let retry_input = ErasureForkAdmissionInputV1 {
+            operation: input.operation,
+            expected_inventory_generation: recovered.expected_inventory_generation(),
+            child_scope,
+            child: retry_child,
+        };
+        for requirement in input
+            .current_inventory
+            .fork_retry_scope_requirements(input.parent, recovered_child.id)?
+        {
+            let extension = input
+                .authority
+                .resolve_fork_scope_extension(requirement.requirement(), &retry_input)?;
+            if extension != *requirement.extension() {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+        }
+        Ok((
+            input.current_inventory.clone(),
+            Timeline::new(recovered_child.clone()),
+        ))
+    }
+
+    fn prepare_identified_fork(
+        &mut self,
+        input: &IdentifiedForkTransitionInput<'_>,
+    ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
+        let requirements = input
+            .current_inventory
+            .fork_scope_requirements(input.parent)?;
+        let child_scope = input
+            .authority
+            .resolve_fork_child_scope(input.parent, input.child)?;
+        let admission_input = ErasureForkAdmissionInputV1 {
+            operation: input.operation,
+            expected_inventory_generation: input.current_generation,
+            child_scope,
+            child: input.child.clone(),
+        };
+        let admissions = {
+            let port = HostedCoordinatorPortV1::new(self.store.host_store(), input.authority);
+            let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, input.coordinator);
+            requirements
+                .into_iter()
+                .map(|requirement| {
+                    input
+                        .authority
+                        .resolve_fork_scope_extension(requirement, &admission_input)
+                        .and_then(|extension| {
+                            state_machine.prepare_fork_admission(
+                                requirement.request(),
+                                extension,
+                                admission_input.clone(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let batch = input
+            .current_inventory
+            .clone()
+            .prepare_fork_batch(admission_input, admissions)?;
+        let successor = batch.successor_inventory().clone();
+        match self.store.host_store().commit_fork_admission(batch)? {
+            ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
+                Ok((successor, Timeline::new(input.child.clone())))
+            }
         }
     }
 
