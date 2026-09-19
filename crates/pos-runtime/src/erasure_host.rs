@@ -3376,7 +3376,21 @@ mod tests {
         }
     }
 
-    struct UnusedCoordinatorAuthorityV1;
+    #[derive(Clone, Copy)]
+    struct UnusedCoordinatorAuthorityV1 {
+        resolved_child_scope: Option<ErasureReferenceV1>,
+    }
+
+    impl UnusedCoordinatorAuthorityV1 {
+        const fn rejecting() -> Self {
+            Self {
+                resolved_child_scope: None,
+            }
+        }
+    }
+
+    static UNUSED_COORDINATOR_AUTHORITY: UnusedCoordinatorAuthorityV1 =
+        UnusedCoordinatorAuthorityV1::rejecting();
 
     impl ErasureFreezeAuthorizationVerifierV1 for UnusedCoordinatorAuthorityV1 {
         fn validate_freeze_authorization(
@@ -3466,7 +3480,8 @@ mod tests {
             _parent: TimelineId,
             _child: &TimelineMeta,
         ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
-            Err(ErasureErrorV1::Unauthorized)
+            self.resolved_child_scope
+                .ok_or(ErasureErrorV1::Unauthorized)
         }
 
         fn resolve_fork_scope_extension(
@@ -3780,7 +3795,7 @@ mod tests {
     #[test]
     fn hosted_coordinator_port_delegates_empty_persistence_reads() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         assert_eq!(port.resolve_state(request)?, None);
         assert_eq!(port.read_manifest(request)?, None);
@@ -3813,7 +3828,7 @@ mod tests {
     fn hosted_coordinator_port_retains_recovery_failures() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
         let request = reference(34);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(30));
         assert_eq!(
             coordinator.verified_inventory(4),
@@ -4119,7 +4134,7 @@ mod tests {
     fn hosted_coordinator_port_delegates_resolution_and_destruction_authority(
     ) -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         let resolution =
             ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
@@ -4154,7 +4169,7 @@ mod tests {
     fn hosted_coordinator_port_delegates_attempt_and_receipt_authority(
     ) -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
-        let port = HostedCoordinatorPortV1::new(&mut store, &UnusedCoordinatorAuthorityV1);
+        let port = HostedCoordinatorPortV1::new(&mut store, &UNUSED_COORDINATOR_AUTHORITY);
         let request = ErasureReferenceV1::from_digest([71; 32]);
         let retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
             request,
@@ -4419,7 +4434,7 @@ mod tests {
             host.install_inventory_from_coordinator(4),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         assert_eq!(
             host.install_inventory_from_coordinator(4),
             Err(ErasureHostErrorV1::AuthorizationDenied)
@@ -5554,12 +5569,13 @@ mod tests {
 
     #[test]
     fn every_hosted_event_store_failure_is_payload_free() {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(FaultModeV1::EventStore)),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let timeline = TimelineId::new();
+        let (mut store, _) = fault_store_with_control(FaultModeV1::EventStore);
+        let timeline = store
+            .inner
+            .create_timeline("fault-parent")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         {
             let mut command = host
                 .command_sender()
@@ -5674,7 +5690,7 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        missing_coordinator.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        missing_coordinator.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         assert_eq!(
             missing_coordinator.apply_identified_fork(
                 ErasureReferenceV1::from_digest([113; 32]),
@@ -5690,7 +5706,7 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        rejected_submit.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        rejected_submit.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         rejected_submit.coordinator = Some(ErasureReferenceV1::from_digest([114; 32]));
         assert_eq!(
             rejected_submit
@@ -5739,7 +5755,7 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        no_coordinator.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        no_coordinator.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         assert_eq!(
             no_coordinator.command_sender().and_then(|mut sender| sender
                 .authorize_erasure_request(
@@ -5783,7 +5799,7 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        identified.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        identified.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         identified.coordinator = Some(ErasureReferenceV1::from_digest([136; 32]));
         let identified_parent = identified
             .command_sender()
@@ -5805,7 +5821,7 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        command.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        command.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         command.coordinator = Some(ErasureReferenceV1::from_digest([138; 32]));
         let command_timeline = command
             .command_sender()
@@ -5834,7 +5850,7 @@ mod tests {
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("identified-parent"))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         host.coordinator = Some(ErasureReferenceV1::from_digest([116; 32]));
         assert_eq!(
             host.command_sender()
@@ -5867,7 +5883,9 @@ mod tests {
         host.command_sender()
             .and_then(|mut sender| sender.commit_fork_admission(batch))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1 {
+            resolved_child_scope: Some(operation),
+        }));
         host.coordinator = Some(ErasureReferenceV1::from_digest([119; 32]));
 
         assert_eq!(
@@ -5892,7 +5910,7 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1));
+        host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         host.coordinator = Some(ErasureReferenceV1::from_digest([120; 32]));
         assert_eq!(
             host.command_sender()
