@@ -2102,6 +2102,9 @@ impl PluginRegistry {
     /// Hosts should prefer [`Self::register_with_output_policy`]. This method
     /// is retained for older callers whose plugins predate output policy
     /// identity and therefore cannot provide an admission binding yet.
+    ///
+    /// # Errors
+    /// Returns the same registration errors as [`Self::register`].
     pub fn register_legacy(
         &mut self,
         plugin: &dyn Plugin,
