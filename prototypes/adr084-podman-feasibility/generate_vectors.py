@@ -59,12 +59,17 @@ def identifier(index: int) -> bytes:
     return bytes([index]) * 16
 
 
-def rejection(name: str, record: list[object], expected: str) -> dict[str, str]:
-    return {
-        "expected_rejection": expected,
-        "record": name,
-        "record_cbor_hex": cbor(record).hex(),
-    }
+def rejection(
+    name: str,
+    unsigned: list[object],
+    expected: str,
+    vector_name: str,
+    signed: bool = False,
+) -> dict[str, str]:
+    result = vector(vector_name, unsigned, signed)
+    result["record"] = name
+    result["expected_rejection"] = expected
+    return result
 
 
 def vector(name: str, unsigned: list[object], signed: bool = False) -> dict[str, str]:
@@ -211,20 +216,27 @@ def main() -> None:
     wrong_executable = [*ois]
     wrong_executable[10] = ["/wrong-adapter", 4096, digest(9), 0, None, None]
     rejections = [
-        rejection("OIS1-wrong-architecture", wrong_architecture, "unsupported architecture"),
-        rejection("OIS1-wrong-layer-order", wrong_layer_order, "ordered layer closure mismatch"),
-        rejection("OIS1-wrong-rootfs", wrong_rootfs, "mounted ORT1 digest mismatch"),
-        rejection("OIS1-wrong-executable", wrong_executable, "adapter identity mismatch"),
+        rejection("OIS1-wrong-architecture", wrong_architecture,
+                  "unsupported architecture", "OciImageSubject", True),
+        rejection("OIS1-wrong-layer-order", wrong_layer_order,
+                  "ordered layer closure mismatch", "OciImageSubject", True),
+        rejection("OIS1-wrong-rootfs", wrong_rootfs,
+                  "mounted ORT1 digest mismatch", "OciImageSubject", True),
+        rejection("OIS1-wrong-executable", wrong_executable,
+                  "adapter identity mismatch", "OciImageSubject", True),
         rejection(
             "RVS2-revoked-image",
             ["RVS2", 2, digest(1), 9, [], [],
              [bytes.fromhex(vectors[1]["self_digest_hex"])], identifier(1)],
             "OIS1 self-digest is revoked",
+            "RVS",
+            True,
         ),
         rejection(
             "mixed-version-closure",
             ["LPS1", 1, "pigloros.air-gapped", 0, digest(1), limits, []],
             "version-1 authority record in version-2 closure",
+            "LPS",
         ),
     ]
     print(json.dumps({"rejection_vectors": rejections, "vectors": vectors}, indent=2, sort_keys=True))
