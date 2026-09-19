@@ -839,6 +839,9 @@ impl ErasureContainmentGateV1 {
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
+        let identity = std::ptr::from_ref(self) as usize;
+        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
+        let _active = ActiveContainmentFence;
         let (candidate, result) = transition().map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(Arc::new(candidate.clone())),
@@ -7035,11 +7038,19 @@ mod coverage_paths {
     fn assert_inventory_transition_fence(
         gate: &ErasureContainmentGateV1,
         inventory: ErasureVerifiedInventoryV1,
+        nested_timeline: TimelineId,
     ) {
         let generation = inventory.generation();
         let mut successor = Some(inventory);
+        let mut nested_result = None;
         assert_eq!(
             gate.install_from_verified_inventory_transition(&mut || {
+                let mut effect = || {};
+                nested_result = Some(gate.with_fence(
+                    nested_timeline,
+                    ErasureProtectedOperationV1::Read,
+                    &mut effect,
+                ));
                 successor
                     .take()
                     .map(|inventory| (inventory, ()))
@@ -7048,6 +7059,7 @@ mod coverage_paths {
             .map(|(inventory, ())| inventory.generation()),
             Ok(generation)
         );
+        assert_eq!(nested_result, Some(Ok(())));
         assert_eq!(
             gate.install_from_verified_inventory_transition(&mut || {
                 Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::PolicyConflict)
@@ -7220,7 +7232,7 @@ mod coverage_paths {
             gate.authorize(unaffected, ErasureProtectedOperationV1::Read),
             Ok(())
         );
-        assert_inventory_transition_fence(&gate, transition_inventory);
+        assert_inventory_transition_fence(&gate, transition_inventory, unaffected);
 
         assert_limit_aware_gate_installation(inventory, generation)?;
         Ok(())
