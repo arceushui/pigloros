@@ -889,7 +889,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     let state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
         Some(scope.clone()),
-        vec![first_extension, second_extension.clone()],
+        vec![first_extension, second_extension],
     )?;
     let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
         vec![(
@@ -935,6 +935,37 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         .fork_retry_scope_requirements(parent, child)?
         .is_empty());
 
+    assert_fork_retry_rejects_parent_corruption(&inventory, parent, child)?;
+    assert_fork_retry_rejects_child_corruption(&inventory, parent, child)?;
+    assert_fork_retry_rejects_included_excluded_child(excluded, parent, child)?;
+
+    let empty = ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
+    let empty_generation = empty.generation();
+    let child_without_name = crate::TimelineMeta {
+        id: TimelineId::new(),
+        mode: crate::TimelineMode::Historical,
+        name: None,
+        owner: None,
+        fork_point: Some((parent, crate::Seq::ZERO)),
+    };
+    let batch = empty.prepare_fork_batch(
+        ErasureForkAdmissionInputV1 {
+            operation: reference(41),
+            expected_inventory_generation: empty_generation,
+            child_scope: reference(42),
+            child: child_without_name,
+        },
+        Vec::new(),
+    )?;
+    assert!(batch.recovery_result().is_ok());
+    Ok(())
+}
+
+fn assert_fork_retry_rejects_parent_corruption(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
     let mut incomplete_classifications = inventory.clone();
     incomplete_classifications
         .classifications
@@ -967,7 +998,14 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         missing_state_scope.fork_retry_scope_requirements(parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
 
+fn assert_fork_retry_rejects_child_corruption(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
     let mut missing_child_request = inventory.clone();
     missing_child_request
         .classifications
@@ -994,19 +1032,6 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let mut invalid_excluded_child = excluded.clone();
-    invalid_excluded_child
-        .classifications
-        .iter_mut()
-        .find(|(timeline, _)| *timeline == child)
-        .and_then(|(_, classifications)| classifications.first_mut())
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?
-        .membership = ErasureInventoryMembershipV1::Included(reference(39));
-    assert_eq!(
-        invalid_excluded_child.fork_retry_scope_requirements(parent, child),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-
     let mut wrong_extension = inventory.clone();
     wrong_extension
         .classifications
@@ -1019,26 +1044,25 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         wrong_extension.fork_retry_scope_requirements(parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
 
-    let empty = ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
-    let empty_generation = empty.generation();
-    let child_without_name = crate::TimelineMeta {
-        id: TimelineId::new(),
-        mode: crate::TimelineMode::Historical,
-        name: None,
-        owner: None,
-        fork_point: Some((parent, crate::Seq::ZERO)),
-    };
-    let batch = empty.prepare_fork_batch(
-        ErasureForkAdmissionInputV1 {
-            operation: reference(41),
-            expected_inventory_generation: empty_generation,
-            child_scope: reference(42),
-            child: child_without_name,
-        },
-        Vec::new(),
-    )?;
-    assert!(batch.recovery_result().is_ok());
+fn assert_fork_retry_rejects_included_excluded_child(
+    mut excluded: ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    excluded
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Included(reference(39));
+    assert_eq!(
+        excluded.fork_retry_scope_requirements(parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
 
