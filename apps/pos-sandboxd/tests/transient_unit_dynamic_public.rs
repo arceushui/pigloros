@@ -122,6 +122,16 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
+    match properties[33].value() {
+        SystemdTransientUnitValue::FileDescriptorStoreMax(value) => {
+            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let (decoded, consumed): (u32, usize) = encoded.deserialize()?;
+            assert_eq!(decoded, *value);
+            assert_eq!(*value, 0);
+            assert_eq!(consumed, encoded.len());
+        }
+        _value => return Err("FileDescriptorStoreMax must have a u value".into()),
+    }
     match properties[34].value() {
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
             assert_eq!(
@@ -258,6 +268,12 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         "RootDirectory",
         SystemdTransientUnitReadbackValue::BoolStringArray((true, Vec::new())),
     );
+    let mut nonzero_descriptor_store =
+        exact_readback(&request, &authority.expected_effective_names);
+    nonzero_descriptor_store[33] = SystemdTransientUnitReadback::new(
+        "FileDescriptorStoreMax",
+        SystemdTransientUnitReadbackValue::U32(1),
+    );
     let mut missing_descriptor = exact_readback(&request, &authority.expected_effective_names);
     missing_descriptor[34] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
@@ -286,6 +302,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         reordered,
         syscall_request_as_readback,
         mistyped_root,
+        nonzero_descriptor_store,
         missing_descriptor,
         extra_descriptor,
         reordered_descriptor,
