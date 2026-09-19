@@ -75,6 +75,13 @@ struct IdentifiedForkTransitionInput<'a> {
 
 struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
 
+enum UnaffectedTopologyTransitionError {
+    Host(ErasureHostErrorV1),
+    Erasure(ErasureErrorV1),
+    RejectedAsAffected,
+    RollbackFailed,
+}
+
 impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
     fn verified_inventory(
         &mut self,
@@ -1456,6 +1463,102 @@ impl ErasureExecutionHostV1 {
         self.apply_unaffected_topology_change(None, change)
     }
 
+    fn verify_unaffected_topology_candidate(
+        &mut self,
+        request_count: usize,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        if request_count == 0 {
+            return self
+                .store
+                .host_store()
+                .complete_erasure_inventory_snapshot_with_limits(limits)
+                .and_then(|snapshot| {
+                    ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+                        .verified_inventory_with_limits(limits)
+                });
+        }
+        let authority = self.authority.clone().ok_or(ErasureErrorV1::Unauthorized)?;
+        let coordinator = self.coordinator.ok_or(ErasureErrorV1::Unauthorized)?;
+        let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+        let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
+        state_machine.verified_inventory_with_limits(limits)
+    }
+
+    fn rollback_unaffected_topology_timeline(
+        &mut self,
+        timeline: &Timeline,
+        created: bool,
+    ) -> Result<(), UnaffectedTopologyTransitionError> {
+        if created
+            && self
+                .store
+                .host_store()
+                .delete_timeline(timeline.id())
+                .is_err()
+        {
+            return Err(UnaffectedTopologyTransitionError::RollbackFailed);
+        }
+        Ok(())
+    }
+
+    fn prepare_unaffected_topology_transition<F>(
+        &mut self,
+        change: Option<F>,
+        request_count: usize,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<(ErasureVerifiedInventoryV1, Timeline), UnaffectedTopologyTransitionError>
+    where
+        F: FnOnce(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>,
+    {
+        let existing_timeline_ids = self
+            .store
+            .host_store()
+            .list_timelines()
+            .map_store_error()
+            .map_err(UnaffectedTopologyTransitionError::Host)?
+            .into_iter()
+            .map(|timeline| timeline.id())
+            .collect::<Vec<_>>();
+        let Some(change) = change else {
+            return Err(UnaffectedTopologyTransitionError::Erasure(
+                ErasureErrorV1::ProvenanceMissing,
+            ));
+        };
+        let timeline = change(self.store.host_store())
+            .map_store_error()
+            .map_err(UnaffectedTopologyTransitionError::Host)?;
+        let created = !existing_timeline_ids.contains(&timeline.id());
+        let candidate = match self.verify_unaffected_topology_candidate(request_count, limits) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.rollback_unaffected_topology_timeline(&timeline, created)?;
+                return Err(UnaffectedTopologyTransitionError::Erasure(error));
+            }
+        };
+        if request_count != 0 && created {
+            match candidate.fork_scope_requirements(timeline.id()) {
+                Ok(requirements) if requirements.is_empty() => {}
+                Ok(_) => {
+                    self.rollback_unaffected_topology_timeline(&timeline, created)?;
+                    return Err(UnaffectedTopologyTransitionError::RejectedAsAffected);
+                }
+                Err(error) => {
+                    self.rollback_unaffected_topology_timeline(&timeline, created)?;
+                    return Err(UnaffectedTopologyTransitionError::Erasure(error));
+                }
+            }
+        }
+        #[cfg(test)]
+        if self.fail_inventory_publication {
+            self.rollback_unaffected_topology_timeline(&timeline, created)?;
+            return Err(UnaffectedTopologyTransitionError::Erasure(
+                ErasureErrorV1::ProvenanceMissing,
+            ));
+        }
+        Ok((candidate, timeline))
+    }
+
     fn apply_unaffected_topology_change(
         &mut self,
         parent: Option<TimelineId>,
@@ -1483,8 +1586,6 @@ impl ErasureExecutionHostV1 {
             return Err(ErasureHostErrorV1::AuthorizationDenied);
         }
         let request_count = inventory.request_count();
-        let authority = self.authority.clone();
-        let coordinator = self.coordinator;
         let gate = Arc::clone(&self.gate);
         let mut change = Some(change);
         let mut transition_error = None;
@@ -1492,115 +1593,30 @@ impl ErasureExecutionHostV1 {
         let mut rollback_failed = false;
         let mut rejected_as_affected = false;
         let publication = {
-            let mut fenced_transition = || {
-                let existing_timeline_ids =
-                    match self.store.host_store().list_timelines().map_store_error() {
-                        Ok(timelines) => timelines
-                            .into_iter()
-                            .map(|timeline| timeline.id())
-                            .collect::<Vec<_>>(),
-                        Err(error) => {
-                            transition_host_error = Some(error);
-                            return Err(ErasureErrorV1::ProvenanceMissing);
-                        }
-                    };
-                let Some(change) = change.take() else {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                };
-                let timeline = match change(self.store.host_store()).map_store_error() {
-                    Ok(timeline) => timeline,
-                    Err(error) => {
-                        transition_host_error = Some(error);
-                        return Err(ErasureErrorV1::ProvenanceMissing);
-                    }
-                };
-                let created = !existing_timeline_ids.contains(&timeline.id());
-                let candidate = if request_count == 0 {
-                    self.store
-                        .host_store()
-                        .complete_erasure_inventory_snapshot_with_limits(limits)
-                        .and_then(|snapshot| {
-                            ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
-                                .verified_inventory_with_limits(limits)
-                        })
-                } else {
-                    let authority = authority.as_ref().ok_or(ErasureErrorV1::Unauthorized)?;
-                    let coordinator = coordinator.ok_or(ErasureErrorV1::Unauthorized)?;
-                    let port =
-                        HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
-                    let mut state_machine =
-                        ErasureCoordinatorStateMachineV1::new(port, coordinator);
-                    state_machine.verified_inventory_with_limits(limits)
-                };
-                let candidate = match candidate {
-                    Ok(candidate) => candidate,
-                    Err(error) => {
-                        if created
-                            && self
-                                .store
-                                .host_store()
-                                .delete_timeline(timeline.id())
-                                .is_err()
-                        {
-                            rollback_failed = true;
-                            transition_error = Some(ErasureErrorV1::ReceiptCommitFailed);
-                            return Err(ErasureErrorV1::ReceiptCommitFailed);
-                        }
-                        transition_error = Some(error);
-                        return Err(error);
-                    }
-                };
-                if request_count != 0 && created {
-                    match candidate.fork_scope_requirements(timeline.id()) {
-                        Ok(requirements) if requirements.is_empty() => {}
-                        Ok(_) => {
-                            rejected_as_affected = true;
-                            if self
-                                .store
-                                .host_store()
-                                .delete_timeline(timeline.id())
-                                .is_err()
-                            {
-                                rollback_failed = true;
-                                transition_error = Some(ErasureErrorV1::ReceiptCommitFailed);
-                                return Err(ErasureErrorV1::ReceiptCommitFailed);
-                            }
-                            transition_error = Some(ErasureErrorV1::PolicyConflict);
-                            return Err(ErasureErrorV1::PolicyConflict);
-                        }
-                        Err(error) => {
-                            if self
-                                .store
-                                .host_store()
-                                .delete_timeline(timeline.id())
-                                .is_err()
-                            {
-                                rollback_failed = true;
-                                transition_error = Some(ErasureErrorV1::ReceiptCommitFailed);
-                                return Err(ErasureErrorV1::ReceiptCommitFailed);
-                            }
-                            transition_error = Some(error);
-                            return Err(error);
-                        }
-                    }
+            let mut fenced_transition = || match self.prepare_unaffected_topology_transition(
+                change.take(),
+                request_count,
+                limits,
+            ) {
+                Ok(result) => Ok(result),
+                Err(UnaffectedTopologyTransitionError::Host(error)) => {
+                    transition_host_error = Some(error);
+                    Err(ErasureErrorV1::ProvenanceMissing)
                 }
-                #[cfg(test)]
-                if self.fail_inventory_publication {
-                    if created
-                        && self
-                            .store
-                            .host_store()
-                            .delete_timeline(timeline.id())
-                            .is_err()
-                    {
-                        rollback_failed = true;
-                        transition_error = Some(ErasureErrorV1::ReceiptCommitFailed);
-                        return Err(ErasureErrorV1::ReceiptCommitFailed);
-                    }
-                    transition_error = Some(ErasureErrorV1::ProvenanceMissing);
-                    return Err(ErasureErrorV1::ProvenanceMissing);
+                Err(UnaffectedTopologyTransitionError::Erasure(error)) => {
+                    transition_error = Some(error);
+                    Err(error)
                 }
-                Ok((candidate, timeline))
+                Err(UnaffectedTopologyTransitionError::RejectedAsAffected) => {
+                    rejected_as_affected = true;
+                    transition_error = Some(ErasureErrorV1::PolicyConflict);
+                    Err(ErasureErrorV1::PolicyConflict)
+                }
+                Err(UnaffectedTopologyTransitionError::RollbackFailed) => {
+                    rollback_failed = true;
+                    transition_error = Some(ErasureErrorV1::ReceiptCommitFailed);
+                    Err(ErasureErrorV1::ReceiptCommitFailed)
+                }
             };
             gate.install_from_verified_inventory_transition(&mut fenced_transition)
         };
@@ -1628,8 +1644,7 @@ impl ErasureExecutionHostV1 {
                     Err(ErasureHostErrorV1::RecoveryUnavailable)
                 } else {
                     Err(transition_error
-                        .map(map_erasure_error)
-                        .unwrap_or_else(|| publication_error.into()))
+                        .map_or_else(|| publication_error.into(), map_erasure_error))
                 }
             }
         }
