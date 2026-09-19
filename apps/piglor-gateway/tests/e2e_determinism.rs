@@ -112,13 +112,29 @@ fn agent_output_binding(
         workload_profile: WorkloadProfileV1::Interactive,
         cut_budget_family: 0,
         max_event_bytes: 4096,
-        fidelity_budgets: [FidelityBudgetV1 {
-            level: 0,
-            max_events: 1,
-            max_bytes: 4096,
-            max_cpu_us: 100,
-            shared_host_cpu_reservation_us: 0,
-        }; 3],
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
         plugin_cpu_reservations: vec![PluginCpuReservationV1 {
             plugin_id,
             cpu_reservations_us: [10; 3],
