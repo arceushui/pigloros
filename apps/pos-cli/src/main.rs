@@ -750,6 +750,7 @@ fn run_builtin_reference_experiment(
     exp.run().map_err(Into::into)
 }
 
+#[allow(clippy::expect_used)]
 fn reference_output_binding(
     plugin_id: PluginId,
     event_type: &str,
