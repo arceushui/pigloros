@@ -178,10 +178,7 @@ impl Plugin for AgentPlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: vec![
-                Kind::new(EVENT_TYPE_ACTION),
-                Kind::new(RECORDER_EVENT_TYPE),
-            ],
+            owned_event_types: vec![Kind::new(EVENT_TYPE_ACTION), Kind::new(RECORDER_EVENT_TYPE)],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
             has_driver: true,
             has_reducer: true,
