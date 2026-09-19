@@ -189,7 +189,7 @@ fn output_admission_rejects_identity_and_resource_limits() -> TestResult {
         Err(OutputAdmissionErrorV1::EventBytesExceeded { .. })
     ));
 
-    let batch_budget = budget_with(plugin_id, 16, 2, 1, 100, [10, 10, 10])?;
+    let batch_budget = budget_with(plugin_id, 16, 2, 3, 100, [10, 10, 10])?;
     let batch_admission = OutputAdmissionV1::try_new(
         plugin_id,
         "1.0.0",
@@ -197,11 +197,12 @@ fn output_admission_rejects_identity_and_resource_limits() -> TestResult {
         batch_budget,
     )?;
     assert!(matches!(
-        batch_admission.validate_batch(&[draft("plugin.output", b"ab")]),
+        batch_admission
+            .validate_batch(&[draft("plugin.output", b"ab"), draft("plugin.output", b"c")]),
         Err(OutputAdmissionErrorV1::BatchBytesExceeded { .. })
     ));
 
-    let cpu_budget = budget_with(plugin_id, 16, 2, 32, 1, [10, 10, 10])?;
+    let cpu_budget = budget_with(plugin_id, 16, 2, 32, 10, [10, 10, 10])?;
     let cpu_admission = OutputAdmissionV1::try_new(
         plugin_id,
         "1.0.0",
@@ -209,7 +210,7 @@ fn output_admission_rejects_identity_and_resource_limits() -> TestResult {
         cpu_budget,
     )?;
     assert!(matches!(
-        cpu_admission.validate_batch(&[draft("plugin.output", b"a")]),
+        cpu_admission.validate_batch(&[draft("plugin.output", b"a"), draft("plugin.output", b"b")]),
         Err(OutputAdmissionErrorV1::CpuExceeded { .. })
     ));
     Ok(())
