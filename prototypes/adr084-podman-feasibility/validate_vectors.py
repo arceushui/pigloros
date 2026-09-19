@@ -89,8 +89,8 @@ def validate_positive(document: dict[str, object]) -> tuple[list[object], list[o
         raise ValueError("positive ORT1 has an unexpected path set")
     for descriptor in (ois[9], ois[10]):
         entry = entries[descriptor[0]]
-        if entry[1] != 1 or entry[5] != descriptor[1] or entry[6] != descriptor[2]:
-            raise ValueError("ELF descriptor does not match ORT1")
+        if entry[1] != 1 or entry[5] != descriptor[1]:
+            raise ValueError("ELF descriptor metadata does not match ORT1")
         if descriptor[3] != 0 or descriptor[4:] != [None, None]:
             raise ValueError("unexpected ELF architecture/interpreter")
 
@@ -151,11 +151,13 @@ def validate_positive(document: dict[str, object]) -> tuple[list[object], list[o
     for path in ("/launcher", "/adapter"):
         mode, uid, gid, content = extracted[path]
         entry = entries[path]
+        descriptor = ois[9] if path == "/launcher" else ois[10]
         if (mode, uid, gid, len(content)) != tuple(entry[2:6]):
             raise ValueError("mounted file metadata differs from ORT1")
-        result = subprocess.run(["b3sum"], input=content, check=True, capture_output=True)
-        if bytes.fromhex(result.stdout.decode("ascii").split()[0]) != entry[6]:
+        if blake3("PiglorOS.OciRootfsFile.v1", content) != entry[6]:
             raise ValueError("mounted file content differs from ORT1")
+        if blake3("PiglorOS.OciExecutable.v1", content) != descriptor[2]:
+            raise ValueError("mounted executable differs from OIS1")
         if content[:4] != b"\x7fELF" or struct.unpack("<H", content[18:20])[0] != 62:
             raise ValueError("fixture executable is not x86_64 ELF")
     return ort, ois

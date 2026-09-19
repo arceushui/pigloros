@@ -56,13 +56,6 @@ def blake3(domain: str, encoded: bytes) -> bytes:
     return bytes.fromhex(result.stdout.decode("ascii").split()[0])
 
 
-def blake3_bytes(content: bytes) -> bytes:
-    result = subprocess.run(
-        ["b3sum"], input=content, check=True, capture_output=True
-    )
-    return bytes.fromhex(result.stdout.decode("ascii").split()[0])
-
-
 def sha256(content: bytes) -> bytes:
     return hashlib.sha256(content).digest()
 
@@ -217,15 +210,47 @@ def main() -> None:
             "schemaVersion": 2,
         }
     )
-    executable = ["/launcher", len(launcher_bytes), blake3_bytes(launcher_bytes), 0, None, None]
-    adapter = ["/adapter", len(adapter_bytes), blake3_bytes(adapter_bytes), 0, None, None]
+    executable = [
+        "/launcher",
+        len(launcher_bytes),
+        blake3("PiglorOS.OciExecutable.v1", launcher_bytes),
+        0,
+        None,
+        None,
+    ]
+    adapter = [
+        "/adapter",
+        len(adapter_bytes),
+        blake3("PiglorOS.OciExecutable.v1", adapter_bytes),
+        0,
+        None,
+        None,
+    ]
     ort = [
         "ORT1",
         1,
         [
             ["/", 0, 365, 0, 0, 0, None, None],
-            ["/adapter", 1, 365, 65532, 65532, len(adapter_bytes), adapter[2], None],
-            ["/launcher", 1, 365, 65532, 65532, len(launcher_bytes), executable[2], None],
+            [
+                "/adapter",
+                1,
+                365,
+                65532,
+                65532,
+                len(adapter_bytes),
+                blake3("PiglorOS.OciRootfsFile.v1", adapter_bytes),
+                None,
+            ],
+            [
+                "/launcher",
+                1,
+                365,
+                65532,
+                65532,
+                len(launcher_bytes),
+                blake3("PiglorOS.OciRootfsFile.v1", launcher_bytes),
+                None,
+            ],
         ],
     ]
     ort_vector = vector("OciRootfsTree", ort)
