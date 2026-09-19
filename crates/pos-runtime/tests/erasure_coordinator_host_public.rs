@@ -1305,47 +1305,47 @@ fn sqlite_public_active_root_failure_rolls_back_before_poisoning(
         TimelineId::new()
     ));
     let path = path.to_string_lossy().into_owned();
-    let authority = Arc::new(TestAuthority::default());
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-    let mut host = test_stage(
-        "open active-root rollback host",
-        open_with_authority(
-            StoreConfig::Sqlite { path: path.clone() },
-            authority_plugin,
-            reference(30),
-            ERASURE_MAX_INVENTORY_REQUESTS,
-        ),
-    )?;
-    let mut commands = test_stage("open active-root rollback sender", host.command_sender())?;
-    let parent = test_stage(
-        "create active-root rollback parent",
-        commands.create_timeline("active-root-parent"),
-    )?;
-    test_stage(
-        "publish active-root rollback topology",
-        authority.set_timeline(parent.id()),
-    )?;
-    let request = test_stage(
-        "construct active-root rollback request",
-        persistence_request(),
-    )?;
-    let request_reference = request.reference();
-    let request_provenance = request.provenance();
-    test_stage(
-        "submit active-root rollback request",
-        commands.submit_erasure_request(request, request_provenance),
-    )?;
-    test_stage(
-        "authorize active-root rollback request",
-        commands.authorize_erasure_request(request_reference, reference(32)),
-    )?;
-    authority.deny_topology.store(true, Ordering::Release);
-    assert_eq!(
-        commands.create_timeline("rolled-back-root"),
-        Err(ErasureHostErrorV1::RecoveryUnavailable)
-    );
-    drop(commands);
-    drop(host);
+    {
+        let authority = Arc::new(TestAuthority::default());
+        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+        let mut host = test_stage(
+            "open active-root rollback host",
+            open_with_authority(
+                StoreConfig::Sqlite { path: path.clone() },
+                authority_plugin,
+                reference(30),
+                ERASURE_MAX_INVENTORY_REQUESTS,
+            ),
+        )?;
+        let mut commands = test_stage("open active-root rollback sender", host.command_sender())?;
+        let parent = test_stage(
+            "create active-root rollback parent",
+            commands.create_timeline("active-root-parent"),
+        )?;
+        test_stage(
+            "publish active-root rollback topology",
+            authority.set_timeline(parent.id()),
+        )?;
+        let request = test_stage(
+            "construct active-root rollback request",
+            persistence_request(),
+        )?;
+        let request_reference = request.reference();
+        let request_provenance = request.provenance();
+        test_stage(
+            "submit active-root rollback request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize active-root rollback request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        authority.deny_topology.store(true, Ordering::Release);
+        assert_eq!(
+            commands.create_timeline("rolled-back-root"),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
 
     let reopened = SqliteStore::open_read_only(&path)?;
     let timelines = reopened.list_timelines()?;
