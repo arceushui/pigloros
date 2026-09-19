@@ -249,7 +249,7 @@ impl HostFixture {
                 Box::new(provider),
             );
             let mut registry = PluginRegistry::new();
-            registry.register(
+            registry.register_generated(
                 child_plugin.as_ref(),
                 Some(Box::new(AgentReducer)),
                 Some(Box::new(driver)),
@@ -857,7 +857,7 @@ fn backtest_runner_reads_train_history_before_non_empty_eval() {
             );
             let mut registry = PluginRegistry::new();
             registry
-                .register(
+                .register_generated(
                     runner_plugin.as_ref(),
                     Some(Box::new(AgentReducer)),
                     Some(Box::new(driver)),
@@ -910,7 +910,7 @@ fn backtest_eval_restores_driver_tick_before_first_provider_decision() {
                 );
                 let mut registry = PluginRegistry::new();
                 registry
-                    .register(
+                    .register_generated(
                         &AgentPlugin::new(),
                         Some(Box::new(AgentReducer)),
                         Some(Box::new(driver)),
