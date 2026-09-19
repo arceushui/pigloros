@@ -4479,7 +4479,9 @@ mod tests {
             .test_ok();
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(_)))
+            Err(ExperimentError::Runtime(RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::MissingDeclaration { .. }
+            )))
         ));
         assert!(matches!(
             session.step_tick(),
@@ -4963,7 +4965,7 @@ mod tests {
             bind_test_erasure_gate(&mut registry);
         }
         registry
-            .register(
+            .register_generated(
                 &make_plugin("host-transaction", owned_event_types),
                 None,
                 Some(Box::new(HostTransactionalDriver {
@@ -4976,7 +4978,7 @@ mod tests {
             .test_ok();
         if case == TransactionCase::PartialDriverFailure {
             registry
-                .register(
+                .register_generated(
                     &make_plugin("host-failing", &[]),
                     None,
                     Some(Box::new(HostTransactionalDriver {
@@ -8141,7 +8143,7 @@ mod backtest_tests {
         let tl_id = pos_core::ids::TimelineId::new();
         drop(driver.step(tl_id, pos_runtime::ObservationView::empty()));
         let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(&plugin, None, Some(Box::new(driver)))
+        reg.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         reg
     }
@@ -8225,7 +8227,7 @@ mod backtest_tests {
             };
             let mut registry = pos_runtime::PluginRegistry::new();
             registry
-                .register(&plugin, None, Some(Box::new(GoodBtDriver)))
+                .register_generated(&plugin, None, Some(Box::new(GoodBtDriver)))
                 .test_ok();
             registry
         });
@@ -8272,7 +8274,7 @@ mod backtest_tests {
                 id: pos_core::ids::PluginId::new(),
             };
             let mut reg = pos_runtime::PluginRegistry::new();
-            reg.register(&plugin, None, None).test_ok();
+            reg.register_generated(&plugin, None, None).test_ok();
             reg
         });
         let result = runner.run().test_ok();
@@ -8420,7 +8422,7 @@ mod backtest_tests {
                 id: pos_core::ids::PluginId::new(),
             };
             let mut reg = pos_runtime::PluginRegistry::new();
-            reg.register(&plugin, None, Some(Box::new(BadBtDriver { entity })))
+            reg.register_generated(&plugin, None, Some(Box::new(BadBtDriver { entity })))
                 .test_ok();
             reg
         });
@@ -8457,10 +8459,10 @@ mod backtest_tests {
             };
             let mut reg = pos_runtime::PluginRegistry::new();
             if n == 0 {
-                reg.register(&plugin, None, Some(Box::new(GoodBtDriver)))
+                reg.register_generated(&plugin, None, Some(Box::new(GoodBtDriver)))
                     .test_ok();
             } else {
-                reg.register(&plugin, None, Some(Box::new(BadEvalDriver { entity })))
+                reg.register_generated(&plugin, None, Some(Box::new(BadEvalDriver { entity })))
                     .test_ok();
             }
             reg
