@@ -10,6 +10,12 @@ import json
 import pathlib
 
 
+def require_keys(value: dict[str, object], allowed: set[str], context: str) -> None:
+    unexpected = set(value) - allowed
+    if unexpected:
+        raise ValueError(f"unexpected {context} fields: {sorted(unexpected)}")
+
+
 def load_json(path: pathlib.Path) -> object:
     def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -46,22 +52,57 @@ def main() -> None:
         raise ValueError("unexpected oci-layout")
     index = load_json(layout / "index.json")
     assert isinstance(index, dict)
+    require_keys(index, {"schemaVersion", "manifests"}, "index")
+    if index.get("schemaVersion") != 2:
+        raise ValueError("unexpected index schema version")
     manifests = index.get("manifests")
     if not isinstance(manifests, list) or len(manifests) != 1:
         raise ValueError("OCI index must select exactly one manifest")
-    manifest_path = blob(layout, manifests[0])
+    index_descriptor = manifests[0]
+    if not isinstance(index_descriptor, dict):
+        raise ValueError("index manifest descriptor is not an object")
+    require_keys(
+        index_descriptor,
+        {"annotations", "digest", "mediaType", "size"},
+        "index descriptor",
+    )
+    annotations = index_descriptor.get("annotations")
+    if not isinstance(annotations, dict) or set(annotations) != {
+        "org.opencontainers.image.ref.name"
+    } or not isinstance(annotations["org.opencontainers.image.ref.name"], str):
+        raise ValueError("unexpected transport-only index annotation")
+    if index_descriptor.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
+        raise ValueError("unexpected index descriptor media type")
+    manifest_path = blob(layout, index_descriptor)
     manifest = load_json(manifest_path)
     assert isinstance(manifest, dict)
+    require_keys(manifest, {"schemaVersion", "mediaType", "config", "layers"}, "manifest")
+    if manifest.get("schemaVersion") != 2:
+        raise ValueError("unexpected manifest schema version")
     if manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
         raise ValueError("unexpected manifest media type")
     config_descriptor = manifest.get("config")
     layers = manifest.get("layers")
     if not isinstance(config_descriptor, dict) or not isinstance(layers, list) or not layers:
         raise ValueError("manifest config/layer closure is incomplete")
+    require_keys(config_descriptor, {"digest", "mediaType", "size"}, "config descriptor")
+    if config_descriptor.get("mediaType") != "application/vnd.oci.image.config.v1+json":
+        raise ValueError("unexpected config media type")
+    for layer in layers:
+        if not isinstance(layer, dict):
+            raise ValueError("layer descriptor is not an object")
+        require_keys(layer, {"digest", "mediaType", "size"}, "layer descriptor")
+        if layer.get("mediaType") != "application/vnd.oci.image.layer.v1.tar+gzip":
+            raise ValueError("unexpected layer media type")
     config_path = blob(layout, config_descriptor)
     layer_paths = [blob(layout, item) for item in layers]
     config = load_json(config_path)
     assert isinstance(config, dict)
+    require_keys(
+        config,
+        {"architecture", "config", "created", "history", "os", "rootfs"},
+        "image config",
+    )
     if config.get("architecture") != arguments.architecture or config.get("os") != "linux":
         raise ValueError(
             f"wrong native platform: {config.get('os')}/{config.get('architecture')}"
@@ -69,15 +110,13 @@ def main() -> None:
     runtime = config.get("config") or {}
     if not isinstance(runtime, dict):
         raise ValueError("image runtime config is not an object")
-    forbidden = ("Env", "Cmd", "Volumes", "ExposedPorts", "Labels", "Healthcheck")
-    unexpected = {key: runtime[key] for key in forbidden if runtime.get(key) not in (None, [], {})}
-    if unexpected:
-        raise ValueError(f"unsafe OCI runtime defaults: {unexpected}")
+    require_keys(runtime, {"Entrypoint", "User", "WorkingDir"}, "runtime config")
     if runtime.get("Entrypoint") != ["/launcher"] or runtime.get("User") != "65532:65532":
         raise ValueError(f"unexpected entrypoint/user: {runtime}")
     rootfs = config.get("rootfs")
     if not isinstance(rootfs, dict) or len(rootfs.get("diff_ids", [])) != len(layers):
         raise ValueError("layer/DiffID cardinality mismatch")
+    require_keys(rootfs, {"diff_ids", "type"}, "rootfs config")
     if rootfs.get("type") != "layers":
         raise ValueError("unsupported rootfs type")
     verified_diff_ids: list[str] = []

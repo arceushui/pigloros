@@ -68,6 +68,8 @@ printf '%s\n' "${image_reference}" >"${artifact_dir}/image-reference.txt"
   "${artifact_dir}/rootfs-manifest.json"
 
 python3 "${prototype_dir}/generate_vectors.py" >"${artifact_dir}/adr085-vectors.json"
+python3 "${prototype_dir}/validate_vectors.py" "${artifact_dir}/adr085-vectors.json" \
+  "${artifact_dir}/adr085-vector-validation.json"
 python3 "${prototype_dir}/driver.py" --image "${image_reference}" \
   --seccomp "${prototype_dir}/seccomp.json" --artifact-dir "${artifact_dir}"
 

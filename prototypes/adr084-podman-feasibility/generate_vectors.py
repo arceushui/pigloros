@@ -4,7 +4,12 @@
 from __future__ import annotations
 
 import json
+import gzip
+import hashlib
+import io
+import struct
 import subprocess
+import tarfile
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -51,12 +56,51 @@ def blake3(domain: str, encoded: bytes) -> bytes:
     return bytes.fromhex(result.stdout.decode("ascii").split()[0])
 
 
+def blake3_bytes(content: bytes) -> bytes:
+    result = subprocess.run(
+        ["b3sum"], input=content, check=True, capture_output=True
+    )
+    return bytes.fromhex(result.stdout.decode("ascii").split()[0])
+
+
+def sha256(content: bytes) -> bytes:
+    return hashlib.sha256(content).digest()
+
+
+def json_bytes(value: object) -> bytes:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def elf_fixture(marker: bytes) -> bytes:
+    identification = b"\x7fELF\x02\x01\x01" + bytes(9)
+    header = struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0)
+    return identification + header + marker
+
+
+def layer(path: str, content: bytes) -> tuple[bytes, bytes]:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as archive:
+        entry = tarfile.TarInfo(path.lstrip("/"))
+        entry.size = len(content)
+        entry.mode = 0o555
+        entry.uid = 65532
+        entry.gid = 65532
+        entry.mtime = 0
+        archive.addfile(entry, io.BytesIO(content))
+    uncompressed = stream.getvalue()
+    return gzip.compress(uncompressed, compresslevel=9, mtime=0), sha256(uncompressed)
+
+
 def digest(index: int) -> bytes:
     return bytes([index]) * 32
 
 
 def identifier(index: int) -> bytes:
     return bytes([index]) * 16
+
+
+def key_id(index: int) -> str:
+    return f"test-key-{index:02d}"
 
 
 def rejection(
@@ -105,22 +149,95 @@ def vector(name: str, unsigned: list[object], signed: bool = False) -> dict[str,
 def main() -> None:
     limits = [[index, 1000 + index] for index in range(17)]
     capability = ["pigloros.sandbox.air-gapped", 1, 1]
+    host_features = sorted(
+        [
+            "cgroup-v2-cpu",
+            "cgroup-v2-memory",
+            "cgroup-v2-pids",
+            "cgroup-kill",
+            "managed-attempt-exec",
+            "process-isolation-controls",
+            "signed-root-image",
+            "mount-namespace",
+            "pid-namespace",
+            "ipc-namespace",
+            "uts-namespace",
+            "user-namespace",
+            "network-namespace",
+            "nftables-atomic",
+            "broker-lifecycle",
+            "limit-observation",
+        ],
+        key=cbor,
+    )
     request_common = [identifier(1), digest(1), 7, identifier(2)]
     payload = [6, digest(2)]
-    descriptor = lambda media, size, value: [media, size, digest(value)]
-    executable = ["/launcher", 4096, digest(8), 0, None, None]
-    adapter = ["/adapter", 4096, digest(9), 0, None, None]
-    ort = ["ORT1", 1, [["/", 0, 365, 0, 0, 0, None, None]]]
+    descriptor = lambda media, content: [media, len(content), sha256(content)]
+    launcher_bytes = elf_fixture(b"launcher-fixture-v1")
+    adapter_bytes = elf_fixture(b"adapter-fixture-v1")
+    launcher_layer, launcher_diff_id = layer("/launcher", launcher_bytes)
+    adapter_layer, adapter_diff_id = layer("/adapter", adapter_bytes)
+    diff_ids = [launcher_diff_id, adapter_diff_id]
+    chain_id = sha256(
+        f"sha256:{diff_ids[0].hex()} sha256:{diff_ids[1].hex()}".encode("ascii")
+    )
+    config_bytes = json_bytes(
+        {
+            "architecture": "amd64",
+            "config": {
+                "Entrypoint": ["/launcher"],
+                "User": "65532:65532",
+                "WorkingDir": "/",
+            },
+            "os": "linux",
+            "rootfs": {
+                "diff_ids": [f"sha256:{value.hex()}" for value in diff_ids],
+                "type": "layers",
+            },
+        }
+    )
+    config_descriptor = descriptor(1, config_bytes)
+    layer_descriptors = [descriptor(2, launcher_layer), descriptor(2, adapter_layer)]
+    manifest_bytes = json_bytes(
+        {
+            "config": {
+                "digest": f"sha256:{config_descriptor[2].hex()}",
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "size": config_descriptor[1],
+            },
+            "layers": [
+                {
+                    "digest": f"sha256:{item[2].hex()}",
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "size": item[1],
+                }
+                for item in layer_descriptors
+            ],
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "schemaVersion": 2,
+        }
+    )
+    executable = ["/launcher", len(launcher_bytes), blake3_bytes(launcher_bytes), 0, None, None]
+    adapter = ["/adapter", len(adapter_bytes), blake3_bytes(adapter_bytes), 0, None, None]
+    ort = [
+        "ORT1",
+        1,
+        [
+            ["/", 0, 365, 0, 0, 0, None, None],
+            ["/adapter", 1, 365, 65532, 65532, len(adapter_bytes), adapter[2], None],
+            ["/launcher", 1, 365, 65532, 65532, len(launcher_bytes), executable[2], None],
+        ],
+    ]
     ort_vector = vector("OciRootfsTree", ort)
     ois = [
         "OIS1",
         1,
         "pigloros.adapter.fixture",
         0,
-        descriptor(0, 512, 3),
-        descriptor(1, 256, 4),
-        [[descriptor(3, 1024, 5), digest(6)], [descriptor(3, 2048, 16), digest(17)]],
-        digest(7),
+        descriptor(0, manifest_bytes),
+        config_descriptor,
+        [[layer_descriptors[0], diff_ids[0]], [layer_descriptors[1], diff_ids[1]]],
+        chain_id,
         bytes.fromhex(ort_vector["self_digest_hex"]),
         executable,
         adapter,
@@ -129,24 +246,25 @@ def main() -> None:
         65532,
         "/",
         11,
-        identifier(3),
+        key_id(3),
     ]
     vectors = [ort_vector, vector("OciImageSubject", ois, signed=True)]
     vectors.extend(
         [
-            vector("RVS", ["RVS2", 2, digest(1), 9, [], [], [digest(2)], identifier(1)], True),
+            vector("RVS", ["RVS2", 2, digest(1), 9, [], [], [digest(2)], key_id(1)], True),
             vector(
                 "APT",
                 ["APT2", 2, 10, digest(1), digest(2), [digest(3)], [digest(4)],
                  digest(5), digest(6), digest(7), digest(8), digest(9), 11, 12,
-                 digest(10), identifier(2)],
+                 digest(10), key_id(2)],
                 True,
             ),
             vector(
                 "SIC",
-                ["SIC2", 2, identifier(1), bytes(range(32)), digest(1), digest(2),
+                ["SIC2", 2, key_id(1),
+                 bytes.fromhex(vectors[1]["signer_public_key_hex"]), digest(1), digest(2),
                  digest(3), "/run/pigloros/provider-execute.sock",
-                 "/run/pigloros/provider-control.sock", ["cgroup-v2"],
+                 "/run/pigloros/provider-control.sock", host_features,
                  [[9, digest(4), digest(5), 1024]]],
             ),
             vector("LPS", ["LPS2", 2, "pigloros.air-gapped", 0, digest(1), limits, []]),
@@ -159,15 +277,15 @@ def main() -> None:
             ),
             vector(
                 "ELM",
-                ["ELM2", 2, limits, digest(1), digest(2), digest(3), digest(4),
-                 digest(5), identifier(1)],
+                 ["ELM2", 2, limits, digest(1), digest(2), digest(3), digest(4),
+                 digest(5), key_id(1)],
                 True,
             ),
             vector(
                 "RBS",
-                ["RBS2", 2, 0, "podman-rootless", digest(1), digest(2), digest(3),
-                 digest(4), 0, identifier(1), capability, 0, digest(5), digest(6),
-                 digest(7), digest(8), digest(9), ["cgroup-v2"], []],
+                 ["RBS2", 2, 0, "podman-rootless", digest(1), digest(2), digest(3),
+                 digest(4), 0, key_id(1), capability, 0, digest(5), digest(6),
+                 digest(7), digest(8), digest(9), host_features, []],
             ),
             vector(
                 "LPV",
@@ -182,27 +300,27 @@ def main() -> None:
             ),
             vector(
                 "RLS",
-                ["RLS2", 2, identifier(1), digest(1), digest(2), digest(3), digest(4),
-                 digest(5), 6, 7, 8, digest(6), digest(7), 9, identifier(2)],
+                 ["RLS2", 2, identifier(1), digest(1), digest(2), digest(3), digest(4),
+                 digest(5), 6, 7, 8, digest(6), digest(7), 9, key_id(2)],
                 True,
             ),
             vector(
                 "SPX",
-                ["SPX2", 2, request_common, identifier(3)] + [digest(index) for index in range(1, 17)]
+                ["SPX2", 2, request_common, identifier(3)] + [digest(index) for index in range(1, 16)]
                 + [[], payload, []],
             ),
             vector(
                 "AGR",
                 ["AGR2", 2, identifier(1), identifier(2)]
-                + [digest(index) for index in range(1, 15)]
-                + [7, 8, 9, digest(16), digest(17), [], digest(18), digest(19), identifier(3)],
+                + [digest(index) for index in range(1, 14)]
+                + [7, 8, 9, digest(16), digest(17), [], digest(18), digest(19), key_id(3)],
                 True,
             ),
             vector(
                 "SPR",
                 ["SPR2", 2, identifier(1)] + [digest(index) for index in range(1, 9)]
                 + [7, 8, 9, digest(9), digest(10), [], digest(11), digest(12),
-                   digest(13), digest(14), digest(15), digest(16), digest(17), identifier(2)],
+                   digest(13), digest(14), digest(15), digest(16), digest(17), key_id(2)],
                 True,
             ),
         ]
@@ -214,7 +332,9 @@ def main() -> None:
     wrong_rootfs = [*ois]
     wrong_rootfs[8] = digest(31)
     wrong_executable = [*ois]
-    wrong_executable[10] = ["/wrong-adapter", 4096, digest(9), 0, None, None]
+    wrong_executable[10] = [*adapter]
+    wrong_executable[10][0] = "/wrong-adapter"
+    mixed_lps = ["LPS1", 1, "pigloros.air-gapped", 0, digest(1), limits, []]
     rejections = [
         rejection("OIS1-wrong-architecture", wrong_architecture,
                   "unsupported architecture", "OciImageSubject", True),
@@ -226,20 +346,52 @@ def main() -> None:
                   "adapter identity mismatch", "OciImageSubject", True),
         rejection(
             "RVS2-revoked-image",
-            ["RVS2", 2, digest(1), 9, [], [],
-             [bytes.fromhex(vectors[1]["self_digest_hex"])], identifier(1)],
+             ["RVS2", 2, digest(1), 9, [], [],
+             [bytes.fromhex(vectors[1]["self_digest_hex"])], key_id(1)],
             "OIS1 self-digest is revoked",
             "RVS",
             True,
         ),
         rejection(
             "mixed-version-closure",
-            ["LPS1", 1, "pigloros.air-gapped", 0, digest(1), limits, []],
+            mixed_lps,
             "version-1 authority record in version-2 closure",
             "LPS",
         ),
     ]
-    print(json.dumps({"rejection_vectors": rejections, "vectors": vectors}, indent=2, sort_keys=True))
+    mixed_lps_digest = bytes.fromhex(rejections[-1]["self_digest_hex"])
+    mixed_apt = [
+        "APT2", 2, 10, digest(1), digest(2), [mixed_lps_digest],
+        [bytes.fromhex(vectors[1]["self_digest_hex"])], digest(5), digest(6),
+        digest(7), digest(8), digest(9), 11, 12, digest(10), key_id(2),
+    ]
+    mixed_apt_vector = vector("APT", mixed_apt, True)
+    rejections[-1]["referencing_apt2_unsigned_cbor_hex"] = mixed_apt_vector[
+        "unsigned_cbor_hex"
+    ]
+    rejections[-1]["referencing_apt2_self_digest_hex"] = mixed_apt_vector[
+        "self_digest_hex"
+    ]
+    rejections[-1]["referencing_apt2_signature_hex"] = mixed_apt_vector[
+        "signature_hex"
+    ]
+    fixture_blobs = [
+        ["application/vnd.oci.image.manifest.v1+json", sha256(manifest_bytes).hex(), manifest_bytes.hex()],
+        ["application/vnd.oci.image.config.v1+json", sha256(config_bytes).hex(), config_bytes.hex()],
+        ["application/vnd.oci.image.layer.v1.tar+gzip", sha256(launcher_layer).hex(), launcher_layer.hex()],
+        ["application/vnd.oci.image.layer.v1.tar+gzip", sha256(adapter_layer).hex(), adapter_layer.hex()],
+    ]
+    print(
+        json.dumps(
+            {
+                "fixture_blobs": fixture_blobs,
+                "rejection_vectors": rejections,
+                "vectors": vectors,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":
