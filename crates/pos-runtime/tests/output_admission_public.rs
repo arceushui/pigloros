@@ -161,7 +161,6 @@ fn output_admission_rejects_plugin_version_mismatch() -> TestResult {
 #[test]
 fn output_admission_rejects_identity_and_resource_limits() -> TestResult {
     let plugin_id = PluginId::new();
-    let budget = budget(plugin_id)?;
     let mismatched = budget(plugin_id)?;
     let mismatched_policy = policy(plugin_id, &mismatched)?;
     let mismatched_budget = budget_with(PluginId::new(), 16, 2, 32, 100, [10, 10, 10])?;
