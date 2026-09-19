@@ -11,8 +11,11 @@ use pos_runtime::{
     Driver, ObservationView, OutputAdmissionErrorV1, OutputAdmissionV1, PluginRegistry,
     RuntimeError, StepOutput,
 };
+use std::error::Error;
 
-fn budget(plugin_id: PluginId) -> ExecutableBudgetPolicyV1 {
+type TestResult = Result<(), Box<dyn Error>>;
+
+fn budget(plugin_id: PluginId) -> Result<ExecutableBudgetPolicyV1, Box<dyn Error>> {
     ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -49,10 +52,22 @@ fn budget(plugin_id: PluginId) -> ExecutableBudgetPolicyV1 {
         execution_profile_hash: Hash::from_bytes([7; 32]),
         max_pass_wall_duration_us: 1_000,
     })
-    .expect("fixture budget is valid")
+    .map_err(|error| error.to_string().into())
 }
 
-fn policy(plugin_id: PluginId, budget: &ExecutableBudgetPolicyV1) -> OutputPolicyV1 {
+fn policy(
+    plugin_id: PluginId,
+    budget: &ExecutableBudgetPolicyV1,
+) -> Result<OutputPolicyV1, Box<dyn Error>> {
+    let declaration = OutputDeclarationV1::new(
+        "plugin.output".to_owned(),
+        OutputAuthorityV1::Authoritative,
+        OutputFidelityV1::L0,
+        16,
+        None,
+        None,
+    )
+    .map_err(|error| -> Box<dyn Error> { error.to_string().into() })?;
     OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id,
         plugin_version: "1.0.0".to_owned(),
@@ -61,17 +76,9 @@ fn policy(plugin_id: PluginId, budget: &ExecutableBudgetPolicyV1) -> OutputPolic
         executable_profile_hash: budget.digest(),
         retention_policy_hash: Hash::from_bytes([3; 32]),
         policy_revision: 1,
-        output_declarations: vec![OutputDeclarationV1::new(
-            "plugin.output".to_owned(),
-            OutputAuthorityV1::Authoritative,
-            OutputFidelityV1::L0,
-            16,
-            None,
-            None,
-        )
-        .expect("fixture declaration is valid")],
+        output_declarations: vec![declaration],
     })
-    .expect("fixture policy is valid")
+    .map_err(|error| error.to_string().into())
 }
 
 fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {
@@ -83,26 +90,23 @@ fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {
 }
 
 #[test]
-fn output_admission_accepts_declared_output_and_exposes_policy_identity() {
+fn output_admission_accepts_declared_output_and_exposes_policy_identity() -> TestResult {
     let plugin_id = PluginId::new();
-    let budget = budget(plugin_id);
+    let budget = budget(plugin_id)?;
     let admission =
-        OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget), budget)
-            .expect("fixture admission is valid");
+        OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget)?, budget)?;
 
-    admission
-        .validate_batch(&[draft("plugin.output", b"accepted")])
-        .expect("declared output is within the exact budget");
+    admission.validate_batch(&[draft("plugin.output", b"accepted")])?;
     assert_ne!(admission.policy_digest(), Hash::zero());
+    Ok(())
 }
 
 #[test]
-fn output_admission_rejects_missing_declaration_and_overflow() {
+fn output_admission_rejects_missing_declaration_and_overflow() -> TestResult {
     let plugin_id = PluginId::new();
-    let budget = budget(plugin_id);
+    let budget = budget(plugin_id)?;
     let admission =
-        OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget), budget)
-            .expect("fixture admission is valid");
+        OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget)?, budget)?;
 
     assert!(matches!(
         admission.validate_batch(&[draft("plugin.unknown", b"x")]),
@@ -117,27 +121,30 @@ fn output_admission_rejects_missing_declaration_and_overflow() {
         admission.validate_batch(&drafts),
         Err(OutputAdmissionErrorV1::EventCountExceeded { level: 0, .. })
     ));
+    Ok(())
 }
 
 #[test]
-fn output_admission_rejects_policy_plugin_mismatch() {
+fn output_admission_rejects_policy_plugin_mismatch() -> TestResult {
     let plugin_id = PluginId::new();
     let other_plugin = PluginId::new();
-    let budget = budget(plugin_id);
+    let budget = budget(plugin_id)?;
     assert!(matches!(
-        OutputAdmissionV1::try_new(other_plugin, "1.0.0", policy(plugin_id, &budget), budget),
+        OutputAdmissionV1::try_new(other_plugin, "1.0.0", policy(plugin_id, &budget)?, budget),
         Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
+    Ok(())
 }
 
 #[test]
-fn output_admission_rejects_plugin_version_mismatch() {
+fn output_admission_rejects_plugin_version_mismatch() -> TestResult {
     let plugin_id = PluginId::new();
-    let budget = budget(plugin_id);
+    let budget = budget(plugin_id)?;
     assert!(matches!(
-        OutputAdmissionV1::try_new(plugin_id, "2.0.0", policy(plugin_id, &budget), budget),
+        OutputAdmissionV1::try_new(plugin_id, "2.0.0", policy(plugin_id, &budget)?, budget),
         Err(OutputAdmissionErrorV1::PluginVersionMismatch)
     ));
+    Ok(())
 }
 
 struct FixturePlugin {
@@ -183,24 +190,22 @@ impl Driver for FixtureDriver {
 }
 
 #[test]
-fn registry_requires_the_policy_before_a_driver_output_can_stage() {
+fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult {
     let plugin_id = PluginId::new();
-    let budget = budget(plugin_id);
-    let policy = policy(plugin_id, &budget);
+    let budget = budget(plugin_id)?;
+    let policy = policy(plugin_id, &budget)?;
     let timeline = pos_core::TimelineId::new();
 
     let mut admitted = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    admitted
-        .register_with_output_policy(
-            &FixturePlugin { id: plugin_id },
-            policy,
-            budget,
-            None,
-            Some(Box::new(FixtureDriver)),
-        )
-        .expect("policy-bound registration succeeds");
+    admitted.register_with_output_policy(
+        &FixturePlugin { id: plugin_id },
+        policy,
+        budget,
+        None,
+        Some(Box::new(FixtureDriver)),
+    )?;
     assert!(matches!(
         admitted.step_all_anchored(timeline, pos_core::Seq::ZERO),
         Ok(drafts) if drafts.len() == 1
@@ -209,17 +214,16 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() {
     let mut missing = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    missing
-        .register(
-            &FixturePlugin {
-                id: PluginId::new(),
-            },
-            None,
-            Some(Box::new(FixtureDriver)),
-        )
-        .expect("structural registration succeeds");
+    missing.register(
+        &FixturePlugin {
+            id: PluginId::new(),
+        },
+        None,
+        Some(Box::new(FixtureDriver)),
+    )?;
     assert!(matches!(
         missing.step_all_anchored(timeline, pos_core::Seq::ZERO),
         Err(RuntimeError::OutputAdmission(_))
     ));
+    Ok(())
 }

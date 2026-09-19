@@ -5,15 +5,17 @@ use piglor_gateway::{
 use piglor_ledger::LedgerView;
 use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
 use pos_core::{
+    output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    },
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
-    OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1, OutputPolicyV1,
-    Plugin, PluginCpuReservationV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
-    WorkloadProfileV1,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash, Plugin,
+    PluginCpuReservationV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, WorkloadProfileV1,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
