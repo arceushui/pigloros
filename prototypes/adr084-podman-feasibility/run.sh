@@ -38,7 +38,8 @@ musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototy
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 
-/usr/bin/podman build --runtime=/usr/bin/crun --pull=never \
+/usr/bin/podman build --runtime=/usr/bin/crun --pull=never --identity-label=false \
+  --unsetenv=PATH --unsetlabel=io.buildah.version \
   --tag "${image_tag}" "${build_dir}" 2>&1 | tee "${artifact_dir}/podman-build.log"
 /usr/bin/podman image inspect "${image_tag}" >"${artifact_dir}/image-inspect.json"
 image_id="$(jq -er '.[0].Id' "${artifact_dir}/image-inspect.json")"
