@@ -5686,7 +5686,7 @@ mod tests {
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .with_fork_registry_factory(move || {
             let mut registry = PluginRegistry::new().with_erasure_gate(foreign_gate.clone());
-            registry.register(&CompositionPlugin(plugin), None, None)?;
+            registry.register_legacy(&CompositionPlugin(plugin), None, None)?;
             Ok(registry)
         });
         experiment
@@ -6997,7 +6997,7 @@ mod coverage_entrypoints {
             },
             move || {
                 let mut registry = PluginRegistry::new();
-                ok(registry.register(
+                ok(registry.register_legacy(
                     &CoveragePlugin { id: plugin_id },
                     None,
                     Some(Box::new(BacktestDriver { entity })),
@@ -7208,7 +7208,7 @@ mod coverage_entrypoints {
         let mut head_fault_store = pos_store::memory::MemoryStore::new();
         let entity = EntityId::new();
         let mut registry = PluginRegistry::new();
-        ok(registry.register(
+        ok(registry.register_legacy(
             &CoveragePlugin {
                 id: PluginId::new(),
             },
@@ -7273,7 +7273,7 @@ mod coverage_entrypoints {
                 .with_consent_authority(authority.clone())
                 .with_fork_registry_factory(move || {
                     let mut registry = PluginRegistry::new();
-                    registry.register(
+                    registry.register_legacy(
                         &CoveragePlugin { id: factory_id },
                         None,
                         Some(Box::new(RestoreFailDriver)),
