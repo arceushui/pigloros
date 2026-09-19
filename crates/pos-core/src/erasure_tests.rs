@@ -1021,6 +1021,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     );
 
     let empty = ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
+    let empty_generation = empty.generation();
     let child_without_name = crate::TimelineMeta {
         id: TimelineId::new(),
         mode: crate::TimelineMode::Historical,
@@ -1031,7 +1032,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     let batch = empty.prepare_fork_batch(
         ErasureForkAdmissionInputV1 {
             operation: reference(41),
-            expected_inventory_generation: empty.generation(),
+            expected_inventory_generation: empty_generation,
             child_scope: reference(42),
             child: child_without_name,
         },
