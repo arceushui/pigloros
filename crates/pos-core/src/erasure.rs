@@ -5618,7 +5618,7 @@ fn update_fork_child_identity(hasher: &mut blake3::Hasher, child: &crate::Timeli
     match child.owner {
         Some(owner) => {
             hasher.update(&[1]);
-            hasher.update(&owner.inner().to_be_bytes());
+            hasher.update(&owner.inner().to_bytes());
         }
         None => {
             hasher.update(&[0]);
