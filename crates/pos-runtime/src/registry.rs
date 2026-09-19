@@ -662,6 +662,13 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     if drafts.is_empty() {
         return Ok(());
     }
+    // Directly late-bound drivers have no Plugin capability or owned event
+    // namespace from which an output policy can be constructed. They remain
+    // outside policy-backed Plugin registration; all capability registrations
+    // still require an explicit or generated policy.
+    if entry.owned_event_types.is_empty() && entry.registration.is_none() {
+        return Ok(());
+    }
     let Some(admission) = entry.output_admission.as_ref() else {
         return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
             event_type: "<unregistered-output-policy>".to_owned(),
