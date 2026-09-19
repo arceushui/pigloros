@@ -33,6 +33,7 @@
         "mprotect",
         "munmap",
         "newfstatat",
+        "open",
         "openat",
         "pause",
         "prlimit64",
