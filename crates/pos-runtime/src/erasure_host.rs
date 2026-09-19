@@ -3038,10 +3038,15 @@ mod tests {
         ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
         ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
         ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+        ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
+        ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
         ErasureCorrectionProvenanceInputV1, ErasureForkAdmissionInputV1,
-        ErasurePersistenceInventorySnapshotV1, ErasureReceiptInventoriesV1,
-        ErasureRetryAdmissionInputV1, ErasureScopeExtensionInputV1, EventStore, Kind, TimelineMeta,
-        TimelineMode, MODALITY_LOCATION,
+        ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeApplicabilityRowV1,
+        ErasureFreezeAuthorizationEvidenceInputV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1,
+        ErasureObligationSetInputV1, ErasureObligationSetV1, ErasurePersistenceInventorySnapshotV1,
+        ErasureReceiptInventoriesV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+        ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+        EventStore, Kind, TimelineMeta, TimelineMode, MODALITY_LOCATION,
     };
 
     use pos_store::memory::MemoryStore;
@@ -3760,6 +3765,256 @@ mod tests {
             _requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_fork_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn resolve_fork_child_scope(
+            &self,
+            _parent: TimelineId,
+            _child: &TimelineMeta,
+        ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn resolve_fork_scope_extension(
+            &self,
+            _requirement: ErasureForkScopeRequirementV1,
+            _input: &ErasureForkAdmissionInputV1,
+        ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn dispatch_destruction(
+            &self,
+            _request: ErasureReferenceV1,
+            _commands: &[ErasureDestructionCommandV1],
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_attempt(
+            &self,
+            _admission: &ErasureRetryAdmissionV1,
+        ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_acknowledgement(
+            &self,
+            _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    #[derive(Default)]
+    struct ActiveTopologyAuthorityV1 {
+        timelines: std::sync::Mutex<Vec<TimelineId>>,
+        frozen: std::sync::atomic::AtomicBool,
+    }
+
+    impl ActiveTopologyAuthorityV1 {
+        fn set_timeline(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
+            self.timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .push(timeline);
+            Ok(())
+        }
+
+        fn freeze_admission(
+            &self,
+            request: ErasureReferenceV1,
+            requested: &ErasureStateTransitionV1,
+        ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+            let target = ErasureRequiredTargetV1 {
+                artifact_class: ErasureArtifactClassV1::TimelineReplay,
+                artifact_digest: reference(41),
+                key_role: ErasureKeyRoleV1::DataEncryption,
+                key_digest: reference(42),
+                replica_set: reference(43),
+                replica_id: reference(44),
+            };
+            let targets = vec![target];
+            let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+                request,
+                scope_members: vec![reference(9)],
+                target_closure: pos_core::erasure::target_closure_digest(&targets),
+                lineage_rule: Some(reference(100)),
+            })?;
+            let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+                request,
+                obligations: Vec::new(),
+                policy: reference(6),
+                trust: reference(8),
+            })?;
+            let applicability_matrix = ErasureInventoryCategoryV1::CANONICAL
+                .into_iter()
+                .map(|category| {
+                    ErasureFreezeApplicabilityRowV1::new(
+                        category,
+                        0,
+                        ErasureApplicabilityDecisionV1::Inapplicable,
+                        None,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let admission_input = ErasureFreezeAdmissionEvidenceInputV1 {
+                request,
+                scope_commitment: scope.reference(),
+                obligation_set: obligation_set.reference(),
+                applicability_matrix,
+                freeze_position: requested
+                    .freeze_position
+                    .ok_or(ErasureErrorV1::ScopeInvalid)?,
+                policy: obligation_set.policy(),
+                trust: obligation_set.trust(),
+                authorization_provenance: reference(0),
+            };
+            let provisional = ErasureFreezeAdmissionEvidenceV1::new(admission_input.clone())?;
+            let authorization = ErasureFreezeAuthorizationEvidenceV1::new(
+                ErasureFreezeAuthorizationEvidenceInputV1 {
+                    admission_body_digest: provisional.authorization_body_digest()?,
+                    policy: obligation_set.policy(),
+                    trust: obligation_set.trust(),
+                    evidence: requested.provenance.digest().to_vec(),
+                },
+            )?;
+            let admission =
+                ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+                    targets,
+                    scope: ErasureScopeCommitmentInputV1 {
+                        request,
+                        scope_members: vec![reference(9)],
+                        target_closure: pos_core::erasure::target_closure_digest(&[target]),
+                        lineage_rule: Some(reference(100)),
+                    },
+                    obligations: Vec::new(),
+                    obligation_set,
+                    freeze_position: requested
+                        .freeze_position
+                        .ok_or(ErasureErrorV1::ScopeInvalid)?,
+                    freeze_admission_evidence: ErasureFreezeAdmissionEvidenceV1::new(
+                        ErasureFreezeAdmissionEvidenceInputV1 {
+                            authorization_provenance: authorization.reference(),
+                            ..admission_input
+                        },
+                    )?,
+                    freeze_authorization_evidence: authorization,
+                })?;
+            self.frozen
+                .store(true, std::sync::atomic::Ordering::Release);
+            Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)))
+        }
+    }
+
+    impl ErasureFreezeAuthorizationVerifierV1 for ActiveTopologyAuthorityV1 {
+        fn validate_freeze_authorization(
+            &self,
+            admission: &ErasureFreezeAdmissionEvidenceV1,
+            authorization: &ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            authorization.verify_admission_body_binding(admission)
+        }
+    }
+
+    impl ErasureRecoveryAuthorizationVerifierV1 for ActiveTopologyAuthorityV1 {
+        fn validate_scope_extension(
+            &self,
+            _extension: &ErasureScopeExtensionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn validate_administrative_resolution(
+            &self,
+            _resolution: &ErasureAdministrativeResolutionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+
+    impl ErasureCoordinatorAuthorityV1 for ActiveTopologyAuthorityV1 {
+        fn verified_topology_observation(
+            &self,
+            _request: ErasureReferenceV1,
+            manifest_digest: ErasureReferenceV1,
+        ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            let timelines = self
+                .timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .clone();
+            if self.frozen.load(std::sync::atomic::Ordering::Acquire) {
+                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+                    manifest_digest,
+                    timelines
+                        .into_iter()
+                        .map(|timeline| (timeline, reference(9)))
+                        .collect(),
+                    Vec::new(),
+                )))
+            } else {
+                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+                    manifest_digest,
+                    Vec::new(),
+                    timelines,
+                )))
+            }
+        }
+
+        fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn admit_authorization(
+            &self,
+            _request: ErasureReferenceV1,
+            _provenance: ErasureReferenceV1,
+            _decision: ErasureAuthorizationDecisionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Ok(())
+        }
+
+        fn admit_corrected_submission(
+            &self,
+            _request: &ErasureRequestV1,
+            _correction: &ErasureCorrectionProvenanceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+
+        fn admit_atomic_freeze(
+            &self,
+            request: ErasureReferenceV1,
+            requested: &ErasureStateTransitionV1,
+        ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+            self.freeze_admission(request, requested)
         }
 
         fn admit_scope_extension(
@@ -4652,6 +4907,158 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
+    fn active_topology_candidate_requires_both_recovery_credentials() {
+        let RejectedHostFixtureV1 {
+            mut host,
+            authority,
+            ..
+        } = rejected_host_with_resolve_control()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let limits = host.recovery_limits;
+
+        host.authority = None;
+        assert_eq!(
+            host.verify_unaffected_topology_candidate(1, limits),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+
+        host.authority = Some(authority);
+        host.coordinator = None;
+        assert_eq!(
+            host.verify_unaffected_topology_candidate(1, limits),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn active_root_topology_changes_roll_back_when_the_new_root_is_affected() {
+        let authority = Arc::new(ActiveTopologyAuthorityV1::default());
+        let mut host =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.authority = Some(authority.clone());
+        host.coordinator = Some(reference(30));
+        host.install_inventory_from_coordinator(4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("active-root-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        authority
+            .set_timeline(parent.id())
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let request = coordinator_request()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let request_reference = request.reference();
+        let request_provenance = request.provenance();
+        host.command_sender()
+            .and_then(|mut sender| sender.submit_erasure_request(request, request_provenance))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.command_sender()
+            .and_then(|mut sender| {
+                sender.authorize_erasure_request(request_reference, reference(32))
+            })
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.command_sender()
+            .and_then(|mut sender| {
+                sender.freeze_access(
+                    request_reference,
+                    &ErasureStateTransitionV1 {
+                        lifecycle: pos_core::ErasureLifecycleV1::AccessFrozen,
+                        freeze_position: Some(10),
+                        pending_owners: Vec::new(),
+                        failed_owners: Vec::new(),
+                        acknowledged_targets: Vec::new(),
+                        replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+                        provenance: reference(39),
+                    },
+                )
+            })
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+
+        let authority_for_change = Arc::clone(&authority);
+        let result = host.apply_empty_topology_change(|store| {
+            let timeline = store.create_timeline("affected-root")?;
+            authority_for_change
+                .set_timeline(timeline.id())
+                .map_err(|_| CoreError::Storage("test authority lock was poisoned".to_owned()))?;
+            Ok(timeline)
+        });
+        assert_eq!(result, Err(ErasureHostErrorV1::Conflict));
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn unaffected_topology_transition_reports_direct_preparation_failures() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let (_, _, inventory) = host
+            .ready_state()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let limits = host.recovery_limits;
+        type TopologyChangeV1 = fn(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>;
+        assert!(matches!(
+            host.prepare_unaffected_topology_transition::<TopologyChangeV1>(
+                None, &inventory, 0, limits,
+            ),
+            Err(UnaffectedTopologyTransitionError::Erasure(
+                ErasureErrorV1::ProvenanceMissing
+            ))
+        ));
+
+        let mut publication_failure = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        publication_failure.fail_inventory_publication = true;
+        let (_, _, inventory) = publication_failure
+            .ready_state()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let limits = publication_failure.recovery_limits;
+        assert!(matches!(
+            publication_failure.prepare_unaffected_topology_transition(
+                Some(|store: &mut dyn ErasureHostStore| {
+                    store.create_timeline("publication-failure")
+                }),
+                &inventory,
+                0,
+                limits,
+            ),
+            Err(UnaffectedTopologyTransitionError::Erasure(
+                ErasureErrorV1::ProvenanceMissing
+            ))
+        ));
+
+        let mut recovery_failure = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::NonemptyInventory)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let (_, _, inventory) = recovery_failure
+            .ready_state()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let limits = recovery_failure.recovery_limits;
+        assert!(matches!(
+            recovery_failure.prepare_unaffected_topology_transition(
+                Some(|store: &mut dyn ErasureHostStore| {
+                    store.create_timeline("inventory-failure")
+                }),
+                &inventory,
+                0,
+                limits,
+            ),
+            Err(UnaffectedTopologyTransitionError::Erasure(
+                ErasureErrorV1::ProvenanceMissing
+            ))
+        ));
     }
 
     #[test]
