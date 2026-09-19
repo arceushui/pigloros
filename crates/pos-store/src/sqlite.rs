@@ -7951,6 +7951,27 @@ mod tests {
     }
 
     #[test]
+    fn bounded_metadata_enforces_elapsed_after_row_enumeration() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("bounded-metadata-elapsed").test_ok();
+        store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"x")])
+            .test_ok();
+
+        BOUNDED_READ_DELAY_PHASE.with(|phase| phase.set(4));
+        let error = store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                EventReadBounds::new_with_total_bytes_and_elapsed(4, 1, usize::MAX, 2, 10, 1_000),
+            )
+            .test_err();
+        BOUNDED_READ_DELAY_PHASE.with(|phase| phase.set(0));
+
+        assert!(matches!(error, CoreError::ReadTimeTooLarge { .. }));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn bounded_read_validates_metadata_before_querying_payloads() {
         let mut store = new_store();
