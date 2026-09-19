@@ -30,6 +30,7 @@ use crate::{
         StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
+    output_admission::OutputAdmissionV1,
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -657,6 +658,19 @@ fn reject_unowned_plugin_drafts(
     }
 }
 
+fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<(), RuntimeError> {
+    if drafts.is_empty() {
+        return Ok(());
+    }
+    let Some(admission) = entry.output_admission.as_ref() else {
+        return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
+            event_type: "<unregistered-output-policy>".to_owned(),
+        }
+        .into());
+    };
+    admission.validate_batch(drafts).map_err(Into::into)
+}
+
 fn invoke_driver(
     driver: &mut dyn Driver,
     timeline: pos_core::ids::TimelineId,
@@ -679,6 +693,12 @@ struct PluginEntry {
     last_tick: Option<u128>,
     event_cursor: Seq,
     registration: Option<PluginRegistrationV1>,
+    output_admission: Option<OutputAdmissionV1>,
+}
+
+struct RegistrationOptions {
+    registration: Option<PluginRegistrationV1>,
+    output_admission: Option<OutputAdmissionV1>,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -1364,8 +1384,24 @@ impl PluginRegistry {
             driver.event_subscriptions(),
             entry.event_cursor,
         );
-        invoke_driver(driver.as_mut(), timeline, observations)
-            .and_then(|output| reject_host_owned_drafts(&output).map(|()| output))
+        invoke_driver(driver.as_mut(), timeline, observations).and_then(|output| {
+            reject_host_owned_drafts(&output)?;
+            validate_plugin_output(entry, &output.drafts)?;
+            Ok(output)
+        })
+    }
+
+    fn validate_registered_output(
+        &self,
+        plugin_id: PluginId,
+        drafts: &[EventDraft],
+    ) -> Result<(), RuntimeError> {
+        let Some(entry) = self.plugins.get(&plugin_id) else {
+            return Err(RuntimeError::NoDriver {
+                name: plugin_id.to_string(),
+            });
+        };
+        validate_plugin_output(entry, drafts)
     }
 
     fn collect_anchored_selection(
@@ -1652,6 +1688,7 @@ impl PluginRegistry {
         };
         if let Err(error) = reject_host_owned_drafts(&output)
             .and_then(|()| reject_unowned_plugin_drafts(&output, &owned_event_types))
+            .and_then(|()| self.validate_registered_output(plugin_id, &output.drafts))
             .and_then(|()| self.schemas.validate_batch(&output.drafts))
         {
             let _ = self.abort_drivers(&[plugin_id]);
@@ -2094,7 +2131,10 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
-            None,
+            RegistrationOptions {
+                registration: None,
+                output_admission: None,
+            },
         )
     }
 
@@ -2121,7 +2161,83 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
-            Some(registration),
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: None,
+            },
+        )
+    }
+
+    /// Register a Plugin with its complete host-verified output policy and budget.
+    ///
+    /// A Plugin that emits drafts without this binding is rejected at the
+    /// production Driver boundary; there is no implicit allow-all policy.
+    ///
+    /// # Errors
+    /// Returns an identity, registration, or capability error when the policy
+    /// cannot be bound to the Plugin.
+    pub fn register_with_output_policy(
+        &mut self,
+        plugin: &dyn Plugin,
+        output_policy: pos_core::output_policy::OutputPolicyV1,
+        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        let admission = OutputAdmissionV1::try_new(
+            plugin.id(),
+            plugin.version(),
+            output_policy,
+            executable_budget,
+        )?;
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            None,
+            &[],
+            context,
+            RegistrationOptions {
+                registration: None,
+                output_admission: Some(admission),
+            },
+        )
+    }
+
+    /// Register a pinned Plugin with its complete host-verified output policy.
+    ///
+    /// # Errors
+    /// Returns an identity, registration, or capability error when the policy
+    /// cannot be bound to the Plugin.
+    pub fn register_pinned_with_output_policy(
+        &mut self,
+        plugin: &dyn Plugin,
+        registration: PluginRegistrationV1,
+        output_policy: pos_core::output_policy::OutputPolicyV1,
+        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        self.validate_registration_roles(&registration)?;
+        let admission = OutputAdmissionV1::try_new(
+            plugin.id(),
+            plugin.version(),
+            output_policy,
+            executable_budget,
+        )?;
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            None,
+            &[],
+            context,
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: Some(admission),
+            },
         )
     }
 
@@ -2164,7 +2280,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: &[Kind],
         context: (PluginId, String, Capability),
-        registration: Option<PluginRegistrationV1>,
+        options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
         if let Some(kind) = cap
@@ -2267,7 +2383,8 @@ impl PluginRegistry {
                 approver,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
-                registration,
+                registration: options.registration,
+                output_admission: options.output_admission,
             },
         );
         Ok(())
@@ -2315,6 +2432,7 @@ impl PluginRegistry {
                 last_tick: None,
                 event_cursor: Seq::ZERO,
                 registration: None,
+                output_admission: None,
             },
         );
     }
@@ -2493,6 +2611,7 @@ impl PluginRegistry {
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = invoke_driver(driver.as_mut(), timeline, observations)?;
                 reject_host_owned_drafts(&output)?;
+                validate_plugin_output(entry, &output.drafts)?;
                 entry.last_tick = Some(now_ns);
                 all_drafts.extend(output.drafts);
             }
@@ -2610,6 +2729,7 @@ impl PluginRegistry {
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = invoke_driver(driver.as_mut(), timeline, observations)?;
                 reject_host_owned_drafts(&output)?;
+                validate_plugin_output(entry, &output.drafts)?;
                 all_drafts.extend(output.drafts);
             }
         }
@@ -3746,6 +3866,7 @@ mod tests {
                 last_tick: None,
                 event_cursor: Seq::ZERO,
                 registration: None,
+                output_admission: None,
             },
         );
 
