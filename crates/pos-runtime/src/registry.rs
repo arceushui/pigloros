@@ -3976,7 +3976,8 @@ mod tests {
         assert_eq!(driver.name(), "simple"); // force coverage of name()
 
         let mut reg = gated_registry();
-        reg.register_generated(&p, None, Some(Box::new(driver))).test_ok();
+        reg.register_generated(&p, None, Some(Box::new(driver)))
+            .test_ok();
         assert_eq!(reg.driver_count(), 1);
 
         let drafts = reg.step_all(tl.id()).test_ok();
