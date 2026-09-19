@@ -667,7 +667,9 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     // driver has no owned event namespace to admit against; retain the seam's
     // existing behavior while requiring policies for capability-backed
     // Plugin registrations.
-    if entry.owned_event_types.is_empty() && entry.registration.is_none() {
+    if entry.output_admission_exempt
+        || (entry.owned_event_types.is_empty() && entry.registration.is_none())
+    {
         return Ok(());
     }
     let Some(admission) = entry.output_admission.as_ref() else {
@@ -702,11 +704,13 @@ struct PluginEntry {
     event_cursor: Seq,
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
+    output_admission_exempt: bool,
 }
 
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
+    output_admission_exempt: bool,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -2093,6 +2097,33 @@ impl PluginRegistry {
         self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
     }
 
+    /// Register through the pre-admission compatibility seam.
+    ///
+    /// Hosts should prefer [`Self::register_with_output_policy`]. This method
+    /// is retained for older callers whose plugins predate output policy
+    /// identity and therefore cannot provide an admission binding yet.
+    pub fn register_legacy(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            None,
+            &[],
+            context,
+            RegistrationOptions {
+                registration: None,
+                output_admission: None,
+                output_admission_exempt: true,
+            },
+        )
+    }
+
     /// Register an implementation through the explicit V1 composition seam.
     ///
     /// # Errors
@@ -2142,6 +2173,7 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: None,
                 output_admission: None,
+                output_admission_exempt: false,
             },
         )
     }
@@ -2172,6 +2204,7 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
+                output_admission_exempt: false,
             },
         )
     }
@@ -2209,6 +2242,7 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: None,
                 output_admission: Some(admission),
+                output_admission_exempt: false,
             },
         )
     }
@@ -2245,6 +2279,7 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: Some(admission),
+                output_admission_exempt: false,
             },
         )
     }
@@ -2393,6 +2428,7 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: options.registration,
                 output_admission: options.output_admission,
+                output_admission_exempt: options.output_admission_exempt,
             },
         );
         Ok(())
@@ -2441,6 +2477,7 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                output_admission_exempt: true,
             },
         );
     }
