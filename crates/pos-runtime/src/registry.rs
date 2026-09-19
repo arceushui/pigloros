@@ -2236,6 +2236,36 @@ impl PluginRegistry {
         )
     }
 
+    /// Register a pinned implementation with an optional action approver.
+    ///
+    /// # Errors
+    /// Returns a registration or closed composition error before mutating the registry.
+    pub fn register_pinned_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        self.validate_registration_roles(&registration)?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: None,
+            },
+        )
+    }
+
     pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
