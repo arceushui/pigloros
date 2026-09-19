@@ -6,7 +6,6 @@ use std::sync::{
 };
 
 use pos_core::erasure::target_closure_digest;
-use pos_core::store::EventStore;
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
@@ -30,7 +29,7 @@ use pos_runtime::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
 };
-use pos_store::{sqlite::SqliteStore, StoreConfig};
+use pos_store::StoreConfig;
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
 pub mod erasure_support;
@@ -1305,8 +1304,8 @@ fn sqlite_public_active_root_failure_rolls_back_before_poisoning(
         TimelineId::new()
     ));
     let path = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
     {
-        let authority = Arc::new(TestAuthority::default());
         let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
         let mut host = test_stage(
             "open active-root rollback host",
@@ -1347,16 +1346,23 @@ fn sqlite_public_active_root_failure_rolls_back_before_poisoning(
         );
     }
 
-    let reopened = SqliteStore::open_read_only(&path)?;
-    let timelines = reopened.list_timelines()?;
-    assert_eq!(
-        timelines
-            .iter()
-            .filter(|timeline| timeline.meta.name.as_deref() == Some("rolled-back-root"))
-            .count(),
-        0
-    );
+    authority.deny_topology.store(false, Ordering::Release);
+    let mut reopened = test_stage(
+        "reopen active-root rollback host",
+        open_read_only_with_authority(
+            &path,
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut reads = test_stage("open active-root rollback reader", reopened.read_sender())?;
+    let timelines = test_stage("read active-root rollback timelines", reads.timelines())?;
     assert_eq!(timelines.len(), 1);
+    assert_eq!(
+        timelines[0].meta.name.as_deref(),
+        Some("active-root-parent")
+    );
     for candidate in [
         std::path::PathBuf::from(&path),
         std::path::PathBuf::from(format!("{path}-wal")),
