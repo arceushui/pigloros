@@ -1604,14 +1604,14 @@ impl ErasureExecutionHostV1 {
             .host_store()
             .recover_fork_admission(input.operation)?
         {
-            return Self::recover_identified_fork(input, recovered, transition_host_error);
+            return Self::recover_identified_fork(input, &recovered, transition_host_error);
         }
         self.prepare_identified_fork(input)
     }
 
     fn recover_identified_fork(
         input: &IdentifiedForkTransitionInput<'_>,
-        recovered: ErasureForkRecoveryV1,
+        recovered: &ErasureForkRecoveryV1,
         transition_host_error: &mut Option<ErasureHostErrorV1>,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
         let recovered_child = recovered.child();
