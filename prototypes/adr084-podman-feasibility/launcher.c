@@ -14,15 +14,24 @@ static void fail(const char *message) {
     _exit(70);
 }
 
+static void verify_descriptors(void) {
+    for (int fd = 0; fd < 64; ++fd) {
+        errno = 0;
+        int result = fcntl(fd, F_GETFD);
+        if ((fd <= 3 && result == -1) || (fd > 3 && (result != -1 || errno != EBADF))) {
+            errno = EPROTO;
+            fail("descriptor-set");
+        }
+    }
+}
+
 int main(void) {
     static const char ready[] = "READY\n";
     static const char expected[] = "RELEASE\n";
     char release[sizeof(expected) - 1];
     struct stat adapter_stat;
 
-    if (fcntl(3, F_GETFD) == -1) {
-        fail("control-fd");
-    }
+    verify_descriptors();
     if (write(3, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
         fail("ready-write");
     }

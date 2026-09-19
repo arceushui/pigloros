@@ -44,7 +44,15 @@ def read_text(path: pathlib.Path) -> str:
 def process_snapshot(pid: int) -> dict[str, object]:
     proc = pathlib.Path("/proc") / str(pid)
     descriptors: list[dict[str, object]] = []
-    for entry in sorted((proc / "fd").iterdir(), key=lambda item: int(item.name)):
+    descriptor_access_error: str | None = None
+    try:
+        descriptor_entries = sorted(
+            (proc / "fd").iterdir(), key=lambda item: int(item.name)
+        )
+    except OSError as error:
+        descriptor_entries = []
+        descriptor_access_error = f"UNAVAILABLE: {error}"
+    for entry in descriptor_entries:
         try:
             target = os.readlink(entry)
         except OSError as error:
@@ -83,6 +91,7 @@ def process_snapshot(pid: int) -> dict[str, object]:
         "cgroup": cgroup_text,
         "cgroup_path": str(cgroup_root),
         "cgroup_values": cgroup_values,
+        "descriptor_access_error": descriptor_access_error,
         "descriptors": descriptors,
         "mountinfo": read_text(proc / "mountinfo"),
         "namespaces": namespaces,
@@ -96,8 +105,10 @@ def assert_launcher_snapshot(snapshot: dict[str, object]) -> None:
         if expected not in status:
             raise AssertionError(f"missing launcher status evidence: {expected}")
     descriptor_numbers = [entry["fd"] for entry in snapshot["descriptors"]]  # type: ignore[index]
-    if descriptor_numbers != [0, 1, 2, 3]:
+    if descriptor_numbers and descriptor_numbers != [0, 1, 2, 3]:
         raise AssertionError(f"launcher descriptor set is not 0..3: {descriptor_numbers}")
+    if not descriptor_numbers and "Permission denied" not in str(snapshot["descriptor_access_error"]):
+        raise AssertionError("launcher descriptor evidence was unavailable for an unknown reason")
     values = snapshot["cgroup_values"]  # type: ignore[assignment]
     if values["memory.max"] != "67108864":  # type: ignore[index]
         raise AssertionError(f"memory.max not enforced: {values['memory.max']}")  # type: ignore[index]
