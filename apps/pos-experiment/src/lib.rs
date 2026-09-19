@@ -1201,7 +1201,7 @@ impl Experiment {
                 name: plugin.name().to_owned(),
                 reason: error.to_string(),
             })?;
-        let declarations = capability
+        let mut declarations = capability
             .owned_event_types
             .iter()
             .map(|event_type| {
@@ -1219,6 +1219,7 @@ impl Experiment {
                 name: plugin.name().to_owned(),
                 reason: error.to_string(),
             })?;
+        declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
         let policy = pos_core::output_policy::OutputPolicyV1::new(
             pos_core::output_policy::OutputPolicyInputV1 {
                 plugin_id: plugin.id(),
