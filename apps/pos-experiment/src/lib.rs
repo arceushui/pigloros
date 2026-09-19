@@ -5306,7 +5306,7 @@ mod tests {
             let driver = FixedDriver::new(entity, "session.event", 1);
             let mut registry = PluginRegistry::new();
             registry
-                .register(
+                .register_generated(
                     &plugin,
                     Some(Box::new(CountReducer)),
                     Some(Box::new(driver)),
@@ -6139,7 +6139,7 @@ mod tests {
             let plugin = make_plugin("nested-result", &["nested.result.event"]);
             let mut registry = PluginRegistry::new();
             registry
-                .register(
+                .register_generated(
                     &plugin,
                     None,
                     Some(Box::new(FixedDriver::new(
@@ -6616,7 +6616,7 @@ mod tests {
                 let plugin = make_plugin("unit-backtest-plugin", &["unit.backtest.event"]);
                 let mut registry = PluginRegistry::new();
                 registry
-                    .register(
+                    .register_generated(
                         &plugin,
                         None,
                         Some(Box::new(FixedDriver::new(entity, "unit.backtest.event", 1))),
@@ -8758,7 +8758,7 @@ mod fault_injection_tests {
             event_type: event_type.clone(),
         };
         let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(
+        reg.register_generated(
             &plugin,
             None,
             Some(Box::new(EmitDriver { entity, event_type })),
