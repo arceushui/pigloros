@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import pathlib
@@ -121,6 +122,10 @@ def launch(
     scenario: str,
 ) -> tuple[subprocess.Popen[bytes], socket.socket, str, pathlib.Path]:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    if parent_control.fileno() == 3:
+        relocated_parent = socket.socket(fileno=os.dup(parent_control.fileno()))
+        parent_control.close()
+        parent_control = relocated_parent
     child_fd = child_control.fileno()
     child_control.set_inheritable(True)
     cidfile = artifact_dir / f"{scenario}.cid"
@@ -155,19 +160,28 @@ def launch(
         image,
     ]
 
-    def child_setup() -> None:
+    saved_fd3: int | None = None
+    if child_fd != 3:
+        try:
+            saved_fd3 = os.dup(3)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        os.dup2(child_fd, 3, inheritable=True)
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=(3,),
+        )
+    finally:
         if child_fd != 3:
-            os.dup2(child_fd, 3, inheritable=True)
-            os.close(child_fd)
-
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        pass_fds=(child_fd,),
-        preexec_fn=child_setup,
-    )
+            os.close(3)
+            if saved_fd3 is not None:
+                os.dup2(saved_fd3, 3)
+                os.close(saved_fd3)
     child_control.close()
     container_id = wait_for_file(cidfile, process)
     ready = parent_control.recv(64)
