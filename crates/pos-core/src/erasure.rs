@@ -4658,7 +4658,7 @@ impl ErasureVerifiedInventoryV1 {
             let extension = extensions
                 .last()
                 .filter(|extension| extension.fork() == child_scope)
-                .cloned()
+                .copied()
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             let requirement = ErasureForkScopeRequirementV1 {
                 request,
