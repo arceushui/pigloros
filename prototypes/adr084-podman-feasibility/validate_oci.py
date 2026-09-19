@@ -76,7 +76,13 @@ def main() -> None:
     manifest_path = blob(layout, index_descriptor)
     manifest = load_json(manifest_path)
     assert isinstance(manifest, dict)
-    require_keys(manifest, {"schemaVersion", "mediaType", "config", "layers"}, "manifest")
+    require_keys(
+        manifest,
+        {"annotations", "schemaVersion", "mediaType", "config", "layers"},
+        "manifest",
+    )
+    if manifest.get("annotations") != annotations:
+        raise ValueError("manifest transport annotation differs from index")
     if manifest.get("schemaVersion") != 2:
         raise ValueError("unexpected manifest schema version")
     if manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
