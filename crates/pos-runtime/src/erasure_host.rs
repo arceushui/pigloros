@@ -1505,20 +1505,13 @@ impl ErasureExecutionHostV1 {
     fn prepare_unaffected_topology_transition<F>(
         &mut self,
         change: Option<F>,
+        current_inventory: &ErasureVerifiedInventoryV1,
         request_count: usize,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), UnaffectedTopologyTransitionError>
     where
         F: FnOnce(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>,
     {
-        let mut existing_timeline_ids = self
-            .store
-            .host_store()
-            .list_timelines()
-            .map_store_error()
-            .map_err(UnaffectedTopologyTransitionError::Host)?
-            .into_iter()
-            .map(|timeline| timeline.id());
         let Some(change) = change else {
             return Err(UnaffectedTopologyTransitionError::Erasure(
                 ErasureErrorV1::ProvenanceMissing,
@@ -1527,7 +1520,9 @@ impl ErasureExecutionHostV1 {
         let timeline = change(self.store.host_store())
             .map_store_error()
             .map_err(UnaffectedTopologyTransitionError::Host)?;
-        let created = !existing_timeline_ids.any(|timeline_id| timeline_id == timeline.id());
+        let created = current_inventory
+            .fork_scope_requirements(timeline.id())
+            .is_err();
         let candidate = match self.verify_unaffected_topology_candidate(request_count, limits) {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -1594,6 +1589,7 @@ impl ErasureExecutionHostV1 {
         let publication = {
             let mut fenced_transition = || match self.prepare_unaffected_topology_transition(
                 change.take(),
+                &inventory,
                 request_count,
                 limits,
             ) {
