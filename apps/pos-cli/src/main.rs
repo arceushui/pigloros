@@ -723,7 +723,7 @@ fn run_builtin_reference_experiment(
     let (agent_policy, agent_budget) = reference_output_binding(
         agent_plugin.id(),
         pos_plugin_rule_agent::EVENT_TYPE_DECISION,
-    )?;
+    );
     exp.register_with_output_policy(
         &agent_plugin,
         agent_policy,
@@ -738,7 +738,7 @@ fn run_builtin_reference_experiment(
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
     let (obs_policy, obs_budget) =
-        reference_output_binding(obs_plugin.id(), pos_plugin_synthetic_obs::EVENT_TYPE)?;
+        reference_output_binding(obs_plugin.id(), pos_plugin_synthetic_obs::EVENT_TYPE);
     exp.register_with_output_policy(
         &obs_plugin,
         obs_policy,
@@ -753,7 +753,7 @@ fn run_builtin_reference_experiment(
 fn reference_output_binding(
     plugin_id: PluginId,
     event_type: &str,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+) -> (OutputPolicyV1, ExecutableBudgetPolicyV1) {
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -789,7 +789,8 @@ fn reference_output_binding(
         accounting_semantics: 0,
         execution_profile_hash: Hash::from_bytes([21; 32]),
         max_pass_wall_duration_us: 1_000,
-    })?;
+    })
+    .expect("reference executable budget constants are valid");
     let declaration = OutputDeclarationV1::new(
         event_type.to_owned(),
         OutputAuthorityV1::Authoritative,
@@ -797,7 +798,8 @@ fn reference_output_binding(
         4096,
         None,
         None,
-    )?;
+    )
+    .expect("reference output declaration constants are valid");
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id,
         plugin_version: "0.1.0".to_owned(),
@@ -807,8 +809,9 @@ fn reference_output_binding(
         retention_policy_hash: Hash::from_bytes([24; 32]),
         policy_revision: 1,
         output_declarations: vec![declaration],
-    })?;
-    Ok((policy, budget))
+    })
+    .expect("reference output policy constants are valid");
+    (policy, budget)
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {

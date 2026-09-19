@@ -16,37 +16,48 @@ use std::error::Error;
 type TestResult = Result<(), Box<dyn Error>>;
 
 fn budget(plugin_id: PluginId) -> Result<ExecutableBudgetPolicyV1, Box<dyn Error>> {
+    budget_with(plugin_id, 16, 2, 32, 100, [10, 10, 10])
+}
+
+fn budget_with(
+    plugin_id: PluginId,
+    max_event_bytes: u32,
+    max_events: u32,
+    max_bytes: u64,
+    max_cpu_us: u32,
+    cpu_reservations_us: [u32; 3],
+) -> Result<ExecutableBudgetPolicyV1, Box<dyn Error>> {
     ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
         cut_budget_family: 0,
-        max_event_bytes: 16,
+        max_event_bytes,
         fidelity_budgets: [
             FidelityBudgetV1 {
                 level: 0,
-                max_events: 2,
-                max_bytes: 32,
-                max_cpu_us: 100,
+                max_events,
+                max_bytes,
+                max_cpu_us,
                 shared_host_cpu_reservation_us: 0,
             },
             FidelityBudgetV1 {
                 level: 1,
-                max_events: 2,
-                max_bytes: 32,
-                max_cpu_us: 100,
+                max_events,
+                max_bytes,
+                max_cpu_us,
                 shared_host_cpu_reservation_us: 0,
             },
             FidelityBudgetV1 {
                 level: 2,
-                max_events: 2,
-                max_bytes: 32,
-                max_cpu_us: 100,
+                max_events,
+                max_bytes,
+                max_cpu_us,
                 shared_host_cpu_reservation_us: 0,
             },
         ],
         plugin_cpu_reservations: vec![PluginCpuReservationV1 {
             plugin_id,
-            cpu_reservations_us: [10, 10, 10],
+            cpu_reservations_us,
         }],
         accounting_semantics: 0,
         execution_profile_hash: Hash::from_bytes([7; 32]),
@@ -143,6 +154,64 @@ fn output_admission_rejects_plugin_version_mismatch() -> TestResult {
     assert!(matches!(
         OutputAdmissionV1::try_new(plugin_id, "2.0.0", policy(plugin_id, &budget)?, budget),
         Err(OutputAdmissionErrorV1::PluginVersionMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn output_admission_rejects_identity_and_resource_limits() -> TestResult {
+    let plugin_id = PluginId::new();
+    let budget = budget(plugin_id)?;
+    let mismatched = budget(plugin_id)?;
+    let mismatched_policy = policy(plugin_id, &mismatched)?;
+    let mismatched_budget = budget_with(PluginId::new(), 16, 2, 32, 100, [10, 10, 10])?;
+    assert!(matches!(
+        OutputAdmissionV1::try_new(plugin_id, "1.0.0", mismatched_policy, mismatched_budget),
+        Err(OutputAdmissionErrorV1::PolicyIdentityMismatch)
+    ));
+
+    let no_cpu_plugin = PluginId::new();
+    let no_cpu_budget = budget_with(no_cpu_plugin, 16, 2, 32, 100, [10, 10, 10])?;
+    let no_cpu_policy = policy(plugin_id, &no_cpu_budget)?;
+    assert!(matches!(
+        OutputAdmissionV1::try_new(plugin_id, "1.0.0", no_cpu_policy, no_cpu_budget),
+        Err(OutputAdmissionErrorV1::MissingCpuReservation)
+    ));
+
+    let bytes_budget = budget_with(plugin_id, 4, 2, 32, 100, [10, 10, 10])?;
+    let bytes_admission = OutputAdmissionV1::try_new(
+        plugin_id,
+        "1.0.0",
+        policy(plugin_id, &bytes_budget)?,
+        bytes_budget,
+    )?;
+    assert!(matches!(
+        bytes_admission.validate_batch(&[draft("plugin.output", b"12345")]),
+        Err(OutputAdmissionErrorV1::EventBytesExceeded { .. })
+    ));
+
+    let batch_budget = budget_with(plugin_id, 16, 2, 1, 100, [10, 10, 10])?;
+    let batch_admission = OutputAdmissionV1::try_new(
+        plugin_id,
+        "1.0.0",
+        policy(plugin_id, &batch_budget)?,
+        batch_budget,
+    )?;
+    assert!(matches!(
+        batch_admission.validate_batch(&[draft("plugin.output", b"ab")]),
+        Err(OutputAdmissionErrorV1::BatchBytesExceeded { .. })
+    ));
+
+    let cpu_budget = budget_with(plugin_id, 16, 2, 32, 1, [10, 10, 10])?;
+    let cpu_admission = OutputAdmissionV1::try_new(
+        plugin_id,
+        "1.0.0",
+        policy(plugin_id, &cpu_budget)?,
+        cpu_budget,
+    )?;
+    assert!(matches!(
+        cpu_admission.validate_batch(&[draft("plugin.output", b"a")]),
+        Err(OutputAdmissionErrorV1::CpuExceeded { .. })
     ));
     Ok(())
 }
