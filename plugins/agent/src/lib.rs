@@ -4,7 +4,8 @@
 
 //! `pos-plugin-agent` — AI-agent entity plugin with swappable `AgentPolicy`.
 //!
-//! Owns event type `"agent.action"` and entity kind `"ai-agent"`.
+//! Owns event types `"agent.action"` and `"runtime.recorded_output"`, plus
+//! the entity kind `"ai-agent"`.
 //! On each driver step it invokes the policy's `decide()` method and emits
 //! one `agent.action` event with a CBOR payload.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
@@ -15,7 +16,9 @@ use pos_core::{
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
-use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+use pos_runtime::{
+    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, RuntimeError, StepOutput,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -175,7 +178,10 @@ impl Plugin for AgentPlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: vec![Kind::new(EVENT_TYPE_ACTION)],
+            owned_event_types: vec![
+                Kind::new(EVENT_TYPE_ACTION),
+                Kind::new(RECORDER_EVENT_TYPE),
+            ],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
             has_driver: true,
             has_reducer: true,
@@ -431,8 +437,15 @@ mod tests {
         let plugin = AgentPlugin::new();
         let cap = plugin.capability();
 
-        assert_eq!(cap.owned_event_types.len(), 1);
-        assert_eq!(cap.owned_event_types[0].as_str(), EVENT_TYPE_ACTION);
+        assert_eq!(cap.owned_event_types.len(), 2);
+        assert!(cap
+            .owned_event_types
+            .iter()
+            .any(|kind| kind.as_str() == EVENT_TYPE_ACTION));
+        assert!(cap
+            .owned_event_types
+            .iter()
+            .any(|kind| kind.as_str() == RECORDER_EVENT_TYPE));
         assert_eq!(cap.owned_entity_kinds.len(), 1);
         assert_eq!(cap.owned_entity_kinds[0], ENTITY_KIND);
         assert!(cap.has_driver);
