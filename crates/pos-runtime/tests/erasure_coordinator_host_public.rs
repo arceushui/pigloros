@@ -6,6 +6,7 @@ use std::sync::{
 };
 
 use pos_core::erasure::target_closure_digest;
+use pos_core::store::EventStore;
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
@@ -29,7 +30,7 @@ use pos_runtime::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
 };
-use pos_store::StoreConfig;
+use pos_store::{sqlite::SqliteStore, StoreConfig};
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
 pub mod erasure_support;
@@ -134,6 +135,7 @@ struct TestAuthority {
     fail_fork_scope_extension: AtomicBool,
     use_closed_scope_resolution: AtomicBool,
     fork_child_scope: std::sync::atomic::AtomicU8,
+    fork_extension_provenance: std::sync::atomic::AtomicU8,
 }
 
 impl Default for TestAuthority {
@@ -154,6 +156,7 @@ impl Default for TestAuthority {
             fail_fork_scope_extension: AtomicBool::new(false),
             use_closed_scope_resolution: AtomicBool::new(false),
             fork_child_scope: std::sync::atomic::AtomicU8::new(19),
+            fork_extension_provenance: std::sync::atomic::AtomicU8::new(20),
         }
     }
 }
@@ -176,6 +179,11 @@ impl TestAuthority {
 
     fn set_fork_child_scope(&self, scope: u8) {
         self.fork_child_scope.store(scope, Ordering::Release);
+    }
+
+    fn set_fork_extension_provenance(&self, provenance: u8) {
+        self.fork_extension_provenance
+            .store(provenance, Ordering::Release);
     }
 
     fn topology(
@@ -377,7 +385,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             fork: input.child_scope,
             lineage_rule: requirement.lineage_rule(),
             predecessor_extension: requirement.predecessor_extension(),
-            admission_provenance: reference(20),
+            admission_provenance: reference(self.fork_extension_provenance.load(Ordering::Acquire)),
         })
     }
 
@@ -653,12 +661,36 @@ fn assert_frozen_fork_retries(
     assert_eq!(
         commands.fork_timeline_identified(
             operation,
+            TimelineId::new(),
+            pos_core::Seq::ZERO,
+            "frozen-child",
+        ),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(
+        commands.fork_timeline_identified(
+            operation,
+            parent,
+            pos_core::Seq::from_u64(1),
+            "frozen-child",
+        ),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(
+        commands.fork_timeline_identified(
+            operation,
             parent,
             pos_core::Seq::ZERO,
             "changed-on-retry",
         ),
         Err(ErasureHostErrorV1::Conflict)
     );
+    authority.set_fork_extension_provenance(21);
+    assert_eq!(
+        commands.fork_timeline_identified(operation, parent, pos_core::Seq::ZERO, "frozen-child",),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    authority.set_fork_extension_provenance(20);
     Ok(())
 }
 
@@ -1263,6 +1295,78 @@ fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
 fn sqlite_host_freezes_access_at_the_coordinator_cas_boundary(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_atomic_freeze_parity(StoreConfig::SqliteInMemory)
+}
+
+#[test]
+fn sqlite_public_active_root_failure_rolls_back_before_poisoning(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-root-rollback-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open active-root rollback host",
+        open_with_authority(
+            StoreConfig::Sqlite { path: path.clone() },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open active-root rollback sender", host.command_sender())?;
+    let parent = test_stage(
+        "create active-root rollback parent",
+        commands.create_timeline("active-root-parent"),
+    )?;
+    test_stage(
+        "publish active-root rollback topology",
+        authority.set_timeline(parent.id()),
+    )?;
+    let request = test_stage(
+        "construct active-root rollback request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    test_stage(
+        "submit active-root rollback request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    test_stage(
+        "authorize active-root rollback request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    authority.deny_topology.store(true, Ordering::Release);
+    assert_eq!(
+        commands.create_timeline("rolled-back-root"),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    drop(commands);
+    drop(host);
+
+    let reopened = SqliteStore::open_read_only(&path)?;
+    let timelines = reopened.list_timelines()?;
+    assert_eq!(
+        timelines
+            .iter()
+            .filter(|timeline| timeline.meta.name.as_deref() == Some("rolled-back-root"))
+            .count(),
+        0
+    );
+    assert_eq!(timelines.len(), 1);
+    for candidate in [
+        std::path::PathBuf::from(&path),
+        std::path::PathBuf::from(format!("{path}-wal")),
+        std::path::PathBuf::from(format!("{path}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+    Ok(())
 }
 
 fn create_persisted_frozen_fork(
