@@ -928,7 +928,7 @@ mod tests {
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         let persona = PersonaPlugin::new();
         registry
-            .register(
+            .register_generated(
                 &persona,
                 Some(Box::new(PersonaReducer)),
                 Some(Box::new(PersonaEvalDriver::new(
@@ -940,7 +940,7 @@ mod tests {
             .test_ok();
         let eval = EvalPlugin::new();
         registry
-            .register(&eval, Some(Box::new(EvalReducer)), None)
+            .register_generated(&eval, Some(Box::new(EvalReducer)), None)
             .test_ok();
         for _ in 0..5 {
             let drafts = registry
