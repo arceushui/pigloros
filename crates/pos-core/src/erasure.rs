@@ -3836,6 +3836,12 @@ impl PreparedErasureForkBatchV1 {
         self.input.expected_inventory_generation
     }
 
+    /// Return the canonical scope reference assigned to the original child.
+    #[must_use]
+    pub const fn child_scope(&self) -> ErasureReferenceV1 {
+        self.input.child_scope
+    }
+
     /// Return the preallocated child metadata.
     #[must_use]
     pub const fn child(&self) -> &crate::TimelineMeta {
@@ -3870,7 +3876,7 @@ impl PreparedErasureForkBatchV1 {
             self.operation(),
             self.binding_digest(),
             self.expected_inventory_generation(),
-            self.input.child_scope,
+            self.child_scope(),
             self.successor_inventory().generation(),
             self.child().clone(),
         )
