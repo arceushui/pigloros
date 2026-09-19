@@ -5440,9 +5440,10 @@ mod tests {
         altered.name = Some("different-child".to_owned());
         assert!(!store.memory_fork_child_is_exact(&altered, chain_head));
 
-        match store.timelines.get_mut(&child.id()) {
-            Some(timeline) => timeline.chain_head = Hash::from_bytes([7; 32]),
-            None => panic!("fork child exists"),
+        let timeline = store.timelines.get_mut(&child.id());
+        assert!(timeline.is_some());
+        if let Some(timeline) = timeline {
+            timeline.chain_head = Hash::from_bytes([7; 32]);
         }
         assert!(!store.memory_fork_child_is_exact(&child.meta, chain_head));
     }
