@@ -662,14 +662,6 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     if drafts.is_empty() {
         return Ok(());
     }
-    // `register_driver` is the legacy late-bound driver seam used by hosts
-    // that do not expose a Plugin capability or output identity.  Such a
-    // driver has no owned event namespace to admit against; retain the seam's
-    // existing behavior while requiring policies for capability-backed
-    // Plugin registrations.
-    if entry.owned_event_types.is_empty() && entry.registration.is_none() {
-        return Ok(());
-    }
     let Some(admission) = entry.output_admission.as_ref() else {
         return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
             event_type: "<unregistered-output-policy>".to_owned(),
