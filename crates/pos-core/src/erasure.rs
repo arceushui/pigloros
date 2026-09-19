@@ -5602,6 +5602,30 @@ impl ErasureForkRetryScopeRequirementV1 {
     }
 }
 
+fn update_fork_child_identity(hasher: &mut blake3::Hasher, child: &crate::TimelineMeta) {
+    hasher.update(&child.id.inner().to_bytes());
+    hasher.update(b"historical");
+    match &child.name {
+        Some(name) => {
+            hasher.update(&[1]);
+            hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(name.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    match child.owner {
+        Some(owner) => {
+            hasher.update(&[1]);
+            hasher.update(&owner.inner().to_be_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
 /// Durable, payload-free result of one committed future-Fork operation.
 ///
 /// This value lets a restarted host answer a retry after the original reply
@@ -5697,27 +5721,7 @@ impl ErasureForkRecoveryV1 {
         hasher.update(&expected_inventory_generation.digest());
         hasher.update(&child_scope.digest());
         hasher.update(&successor_generation.digest());
-        hasher.update(&child.id.inner().to_bytes());
-        hasher.update(b"historical");
-        match &child.name {
-            Some(name) => {
-                hasher.update(&[1]);
-                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
-                hasher.update(name.as_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-        match child.owner {
-            Some(owner) => {
-                hasher.update(&[1]);
-                hasher.update(&owner.inner().to_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
+        update_fork_child_identity(&mut hasher, child);
         let (parent, at_seq) = fork_point;
         hasher.update(&parent.inner().to_bytes());
         hasher.update(&at_seq.as_u64().to_be_bytes());
@@ -5936,27 +5940,7 @@ impl PreparedErasureForkBatchV1 {
         ] {
             hasher.update(&reference.digest());
         }
-        hasher.update(&input.child.id.inner().to_bytes());
-        hasher.update(b"historical");
-        match &input.child.name {
-            Some(name) => {
-                hasher.update(&[1]);
-                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
-                hasher.update(name.as_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-        match input.child.owner {
-            Some(owner) => {
-                hasher.update(&[1]);
-                hasher.update(&owner.inner().to_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
+        update_fork_child_identity(&mut hasher, &input.child);
         hasher.update(&parent.inner().to_bytes());
         hasher.update(&at_seq.as_u64().to_be_bytes());
         hasher.update(
