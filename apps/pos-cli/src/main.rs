@@ -49,7 +49,7 @@ use pos_core::{
         OutputPolicyV1,
     },
     store::SeqRange,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Plugin,
     PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_experiment::{
