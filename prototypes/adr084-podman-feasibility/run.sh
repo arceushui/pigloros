@@ -30,7 +30,7 @@ trap cleanup EXIT
 
 /usr/bin/podman info --format json >"${artifact_dir}/podman-info.json"
 jq -e '.host.security.rootless == true' "${artifact_dir}/podman-info.json" >/dev/null
-jq -e '.host.cgroupsVersion == "v2"' "${artifact_dir}/podman-info.json" >/dev/null
+jq -e '.host.cgroupVersion == "v2"' "${artifact_dir}/podman-info.json" >/dev/null
 jq -e '.host.ociRuntime.name == "crun" or .host.ociRuntime.path == "/usr/bin/crun"' \
   "${artifact_dir}/podman-info.json" >/dev/null
 
