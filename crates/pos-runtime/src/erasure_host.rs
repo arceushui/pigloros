@@ -1604,13 +1604,12 @@ impl ErasureExecutionHostV1 {
             .host_store()
             .recover_fork_admission(input.operation)?
         {
-            return self.recover_identified_fork(input, recovered, transition_host_error);
+            return Self::recover_identified_fork(input, recovered, transition_host_error);
         }
         self.prepare_identified_fork(input)
     }
 
     fn recover_identified_fork(
-        &self,
         input: &IdentifiedForkTransitionInput<'_>,
         recovered: ErasureForkRecoveryV1,
         transition_host_error: &mut Option<ErasureHostErrorV1>,
@@ -5573,7 +5572,8 @@ mod tests {
         let timeline = store
             .inner
             .create_timeline("fault-parent")
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+            .id();
         let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         {
