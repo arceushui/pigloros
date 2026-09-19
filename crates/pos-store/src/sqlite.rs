@@ -4994,7 +4994,7 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
         &mut self,
         operation: ErasureReferenceV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-        sqlite_recover_fork_admission(&self.conn, operation)
+        sqlite_recover_fork_admission(&self.conn, self.hasher.as_ref(), operation)
     }
 }
 
@@ -5121,35 +5121,36 @@ fn sqlite_fork_admission_receipt(
 
 fn sqlite_recover_fork_admission(
     conn: &Connection,
+    hasher: &dyn Hasher,
     operation: ErasureReferenceV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
     let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
         return Ok(None);
     };
     let recovered = receipt.recover(operation)?;
-    if !sqlite_timeline_exists(conn, recovered.child().id)? {
+    let (parent, at_seq) = recovered
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let chain_head = SqliteStore::compute_chain_hash_at_unchecked_on(conn, hasher, parent, at_seq)
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    if !sqlite_timeline_is_exact(conn, recovered.child(), chain_head)? {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     Ok(Some(recovered))
 }
 
-fn sqlite_fork_admission_is_exact(
+fn sqlite_timeline_is_exact(
     conn: &Connection,
-    admission: &PreparedErasureForkBatchV1,
+    child: &TimelineMeta,
     chain_head: Hash,
-    receipt: &SqliteForkAdmissionReceiptV1,
 ) -> Result<bool, ErasureErrorV1> {
-    let child = admission.child();
-    let Ok(recovered) = receipt.recover(admission.operation()) else {
-        return Ok(false);
-    };
-    if recovered != admission.recovery_result()? {
-        return Ok(false);
-    }
     let row = conn
         .query_row(
             "SELECT name, mode, parent_id, fork_seq, head_seq, chain_head
-             FROM timelines WHERE id=?1",
+             FROM timelines
+             WHERE id=?1
+               AND NOT EXISTS (SELECT 1 FROM events WHERE timeline_id=?1)",
             params![child.id.to_string()],
             |row| {
                 Ok((
@@ -5178,7 +5179,7 @@ fn sqlite_fork_admission_is_exact(
         .optional()
         .map_err(map_erasure_receipt_failure)?;
     let expected_owner = child.owner.map(|value| value.to_string());
-    if (
+    Ok((
         name.as_ref(),
         mode.as_str(),
         parent.as_ref(),
@@ -5186,7 +5187,7 @@ fn sqlite_fork_admission_is_exact(
         head,
         stored_chain_head.as_slice(),
         owner.as_ref(),
-    ) != (
+    ) == (
         child.name.as_ref(),
         mode_str(child.mode),
         expected_parent.as_ref(),
@@ -5194,7 +5195,23 @@ fn sqlite_fork_admission_is_exact(
         0,
         chain_head.as_bytes(),
         expected_owner.as_ref(),
-    ) {
+    ))
+}
+
+fn sqlite_fork_admission_is_exact(
+    conn: &Connection,
+    admission: &PreparedErasureForkBatchV1,
+    chain_head: Hash,
+    receipt: &SqliteForkAdmissionReceiptV1,
+) -> Result<bool, ErasureErrorV1> {
+    let child = admission.child();
+    let Ok(recovered) = receipt.recover(admission.operation()) else {
+        return Ok(false);
+    };
+    if recovered != admission.recovery_result()? {
+        return Ok(false);
+    }
+    if !sqlite_timeline_is_exact(conn, child, chain_head)? {
         return Ok(false);
     }
     for prepared in admission.admissions() {

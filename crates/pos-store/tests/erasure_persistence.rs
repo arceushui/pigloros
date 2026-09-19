@@ -1290,6 +1290,38 @@ fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_recovery_rejects_a_mismatched_original_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE timelines SET name='different-child' WHERE id=?1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+    assert_eq!(
+        SqliteStore::open(path)?.recover_fork_admission(operation),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_admission_commits_every_overlapping_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_overlapping_fork_batch(SqliteStore::open_in_memory()?)
@@ -1425,6 +1457,20 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
+            "UPDATE erasure_fork_admissions SET expected_generation=zeroblob(32)
+             WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_fork_admissions SET child_scope=zeroblob(32)
+             WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
             "UPDATE erasure_fork_admissions SET child_id='corrupted' WHERE operation_digest=?1",
             rusqlite::params![prepared.operation().digest().as_slice()],
         )
@@ -1497,6 +1543,8 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
 fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std::error::Error>> {
     for assignment in [
         "binding_digest='not-a-blob'",
+        "expected_generation='not-a-blob'",
+        "child_scope='not-a-blob'",
         "child_id=X'00'",
         "child_name=X'00'",
         "child_mode=X'00'",

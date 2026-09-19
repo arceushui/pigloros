@@ -1458,14 +1458,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
             .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
-            let exact_child = self.timelines.get(&child.id).is_some_and(|state| {
-                (
-                    &state.timeline.meta,
-                    state.timeline.head,
-                    state.events.is_empty(),
-                    state.chain_head,
-                ) == (&child, Seq::ZERO, true, chain_head)
-            });
+            let exact_child = self.memory_fork_child_is_exact(&child, chain_head);
             let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
             return ((stored_result.binding_digest(), exact_child, exact_manifest)
                 == (binding, true, true))
@@ -1518,14 +1511,31 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
             return Ok(None);
         };
-        let exact_child = self.timelines.contains_key(&result.child().id);
-        exact_child
+        let (parent, at_seq) = result
+            .child()
+            .fork_point
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let chain_head = self
+            .compute_chain_hash_at_unchecked(parent, at_seq)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        self.memory_fork_child_is_exact(result.child(), chain_head)
             .then_some(Some(result))
             .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 }
 
 impl MemoryStore {
+    fn memory_fork_child_is_exact(&self, child: &TimelineMeta, chain_head: Hash) -> bool {
+        self.timelines.get(&child.id).is_some_and(|state| {
+            (
+                &state.timeline.meta,
+                state.timeline.head,
+                state.events.is_empty(),
+                state.chain_head,
+            ) == (child, Seq::ZERO, true, chain_head)
+        })
+    }
+
     fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
         admission.admissions().iter().all(|prepared| {
             let mutation = prepared.mutation();
@@ -5414,6 +5424,28 @@ mod tests {
             std::mem::discriminant(&err),
             std::mem::discriminant(&CoreError::TimelineNotFound(TimelineId::new()))
         );
+    }
+
+    #[test]
+    fn erasure_fork_child_exactness_checks_metadata_and_chain_head() {
+        let mut store = new_store();
+        let parent = store.create_timeline("parent").test_ok();
+        let child = store.fork(parent.id(), Seq::ZERO, "child").test_ok();
+        let chain_head = store
+            .compute_chain_hash_at_unchecked(parent.id(), Seq::ZERO)
+            .test_ok();
+        assert!(store.memory_fork_child_is_exact(&child.meta, chain_head));
+
+        let mut altered = child.meta.clone();
+        altered.name = Some("different-child".to_owned());
+        assert!(!store.memory_fork_child_is_exact(&altered, chain_head));
+
+        store
+            .timelines
+            .get_mut(&child.id())
+            .expect("fork child exists")
+            .chain_head = Hash::from_bytes([7; 32]);
+        assert!(!store.memory_fork_child_is_exact(&child.meta, chain_head));
     }
 
     #[test]
