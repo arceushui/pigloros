@@ -1205,10 +1205,10 @@ impl Experiment {
             .owned_event_types
             .iter()
             .map(|event_type| {
-                pos_core::OutputDeclarationV1::new(
+                pos_core::output_policy::OutputDeclarationV1::new(
                     event_type.as_str().to_owned(),
-                    pos_core::OutputAuthorityV1::Authoritative,
-                    pos_core::OutputFidelityV1::L0,
+                    pos_core::output_policy::OutputAuthorityV1::Authoritative,
+                    pos_core::output_policy::OutputFidelityV1::L0,
                     1_048_576,
                     None,
                     None,
@@ -1219,16 +1219,18 @@ impl Experiment {
                 name: plugin.name().to_owned(),
                 reason: error.to_string(),
             })?;
-        let policy = pos_core::OutputPolicyV1::new(pos_core::OutputPolicyInputV1 {
-            plugin_id: plugin.id(),
-            plugin_version: plugin.version().to_owned(),
-            implementation_hash: Hash::from_bytes([22; 32]),
-            base_configuration_digest: Hash::from_bytes([23; 32]),
-            executable_profile_hash: budget.digest(),
-            retention_policy_hash: Hash::from_bytes([24; 32]),
-            policy_revision: 1,
-            output_declarations: declarations,
-        })
+        let policy = pos_core::output_policy::OutputPolicyV1::new(
+            pos_core::output_policy::OutputPolicyInputV1 {
+                plugin_id: plugin.id(),
+                plugin_version: plugin.version().to_owned(),
+                implementation_hash: Hash::from_bytes([22; 32]),
+                base_configuration_digest: Hash::from_bytes([23; 32]),
+                executable_profile_hash: budget.digest(),
+                retention_policy_hash: Hash::from_bytes([24; 32]),
+                policy_revision: 1,
+                output_declarations: declarations,
+            },
+        )
         .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
             name: plugin.name().to_owned(),
             reason: error.to_string(),
