@@ -355,6 +355,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         if !timelines.iter().any(|(timeline, _)| *timeline == child.id) {
             timelines.push((child.id, reference(19)));
         }
+        drop(timelines);
         Ok(reference(self.fork_child_scope.load(Ordering::Acquire)))
     }
 
@@ -623,6 +624,44 @@ fn assert_recovered_fork_is_frozen(
     Ok(())
 }
 
+fn assert_frozen_fork_retries(
+    commands: &mut pos_runtime::ErasureCommandSenderV1<'_>,
+    authority: &TestAuthority,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let operation = reference(40);
+    assert_eq!(
+        test_stage(
+            "exactly retry frozen timeline fork",
+            commands.fork_timeline_identified(
+                operation,
+                parent,
+                pos_core::Seq::ZERO,
+                "frozen-child",
+            ),
+        )?
+        .id(),
+        child
+    );
+    authority.set_fork_child_scope(21);
+    assert_eq!(
+        commands.fork_timeline_identified(operation, parent, pos_core::Seq::ZERO, "frozen-child",),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    authority.set_fork_child_scope(19);
+    assert_eq!(
+        commands.fork_timeline_identified(
+            operation,
+            parent,
+            pos_core::Seq::ZERO,
+            "changed-on-retry",
+        ),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    Ok(())
+}
+
 fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
@@ -679,11 +718,10 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         commands.fork_timeline(timeline.id(), pos_core::Seq::ZERO, "affected-ordinary-fork",),
         Err(ErasureHostErrorV1::Conflict)
     );
-    let operation = reference(40);
     let child = test_stage(
         "fork frozen timeline",
         commands.fork_timeline_identified(
-            operation,
+            reference(40),
             timeline.id(),
             pos_core::Seq::ZERO,
             "frozen-child",
@@ -693,39 +731,7 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         commands.timeline(child.id()),
         Err(ErasureHostErrorV1::AccessFrozen)
     );
-    assert_eq!(
-        test_stage(
-            "exactly retry frozen timeline fork",
-            commands.fork_timeline_identified(
-                operation,
-                timeline.id(),
-                pos_core::Seq::ZERO,
-                "frozen-child",
-            ),
-        )?
-        .id(),
-        child.id()
-    );
-    authority.set_fork_child_scope(21);
-    assert_eq!(
-        commands.fork_timeline_identified(
-            operation,
-            timeline.id(),
-            pos_core::Seq::ZERO,
-            "frozen-child",
-        ),
-        Err(ErasureHostErrorV1::Conflict)
-    );
-    authority.set_fork_child_scope(19);
-    assert_eq!(
-        commands.fork_timeline_identified(
-            operation,
-            timeline.id(),
-            pos_core::Seq::ZERO,
-            "changed-on-retry",
-        ),
-        Err(ErasureHostErrorV1::Conflict)
-    );
+    assert_frozen_fork_retries(&mut commands, &authority, timeline.id(), child.id())?;
     Ok(())
 }
 
@@ -1259,6 +1265,58 @@ fn sqlite_host_freezes_access_at_the_coordinator_cas_boundary(
     assert_atomic_freeze_parity(StoreConfig::SqliteInMemory)
 }
 
+fn create_persisted_frozen_fork(
+    path_text: &str,
+    authority: &Arc<TestAuthority>,
+) -> Result<(TimelineId, TimelineId), Box<dyn std::error::Error>> {
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open persistent coordinator host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.to_owned(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open persistent command sender", host.command_sender())?;
+    let parent = test_stage(
+        "create persistent parent",
+        commands.create_timeline("restart-parent"),
+    )?;
+    test_stage(
+        "publish persistent authority topology",
+        authority.set_timeline(parent.id()),
+    )?;
+    let request = test_stage("construct persistent request", persistence_request())?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    test_stage(
+        "submit persistent request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    test_stage(
+        "authorize persistent request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze persistent request",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    let child = test_stage(
+        "fork persistent frozen timeline",
+        commands.fork_timeline_identified(
+            reference(41),
+            parent.id(),
+            pos_core::Seq::ZERO,
+            "restart-child",
+        ),
+    )?;
+    Ok((parent.id(), child.id()))
+}
+
 #[test]
 fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1268,57 +1326,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
     ));
     let path_text = path.to_string_lossy().into_owned();
     let authority = Arc::new(TestAuthority::default());
-    let (parent, child) = {
-        let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-        let mut host = test_stage(
-            "open persistent coordinator host",
-            open_with_authority(
-                StoreConfig::Sqlite {
-                    path: path_text.clone(),
-                },
-                authority_plugin,
-                reference(30),
-                ERASURE_MAX_INVENTORY_REQUESTS,
-            ),
-        )?;
-        let (parent, child) = {
-            let mut commands = test_stage("open persistent command sender", host.command_sender())?;
-            let parent = test_stage(
-                "create persistent parent",
-                commands.create_timeline("restart-parent"),
-            )?;
-            test_stage(
-                "publish persistent authority topology",
-                authority.set_timeline(parent.id()),
-            )?;
-            let request = test_stage("construct persistent request", persistence_request())?;
-            let request_reference = request.reference();
-            let request_provenance = request.provenance();
-            test_stage(
-                "submit persistent request",
-                commands.submit_erasure_request(request, request_provenance),
-            )?;
-            test_stage(
-                "authorize persistent request",
-                commands.authorize_erasure_request(request_reference, reference(32)),
-            )?;
-            test_stage(
-                "freeze persistent request",
-                commands.freeze_access(request_reference, &freeze_transition()),
-            )?;
-            let child = test_stage(
-                "fork persistent frozen timeline",
-                commands.fork_timeline_identified(
-                    reference(41),
-                    parent.id(),
-                    pos_core::Seq::ZERO,
-                    "restart-child",
-                ),
-            )?;
-            (parent.id(), child.id())
-        };
-        (parent, child)
-    };
+    let (parent, child) = create_persisted_frozen_fork(&path_text, &authority)?;
     let mut original_authority_recovery = test_stage(
         "reopen persistent coordinator host with the original authority",
         open_read_only_with_authority(
