@@ -496,7 +496,7 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
     result_pipeline! {
-        registry.register_with_approver(
+        registry.register_generated_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver(
