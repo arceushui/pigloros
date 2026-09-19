@@ -3912,6 +3912,7 @@ mod tests {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                output_admission_exempt: true,
             },
         );
 
