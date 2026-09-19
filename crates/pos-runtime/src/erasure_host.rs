@@ -1511,7 +1511,7 @@ impl ErasureExecutionHostV1 {
     where
         F: FnOnce(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>,
     {
-        let existing_timeline_ids = self
+        let mut existing_timeline_ids = self
             .store
             .host_store()
             .list_timelines()
