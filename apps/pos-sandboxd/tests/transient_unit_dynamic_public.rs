@@ -195,8 +195,10 @@ fn swapped_descriptor_name_and_fd_shape_is_rejected_before_transport() -> Result
 fn only_normalized_bounded_provider_paths_can_compile() {
     for path in [
         "relative/root",
+        "/",
         "/run",
         "/run//attempt/root",
+        "/run/./attempt/root",
         "/run/attempt/../root",
         "/run/attempt/root/",
         "/run/attempt\0/root",
@@ -249,6 +251,11 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         "SystemCallFilter",
         SystemdTransientUnitReadbackValue::BoolStringArray((true, authority.requested_names)),
     );
+    let mut mistyped_root = exact_readback(&request, &authority.expected_effective_names);
+    mistyped_root[1] = SystemdTransientUnitReadback::new(
+        "RootDirectory",
+        SystemdTransientUnitReadbackValue::BoolStringArray((true, Vec::new())),
+    );
     let mut missing_descriptor = exact_readback(&request, &authority.expected_effective_names);
     missing_descriptor[33] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
@@ -276,6 +283,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         extra,
         reordered,
         syscall_request_as_readback,
+        mistyped_root,
         missing_descriptor,
         extra_descriptor,
         reordered_descriptor,
