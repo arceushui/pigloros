@@ -1159,7 +1159,7 @@ impl Experiment {
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register(plugin, reducer, driver)
+        self.registry.register_legacy(plugin, reducer, driver)
     }
 
     /// Register a Plugin with its host-verified output policy and executable budget.
