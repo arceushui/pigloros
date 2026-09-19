@@ -1,0 +1,53 @@
+# Throwaway pre-acceptance evidence for Proposed ADR-084/ADR-085.
+# This workflow and its prototype remain on an unmerged branch.
+name: adr084-podman-feasibility
+
+on:
+  push:
+    branches:
+      - codex/adr084-podman-feasibility
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adr084-podman-feasibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: Podman feasibility (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install distribution probe dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes b3sum crun jq musl-tools podman python3-cryptography
+          probe_user="$(id -un)"
+          if ! grep -q "^${probe_user}:" /etc/subuid; then
+            sudo usermod --add-subuids 100000-165535 "${probe_user}"
+          fi
+          if ! grep -q "^${probe_user}:" /etc/subgid; then
+            sudo usermod --add-subgids 100000-165535 "${probe_user}"
+          fi
+      - name: Run throwaway Podman feasibility probe
+        run: bash prototypes/adr084-podman-feasibility/run.sh
+      - name: Upload durable raw evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adr084-podman-feasibility-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/adr084-podman-feasibility/
+          if-no-files-found: error
+          retention-days: 90
