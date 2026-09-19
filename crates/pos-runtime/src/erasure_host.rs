@@ -1518,8 +1518,7 @@ impl ErasureExecutionHostV1 {
             .map_store_error()
             .map_err(UnaffectedTopologyTransitionError::Host)?
             .into_iter()
-            .map(|timeline| timeline.id())
-            .collect::<Vec<_>>();
+            .map(|timeline| timeline.id());
         let Some(change) = change else {
             return Err(UnaffectedTopologyTransitionError::Erasure(
                 ErasureErrorV1::ProvenanceMissing,
@@ -1528,7 +1527,7 @@ impl ErasureExecutionHostV1 {
         let timeline = change(self.store.host_store())
             .map_store_error()
             .map_err(UnaffectedTopologyTransitionError::Host)?;
-        let created = !existing_timeline_ids.contains(&timeline.id());
+        let created = !existing_timeline_ids.any(|timeline_id| timeline_id == timeline.id());
         let candidate = match self.verify_unaffected_topology_candidate(request_count, limits) {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -4161,7 +4160,7 @@ mod tests {
             .previous_state()
             .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))?;
-        host.authority = Some(Arc::clone(&authority));
+        host.authority = Some(authority.clone());
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)?;
         Ok(RejectedHostFixtureV1 {
@@ -4183,6 +4182,7 @@ mod tests {
             request,
             rejected_digest,
             predecessor_digest,
+            ..
         } = rejected_host_with_resolve_control()?;
         control.set_fault(ResolveStateFaultV1::Adapter {
             requested: predecessor_digest,
@@ -4629,7 +4629,7 @@ mod tests {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
 
-        host.authority = Some(Arc::clone(&authority));
+        host.authority = Some(authority.clone());
         host.coordinator = None;
         assert_eq!(
             host.apply_empty_topology_change(|store| store.create_timeline("missing-coordinator")),
