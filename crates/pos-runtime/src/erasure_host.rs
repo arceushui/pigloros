@@ -1355,6 +1355,15 @@ impl ErasureExecutionHostV1 {
         if self.gate.inventory_generation() != Ok(generation) {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         }
+        let inventory = self.ready_inventory(generation, request_count)?;
+        Ok((generation, maximum_requests, inventory))
+    }
+
+    fn ready_inventory(
+        &self,
+        generation: ErasureReferenceV1,
+        request_count: usize,
+    ) -> Result<Arc<ErasureVerifiedInventoryV1>, ErasureHostErrorV1> {
         let inventory = self
             .inventory
             .as_ref()
@@ -1364,7 +1373,7 @@ impl ErasureExecutionHostV1 {
         if inventory.request_count() != request_count {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         }
-        Ok((generation, maximum_requests, inventory))
+        Ok(inventory)
     }
 
     fn ensure_generation(
