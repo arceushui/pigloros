@@ -1196,7 +1196,7 @@ impl Experiment {
         approver: Option<Box<dyn pos_core::ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_with_approver(
+        self.registry.register_generated_with_approver(
             plugin,
             reducer,
             driver,

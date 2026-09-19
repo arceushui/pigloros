@@ -2236,6 +2236,165 @@ impl PluginRegistry {
         )
     }
 
+    pub fn register_generated_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        let budget =
+            pos_core::ExecutableBudgetPolicyV1::new(pos_core::ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile: pos_core::WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 4_096,
+                fidelity_budgets: [
+                    pos_core::FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 500_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    pos_core::FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 250_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    pos_core::FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 1_000,
+                        max_bytes: 16 * 1024 * 1024,
+                        max_cpu_us: 50_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![pos_core::PluginCpuReservationV1 {
+                    plugin_id: plugin.id(),
+                    cpu_reservations_us: [10; 3],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: pos_core::Hash::from_bytes([21; 32]),
+                max_pass_wall_duration_us: 1_000,
+            })
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+        let mut declarations = plugin
+            .capability()
+            .owned_event_types
+            .into_iter()
+            .map(|event_type| {
+                pos_core::output_policy::OutputDeclarationV1::new(
+                    event_type.as_str().to_owned(),
+                    pos_core::output_policy::OutputAuthorityV1::Authoritative,
+                    pos_core::output_policy::OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+        declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
+        let policy = pos_core::output_policy::OutputPolicyV1::new(
+            pos_core::output_policy::OutputPolicyInputV1 {
+                plugin_id: plugin.id(),
+                plugin_version: plugin.version().to_owned(),
+                implementation_hash: pos_core::Hash::from_bytes([22; 32]),
+                base_configuration_digest: pos_core::Hash::from_bytes([23; 32]),
+                executable_profile_hash: budget.digest(),
+                retention_policy_hash: pos_core::Hash::from_bytes([24; 32]),
+                policy_revision: 1,
+                output_declarations: declarations,
+            },
+        )
+        .map_err(|error| RuntimeError::CapabilityMismatch {
+            name: plugin.name().to_owned(),
+            reason: error.to_string(),
+        })?;
+        let context = self.registration_context(plugin)?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+            RegistrationOptions {
+                registration: None,
+                output_admission: Some(OutputAdmissionV1::try_new(
+                    plugin.id(),
+                    plugin.version(),
+                    policy,
+                    budget,
+                )?),
+            },
+        )
+    }
+
+    /// Register an implementation through the explicit V1 composition seam.
+    ///
+    /// # Errors
+    /// Returns a registration or closed composition error before mutating the registry.
+    pub fn register_pinned(
+        &mut self,
+        plugin: &dyn Plugin,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        self.register_pinned_with_approver(
+            plugin,
+            registration,
+            reducer,
+            driver,
+            None,
+            std::iter::empty(),
+        )
+    }
+
+    /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
+    ///
+    /// Wires event-type schemas, (optionally) a reducer and driver, and (optionally)
+    /// an action approver indexed by the explicitly supplied event types.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::DuplicatePlugin`] if a plugin with the same `PluginId`
+    /// is already registered.
+    pub fn register_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+            RegistrationOptions {
+                registration: None,
+                output_admission: None,
+            },
+        )
+    }
+
     /// Register a pinned implementation with an optional ADR-057 approver.
     ///
     /// # Errors
