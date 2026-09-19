@@ -1159,85 +1159,7 @@ impl Experiment {
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        let capability = plugin.capability();
-        let budget =
-            pos_core::ExecutableBudgetPolicyV1::new(pos_core::ExecutableBudgetPolicyInputV1 {
-                revision: 1,
-                workload_profile: pos_core::WorkloadProfileV1::Interactive,
-                cut_budget_family: 0,
-                max_event_bytes: 4_096,
-                fidelity_budgets: [
-                    pos_core::FidelityBudgetV1 {
-                        level: 0,
-                        max_events: 1_000,
-                        max_bytes: 64 * 1024 * 1024,
-                        max_cpu_us: 500_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    pos_core::FidelityBudgetV1 {
-                        level: 1,
-                        max_events: 1_000,
-                        max_bytes: 64 * 1024 * 1024,
-                        max_cpu_us: 250_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    pos_core::FidelityBudgetV1 {
-                        level: 2,
-                        max_events: 1_000,
-                        max_bytes: 16 * 1024 * 1024,
-                        max_cpu_us: 50_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                ],
-                plugin_cpu_reservations: vec![pos_core::PluginCpuReservationV1 {
-                    plugin_id: plugin.id(),
-                    cpu_reservations_us: [10; 3],
-                }],
-                accounting_semantics: 0,
-                execution_profile_hash: Hash::from_bytes([21; 32]),
-                max_pass_wall_duration_us: 1_000,
-            })
-            .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: error.to_string(),
-            })?;
-        let mut declarations = capability
-            .owned_event_types
-            .iter()
-            .map(|event_type| {
-                pos_core::output_policy::OutputDeclarationV1::new(
-                    event_type.as_str().to_owned(),
-                    pos_core::output_policy::OutputAuthorityV1::Authoritative,
-                    pos_core::output_policy::OutputFidelityV1::L0,
-                    4_096,
-                    None,
-                    None,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: error.to_string(),
-            })?;
-        declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
-        let policy = pos_core::output_policy::OutputPolicyV1::new(
-            pos_core::output_policy::OutputPolicyInputV1 {
-                plugin_id: plugin.id(),
-                plugin_version: plugin.version().to_owned(),
-                implementation_hash: Hash::from_bytes([22; 32]),
-                base_configuration_digest: Hash::from_bytes([23; 32]),
-                executable_profile_hash: budget.digest(),
-                retention_policy_hash: Hash::from_bytes([24; 32]),
-                policy_revision: 1,
-                output_declarations: declarations,
-            },
-        )
-        .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-            name: plugin.name().to_owned(),
-            reason: error.to_string(),
-        })?;
-        self.registry
-            .register_with_output_policy(plugin, policy, budget, reducer, driver)
+        self.registry.register_generated(plugin, reducer, driver)
     }
 
     /// Register a Plugin with its host-verified output policy and executable budget.
@@ -5764,7 +5686,7 @@ mod tests {
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .with_fork_registry_factory(move || {
             let mut registry = PluginRegistry::new().with_erasure_gate(foreign_gate.clone());
-            registry.register(&CompositionPlugin(plugin), None, None)?;
+            registry.register_generated(&CompositionPlugin(plugin), None, None)?;
             Ok(registry)
         });
         experiment
@@ -7075,7 +6997,7 @@ mod coverage_entrypoints {
             },
             move || {
                 let mut registry = PluginRegistry::new();
-                ok(registry.register(
+                ok(registry.register_generated(
                     &CoveragePlugin { id: plugin_id },
                     None,
                     Some(Box::new(BacktestDriver { entity })),
@@ -7286,7 +7208,7 @@ mod coverage_entrypoints {
         let mut head_fault_store = pos_store::memory::MemoryStore::new();
         let entity = EntityId::new();
         let mut registry = PluginRegistry::new();
-        ok(registry.register(
+        ok(registry.register_generated(
             &CoveragePlugin {
                 id: PluginId::new(),
             },
@@ -7351,7 +7273,7 @@ mod coverage_entrypoints {
                 .with_consent_authority(authority.clone())
                 .with_fork_registry_factory(move || {
                     let mut registry = PluginRegistry::new();
-                    registry.register(
+                    registry.register_generated(
                         &CoveragePlugin { id: factory_id },
                         None,
                         Some(Box::new(RestoreFailDriver)),

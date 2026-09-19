@@ -2085,6 +2085,97 @@ impl PluginRegistry {
         self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
     }
 
+    /// Register a plugin with a deterministic policy derived from its declared
+    /// event namespace and the bounded Interactive executable profile.
+    ///
+    /// # Errors
+    /// Returns policy-construction or registration errors.
+    pub fn register_generated(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        let budget =
+            pos_core::ExecutableBudgetPolicyV1::new(pos_core::ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile: pos_core::WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 4_096,
+                fidelity_budgets: [
+                    pos_core::FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 500_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    pos_core::FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 250_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    pos_core::FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 1_000,
+                        max_bytes: 16 * 1024 * 1024,
+                        max_cpu_us: 50_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![pos_core::PluginCpuReservationV1 {
+                    plugin_id: plugin.id(),
+                    cpu_reservations_us: [10; 3],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: pos_core::Hash::from_bytes([21; 32]),
+                max_pass_wall_duration_us: 1_000,
+            })
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+        let mut declarations = plugin
+            .capability()
+            .owned_event_types
+            .into_iter()
+            .map(|event_type| {
+                pos_core::output_policy::OutputDeclarationV1::new(
+                    event_type.as_str().to_owned(),
+                    pos_core::output_policy::OutputAuthorityV1::Authoritative,
+                    pos_core::output_policy::OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+        declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
+        let policy = pos_core::output_policy::OutputPolicyV1::new(
+            pos_core::output_policy::OutputPolicyInputV1 {
+                plugin_id: plugin.id(),
+                plugin_version: plugin.version().to_owned(),
+                implementation_hash: pos_core::Hash::from_bytes([22; 32]),
+                base_configuration_digest: pos_core::Hash::from_bytes([23; 32]),
+                executable_profile_hash: budget.digest(),
+                retention_policy_hash: pos_core::Hash::from_bytes([24; 32]),
+                policy_revision: 1,
+                output_declarations: declarations,
+            },
+        )
+        .map_err(|error| RuntimeError::CapabilityMismatch {
+            name: plugin.name().to_owned(),
+            reason: error.to_string(),
+        })?;
+        self.register_with_output_policy(plugin, policy, budget, reducer, driver)
+    }
+
     /// Register an implementation through the explicit V1 composition seam.
     ///
     /// # Errors
