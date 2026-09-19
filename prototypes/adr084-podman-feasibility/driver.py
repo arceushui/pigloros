@@ -59,7 +59,13 @@ def process_snapshot(pid: int) -> dict[str, object]:
             target = f"UNAVAILABLE: {error}"
         descriptors.append({"fd": int(entry.name), "target": target})
     namespaces: dict[str, str] = {}
-    for entry in sorted((proc / "ns").iterdir()):
+    namespace_access_error: str | None = None
+    try:
+        namespace_entries = sorted((proc / "ns").iterdir())
+    except OSError as error:
+        namespace_entries = []
+        namespace_access_error = f"UNAVAILABLE: {error}"
+    for entry in namespace_entries:
         try:
             namespaces[entry.name] = os.readlink(entry)
         except OSError as error:
@@ -94,6 +100,7 @@ def process_snapshot(pid: int) -> dict[str, object]:
         "descriptor_access_error": descriptor_access_error,
         "descriptors": descriptors,
         "mountinfo": read_text(proc / "mountinfo"),
+        "namespace_access_error": namespace_access_error,
         "namespaces": namespaces,
     }
 
