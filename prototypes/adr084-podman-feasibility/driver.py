@@ -134,7 +134,6 @@ def launch(
         f"--cidfile={cidfile}",
         "--preserve-fds=1",
         "--network=none",
-        "--dns=none",
         "--no-hosts",
         "--hostname=pigloros-adapter",
         "--read-only",
