@@ -2266,6 +2266,10 @@ impl PluginRegistry {
         )
     }
 
+    /// Register a plugin with a generated policy and action approver.
+    ///
+    /// # Errors
+    /// Returns policy-construction, capability, or registration errors.
     pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
