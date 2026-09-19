@@ -1184,7 +1184,7 @@ impl Experiment {
                     pos_core::FidelityBudgetV1 {
                         level: 2,
                         max_events: 1_000,
-                        max_bytes: 64 * 1024 * 1024,
+                        max_bytes: 16 * 1024 * 1024,
                         max_cpu_us: 50_000,
                         shared_host_cpu_reservation_us: 0,
                     },
