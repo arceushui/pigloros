@@ -128,6 +128,8 @@ pub enum SystemdTransientUnitValue {
     SystemCallFilter((bool, Vec<String>)),
     /// A D-Bus `(bas)` address-family value.
     RestrictAddressFamilies((bool, Vec<String>)),
+    /// A D-Bus `u` descriptor-store limit.
+    FileDescriptorStoreMax(u32),
     /// A D-Bus `a(hs)` descriptor array: Unix FD before descriptor name.
     ExtraFileDescriptors(Vec<(OwnedFd, String)>),
 }
@@ -141,6 +143,7 @@ impl SystemdTransientUnitValue {
             Self::RootDirectory(_) => "s",
             Self::BindReadOnlyPaths(_) => "a(ssbt)",
             Self::SystemCallFilter(_) | Self::RestrictAddressFamilies(_) => "(bas)",
+            Self::FileDescriptorStoreMax(_) => "u",
             Self::ExtraFileDescriptors(_) => "a(hs)",
         }
     }
@@ -232,6 +235,8 @@ pub enum SystemdTransientUnitReadbackValue {
     BoolStringArray((bool, Vec<String>)),
     /// A D-Bus `as` value.
     StringArray(Vec<String>),
+    /// A D-Bus `u` value.
+    U32(u32),
 }
 
 /// A manager property that is observed but never sent in this request.
@@ -310,7 +315,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 5);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 6);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 property.name(),
@@ -344,6 +349,10 @@ impl TransientUnitRequest {
                 ));
             }
         }
+        properties.push(SystemdTransientUnitProperty::new(
+            "FileDescriptorStoreMax",
+            SystemdTransientUnitValue::FileDescriptorStoreMax(0),
+        ));
         properties.push(SystemdTransientUnitProperty::new(
             "ExtraFileDescriptors",
             SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
@@ -391,6 +400,10 @@ impl TransientUnitRequest {
     ) -> bool {
         observed.name == requested.name
             && match (&requested.value, &observed.value) {
+                (
+                    SystemdTransientUnitValue::FileDescriptorStoreMax(expected),
+                    SystemdTransientUnitReadbackValue::U32(actual),
+                ) => expected == actual,
                 (
                     SystemdTransientUnitValue::Static(expected),
                     SystemdTransientUnitReadbackValue::Static(actual),

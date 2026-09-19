@@ -14,7 +14,7 @@ const X86_64: &[u8] = include_bytes!(
     "../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
 
-const EXPECTED_PROPERTY_NAMES: [&str; 34] = [
+const EXPECTED_PROPERTY_NAMES: [&str; 35] = [
     "Type",
     "RootDirectory",
     "BindReadOnlyPaths",
@@ -48,6 +48,7 @@ const EXPECTED_PROPERTY_NAMES: [&str; 34] = [
     "UMask",
     "KillMode",
     "SendSIGKILL",
+    "FileDescriptorStoreMax",
     "ExtraFileDescriptors",
 ];
 
@@ -70,7 +71,8 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     assert_eq!(properties[2].value().dbus_signature(), "a(ssbt)");
     assert_eq!(properties[28].value().dbus_signature(), "(bas)");
     assert_eq!(properties[29].value().dbus_signature(), "(bas)");
-    assert_eq!(properties[33].value().dbus_signature(), "a(hs)");
+    assert_eq!(properties[33].value().dbus_signature(), "u");
+    assert_eq!(properties[34].value().dbus_signature(), "a(hs)");
 
     match properties[1].value() {
         SystemdTransientUnitValue::RootDirectory(value) => {
@@ -120,7 +122,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
-    match properties[33].value() {
+    match properties[34].value() {
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
             assert_eq!(
                 <Vec<(OwnedFd, String)> as Type>::SIGNATURE.to_string(),
@@ -157,7 +159,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
             }
             _value => return Err("RestrictAddressFamilies must have a (bas) value".into()),
         }
-        match properties[33].value() {
+        match properties[34].value() {
             SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                 assert_eq!(value.len(), 1);
                 assert_eq!(value[0].1, "piglor-release-v1");
@@ -257,12 +259,12 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         SystemdTransientUnitReadbackValue::BoolStringArray((true, Vec::new())),
     );
     let mut missing_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    missing_descriptor[33] = SystemdTransientUnitReadback::new(
+    missing_descriptor[34] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(Vec::new()),
     );
     let mut extra_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    extra_descriptor[33] = SystemdTransientUnitReadback::new(
+    extra_descriptor[34] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-host-service-v1".to_owned(),
@@ -271,7 +273,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         ]),
     );
     let mut reordered_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    reordered_descriptor[33] = SystemdTransientUnitReadback::new(
+    reordered_descriptor[34] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-release-v1".to_owned(),
@@ -403,6 +405,9 @@ fn exact_readback(
                     SystemdTransientUnitReadbackValue::StringArray(
                         value.iter().map(|(_, name)| name.clone()).collect(),
                     )
+                }
+                SystemdTransientUnitValue::FileDescriptorStoreMax(value) => {
+                    SystemdTransientUnitReadbackValue::U32(*value)
                 }
             };
             SystemdTransientUnitReadback::new(property.name(), value)
