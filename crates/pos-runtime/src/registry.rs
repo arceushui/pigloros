@@ -176,10 +176,27 @@ mod coverage_paths {
         ids::{EntityId, EventId, TimelineId},
         ConsentGrantedV1, Event,
     };
+    use pos_store::{open_store, StoreConfig};
     use std::sync::{Arc, Mutex};
 
     fn gated_registry() -> PluginRegistry {
         PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn gated_store() -> Box<dyn pos_core::store::EventStore> {
+        let mut store = open_store(StoreConfig::Memory).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "opening the in-memory store failed: {error:?}"
+            )))
+        });
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "binding the in-memory erasure gate failed: {error:?}"
+                )))
+            });
+        store
     }
 
     struct RestoreDriver {
@@ -288,9 +305,9 @@ mod coverage_paths {
         )];
         let mut registry = gated_registry().with_consent_authority(authority);
         registry.register_test_driver(Box::new(EmptyDriver));
-        registry
+        assert!(registry
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
-            .test_ok();
+            .is_ok());
         let mut store = gated_store();
         assert!(matches!(
             registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
@@ -325,7 +342,7 @@ mod coverage_paths {
         )];
         let mut registry = gated_registry();
         registry.register_test_driver(Box::new(EmptyDriver));
-        registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
+        assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_ok());
         let mut store = gated_store();
         assert!(matches!(
             registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
