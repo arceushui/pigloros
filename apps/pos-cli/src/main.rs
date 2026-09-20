@@ -1263,6 +1263,34 @@ mod tests {
     }
 
     #[test]
+    fn cmd_experiment_reproduce_rejects_tampered_policy_digest() {
+        let dir = tempfile::tempdir().test_ok();
+        let path = dir
+            .path()
+            .join("tampered-policy.db")
+            .to_str()
+            .test_ok()
+            .to_owned();
+        cmd_experiment_run(&path, 3).test_ok();
+        let manifest_path = path.replace(".db", "-manifest.json");
+        let mut reproduction: ReproductionManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).test_ok()).test_ok();
+        let digest = reproduction
+            .manifest
+            .output_policy_digests
+            .values_mut()
+            .next()
+            .test_ok();
+        *digest = pos_core::Hash::zero();
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string(&reproduction).test_ok(),
+        )
+        .test_ok();
+        assert!(cmd_experiment_reproduce(&manifest_path).is_err());
+    }
+
+    #[test]
     fn cmd_experiment_reproduce_rejects_manifest_without_recipe() {
         let manifest = pos_core::ReproManifest::new(
             TimelineId::new(),
