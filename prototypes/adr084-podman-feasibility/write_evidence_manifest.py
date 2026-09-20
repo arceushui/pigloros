@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write prototype provenance and an SPDX inventory of every executed input."""
+"""Write prototype provenance and an SPDX inventory of selected retained inputs."""
 
 from __future__ import annotations
 
@@ -230,7 +230,7 @@ def main() -> None:
         ("runtime/podman", pathlib.Path("/usr/bin/podman")),
     ]
     file_names = [name for name, _ in files]
-    required_inputs = {
+    required_retained_inputs = {
         "input/derived-scs1.cbor",
         "input/production-scs1.cbor",
         "prototype/driver.py",
@@ -238,10 +238,12 @@ def main() -> None:
         "prototype/run.sh",
         "workflow/adr084-podman-feasibility.yml",
     }
-    if len(file_names) != len(set(file_names)) or not required_inputs.issubset(
-        file_names
-    ):
-        raise ValueError("executed-input inventory is incomplete or duplicated")
+    duplicated_inputs = len(file_names) != len(set(file_names))
+    missing_required_inputs = not required_retained_inputs.issubset(file_names)
+    if duplicated_inputs or missing_required_inputs:
+        raise ValueError(
+            "selected retained-input inventory is incomplete or duplicated"
+        )
     sbom = {
         "SPDXID": "SPDXRef-DOCUMENT",
         "creationInfo": {
