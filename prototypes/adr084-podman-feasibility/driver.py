@@ -2478,6 +2478,163 @@ def cancellation_scenario(
     if residual:
         raise AssertionError(f"descendants survived cancellation: {residual}")
     run("/usr/bin/podman", "rm", "--force", container_id)
+    signed_observation = signed_limit_observation(
+        "terminal-cancelled",
+        {
+            "container_id": container_id,
+            "descendants_terminated": not residual,
+            "return_code": return_code,
+            "terminal_code": 1,
+            "terminal_name": "Cancelled",
+        },
+    )
+    report = {
+        "container_id": container_id,
+        "descendants_terminated": not residual,
+        "return_code": return_code,
+        "signed_observation": signed_observation,
+        "terminal_code": 1,
+        "terminal_name": "Cancelled",
+    }
+    (artifact_dir / "cancel.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if return_code != 137 or not signed_observation["signature_verified"]:
+        raise AssertionError(f"cancellation terminal evidence failed: {report!r}")
+
+
+def cleanup_failure_scenario(artifact_dir: pathlib.Path) -> None:
+    owned = artifact_dir / "cleanup-failure-injected-resource"
+    owned.mkdir(mode=0o700)
+    identity = owned.stat()
+    cleanup_started_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    deadline_ns = cleanup_started_ns + 10_000_000
+    while time.clock_gettime_ns(time.CLOCK_MONOTONIC) <= deadline_ns:
+        pass
+    observed_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    residual_at_deadline = owned.exists()
+    signed_observation = signed_limit_observation(
+        "terminal-cleanup-failed",
+        {
+            "deadline_ns": deadline_ns,
+            "device": identity.st_dev,
+            "inode": identity.st_ino,
+            "observed_ns": observed_ns,
+            "residual_at_deadline": residual_at_deadline,
+            "terminal_code": 2,
+            "terminal_name": "CleanupFailed",
+        },
+    )
+    owned.rmdir()
+    report = {
+        "cleanup_started_ns": cleanup_started_ns,
+        "deadline_ns": deadline_ns,
+        "injected_resource": str(owned),
+        "injected_resource_device": identity.st_dev,
+        "injected_resource_inode": identity.st_ino,
+        "observed_ns": observed_ns,
+        "post_evidence_cleanup_complete": not owned.exists(),
+        "residual_at_deadline": residual_at_deadline,
+        "signed_observation": signed_observation,
+        "terminal_code": 2,
+        "terminal_name": "CleanupFailed",
+    }
+    (artifact_dir / "terminal-cleanup-failed.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if (
+        not residual_at_deadline
+        or observed_ns <= deadline_ns
+        or not report["post_evidence_cleanup_complete"]
+        or not signed_observation["signature_verified"]
+    ):
+        raise AssertionError(f"cleanup-failure evidence failed: {report!r}")
+
+
+def ipc_failure_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_hold: bytes,
+) -> None:
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_hold,
+        "terminal-ipc-failure",
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    process.stdin.close()
+    readable, _, _ = select.select([process.stderr], [], [], 10)
+    if not readable:
+        raise TimeoutError("IPC-failure adapter did not report its descendant")
+    marker = process.stderr.readline()
+    if not marker.startswith(b"HOLDING child="):
+        raise AssertionError(f"unexpected IPC-failure marker: {marker!r}")
+    provider_output_fd = process.stdout.fileno()
+    process.stdout.close()
+    try:
+        os.read(provider_output_fd, 1)
+    except OSError as error:
+        provider_errno = error.errno
+    else:
+        raise AssertionError("closed provider output endpoint remained readable")
+    inspected = json.loads(run("/usr/bin/podman", "inspect", container_id).stdout)[0]
+    alive_at_selection = bool(inspected["State"]["Running"])
+    signed_observation = signed_limit_observation(
+        "terminal-ipc-failure",
+        {
+            "adapter_alive_at_selection": alive_at_selection,
+            "provider_errno": provider_errno,
+            "terminal_code": 9,
+            "terminal_name": "IpcFailure",
+        },
+    )
+    launcher = json.loads(
+        (artifact_dir / "terminal-ipc-failure.launcher.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    cgroup_path = pathlib.Path(launcher["cgroup_path"])
+    run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
+    return_code = process.wait(timeout=20)
+    control.close()
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    cgroup_empty = not cgroup_path.exists() or not read_text(
+        cgroup_path / "cgroup.procs"
+    ).strip()
+    report = {
+        "adapter_alive_at_selection": alive_at_selection,
+        "adapter_marker": marker.decode("ascii").strip(),
+        "cleanup_return_code": return_code,
+        "cgroup_empty_or_absent": cgroup_empty,
+        "provider_errno": provider_errno,
+        "provider_errno_name": errno.errorcode.get(provider_errno),
+        "signed_observation": signed_observation,
+        "terminal_code": 9,
+        "terminal_name": "IpcFailure",
+    }
+    (artifact_dir / "terminal-ipc-failure.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if (
+        provider_errno != errno.EBADF
+        or not alive_at_selection
+        or not cgroup_empty
+        or not signed_observation["signature_verified"]
+    ):
+        raise AssertionError(f"IPC-failure evidence failed: {report!r}")
 
 
 def process_start_ticks(pid: int) -> int | None:
@@ -3990,6 +4147,17 @@ def main() -> None:
         barrier_fixture,
     )
     cancellation_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_hold,
+    )
+    cleanup_failure_scenario(arguments.artifact_dir)
+    ipc_failure_scenario(
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,

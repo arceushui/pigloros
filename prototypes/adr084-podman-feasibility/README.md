@@ -177,6 +177,16 @@ real HOLDING descendant marker, then kills the provider. All six select terminal
 code 0 `BrokerDied`, remove the exact container and cgroup descendants, and bind
 their journal tips into a signed cross-case summary.
 
+The terminal matrix also retains three otherwise easy-to-conflate provider
+outcomes. The existing real cancellation path now signs code 1 `Cancelled` only
+after its descendant-bearing cgroup is empty. A conformance-owned temporary
+resource is deliberately retained beyond a monotonic cleanup deadline to force
+code 2 `CleanupFailed`, then removed by the harness after the observation is
+durable. For code 9 `IpcFailure`, a released HOLD attempt remains alive while
+the provider closes its own stdout transport endpoint and observes `EBADF` on
+the real pipe before any process-crash observation; cleanup follows terminal
+selection and cannot retroactively relabel the outcome.
+
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported
 BPF. A valid-base64, one-byte mutation is exercised through real crun and must

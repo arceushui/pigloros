@@ -173,7 +173,23 @@ def main() -> None:
         "cancel.installed-seccomp.bpf",
         "cancel.seccomp-install.json",
         "cancel.eai1",
+        "cancel.json",
         "cancel.stderr",
+        "terminal-cleanup-failed.json",
+        "terminal-ipc-failure.json",
+        *(
+            f"terminal-ipc-failure.{suffix}"
+            for suffix in (
+                "installed-seccomp.bpf",
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "launcher.json",
+                "ready2.cbor",
+                "release2.cbor",
+                "release-barrier.json",
+                "seccomp-install.json",
+            )
+        ),
         "expected.eao1",
         "elm-memory.eai1",
         "elm-memory.installed-seccomp.bpf",
