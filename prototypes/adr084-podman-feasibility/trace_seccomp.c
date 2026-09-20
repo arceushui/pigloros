@@ -356,41 +356,38 @@ int main(int argc, char **argv) {
                 struct sock_fprog program;
                 if (!copy_tracee(pid, (uintptr_t)information.entry.args[2],
                                  &program, sizeof(program))) {
-                    ++other_install_attempts;
-                    ++unreadable_install_attempts;
-                    goto continue_tracee;
+                    errno = EPROTO;
+                    fail("installed-program-unreadable");
                 }
                 size_t installed_length =
                     (size_t)program.len * sizeof(struct sock_filter);
-                bool is_expected = false;
-                unsigned char *installed = NULL;
-                if (installed_length == expected_length) {
-                    installed = malloc(installed_length);
-                    if (installed == NULL) {
-                        fail("installed-allocate");
-                    }
-                    if (!copy_tracee(pid, (uintptr_t)program.filter, installed,
-                                     installed_length)) {
-                        free(installed);
-                        ++other_install_attempts;
-                        ++unreadable_install_attempts;
-                        goto continue_tracee;
-                    }
-                    is_expected =
-                        memcmp(installed, expected, installed_length) == 0;
+                if (installed_length != expected_length) {
+                    errno = EPROTO;
+                    fail("installed-length-mismatch");
                 }
-                if (is_expected) {
-                    ++install_attempts;
-                    if (install_attempts != 1) {
-                        errno = EPROTO;
-                        fail("install-attempt");
-                    }
-                    write_exact(argv[2], installed, installed_length);
-                    process->awaiting_install_exit = true;
-                    installer = pid;
-                } else {
-                    ++other_install_attempts;
+                unsigned char *installed = malloc(installed_length);
+                if (installed == NULL) {
+                    fail("installed-allocate");
                 }
+                if (!copy_tracee(pid, (uintptr_t)program.filter, installed,
+                                 installed_length)) {
+                    free(installed);
+                    errno = EPROTO;
+                    fail("installed-bytes-unreadable");
+                }
+                if (memcmp(installed, expected, installed_length) != 0) {
+                    free(installed);
+                    errno = EPROTO;
+                    fail("installed-byte-mismatch");
+                }
+                ++install_attempts;
+                if (install_attempts != 1) {
+                    errno = EPROTO;
+                    fail("install-attempt");
+                }
+                write_exact(argv[2], installed, installed_length);
+                process->awaiting_install_exit = true;
+                installer = pid;
                 free(installed);
             } else if (information.op == PTRACE_SYSCALL_INFO_EXIT &&
                        process->awaiting_install_exit) {

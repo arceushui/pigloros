@@ -692,6 +692,95 @@ def transport_rejection_scenario(
     )
 
 
+def installed_byte_mutation_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+) -> None:
+    canonical = seccomp_bpf.read_bytes()
+    mutated = bytearray(canonical)
+    mutated[-1] ^= 1
+    mutated_base64 = base64.b64encode(mutated).decode("ascii")
+    name = f"pigloros-adr084-installed-byte-mutation-{uuid.uuid4().hex[:12]}"
+    installed = artifact_dir / "installed-byte-mutation.installed-seccomp.bpf"
+    install_report = artifact_dir / "installed-byte-mutation.seccomp-install.json"
+    podman_command = [
+        "/usr/bin/podman",
+        "run",
+        "--runtime=/usr/bin/crun",
+        "--pull=never",
+        f"--name={name}",
+        "--network=none",
+        "--no-hosts",
+        "--hostname=pigloros-adapter",
+        "--read-only",
+        "--read-only-tmpfs=false",
+        "--cap-drop=all",
+        "--security-opt=no-new-privileges",
+        f"--security-opt=seccomp={seccomp}",
+        f"--annotation=run.oci.seccomp_bpf_data={mutated_base64}",
+        "--stop-signal=15",
+        "--memory=64m",
+        "--memory-swap=64m",
+        "--pids-limit=16",
+        "--cpus=0.5",
+        "--ulimit=nofile=64:64",
+        "--ulimit=fsize=1048576:1048576",
+        "--user=65532:65532",
+        "--label=io.pigloros.prototype=adr084",
+        "--label=io.pigloros.scenario=installed-byte-mutation",
+        "--rm=false",
+        image,
+    ]
+    completed = subprocess.run(
+        [
+            str(seccomp_tracer),
+            str(seccomp_bpf),
+            str(installed),
+            str(install_report),
+            "--",
+            *podman_command,
+        ],
+        input=b"",
+        capture_output=True,
+        timeout=30,
+    )
+    run("/usr/bin/podman", "rm", "--force", name, check=False)
+    (artifact_dir / "installed-byte-mutation.stdout").write_bytes(completed.stdout)
+    (artifact_dir / "installed-byte-mutation.stderr").write_bytes(completed.stderr)
+    if (
+        completed.returncode != 72
+        or completed.stdout
+        or b"seccomp-tracer-error:installed-byte-mismatch" not in completed.stderr
+        or installed.exists()
+        or install_report.exists()
+    ):
+        raise AssertionError(
+            "mutated installed BPF was not stopped before seccomp continuation: "
+            f"code={completed.returncode} stdout={completed.stdout!r} "
+            f"stderr={completed.stderr!r} installed={installed.exists()} "
+            f"report={install_report.exists()}"
+        )
+    (artifact_dir / "installed-byte-mutation.json").write_text(
+        json.dumps(
+            {
+                "canonical_sha256": hashlib.sha256(canonical).hexdigest(),
+                "mutation": "final byte xor 1 after canonical base64 decode",
+                "mutated_sha256": hashlib.sha256(mutated).hexdigest(),
+                "return_code": completed.returncode,
+                "seccomp_syscall_continued": False,
+                "verdict": "same-flags changed install bytes rejected before continuation",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def stacked_filter_scenario(
     image: str,
     seccomp: pathlib.Path,
@@ -1483,6 +1572,13 @@ def main() -> None:
     (arguments.artifact_dir / "annotation-mutation-report.json").write_text(
         json.dumps(mutation_report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+    installed_byte_mutation_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
     )
     normal_scenario(
         arguments.image,

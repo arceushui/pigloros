@@ -36,6 +36,11 @@ digests, and both transcripts; the adapter accepts only the two generated
 throwaway vectors, so this remains a byte-preservation proof rather than a
 production transport implementation.
 
+The seccomp supervisor also stops the admitted-flags syscall before kernel
+continuation when the mapped install buffer differs from the provider-exported
+BPF. A valid-base64, one-byte mutation is exercised through real crun and must
+terminate under `PTRACE_O_EXITKILL` without an installed-byte artifact.
+
 The canonical ADRs remain Proposed. A green workflow proves only the bounded
 claims named by its retained artifacts; the complete ADR acceptance matrix,
 production provider, native source coverage, a general-purpose transport codec,
