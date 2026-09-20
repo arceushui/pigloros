@@ -42,6 +42,12 @@ digests, and both transcripts; the adapter accepts only the two generated
 throwaway vectors, so this remains a byte-preservation proof rather than a
 production transport implementation.
 
+The EAI1 fixture's authenticated memory and storage ceilings equal the runtime
+controls: 64 MiB `memory.max`, zero swap, and one 64 KiB `/work` tmpfs. Every
+launch requires `/work` to be exactly `rw,nosuid,nodev,noexec` with the retained
+mountinfo size while the image root remains read-only. Forced terminal outcomes
+and their ADR-069 precedence remain a separate, still-open evidence slice.
+
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
 the driver durably records an attempt-bound monotonic launch anchor and passes a

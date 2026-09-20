@@ -405,7 +405,7 @@ def validate_eai1(stream: bytes, expected_payload: bytes) -> dict[str, object]:
         0,
         0,
         blake3(b"adr084-fixture"),
-        [1048576, 1000, 1000, 1000, 65536, 65536, 1000, 1000000000],
+        [67108864, 1000, 1000, 1000, 65536, 65536, 1000, 1000000000],
         1000,
         False,
         0,
@@ -576,6 +576,15 @@ def assert_launcher_snapshot(
     ]
     if len(root_mounts) != 1 or " ro," not in root_mounts[0]:
         raise AssertionError(f"container root is not uniquely read-only: {root_mounts}")
+    work_mounts = [
+        line for line in str(snapshot["mountinfo"]).splitlines() if " /work " in line
+    ]
+    if (
+        len(work_mounts) != 1
+        or " /work rw,nosuid,nodev,noexec" not in work_mounts[0]
+        or " - tmpfs tmpfs rw,size=64k" not in work_mounts[0]
+    ):
+        raise AssertionError(f"/work is not the exact bounded tmpfs: {work_mounts}")
 
 
 def expected_runtime_annotations(
@@ -780,6 +789,7 @@ def launch(
         "--hostname=pigloros-adapter",
         "--read-only",
         "--read-only-tmpfs=false",
+        "--tmpfs=/work:rw,nosuid,nodev,noexec,size=65536",
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
         f"--security-opt={profile_argument}",
@@ -1525,6 +1535,7 @@ def installed_byte_mutation_scenario(
         "--hostname=pigloros-adapter",
         "--read-only",
         "--read-only-tmpfs=false",
+        "--tmpfs=/work:rw,nosuid,nodev,noexec,size=65536",
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
         f"--security-opt=seccomp={seccomp}",
@@ -1695,6 +1706,7 @@ def seccomp_probe_scenario(
         "--hostname=pigloros-seccomp-probe",
         "--read-only",
         "--read-only-tmpfs=false",
+        "--tmpfs=/work:rw,nosuid,nodev,noexec,size=65536",
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
         f"--security-opt=seccomp={seccomp}",
@@ -1790,6 +1802,7 @@ def cache_probe_scenario(
         "--no-hosts",
         "--read-only",
         "--read-only-tmpfs=false",
+        "--tmpfs=/work:rw,nosuid,nodev,noexec,size=65536",
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
         f"--security-opt=seccomp={seccomp}",
@@ -1867,6 +1880,7 @@ def native_matrix_scenario(
         "--hostname=pigloros-native-matrix",
         "--read-only",
         "--read-only-tmpfs=false",
+        "--tmpfs=/work:rw,nosuid,nodev,noexec,size=65536",
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
         f"--security-opt=seccomp={seccomp}",
