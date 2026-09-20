@@ -4629,7 +4629,7 @@ mod tests {
             .previous_state()
             .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))?;
-        host.authority = Some(authority.clone());
+        host.authority = Some(authority);
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)?;
         Ok(RejectedHostFixtureV1 {
@@ -5115,11 +5115,11 @@ mod tests {
         let (mut store, _) = fault_store_with_control(FaultModeV1::Recovery);
         let authority_for_creation = Arc::clone(&authority);
         store.timeline_created_hook = Some(Arc::new(move |timeline| {
-            let _ = authority_for_creation.set_timeline(timeline);
+            assert!(authority_for_creation.set_timeline(timeline).is_ok());
         }));
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(authority.clone());
+        host.authority = Some(authority);
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
