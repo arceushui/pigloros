@@ -254,7 +254,7 @@ fn registry_replay_identity_covers_policy_and_budget_variants() -> TestResult {
             policy,
             budget,
             None,
-            None,
+            Some(Box::new(FixtureDriver)),
         )?;
         assert!(registry
             .replay_policy_identities()
