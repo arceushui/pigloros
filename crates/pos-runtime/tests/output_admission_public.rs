@@ -402,6 +402,21 @@ fn generated_registration_with_approver_binds_owned_output_policy() -> TestResul
     Ok(())
 }
 
+#[test]
+fn public_tick_and_step_validate_generated_driver_output() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_generated(&plugin, None, Some(Box::new(FixtureDriver)))?;
+    let timeline = pos_core::TimelineId::new();
+    registry.tick_cadenced(timeline, 0)?;
+    registry.step_all(timeline)?;
+    Ok(())
+}
+
 struct DuplicateFixturePlugin {
     id: PluginId,
 }
