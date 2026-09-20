@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
-            autoconf automake b3sum build-essential crun gperf jq libtool \
+            autoconf automake b3sum binutils-arm-linux-gnueabihf build-essential crun gperf jq libtool \
             musl-tools podman python3-cbor2 python3-cryptography python3-z3
           probe_user="$(id -un)"
           if ! grep -q "^${probe_user}:" /etc/subuid; then

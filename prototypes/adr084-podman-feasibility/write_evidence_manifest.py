@@ -21,13 +21,24 @@ def main() -> None:
     parser.add_argument("prototype_dir", type=pathlib.Path)
     parser.add_argument("--architecture", required=True)
     arguments = parser.parse_args()
+    foreign_source_name = {
+        "amd64": "foreign_x86.S",
+        "arm64": "foreign_arm.S",
+    }[arguments.architecture]
 
     files = [
         ("/launcher", arguments.build_dir / "launcher"),
         ("/adapter", arguments.build_dir / "adapter"),
+        ("/seccomp-probe", arguments.build_dir / "seccomp-probe"),
+        ("/foreign-probe", arguments.build_dir / "foreign-probe"),
         ("prototype/launcher.c", arguments.prototype_dir / "launcher.c"),
         ("prototype/adapter.c", arguments.prototype_dir / "adapter.c"),
         ("prototype/compile_seccomp.c", arguments.prototype_dir / "compile_seccomp.c"),
+        ("prototype/seccomp_probe.c", arguments.prototype_dir / "seccomp_probe.c"),
+        (
+            f"prototype/{foreign_source_name}",
+            arguments.prototype_dir / foreign_source_name,
+        ),
         ("prototype/prepare_seccomp.py", arguments.prototype_dir / "prepare_seccomp.py"),
         ("prototype/trace_seccomp.c", arguments.prototype_dir / "trace_seccomp.c"),
         ("prototype/verify_seccomp_bpf.py", arguments.prototype_dir / "verify_seccomp_bpf.py"),
@@ -82,6 +93,10 @@ def main() -> None:
         "normal.seccomp-install.json",
         "cancel.installed-seccomp.bpf",
         "cancel.seccomp-install.json",
+        "probe.installed-seccomp.bpf",
+        "probe.seccomp-install.json",
+        "probe.stderr",
+        "probe.stdout",
         "oci-archive-validation.json",
         "oci-validation.json",
         "rootfs-manifest.json",

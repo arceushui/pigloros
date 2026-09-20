@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -343,9 +344,96 @@ def cancellation_scenario(
     run("/usr/bin/podman", "rm", "--force", container_id)
 
 
+def seccomp_probe_scenario(
+    architecture: str,
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+) -> None:
+    name = f"pigloros-adr084-seccomp-probe-{uuid.uuid4().hex[:12]}"
+    podman_command = [
+        "/usr/bin/podman",
+        "run",
+        "--runtime=/usr/bin/crun",
+        "--pull=never",
+        f"--name={name}",
+        "--network=none",
+        "--no-hosts",
+        "--hostname=pigloros-seccomp-probe",
+        "--read-only",
+        "--read-only-tmpfs=false",
+        "--cap-drop=all",
+        "--security-opt=no-new-privileges",
+        f"--security-opt=seccomp={seccomp}",
+        f"--annotation=run.oci.seccomp_bpf_data={seccomp_bpf_base64}",
+        "--stop-signal=15",
+        "--memory=64m",
+        "--memory-swap=64m",
+        "--pids-limit=16",
+        "--cpus=0.5",
+        "--ulimit=nofile=64:64",
+        "--ulimit=fsize=1048576:1048576",
+        "--user=65532:65532",
+        "--label=io.pigloros.prototype=adr084",
+        "--label=io.pigloros.scenario=seccomp-probe",
+        "--entrypoint=/seccomp-probe",
+        "--rm=false",
+        image,
+    ]
+    completed = subprocess.run(
+        [
+            str(seccomp_tracer),
+            str(seccomp_bpf),
+            str(artifact_dir / "probe.installed-seccomp.bpf"),
+            str(artifact_dir / "probe.seccomp-install.json"),
+            "--",
+            *podman_command,
+        ],
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
+    (artifact_dir / "probe.stdout").write_bytes(completed.stdout)
+    (artifact_dir / "probe.stderr").write_bytes(completed.stderr)
+    inspect_text = run("/usr/bin/podman", "inspect", name).stdout
+    (artifact_dir / "probe.inspect.json").write_text(inspect_text, encoding="utf-8")
+    inspected = json.loads(inspect_text)[0]
+    expected_annotations = {
+        "io.container.manager": "libpod",
+        "io.podman.annotations.seccomp": str(seccomp),
+        "org.opencontainers.image.stopSignal": "15",
+        "run.oci.seccomp_bpf_data": seccomp_bpf_base64,
+    }
+    if inspected["Config"]["Annotations"] != expected_annotations:
+        raise AssertionError("seccomp probe effective annotations differ")
+    try:
+        observed = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            f"seccomp probe emitted invalid JSON: {completed.stdout!r}"
+        ) from error
+    expected: dict[str, object] = {
+        "architecture": architecture,
+        "foreign_signal": signal.SIGSYS,
+    }
+    if architecture == "x86_64":
+        expected.update({"high_bit_signal": signal.SIGSYS, "sentinel_raw": -4094})
+    if completed.returncode != 0 or observed != expected:
+        raise AssertionError(
+            "seccomp boundary probe failed: "
+            f"code={completed.returncode} observed={observed!r} "
+            f"stderr={completed.stderr!r}"
+        )
+    run("/usr/bin/podman", "rm", name)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
+    parser.add_argument("--architecture", required=True, choices=("x86_64", "aarch64"))
     parser.add_argument("--seccomp", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-bpf-base64", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-bpf", required=True, type=pathlib.Path)
@@ -369,6 +457,15 @@ def main() -> None:
         arguments.artifact_dir,
     )
     cancellation_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+    )
+    seccomp_probe_scenario(
+        arguments.architecture,
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,

@@ -56,8 +56,8 @@ static struct traced_process *find_traced(pid_t pid) {
             return &traced[index];
         }
     }
-    errno = ESRCH;
-    fail("unknown-tracee");
+    add_traced(pid);
+    return &traced[traced_count - 1];
 }
 
 static void remove_traced(pid_t pid) {

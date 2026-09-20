@@ -48,6 +48,21 @@ jq -e '.host.ociRuntime.name == "crun" or .host.ociRuntime.path == "/usr/bin/cru
 
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototype_dir}/launcher.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
+musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/seccomp-probe" \
+  "${prototype_dir}/seccomp_probe.c"
+case "${evidence_architecture}" in
+  x86_64)
+    as --32 -o "${build_dir}/foreign-probe.o" "${prototype_dir}/foreign_x86.S"
+    ld -m elf_i386 -e _start -o "${build_dir}/foreign-probe" \
+      "${build_dir}/foreign-probe.o"
+    ;;
+  aarch64)
+    arm-linux-gnueabihf-as -o "${build_dir}/foreign-probe.o" \
+      "${prototype_dir}/foreign_arm.S"
+    arm-linux-gnueabihf-ld -e _start -o "${build_dir}/foreign-probe" \
+      "${build_dir}/foreign-probe.o"
+    ;;
+esac
 cc -O2 -Wall -Wextra -Werror -o "${build_dir}/trace-seccomp" \
   "${prototype_dir}/trace_seccomp.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
@@ -132,7 +147,8 @@ python3 "${prototype_dir}/validate_runtime_subject.py" \
 python3 "${prototype_dir}/generate_vectors.py" >"${artifact_dir}/adr085-vectors.json"
 python3 "${prototype_dir}/validate_vectors.py" "${artifact_dir}/adr085-vectors.json" \
   "${artifact_dir}/adr085-vector-validation.json"
-python3 "${prototype_dir}/driver.py" --image "${image_reference}" \
+python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
+  --image "${image_reference}" \
   --seccomp "${seccomp_dir}/oci-seccomp-profile.json" \
   --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
   --seccomp-bpf "${seccomp_dir}/exported-seccomp.bpf" \
