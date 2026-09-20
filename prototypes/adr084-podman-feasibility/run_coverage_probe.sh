@@ -21,7 +21,11 @@ cd "${fixture_dir}"
 # cargo-llvm-cov owns the instrumented build/report environment. Counter
 # relocation is the one additional candidate-C mechanism being measured.
 source <(cargo llvm-cov show-env --sh --target "${target}")
-export RUSTFLAGS="${RUSTFLAGS} -C llvm-args=-runtime-counter-relocation"
+if [[ -n ${CARGO_ENCODED_RUSTFLAGS:-} ]]; then
+  CARGO_ENCODED_RUSTFLAGS+=$'\x1f'
+fi
+CARGO_ENCODED_RUSTFLAGS+='-Cllvm-args=-runtime-counter-relocation'
+export CARGO_ENCODED_RUSTFLAGS
 cargo build --workspace --target "${target}"
 
 readonly host_target=$(rustc -vV | sed -n 's/^host: //p')
@@ -40,7 +44,7 @@ test -x "${llvm_cov}" -a -x "${llvm_profdata}"
   "${llvm_cov}" --version
   "${llvm_profdata}" --version
   printf 'target=%s\n' "${target}"
-  printf 'rustflags=%s\n' "${RUSTFLAGS}"
+  printf 'cargo_encoded_rustflags=%q\n' "${CARGO_ENCODED_RUSTFLAGS}"
   printf 'llvm_profile_file_build_environment=%s\n' "${LLVM_PROFILE_FILE}"
   sha256sum "$(command -v cargo-llvm-cov)" "${llvm_cov}" "${llvm_profdata}" \
     "${launcher}" "${adapter}"
