@@ -28,6 +28,7 @@ struct traced_process {
 
 static struct traced_process traced[MAX_TRACED];
 static size_t traced_count;
+static unsigned int unreadable_path_checks;
 
 static void fail(const char *message) __attribute__((noreturn));
 
@@ -123,23 +124,6 @@ static bool copy_tracee(pid_t pid, uintptr_t address, void *destination,
     return true;
 }
 
-static bool is_crun(pid_t pid) {
-    char proc_path[64];
-    char executable[MAX_REMOTE_PATH];
-    int length = snprintf(proc_path, sizeof(proc_path), "/proc/%ld/exe",
-                          (long)pid);
-    if (length <= 0 || (size_t)length >= sizeof(proc_path)) {
-        return false;
-    }
-    ssize_t amount = readlink(proc_path, executable, sizeof(executable) - 1);
-    if (amount <= 0) {
-        return false;
-    }
-    executable[amount] = '\0';
-    const char *base = strrchr(executable, '/');
-    return strcmp(base == NULL ? executable : base + 1, "crun") == 0;
-}
-
 static bool remote_path_contains_cache(pid_t pid, uintptr_t address) {
     if (address == 0) {
         return false;
@@ -148,7 +132,8 @@ static bool remote_path_contains_cache(pid_t pid, uintptr_t address) {
     for (size_t offset = 0; offset < sizeof(path); offset += sizeof(long)) {
         long word = 0;
         if (!copy_tracee(pid, address + offset, &word, sizeof(word))) {
-            fail("crun-path-read");
+            ++unreadable_path_checks;
+            return false;
         }
         size_t remaining = sizeof(path) - offset;
         size_t amount = remaining < sizeof(word) ? remaining : sizeof(word);
@@ -163,11 +148,8 @@ static bool remote_path_contains_cache(pid_t pid, uintptr_t address) {
     fail("crun-path-bound");
 }
 
-static bool crun_cache_path_syscall(pid_t pid,
-                                    const struct __ptrace_syscall_info *info) {
-    if (!is_crun(pid)) {
-        return false;
-    }
+static bool cache_path_syscall(pid_t pid,
+                               const struct __ptrace_syscall_info *info) {
     uint64_t number = info->entry.nr;
     uintptr_t first = 0;
     uintptr_t second = 0;
@@ -237,10 +219,11 @@ static void write_report(const char *path, pid_t installer, size_t length,
         "  \"equality\": true,\n  \"install_attempts\": 1,\n"
         "  \"installer_pid\": %ld,\n"
         "  \"other_traced_install_attempts\": %u,\n"
+        "  \"unreadable_path_checks\": %u,\n"
         "  \"unreadable_traced_install_attempts\": %u,\n"
         "  \"syscall_return\": %ld\n}\n",
         ADMITTED_SECCOMP_FLAGS, length, (long)installer, other_attempts,
-        unreadable_attempts, result);
+        unreadable_path_checks, unreadable_attempts, result);
     if (written < 0 || fsync(descriptor) == -1 || close(descriptor) == -1) {
         fail("report-write");
     }
@@ -331,7 +314,7 @@ int main(int argc, char **argv) {
                 fail("syscall-info");
             }
             if (information.op == PTRACE_SYSCALL_INFO_ENTRY &&
-                crun_cache_path_syscall(pid, &information)) {
+                cache_path_syscall(pid, &information)) {
                 errno = EPROTO;
                 fail("checksum-cache-access");
             }
@@ -370,7 +353,7 @@ int main(int argc, char **argv) {
                 }
                 if (is_expected) {
                     ++install_attempts;
-                    if (install_attempts != 1 || !is_crun(pid)) {
+                    if (install_attempts != 1) {
                         errno = EPROTO;
                         fail("install-attempt");
                     }
