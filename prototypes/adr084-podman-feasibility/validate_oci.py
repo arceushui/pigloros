@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import json
 import pathlib
+import re
 
 
 def require_keys(value: dict[str, object], allowed: set[str], context: str) -> None:
@@ -26,6 +27,14 @@ def load_json(path: pathlib.Path) -> object:
         return result
 
     return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate)
+
+
+def require_timestamp(value: object, context: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z",
+        value,
+    ):
+        raise ValueError(f"invalid {context} timestamp")
 
 
 def blob(root: pathlib.Path, descriptor: dict[str, object]) -> pathlib.Path:
@@ -120,8 +129,30 @@ def main() -> None:
     if not isinstance(runtime, dict):
         raise ValueError("image runtime config is not an object")
     require_keys(runtime, {"Entrypoint", "User", "WorkingDir"}, "runtime config")
-    if runtime.get("Entrypoint") != ["/launcher"] or runtime.get("User") != "65532:65532":
-        raise ValueError(f"unexpected entrypoint/user: {runtime}")
+    if runtime != {
+        "Entrypoint": ["/launcher"],
+        "User": "65532:65532",
+        "WorkingDir": "/",
+    }:
+        raise ValueError(f"unexpected runtime config: {runtime}")
+    require_timestamp(config.get("created"), "config created")
+    history = config.get("history")
+    if not isinstance(history, list) or not history or len(history) > 128:
+        raise ValueError("invalid image history")
+    for item in history:
+        if not isinstance(item, dict):
+            raise ValueError("history entry is not an object")
+        if not set(item).issubset({"created", "created_by", "comment", "empty_layer"}):
+            raise ValueError("unexpected history entry fields")
+        require_timestamp(item.get("created"), "history created")
+        for key, limit in (("created_by", 4096), ("comment", 256)):
+            if key in item and (
+                not isinstance(item[key], str)
+                or len(item[key].encode("utf-8")) > limit
+            ):
+                raise ValueError(f"invalid history {key}")
+        if "empty_layer" in item and not isinstance(item["empty_layer"], bool):
+            raise ValueError("invalid history empty_layer")
     rootfs = config.get("rootfs")
     if not isinstance(rootfs, dict) or len(rootfs.get("diff_ids", [])) != len(layers):
         raise ValueError("layer/DiffID cardinality mismatch")
@@ -139,6 +170,10 @@ def main() -> None:
     chain_id = verified_diff_ids[0]
     for diff_id in verified_diff_ids[1:]:
         chain_id = "sha256:" + hashlib.sha256(f"{chain_id} {diff_id}".encode("ascii")).hexdigest()
+    reachable = {manifest_path.resolve(), config_path.resolve(), *(path.resolve() for path in layer_paths)}
+    actual = {path.resolve() for path in (layout / "blobs" / "sha256").iterdir() if path.is_file()}
+    if actual != reachable:
+        raise ValueError("OCI layout contains extra or missing blobs")
     evidence = {
         "config": config_descriptor,
         "config_json": config,

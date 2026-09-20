@@ -1,7 +1,9 @@
 #define _GNU_SOURCE
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,10 +17,36 @@ static void fail(const char *message) {
 }
 
 static void verify_descriptors(void) {
-    for (int fd = 0; fd < 64; ++fd) {
-        errno = 0;
-        int result = fcntl(fd, F_GETFD);
-        if ((fd <= 3 && result == -1) || (fd > 3 && (result != -1 || errno != EBADF))) {
+    bool seen[4] = {false, false, false, false};
+    DIR *directory = opendir("/proc/self/fd");
+    if (directory == NULL) {
+        fail("descriptor-directory");
+    }
+    int scan_fd = dirfd(directory);
+    errno = 0;
+    for (struct dirent *entry = readdir(directory); entry != NULL; entry = readdir(directory)) {
+        char *end = NULL;
+        long fd = strtol(entry->d_name, &end, 10);
+        if (end == entry->d_name || *end != '\0') {
+            continue;
+        }
+        if (fd == scan_fd) {
+            continue;
+        }
+        if (fd < 0 || fd > 3 || seen[fd]) {
+            errno = EPROTO;
+            fail("descriptor-set");
+        }
+        seen[fd] = true;
+    }
+    if (errno != 0) {
+        fail("descriptor-read");
+    }
+    if (closedir(directory) == -1) {
+        fail("descriptor-close");
+    }
+    for (int fd = 0; fd <= 3; ++fd) {
+        if (!seen[fd]) {
             errno = EPROTO;
             fail("descriptor-set");
         }

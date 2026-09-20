@@ -39,7 +39,7 @@ musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototyp
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 
 /usr/bin/podman build --runtime=/usr/bin/crun --pull=never --identity-label=false \
-  --unsetenv=PATH --unsetlabel=io.buildah.version \
+  --timestamp=0 --unsetenv=PATH --unsetlabel=io.buildah.version \
   --tag "${image_tag}" "${build_dir}" 2>&1 | tee "${artifact_dir}/podman-build.log"
 /usr/bin/podman image inspect "${image_tag}" >"${artifact_dir}/image-inspect.json"
 image_id="$(jq -er '.[0].Id' "${artifact_dir}/image-inspect.json")"
@@ -72,6 +72,10 @@ python3 "${prototype_dir}/validate_vectors.py" "${artifact_dir}/adr085-vectors.j
   "${artifact_dir}/adr085-vector-validation.json"
 python3 "${prototype_dir}/driver.py" --image "${image_reference}" \
   --seccomp "${prototype_dir}/seccomp.json" --artifact-dir "${artifact_dir}"
+
+python3 "${prototype_dir}/write_evidence_manifest.py" \
+  "${artifact_dir}" "${build_dir}" "${prototype_dir}" \
+  --architecture "${oci_architecture}"
 
 printf 'ADR-084 prototype passed on %s\n' "$(uname -m)" | tee "${artifact_dir}/verdict.txt"
 find "${artifact_dir}" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum \

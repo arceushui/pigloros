@@ -1,7 +1,9 @@
 #define _GNU_SOURCE
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -20,11 +22,38 @@ static void fail(const char *message) {
 }
 
 static void verify_boundary(void) {
-    for (int fd = 3; fd < 64; ++fd) {
-        errno = 0;
-        if (fcntl(fd, F_GETFD) != -1 || errno != EBADF) {
+    bool seen[3] = {false, false, false};
+    DIR *directory = opendir("/proc/self/fd");
+    if (directory == NULL) {
+        fail("descriptor-directory");
+    }
+    int scan_fd = dirfd(directory);
+    errno = 0;
+    for (struct dirent *entry = readdir(directory); entry != NULL; entry = readdir(directory)) {
+        char *end = NULL;
+        long fd = strtol(entry->d_name, &end, 10);
+        if (end == entry->d_name || *end != '\0') {
+            continue;
+        }
+        if (fd == scan_fd) {
+            continue;
+        }
+        if (fd < 0 || fd > 2 || seen[fd]) {
             errno = EPROTO;
             fail("extra-fd");
+        }
+        seen[fd] = true;
+    }
+    if (errno != 0) {
+        fail("descriptor-read");
+    }
+    if (closedir(directory) == -1) {
+        fail("descriptor-close");
+    }
+    for (int fd = 0; fd <= 2; ++fd) {
+        if (!seen[fd]) {
+            errno = EPROTO;
+            fail("descriptor-set");
         }
     }
     if (environ[0] == NULL || strcmp(environ[0], "PIGLOROS_PROTOCOL=EAI1") != 0 ||

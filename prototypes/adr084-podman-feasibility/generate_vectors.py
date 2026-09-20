@@ -64,10 +64,40 @@ def json_bytes(value: object) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
-def elf_fixture(marker: bytes) -> bytes:
+def elf_fixture(exit_status: int) -> bytes:
+    """Build a complete static x86_64 ELF that exits with the selected status."""
     identification = b"\x7fELF\x02\x01\x01" + bytes(9)
-    header = struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0)
-    return identification + header + marker
+    code = b"\xbf" + exit_status.to_bytes(4, "little") + b"\xb8\x3c\x00\x00\x00\x0f\x05"
+    entry_offset = 64 + 56
+    file_size = entry_offset + len(code)
+    header = struct.pack(
+        "<HHIQQQIHHHHHH",
+        2,
+        62,
+        1,
+        0x400000 + entry_offset,
+        64,
+        0,
+        0,
+        64,
+        56,
+        1,
+        0,
+        0,
+        0,
+    )
+    program_header = struct.pack(
+        "<IIQQQQQQ",
+        1,
+        5,
+        0,
+        0x400000,
+        0x400000,
+        file_size,
+        file_size,
+        0x1000,
+    )
+    return identification + header + program_header + code
 
 
 def layer(path: str, content: bytes) -> tuple[bytes, bytes]:
@@ -166,8 +196,8 @@ def main() -> None:
     request_common = [identifier(1), digest(1), 7, identifier(2)]
     payload = [6, digest(2)]
     descriptor = lambda media, content: [media, len(content), sha256(content)]
-    launcher_bytes = elf_fixture(b"launcher-fixture-v1")
-    adapter_bytes = elf_fixture(b"adapter-fixture-v1")
+    launcher_bytes = elf_fixture(0)
+    adapter_bytes = elf_fixture(1)
     launcher_layer, launcher_diff_id = layer("/launcher", launcher_bytes)
     adapter_layer, adapter_diff_id = layer("/adapter", adapter_bytes)
     diff_ids = [launcher_diff_id, adapter_diff_id]
@@ -193,6 +223,10 @@ def main() -> None:
     layer_descriptors = [descriptor(2, launcher_layer), descriptor(2, adapter_layer)]
     manifest_bytes = json_bytes(
         {
+            "annotations": {
+                "org.opencontainers.image.base.digest": "",
+                "org.opencontainers.image.base.name": "",
+            },
             "config": {
                 "digest": f"sha256:{config_descriptor[2].hex()}",
                 "mediaType": "application/vnd.oci.image.config.v1+json",
@@ -274,6 +308,25 @@ def main() -> None:
         key_id(3),
     ]
     vectors = [ort_vector, vector("OciImageSubject", ois, signed=True)]
+    ois_digest = bytes.fromhex(vectors[1]["self_digest_hex"])
+    rbs_vector = vector(
+        "RBS",
+        ["RBS2", 2, 0, "podman-rootless", digest(1), digest(2), digest(3),
+         digest(4), 0, key_id(1), capability, 0, digest(5), ois_digest,
+         digest(7), digest(8), digest(9), host_features, []],
+    )
+    rbs_digest = bytes.fromhex(rbs_vector["self_digest_hex"])
+    ready_unsigned = [
+        "RDY2", 2, identifier(1), digest(1), identifier(2), executable[2], [1, 2],
+        ois_digest, bytes.fromhex(ort_vector["self_digest_hex"]), adapter[2], [3, 4],
+        digest(8), digest(9), digest(10), rbs_digest,
+    ]
+    ready_vector = vector("RDY", ready_unsigned)
+    release_unsigned = [
+        "RLS2", 2, identifier(1), digest(1),
+        bytes.fromhex(ready_vector["self_digest_hex"]), digest(3), digest(4),
+        digest(5), 6, 7, 8, rbs_digest, rbs_digest, 9, key_id(2),
+    ]
     vectors.extend(
         [
             vector("RVS", ["RVS2", 2, digest(1), 9, [], [], [digest(2)], key_id(1)], True),
@@ -306,29 +359,14 @@ def main() -> None:
                  digest(5), key_id(1)],
                 True,
             ),
-            vector(
-                "RBS",
-                 ["RBS2", 2, 0, "podman-rootless", digest(1), digest(2), digest(3),
-                 digest(4), 0, key_id(1), capability, 0, digest(5), digest(6),
-                 digest(7), digest(8), digest(9), host_features, []],
-            ),
+            rbs_vector,
             vector(
                 "LPV",
                 ["LPV2", 2, identifier(1), digest(1), digest(2), "/adapter",
                  ["--fixture"], digest(3)],
             ),
-            vector(
-                "RDY",
-                ["RDY2", 2, identifier(1), digest(1), identifier(2), digest(2), [1, 2],
-                 digest(3), digest(4), digest(5), digest(6), digest(7), [3, 4], digest(8),
-                 digest(9), digest(10)],
-            ),
-            vector(
-                "RLS",
-                 ["RLS2", 2, identifier(1), digest(1), digest(2), digest(3), digest(4),
-                 digest(5), 6, 7, 8, digest(6), digest(7), 9, key_id(2)],
-                True,
-            ),
+            ready_vector,
+            vector("RLS", release_unsigned, True),
             vector(
                 "SPX",
                 ["SPX2", 2, request_common, identifier(3)] + [digest(index) for index in range(1, 16)]
@@ -359,6 +397,12 @@ def main() -> None:
     wrong_executable = [*ois]
     wrong_executable[10] = [*adapter]
     wrong_executable[10][0] = "/wrong-adapter"
+    wrong_ready_launcher = [*ready_unsigned]
+    wrong_ready_launcher[5] = digest(30)
+    wrong_ready_adapter = [*ready_unsigned]
+    wrong_ready_adapter[9] = digest(30)
+    wrong_release_observed = [*release_unsigned]
+    wrong_release_observed[12] = digest(30)
     mixed_lps = ["LPS1", 1, "pigloros.air-gapped", 0, digest(1), limits, []]
     rejections = [
         rejection("OIS1-wrong-architecture", wrong_architecture,
@@ -383,21 +427,40 @@ def main() -> None:
             "version-1 authority record in version-2 closure",
             "LPS",
         ),
+        rejection(
+            "RDY2-wrong-launcher-digest",
+            wrong_ready_launcher,
+            "launcher executable digest differs from OIS1",
+            "RDY",
+        ),
+        rejection(
+            "RDY2-wrong-adapter-digest",
+            wrong_ready_adapter,
+            "adapter executable digest differs from OIS1",
+            "RDY",
+        ),
+        rejection(
+            "RLS2-wrong-observed-rbs2",
+            wrong_release_observed,
+            "observed RBS2 digest differs from expected RBS2",
+            "RLS",
+            True,
+        ),
     ]
-    mixed_lps_digest = bytes.fromhex(rejections[-1]["self_digest_hex"])
+    mixed_lps_digest = bytes.fromhex(rejections[5]["self_digest_hex"])
     mixed_apt = [
         "APT2", 2, 10, digest(1), digest(2), [mixed_lps_digest],
         [bytes.fromhex(vectors[1]["self_digest_hex"])], digest(5), digest(6),
         digest(7), digest(8), digest(9), 11, 12, digest(10), key_id(2),
     ]
     mixed_apt_vector = vector("APT", mixed_apt, True)
-    rejections[-1]["referencing_apt2_unsigned_cbor_hex"] = mixed_apt_vector[
+    rejections[5]["referencing_apt2_unsigned_cbor_hex"] = mixed_apt_vector[
         "unsigned_cbor_hex"
     ]
-    rejections[-1]["referencing_apt2_self_digest_hex"] = mixed_apt_vector[
+    rejections[5]["referencing_apt2_self_digest_hex"] = mixed_apt_vector[
         "self_digest_hex"
     ]
-    rejections[-1]["referencing_apt2_signature_hex"] = mixed_apt_vector[
+    rejections[5]["referencing_apt2_signature_hex"] = mixed_apt_vector[
         "signature_hex"
     ]
     fixture_blobs = [
@@ -406,10 +469,40 @@ def main() -> None:
         ["application/vnd.oci.image.layer.v1.tar+gzip", sha256(launcher_layer).hex(), launcher_layer.hex()],
         ["application/vnd.oci.image.layer.v1.tar+gzip", sha256(adapter_layer).hex(), adapter_layer.hex()],
     ]
+    noncanonical_ois = bytes.fromhex(vectors[1]["unsigned_cbor_hex"])
+    noncanonical_ois = noncanonical_ois[:6] + b"\x18\x01" + noncanonical_ois[7:]
+    malformed_cases = [
+        {
+            "record": "OIS1-noncanonical-CBOR",
+            "expected_rejection": "noncanonical OIS1 CBOR",
+            "input_hex": noncanonical_ois.hex(),
+        },
+        {
+            "record": "manifest-duplicate-key",
+            "expected_rejection": "duplicate JSON key",
+            "input_hex": b'{"schemaVersion":2,"schemaVersion":2}'.hex(),
+        },
+        {
+            "record": "manifest-extra-field",
+            "expected_rejection": "unexpected manifest fields",
+            "input_hex": json_bytes({**json.loads(manifest_bytes), "extra": 1}).hex(),
+        },
+        {
+            "record": "config-DiffID-mismatch",
+            "expected_rejection": "config DiffID mismatch",
+            "input_hex": json_bytes(
+                {
+                    **json.loads(config_bytes),
+                    "rootfs": {"type": "layers", "diff_ids": ["sha256:" + "00" * 32]},
+                }
+            ).hex(),
+        },
+    ]
     print(
         json.dumps(
             {
                 "fixture_blobs": fixture_blobs,
+                "malformed_cases": malformed_cases,
                 "rejection_vectors": rejections,
                 "vectors": vectors,
             },
