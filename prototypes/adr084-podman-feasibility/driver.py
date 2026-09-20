@@ -1328,10 +1328,13 @@ def memory_limit_scenario(
             final = parse_cgroup_events(current_text)
             if final.get("oom_kill", 0) > baseline.get("oom_kill", 0):
                 break
-        if process.poll() is not None:
+        if process.poll() is not None and not cgroup_path.exists():
             break
         time.sleep(0.01)
     return_code = process.wait(timeout=20)
+    final_text = read_text(cgroup_path / "memory.events.local").strip()
+    if not final_text.startswith("UNAVAILABLE:"):
+        final = parse_cgroup_events(final_text)
     output = process.stdout.read()
     errors = process.stderr.read()
     control.close()
