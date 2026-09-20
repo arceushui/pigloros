@@ -67,24 +67,6 @@ struct AdmissionUsage {
     bytes: [u64; 3],
 }
 
-impl Clone for OutputAdmissionV1 {
-    fn clone(&self) -> Self {
-        Self {
-            plugin_id: self.plugin_id,
-            policy_digest: self.policy_digest,
-            policy: self.policy.clone(),
-            budget: self.budget.clone(),
-            cpu_reservations_us: self.cpu_reservations_us,
-            usage: Mutex::new(
-                *self
-                    .usage
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            ),
-        }
-    }
-}
-
 impl OutputAdmissionV1 {
     /// Bind a structural output policy to its exact executable budget identity.
     ///
