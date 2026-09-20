@@ -892,6 +892,12 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     admission.validate_batch(drafts).map_err(Into::into)
 }
 
+fn reset_admission_usage(entry: &PluginEntry) {
+    if let Some(admission) = entry.output_admission.as_ref() {
+        admission.reset_usage();
+    }
+}
+
 fn validate_test_driver_output(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
     const MAX_TEST_DRIVER_EVENTS: u32 = 1_000;
     const MAX_TEST_DRIVER_EVENT_BYTES: u32 = 4_096;
@@ -1645,11 +1651,7 @@ impl PluginRegistry {
 
     fn abort_drivers(&mut self, driver_ids: &[PluginId]) -> Option<RuntimeError> {
         let mut first_error = None;
-        for entry in self.plugins.values() {
-            if let Some(admission) = entry.output_admission.as_ref() {
-                admission.reset_usage();
-            }
-        }
+        self.plugins.values().for_each(reset_admission_usage);
         for id in driver_ids {
             if let Some(driver) = self
                 .plugins
@@ -2036,12 +2038,8 @@ impl PluginRegistry {
 
     fn commit_pending_step(&mut self, pending: PendingStep) {
         for id in &pending.driver_ids {
-            if let Some(admission) = self
-                .plugins
-                .get(id)
-                .and_then(|entry| entry.output_admission.as_ref())
-            {
-                admission.reset_usage();
+            if let Some(entry) = self.plugins.get(id) {
+                reset_admission_usage(entry);
             }
             if let Some(driver) = self
                 .plugins
