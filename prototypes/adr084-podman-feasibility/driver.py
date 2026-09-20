@@ -511,6 +511,49 @@ def launch(
         (artifact_dir / f"{scenario}.pre-ready.stderr").write_text(
             stderr, encoding="utf-8"
         )
+        if expect_annotation_rejection is not None:
+            assert process.stdout is not None
+            output = process.stdout.read()
+            inspected = json.loads(
+                run("/usr/bin/podman", "inspect", container_id).stdout
+            )[0]
+            annotations = inspected["Config"]["Annotations"]
+            expected_key, separator, expected_value = (
+                expect_annotation_rejection.partition("=")
+            )
+            run("/usr/bin/podman", "rm", "--force", container_id)
+            parent_control.close()
+            if (
+                separator != "="
+                or annotations.get(expected_key) != expected_value
+                or output
+                or "OCI runtime error" not in stderr
+            ):
+                raise AssertionError(
+                    "configured security default did not fail closed before start: "
+                    f"annotations={annotations!r} output={output!r} stderr={stderr!r}"
+                )
+            (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+            (artifact_dir / f"{scenario}.stderr").write_text(
+                stderr, encoding="utf-8"
+            )
+            (artifact_dir / f"{scenario}.json").write_text(
+                json.dumps(
+                    {
+                        "actual_annotations": annotations,
+                        "injection": expect_annotation_rejection,
+                        "launcher_ready": False,
+                        "release_sent": False,
+                        "return_code": return_code,
+                        "verdict": "configured security default rejected by crun before start",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
         raise AssertionError(
             f"unexpected launcher readiness: {ready!r}; "
             f"exit={return_code}; stderr={stderr!r}"
@@ -542,7 +585,15 @@ def launch(
         output = process.stdout.read()
         errors = process.stderr.read()
         run("/usr/bin/podman", "rm", "--force", container_id)
-        if annotation_error is None or output:
+        expected_key, separator, expected_value = (
+            expect_annotation_rejection.partition("=")
+        )
+        if (
+            separator != "="
+            or annotations.get(expected_key) != expected_value
+            or annotation_error is None
+            or output
+        ):
             raise AssertionError(
                 f"runtime annotation injection was not rejected: {annotations!r}"
             )
@@ -553,6 +604,7 @@ def launch(
                 {
                     "actual_annotations": annotations,
                     "injection": expect_annotation_rejection,
+                    "launcher_ready": True,
                     "release_sent": False,
                     "return_code": return_code,
                     "validation_error": str(annotation_error),
@@ -589,6 +641,8 @@ def configured_default_rejection_scenario(
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
     containers_conf: pathlib.Path,
+    scenario: str,
+    injection: str,
 ) -> None:
     result = launch(
         image,
@@ -598,10 +652,10 @@ def configured_default_rejection_scenario(
         seccomp_tracer,
         artifact_dir,
         b"",
-        "configured-default-injection",
+        scenario,
         release=False,
         containers_conf=containers_conf,
-        expect_annotation_rejection="org.systemd.property.DeviceAllow=injected",
+        expect_annotation_rejection=injection,
     )
     if result is not None:
         raise AssertionError("configured-default injection unexpectedly returned a launch")
@@ -1634,6 +1688,9 @@ def main() -> None:
     parser.add_argument("--eai1-hold", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--configured-defaults", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--configured-security-defaults", required=True, type=pathlib.Path
+    )
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -1702,6 +1759,19 @@ def main() -> None:
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
         arguments.configured_defaults.resolve(),
+        "configured-default-injection",
+        "fixture.configured-default=injected",
+    )
+    configured_default_rejection_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        arguments.configured_security_defaults.resolve(),
+        "configured-security-default-injection",
+        "org.systemd.property.DeviceAllow=injected",
     )
     normal_scenario(
         arguments.image,

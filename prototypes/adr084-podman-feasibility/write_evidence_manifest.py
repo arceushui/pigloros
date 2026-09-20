@@ -44,6 +44,10 @@ def main() -> None:
             arguments.prototype_dir / "configured-default-injection.conf",
         ),
         (
+            "prototype/configured-security-default-injection.conf",
+            arguments.prototype_dir / "configured-security-default-injection.conf",
+        ),
+        (
             "prototype/generate_adapter_transport.py",
             arguments.prototype_dir / "generate_adapter_transport.py",
         ),
@@ -143,6 +147,9 @@ def main() -> None:
         "configured-default-injection.json",
         "configured-default-injection.stderr",
         "configured-default-injection.stdout",
+        "configured-security-default-injection.json",
+        "configured-security-default-injection.stderr",
+        "configured-security-default-injection.stdout",
         "probe-filter-binding.json",
         "probe.stderr",
         "probe.stdout",
