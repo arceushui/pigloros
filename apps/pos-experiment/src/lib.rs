@@ -2247,6 +2247,11 @@ impl ExperimentSession {
             .plugin_versions()
             .map(|(name, version)| (name.to_owned(), version.to_owned()))
             .collect();
+        let output_policy_digests: Vec<(String, Hash)> = self
+            .registry
+            .output_policy_digests()
+            .map(|(name, digest)| (name.to_owned(), digest))
+            .collect();
         let consent_gate = self
             .operation_token
             .as_ref()
@@ -2274,8 +2279,8 @@ impl ExperimentSession {
                 for (name, version) in &plugin_versions {
                     manifest = manifest.with_plugin_version(name, version.clone());
                 }
-                for (name, digest) in self.registry.output_policy_digests() {
-                    manifest = manifest.with_output_policy_digest(name, digest);
+                for (name, digest) in &output_policy_digests {
+                    manifest = manifest.with_output_policy_digest(name, *digest);
                 }
                 manifest
                     .adapter_records
