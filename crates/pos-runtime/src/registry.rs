@@ -669,7 +669,7 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     }
     // The direct-driver seam is deliberately test-only. Production Plugin
     // registration always carries an explicit or generated admission policy.
-    if entry.test_only_driver {
+    if cfg!(debug_assertions) && entry.test_only_driver {
         return Ok(());
     }
     let Some(admission) = entry.output_admission.as_ref() else {
@@ -2568,7 +2568,10 @@ impl PluginRegistry {
         self.plugins.values().map(plugin_name_and_version)
     }
 
-    /// Register a direct driver in a test-only harness.
+    /// Register a direct driver in a debug-only test harness.
+    ///
+    /// Release builds still require output admission even when this helper is
+    /// called by an external crate.
     #[doc(hidden)]
     pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {
         let name = driver.name().to_owned();
