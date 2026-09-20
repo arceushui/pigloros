@@ -6667,6 +6667,47 @@ mod coverage_entrypoints {
         }
     }
 
+    struct EmptyOutputPlugin;
+
+    impl Plugin for EmptyOutputPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-empty-output-plugin"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                has_driver: true,
+                ..Capability::default()
+            }
+        }
+    }
+
+    struct UnknownDraftDriver;
+
+    impl Driver for UnknownDraftDriver {
+        fn name(&self) -> &'static str {
+            "coverage-unknown-draft-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput {
+                drafts: vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("coverage.unknown"),
+                    pos_core::CanonicalBytes::from_static(b"unknown"),
+                )],
+            })
+        }
+    }
+
     struct FailingDriver;
 
     impl Driver for FailingDriver {
@@ -7228,6 +7269,37 @@ mod coverage_entrypoints {
             pos_core::clock::Seq::ZERO,
         )
         .is_err());
+    }
+
+    #[test]
+    fn append_driver_drafts_aborts_on_schema_failure() {
+        let mut store = test_memory_store();
+        let timeline = ok(store.create_timeline("coverage-schema-failure"));
+        let mut registry = test_registry();
+        ok(registry.register(&EmptyOutputPlugin, None, Some(Box::new(UnknownDraftDriver))));
+        assert!(append_driver_drafts(
+            &mut store,
+            timeline.id(),
+            &mut registry,
+            pos_core::clock::Seq::ZERO,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn session_step_boundary_aborts_on_schema_failure() {
+        let mut session = ok(Experiment::new(config(
+            "coverage-session-schema-failure",
+            StopCondition::MaxTicks(1),
+        ))
+        .start());
+        ok(session
+            .registry
+            .register(&EmptyOutputPlugin, None, Some(Box::new(UnknownDraftDriver))));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(_))
+        ));
     }
 
     #[test]
