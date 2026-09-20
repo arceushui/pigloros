@@ -45,7 +45,6 @@ use pos_core::{
     ids::{PluginId, TimelineId},
     manifest::AdapterRecord,
     store::SeqRange,
-    Plugin,
 };
 use pos_experiment::{
     Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
