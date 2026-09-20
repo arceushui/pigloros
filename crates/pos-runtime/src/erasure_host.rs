@@ -1746,6 +1746,31 @@ impl ErasureExecutionHostV1 {
         let coordinator = self
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        self.apply_identified_fork_with_recovery(
+            operation,
+            parent,
+            at_seq,
+            name,
+            current_generation,
+            maximum_requests,
+            &current_inventory,
+            authority.as_ref(),
+            coordinator,
+        )
+    }
+
+    fn apply_identified_fork_with_recovery(
+        &mut self,
+        operation: ErasureReferenceV1,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+        current_generation: ErasureReferenceV1,
+        maximum_requests: usize,
+        current_inventory: &ErasureVerifiedInventoryV1,
+        authority: &dyn ErasureCoordinatorAuthorityV1,
+        coordinator: ErasureReferenceV1,
+    ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let (child, recovered) =
             self.recover_identified_fork_child(operation, parent, at_seq, name)?;
         let transition = IdentifiedForkTransitionInput {
@@ -1753,8 +1778,8 @@ impl ErasureExecutionHostV1 {
             parent,
             child: &child,
             current_generation,
-            current_inventory: &current_inventory,
-            authority: authority.as_ref(),
+            current_inventory,
+            authority,
             coordinator,
             recovered,
         };
