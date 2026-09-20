@@ -4642,6 +4642,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    #[allow(clippy::too_many_lines)]
     fn protected_append_fences_cover_missing_gate_and_store_errors() {
         struct EmptyDriver;
 
