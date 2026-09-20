@@ -1,6 +1,7 @@
 FROM scratch
 COPY --chown=65532:65532 launcher /launcher
 COPY --chown=65532:65532 adapter /adapter
+COPY --chown=65532:65532 cache-probe /cache-probe
 COPY --chown=65532:65532 seccomp-probe /seccomp-probe
 COPY --chown=65532:65532 foreign-probe /foreign-probe
 USER 65532:65532

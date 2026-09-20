@@ -48,6 +48,8 @@ jq -e '.host.ociRuntime.name == "crun" or .host.ociRuntime.path == "/usr/bin/cru
 
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototype_dir}/launcher.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
+musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/cache-probe" \
+  "${prototype_dir}/cache_probe.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/seccomp-probe" \
   "${prototype_dir}/seccomp_probe.c"
 case "${evidence_architecture}" in

@@ -29,10 +29,12 @@ def main() -> None:
     files = [
         ("/launcher", arguments.build_dir / "launcher"),
         ("/adapter", arguments.build_dir / "adapter"),
+        ("/cache-probe", arguments.build_dir / "cache-probe"),
         ("/seccomp-probe", arguments.build_dir / "seccomp-probe"),
         ("/foreign-probe", arguments.build_dir / "foreign-probe"),
         ("prototype/launcher.c", arguments.prototype_dir / "launcher.c"),
         ("prototype/adapter.c", arguments.prototype_dir / "adapter.c"),
+        ("prototype/cache_probe.c", arguments.prototype_dir / "cache_probe.c"),
         ("prototype/compile_seccomp.c", arguments.prototype_dir / "compile_seccomp.c"),
         ("prototype/seccomp_probe.c", arguments.prototype_dir / "seccomp_probe.c"),
         (

@@ -505,6 +505,81 @@ def seccomp_probe_scenario(
     run("/usr/bin/podman", "rm", name)
 
 
+def cache_probe_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    scenario: str,
+) -> None:
+    name = f"pigloros-adr084-{scenario}-{uuid.uuid4().hex[:12]}"
+    podman_command = [
+        "/usr/bin/podman",
+        "run",
+        "--runtime=/usr/bin/crun",
+        "--pull=never",
+        f"--name={name}",
+        "--network=none",
+        "--no-hosts",
+        "--read-only",
+        "--read-only-tmpfs=false",
+        "--cap-drop=all",
+        "--security-opt=no-new-privileges",
+        f"--security-opt=seccomp={seccomp}",
+        f"--annotation=run.oci.seccomp_bpf_data={seccomp_bpf_base64}",
+        "--stop-signal=15",
+        "--memory=64m",
+        "--memory-swap=64m",
+        "--pids-limit=16",
+        "--cpus=0.5",
+        "--ulimit=nofile=64:64",
+        "--ulimit=fsize=1048576:1048576",
+        "--user=65532:65532",
+        "--label=io.pigloros.prototype=adr084",
+        f"--label=io.pigloros.scenario={scenario}",
+        "--entrypoint=/cache-probe",
+        "--rm=false",
+        image,
+    ]
+    completed = subprocess.run(
+        [
+            str(seccomp_tracer),
+            str(seccomp_bpf),
+            str(artifact_dir / f"{scenario}.installed-seccomp.bpf"),
+            str(artifact_dir / f"{scenario}.seccomp-install.json"),
+            "--",
+            *podman_command,
+        ],
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
+    (artifact_dir / f"{scenario}.stdout").write_bytes(completed.stdout)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(completed.stderr)
+    inspect_text = run("/usr/bin/podman", "inspect", name).stdout
+    (artifact_dir / f"{scenario}.inspect.json").write_text(
+        inspect_text, encoding="utf-8"
+    )
+    inspected = json.loads(inspect_text)[0]
+    expected_annotations = {
+        "io.container.manager": "libpod",
+        "io.podman.annotations.seccomp": str(seccomp),
+        "org.opencontainers.image.stopSignal": "15",
+        "run.oci.seccomp_bpf_data": seccomp_bpf_base64,
+    }
+    if inspected["Config"]["Annotations"] != expected_annotations:
+        raise AssertionError("cache probe effective annotations differ")
+    if completed.returncode != 0 or completed.stdout != b"CACHE-OK\n":
+        raise AssertionError(
+            "cache bypass probe failed: "
+            f"code={completed.returncode} output={completed.stdout!r} "
+            f"stderr={completed.stderr!r}"
+        )
+    run("/usr/bin/podman", "rm", name)
+
+
 def crun_cache_checksum(profile: dict[str, object]) -> tuple[str, dict[str, object]]:
     package_version = "1.14.1"
     libseccomp_version = (2, 5, 5)
@@ -582,7 +657,6 @@ def cache_snapshot(cache_dir: pathlib.Path) -> dict[str, object]:
 
 
 def cache_matrix_scenario(
-    architecture: str,
     image: str,
     seccomp: pathlib.Path,
     seccomp_bpf_base64: str,
@@ -619,8 +693,7 @@ def cache_matrix_scenario(
             if mtime_ns is not None:
                 os.utime(cache_file, ns=(mtime_ns, mtime_ns))
         before = cache_snapshot(cache_dir)
-        seccomp_probe_scenario(
-            architecture,
+        cache_probe_scenario(
             image,
             seccomp,
             seccomp_bpf_base64,
@@ -717,7 +790,6 @@ def main() -> None:
         arguments.artifact_dir,
     )
     cache_matrix_scenario(
-        arguments.architecture,
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,

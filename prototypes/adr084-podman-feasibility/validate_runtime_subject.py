@@ -69,6 +69,7 @@ def main() -> None:
     if {item["path"] for item in mounted["entries"]} != {
         "/",
         "/adapter",
+        "/cache-probe",
         "/foreign-probe",
         "/launcher",
         "/seccomp-probe",
