@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::os::fd::IntoRawFd;
-use std::os::raw::{c_int, c_long};
+use std::os::raw::{c_char, c_int, c_long};
 use std::ptr;
 
 #[used]
@@ -69,7 +69,7 @@ fn main() {
     let program = CString::new("coverage-adapter").expect("program argument");
     let mode_argument = CString::new(mode).expect("mode argument");
     let arguments = [program.as_ptr(), mode_argument.as_ptr(), ptr::null()];
-    let environment = [ptr::null()];
+    let environment: [*const c_char; 1] = [ptr::null()];
     let empty_path = CString::new("").expect("empty execveat path");
     let result = unsafe {
         syscall(
