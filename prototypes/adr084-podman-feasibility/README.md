@@ -15,12 +15,13 @@ non-stdio descriptor?
 The prototype also emits ADR-085 canonical vectors, independently verifies the
 OCI manifest/config/layer/DiffID/ChainID closure, removes and rootlessly imports
 the saved OCI archive, and records runtime, namespace, mount, cgroup,
-descriptor, environment, and negative-probe evidence. For ADR-084 revision 24,
+descriptor, environment, and negative-probe evidence. For ADR-084 revision 27,
 it partitions the signed SCS1 into requested `R`, effective audit `E`, and
 readback-only PNR `D`; materializes an exact-`R` libseccomp interface and exact
 `E` audit profile; compiles numeric `R` with pinned libseccomp 2.6.1; and uses an
 independent symbolic verifier over the exported BPF's complete 32-bit syscall
-domain. It intentionally lives only on the throwaway evidence branch.
+domain, including the x86_64 x32-kill range and tracer-skip sentinel. It
+intentionally lives only on the throwaway evidence branch.
 
 The canonical ADRs remain Proposed. A green workflow proves only the bounded
 claims named by its retained artifacts; the complete ADR acceptance matrix,

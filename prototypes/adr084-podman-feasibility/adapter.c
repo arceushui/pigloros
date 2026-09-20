@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <sched.h>
 #include <signal.h>
@@ -76,14 +77,25 @@ static void verify_boundary(void) {
         fail("read-only-root");
     }
 
-    errno = 0;
     int network = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (network != -1 || errno != EPERM) {
-        if (network != -1) {
-            close(network);
-        }
+    if (network == -1) {
+        fail("network-socket");
+    }
+    struct sockaddr_in unreachable = {
+        .sin_family = AF_INET,
+        .sin_port = htons(9),
+        .sin_addr = {.s_addr = htonl(0xcb007101)},
+    };
+    errno = 0;
+    int connected = connect(network, (struct sockaddr *)&unreachable,
+                            sizeof(unreachable));
+    int connect_errno = errno;
+    if (close(network) == -1) {
+        fail("network-close");
+    }
+    if (connected != -1 || connect_errno != ENETUNREACH) {
         errno = EPROTO;
-        fail("network-syscall");
+        fail("network-egress");
     }
 }
 
