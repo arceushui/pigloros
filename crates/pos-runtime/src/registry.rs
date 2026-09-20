@@ -102,7 +102,11 @@ fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
         }
         let budget = admission.budget().fields();
         hasher.update(&budget.revision.to_le_bytes());
-        hasher.update(&[budget.workload_profile.code()]);
+        hasher.update(&[match budget.workload_profile {
+            pos_core::WorkloadProfileV1::Interactive => 0,
+            pos_core::WorkloadProfileV1::Fork => 1,
+            pos_core::WorkloadProfileV1::Research => 2,
+        }]);
         hasher.update(&[budget.cut_budget_family]);
         hasher.update(&budget.max_event_bytes.to_le_bytes());
         for fidelity in budget.fidelity_budgets {
