@@ -1344,6 +1344,150 @@ def memory_limit_scenario(
         raise AssertionError(f"memory limit did not force OOM evidence: {report!r}")
 
 
+def task_limit_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_tasks: bytes,
+) -> None:
+    scenario = "elm-tasks"
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_tasks,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    snapshot = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    cgroup_path = pathlib.Path(snapshot["cgroup_path"])
+    baseline = parse_cgroup_events(snapshot["cgroup_values"]["pids.events.local"])
+    process.stdin.close()
+    final = baseline
+    observation_deadline = time.monotonic() + 20
+    while time.monotonic() < observation_deadline:
+        current_text = read_text(cgroup_path / "pids.events.local").strip()
+        if not current_text.startswith("UNAVAILABLE:"):
+            final = parse_cgroup_events(current_text)
+            if final.get("max", 0) > baseline.get("max", 0):
+                break
+        if process.poll() is not None:
+            break
+        time.sleep(0.01)
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    return_code = process.wait(timeout=20)
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    control.close()
+    max_delta = final.get("max", 0) - baseline.get("max", 0)
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "baseline_pids_events_local": baseline,
+        "container_id": container_id,
+        "final_pids_events_local": final,
+        "pids_max": snapshot["cgroup_values"]["pids.max"],
+        "pids_max_delta": max_delta,
+        "return_code_after_cleanup": return_code,
+        "terminal_code": 5,
+        "terminal_name": "TaskLimit",
+        "verdict": "forced fork exhaustion selected TaskLimit",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if (
+        output
+        or snapshot["cgroup_values"]["pids.max"] != "16"
+        or max_delta <= 0
+        or b"TASK_LIMIT" not in errors
+    ):
+        raise AssertionError(f"task limit did not force pids evidence: {report!r}")
+
+
+def cpu_throttling_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_cpu: bytes,
+) -> None:
+    scenario = "elm-cpu-throttling"
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_cpu,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    snapshot = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    cgroup_path = pathlib.Path(snapshot["cgroup_path"])
+    baseline = parse_cgroup_events(snapshot["cgroup_values"]["cpu.stat"])
+    process.stdin.close()
+    final = baseline
+    observation_deadline = time.monotonic() + 20
+    while time.monotonic() < observation_deadline:
+        current_text = read_text(cgroup_path / "cpu.stat").strip()
+        if not current_text.startswith("UNAVAILABLE:"):
+            final = parse_cgroup_events(current_text)
+            if final.get("nr_throttled", 0) > baseline.get("nr_throttled", 0):
+                break
+        if process.poll() is not None:
+            break
+        time.sleep(0.01)
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    return_code = process.wait(timeout=20)
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    control.close()
+    throttled_delta = final.get("nr_throttled", 0) - baseline.get("nr_throttled", 0)
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "baseline_cpu_stat": baseline,
+        "container_id": container_id,
+        "cpu_max": snapshot["cgroup_values"]["cpu.max"],
+        "final_cpu_stat": final,
+        "nr_throttled_delta": throttled_delta,
+        "return_code_after_cleanup": return_code,
+        "terminal_selected": None,
+        "verdict": "CPU quota throttling was observed without manufacturing a terminal",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if (
+        output
+        or snapshot["cgroup_values"]["cpu.max"] != "50000 100000"
+        or throttled_delta <= 0
+    ):
+        raise AssertionError(f"CPU quota did not produce throttling evidence: {report!r}")
+
+
 def concurrent_lifecycle_worker(
     index: int,
     image: str,
@@ -2474,6 +2618,8 @@ def main() -> None:
     parser.add_argument("--eai1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-hold", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-memory", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-tasks", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-cpu", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--runtime-subject", required=True, type=pathlib.Path)
     parser.add_argument("--configured-defaults", required=True, type=pathlib.Path)
@@ -2501,15 +2647,21 @@ def main() -> None:
     eai1_hello = arguments.eai1_hello.read_bytes()
     eai1_hold = arguments.eai1_hold.read_bytes()
     eai1_memory = arguments.eai1_memory.read_bytes()
+    eai1_tasks = arguments.eai1_tasks.read_bytes()
+    eai1_cpu = arguments.eai1_cpu.read_bytes()
     eao1_hello = arguments.eao1_hello.read_bytes()
     (arguments.artifact_dir / "normal.eai1").write_bytes(eai1_hello)
     (arguments.artifact_dir / "cancel.eai1").write_bytes(eai1_hold)
     (arguments.artifact_dir / "elm-memory.eai1").write_bytes(eai1_memory)
+    (arguments.artifact_dir / "elm-tasks.eai1").write_bytes(eai1_tasks)
+    (arguments.artifact_dir / "elm-cpu-throttling.eai1").write_bytes(eai1_cpu)
     (arguments.artifact_dir / "expected.eao1").write_bytes(eao1_hello)
     transport_report = {
         "eai1_hello": validate_eai1(eai1_hello, b"hello\n"),
         "eai1_hold": validate_eai1(eai1_hold, b"HOLD\n"),
         "eai1_memory": validate_eai1(eai1_memory, b"MEMORY\n"),
+        "eai1_tasks": validate_eai1(eai1_tasks, b"TASKS\n"),
+        "eai1_cpu": validate_eai1(eai1_cpu, b"CPU\n"),
         "eao1_hello": validate_eao1(eao1_hello, b"hello\n"),
         "verdict": "canonical framed streams independently validated before launch",
     }
@@ -2590,6 +2742,26 @@ def main() -> None:
         arguments.artifact_dir,
         barrier_fixture,
         eai1_memory,
+    )
+    task_limit_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_tasks,
+    )
+    cpu_throttling_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_cpu,
     )
     concurrent_lifecycle_scenario(
         arguments.image,

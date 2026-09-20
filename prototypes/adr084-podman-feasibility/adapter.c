@@ -135,7 +135,12 @@ int main(void) {
                            memcmp(input, eai1_hold, length) == 0;
         bool memory_prefix = length <= eai1_memory_len &&
                              memcmp(input, eai1_memory, length) == 0;
-        if (!hello_prefix && !hold_prefix && !memory_prefix) {
+        bool tasks_prefix = length <= eai1_tasks_len &&
+                            memcmp(input, eai1_tasks, length) == 0;
+        bool cpu_prefix = length <= eai1_cpu_len &&
+                          memcmp(input, eai1_cpu, length) == 0;
+        if (!hello_prefix && !hold_prefix && !memory_prefix && !tasks_prefix &&
+            !cpu_prefix) {
             errno = EPROTO;
             fail("input-authentication");
         }
@@ -166,6 +171,34 @@ int main(void) {
             for (size_t offset = 0; offset < allocation_size; offset += 4096U) {
                 allocation[offset] = (unsigned char)(offset >> 12);
             }
+        }
+    }
+    if (length == eai1_tasks_len && memcmp(input, eai1_tasks, length) == 0) {
+        size_t children = 0;
+        for (;;) {
+            pid_t child = fork();
+            if (child == -1) {
+                if (errno != EAGAIN) {
+                    fail("task-fork");
+                }
+                dprintf(STDERR_FILENO, "TASK_LIMIT children=%zu errno=%d\n", children,
+                        errno);
+                for (;;) {
+                    pause();
+                }
+            }
+            if (child == 0) {
+                for (;;) {
+                    pause();
+                }
+            }
+            children += 1;
+        }
+    }
+    if (length == eai1_cpu_len && memcmp(input, eai1_cpu, length) == 0) {
+        volatile unsigned long counter = 0;
+        for (;;) {
+            counter += 1;
         }
     }
     if (length != eai1_hello_len || memcmp(input, eai1_hello, length) != 0) {

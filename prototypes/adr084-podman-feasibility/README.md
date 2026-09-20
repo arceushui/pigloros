@@ -52,6 +52,11 @@ memory beyond `memory.max`; the provider retains the before/after
 terminal code 3 `OomKilled`. The other forced outcomes and their precedence
 remain an open evidence slice.
 
+A canonical TASKS attempt forces `pids.max=16`; its retained local `max` event
+selects terminal code 5 `TaskLimit`. A separate canonical CPU attempt crosses
+the 0.5-CPU quota and retains an `nr_throttled` delta without selecting a
+terminal, because CPU throttling is telemetry only.
+
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
 the driver durably records an attempt-bound monotonic launch anchor and passes a
