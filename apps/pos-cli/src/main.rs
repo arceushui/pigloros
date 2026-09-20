@@ -808,7 +808,9 @@ fn reproduce_manifest(
                 Ok(())
             } else {
                 output_stderr!(
-                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_keys={policy_keys_match}"
+                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_keys={policy_keys_match}; reproduced identities={:?}, expected identities={:?}",
+                    reproduced.manifest.replay_policy_identities,
+                    reproduction.manifest.replay_policy_identities
                 );
                 output_stdout!("MISMATCH");
                 Err("reproduced chain_head does not match manifest".into())
