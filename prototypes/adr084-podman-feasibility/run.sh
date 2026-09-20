@@ -245,6 +245,9 @@ python3 "${prototype_dir}/write_evidence_manifest.py" \
   "${artifact_dir}" "${build_dir}" "${prototype_dir}" \
   --architecture "${oci_architecture}"
 
-printf 'ADR-084 prototype passed on %s\n' "$(uname -m)" | tee "${artifact_dir}/verdict.txt"
+jq -e '.adr069_compatible == false and .observed_terminal_code == 8 and .required_terminal_code == 7' \
+  "${artifact_dir}/elm-file.json" >/dev/null
+printf 'ADR-084 prototype completed on %s; Podman+crun candidate is incompatible with the required SIGXFSZ file-limit evidence\n' \
+  "$(uname -m)" | tee "${artifact_dir}/verdict.txt"
 find "${artifact_dir}" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum \
   >"${artifact_dir}/SHA256SUMS"

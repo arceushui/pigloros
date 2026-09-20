@@ -1546,31 +1546,36 @@ def file_limit_scenario(
     (artifact_dir / f"{scenario}.stdout").write_bytes(output)
     (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
     report = {
+        "adr069_compatible": False,
         "container_id": container_id,
+        "observed_errno": "EFBIG",
+        "observed_signal": None,
+        "observed_terminal_code": 8,
+        "observed_terminal_name": "ProcessCrash",
         "podman_exit_code": state["ExitCode"],
         "podman_oom_killed": state["OOMKilled"],
         "process_limits": snapshot["limits"],
+        "required_signal": "SIGXFSZ",
+        "required_terminal_code": 7,
+        "required_terminal_name": "FileOrOutputLimit",
         "return_code": return_code,
         "runtime_annotations": inspected["Config"]["Annotations"],
-        "signal": "SIGXFSZ",
-        "signal_number": 25,
         "seccomp_install_observer": "untraced exact annotation after global install proof",
-        "terminal_code": 7,
-        "terminal_name": "FileOrOutputLimit",
-        "verdict": "unambiguous SIGXFSZ selected FileOrOutputLimit",
+        "verdict": "candidate enforced RLIMIT_FSIZE but did not produce required SIGXFSZ evidence",
     }
     (artifact_dir / f"{scenario}.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     run("/usr/bin/podman", "rm", "--force", container_id)
     if (
-        return_code != 128 + 25
-        or state["ExitCode"] != 128 + 25
+        return_code != 71
+        or state["ExitCode"] != 71
         or state["OOMKilled"] is not False
         or output
         or errors
+        != b"adapter-error:file-limit-write-without-sigxfsz:File too large\n"
     ):
-        raise AssertionError(f"file limit did not force SIGXFSZ evidence: {report!r}")
+        raise AssertionError(f"file limit negative result changed: {report!r}")
 
 
 def concurrent_lifecycle_worker(

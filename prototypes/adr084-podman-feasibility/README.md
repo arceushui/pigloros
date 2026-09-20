@@ -59,11 +59,13 @@ terminal, because CPU throttling is telemetry only.
 
 Every launch also retains the exact `RLIMIT_NOFILE=64:64` and
 `RLIMIT_FSIZE=32768:32768` process readback. NOFILE remains safety evidence only.
-A canonical FILE attempt crosses the file-size limit inside `/work`; only the
-unambiguous SIGXFSZ process result selects terminal code 7 `FileOrOutputLimit`.
-The SIGXFSZ attempt runs without the ptrace install observer so the observer
-cannot suppress or alter the signal; it still validates the exact runtime BPF
-annotation/profile tuple already captured byte-for-byte by the global proof.
+A canonical FILE attempt crosses the file-size limit inside `/work`. It runs
+without the ptrace install observer so the observer cannot suppress or alter a
+signal, while retaining the exact runtime BPF annotation/profile tuple already
+captured byte-for-byte by the global proof. Both hosted architectures enforce
+the limit but return `EFBIG` and exit 71 without SIGXFSZ. ADR-069 therefore
+selects fallback code 8 `ProcessCrash`, not code 7 `FileOrOutputLimit`; this is
+a manifest-bound incompatibility finding, not a successful prerequisite.
 
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
