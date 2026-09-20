@@ -20,6 +20,7 @@ import struct
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import cbor2
@@ -30,6 +31,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 ATTEMPT_DOMAIN = b"PiglorOS.EvaluatorAttemptStream.v1\0"
 OBSERVATION_DOMAIN = b"PiglorOS.EvaluatorObservationStream.v1\0"
 RUNTIME_KEY_ID = "prototype-runtime-key-01"
+PROTOTYPE_PROVIDER_ID = "adr084-podman-crun-prototype-v1"
 WATCHDOG_NS = 60_000_000_000
 MISSING_RELEASE_SECONDS = 30
 
@@ -1098,6 +1100,10 @@ def launch(
     release_mutation: str | None = None,
     release_gate: tuple[pathlib.Path, pathlib.Path] | None = None,
     trace_seccomp_install: bool = True,
+    stage_hook: Callable[
+        [str, subprocess.Popen[bytes], str, BarrierAttempt], None
+    ]
+    | None = None,
 ) -> tuple[subprocess.Popen[bytes], socket.socket, str] | None:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     if parent_control.fileno() == 3:
@@ -1147,6 +1153,9 @@ def launch(
         "--ulimit=fsize=32768:32768",
         "--user=65532:65532",
         "--label=io.pigloros.prototype=adr084",
+        f"--label=io.pigloros.provider-id={PROTOTYPE_PROVIDER_ID}",
+        f"--label=io.pigloros.attempt-id={barrier_attempt.attempt_id.hex()}",
+        f"--label=io.pigloros.creation-nonce={barrier_attempt.nonce.hex()}",
         f"--label=io.pigloros.scenario={scenario}",
         "--rm=false",
         "-i",
@@ -1198,6 +1207,8 @@ def launch(
                 os.close(saved_fd3)
     child_control.close()
     container_id = wait_for_container(name, process)
+    if stage_hook is not None:
+        stage_hook("before-ready", process, container_id, barrier_attempt)
     try:
         ready = parent_control.recv(4096)
     except ConnectionResetError:
@@ -1260,6 +1271,9 @@ def launch(
             f"exit={return_code}; stderr={stderr!r}; error={ready_error}"
         ) from ready_error
     (artifact_dir / f"{scenario}.ready2.cbor").write_bytes(ready)
+    if stage_hook is not None:
+        stage_hook("after-ready", process, container_id, barrier_attempt)
+        stage_hook("before-observe", process, container_id, barrier_attempt)
     readable, _, _ = select.select([process.stdout], [], [], 0.2)
     if readable:
         premature = process.stdout.read1(64)
@@ -1327,6 +1341,8 @@ def launch(
     (artifact_dir / f"{scenario}.launcher.json").write_text(
         json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    if stage_hook is not None:
+        stage_hook("after-observe", process, container_id, barrier_attempt)
     if release_gate is not None:
         observed_path, release_path = release_gate
         observed_path.write_text(
@@ -1349,6 +1365,8 @@ def launch(
         if not release_path.exists():
             raise TimeoutError(f"release gate did not open for {scenario}")
     if release:
+        if stage_hook is not None:
+            stage_hook("before-release", process, container_id, barrier_attempt)
         release_packet, release_unsigned, release_digest = build_and_verify_release(
             ready_digest, barrier_attempt, barrier_fixture
         )
@@ -1398,6 +1416,8 @@ def launch(
         assert process.stdin is not None
         process.stdin.write(input_bytes)
         process.stdin.flush()
+        if stage_hook is not None:
+            stage_hook("after-release", process, container_id, barrier_attempt)
     return process, parent_control, container_id
 
 
@@ -2458,6 +2478,337 @@ def cancellation_scenario(
     if residual:
         raise AssertionError(f"descendants survived cancellation: {residual}")
     run("/usr/bin/podman", "rm", "--force", container_id)
+
+
+def process_start_ticks(pid: int) -> int | None:
+    if pid <= 0:
+        return None
+    try:
+        fields = (pathlib.Path("/proc") / str(pid) / "stat").read_text(
+            encoding="ascii"
+        ).split()
+    except OSError:
+        return None
+    return int(fields[21])
+
+
+def write_fsynced_json(path: pathlib.Path, value: object) -> None:
+    with path.open("w", encoding="utf-8") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def barrier_provider_death_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_hold: bytes,
+) -> None:
+    stages = (
+        "before-ready",
+        "after-ready",
+        "before-observe",
+        "after-observe",
+        "before-release",
+        "after-release",
+    )
+    state_for_stage = {
+        "before-ready": "LauncherStarting",
+        "after-ready": "Ready",
+        "before-observe": "Ready",
+        "after-observe": "Observed",
+        "before-release": "Observed",
+        "after-release": "Released",
+    }
+    results: list[dict[str, object]] = []
+    for target_stage in stages:
+        scenario = f"provider-death-{target_stage}"
+        context_path = artifact_dir / f"{scenario}.crash-context.json"
+        journal_path = artifact_dir / f"{scenario}.journal.json"
+        child = os.fork()
+        if child == 0:
+            journal: list[dict[str, object]] = []
+
+            def stage_hook(
+                stage: str,
+                process: subprocess.Popen[bytes],
+                container_id: str,
+                attempt: BarrierAttempt,
+            ) -> None:
+                inspected = json.loads(
+                    run("/usr/bin/podman", "inspect", container_id).stdout
+                )[0]
+                pid = int(inspected["State"]["Pid"])
+                marker: str | None = None
+                if stage == "after-release":
+                    assert process.stdin is not None
+                    assert process.stderr is not None
+                    process.stdin.close()
+                    readable, _, _ = select.select([process.stderr], [], [], 10)
+                    if not readable:
+                        raise TimeoutError(
+                            "released adapter did not report its descendant"
+                        )
+                    marker = process.stderr.readline().decode(
+                        "utf-8", errors="replace"
+                    )
+                    if not marker.startswith("HOLDING child="):
+                        raise AssertionError(
+                            f"unexpected released adapter marker: {marker!r}"
+                        )
+                snapshot = process_snapshot(pid) if pid > 0 else None
+                details = {
+                    "attempt_id": attempt.attempt_id.hex(),
+                    "cgroup_path": snapshot["cgroup_path"] if snapshot else None,
+                    "container_id": container_id,
+                    "created": inspected["Created"],
+                    "creation_nonce": attempt.nonce.hex(),
+                    "image_id": inspected["Image"],
+                    "labels": inspected["Config"]["Labels"],
+                    "launcher_pid": pid,
+                    "launcher_start_ticks": process_start_ticks(pid),
+                    "provider_command_pid": process.pid,
+                    "provider_command_start_ticks": process_start_ticks(process.pid),
+                    "released_adapter_marker": marker,
+                }
+                previous = (
+                    bytes.fromhex(str(journal[-1]["record_digest"]))
+                    if journal
+                    else None
+                )
+                unsigned = [
+                    len(journal),
+                    previous,
+                    state_for_stage[stage],
+                    stage,
+                    details,
+                ]
+                digest = blake3(
+                    b"PiglorOS.ADR084BarrierCrashJournal.v1\0"
+                    + canonical(unsigned)
+                ).hex()
+                journal.append(
+                    {
+                        "details": details,
+                        "ordinal": len(journal),
+                        "previous_record_digest": previous.hex() if previous else None,
+                        "record_digest": digest,
+                        "stage": stage,
+                        "state": state_for_stage[stage],
+                    }
+                )
+                write_fsynced_json(journal_path, journal)
+                if stage != target_stage:
+                    return
+                write_fsynced_json(
+                    context_path,
+                    {
+                        **details,
+                        "crash_signal": signal.SIGKILL,
+                        "journal_record_count": len(journal),
+                        "journal_tip_digest": digest,
+                        "target_stage": target_stage,
+                    },
+                )
+                os.kill(os.getpid(), signal.SIGKILL)
+
+            launch(
+                image,
+                seccomp,
+                seccomp_bpf_base64,
+                seccomp_bpf,
+                seccomp_tracer,
+                artifact_dir,
+                barrier_fixture,
+                eai1_hold,
+                scenario,
+                stage_hook=stage_hook,
+            )
+            os._exit(72)
+        waited, status = os.waitpid(child, 0)
+        if (
+            waited != child
+            or not os.WIFSIGNALED(status)
+            or os.WTERMSIG(status) != signal.SIGKILL
+        ):
+            raise AssertionError(
+                f"barrier provider crash injection failed at {target_stage}: {status}"
+            )
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        previous_digest: bytes | None = None
+        for ordinal, record in enumerate(journal):
+            if record["ordinal"] != ordinal or record["previous_record_digest"] != (
+                previous_digest.hex() if previous_digest else None
+            ):
+                raise AssertionError(f"barrier crash journal chain broke: {journal!r}")
+            unsigned = [
+                ordinal,
+                previous_digest,
+                record["state"],
+                record["stage"],
+                record["details"],
+            ]
+            expected_digest = blake3(
+                b"PiglorOS.ADR084BarrierCrashJournal.v1\0" + canonical(unsigned)
+            ).hex()
+            if record["record_digest"] != expected_digest:
+                raise AssertionError(
+                    f"barrier crash journal digest mismatch: {record!r}"
+                )
+            previous_digest = bytes.fromhex(expected_digest)
+        if (
+            context["target_stage"] != target_stage
+            or context["journal_record_count"] != len(journal)
+            or context["journal_tip_digest"] != journal[-1]["record_digest"]
+        ):
+            raise AssertionError(f"barrier crash context mismatch: {context!r}")
+        expected_labels = {
+            "io.pigloros.attempt-id": context["attempt_id"],
+            "io.pigloros.creation-nonce": context["creation_nonce"],
+            "io.pigloros.prototype": "adr084",
+            "io.pigloros.provider-id": PROTOTYPE_PROVIDER_ID,
+            "io.pigloros.scenario": scenario,
+        }
+        command = [
+            "/usr/bin/podman",
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--format={{.ID}}",
+        ]
+        for key, value in sorted(expected_labels.items()):
+            command.append(f"--filter=label={key}={value}")
+        candidates = [line for line in run(*command).stdout.splitlines() if line]
+        if candidates != [context["container_id"]]:
+            raise AssertionError(
+                f"barrier restart candidate discovery mismatch: {candidates!r}"
+            )
+        inspected = json.loads(
+            run("/usr/bin/podman", "inspect", context["container_id"]).stdout
+        )[0]
+        actual_labels = inspected["Config"]["Labels"]
+        if (
+            inspected["Id"] != context["container_id"]
+            or inspected["Created"] != context["created"]
+            or inspected["Image"] != context["image_id"]
+            or any(actual_labels.get(key) != value for key, value in expected_labels.items())
+        ):
+            raise AssertionError("barrier restart exact identity mismatch")
+        running_pid = int(inspected["State"]["Pid"])
+        if running_pid > 0 and (
+            running_pid != context["launcher_pid"]
+            or process_start_ticks(running_pid) != context["launcher_start_ticks"]
+        ):
+            raise AssertionError("barrier restart live PID identity mismatch")
+        logs_result = run(
+            "/usr/bin/podman", "logs", context["container_id"], check=False
+        )
+        logs = logs_result.stdout + logs_result.stderr
+        marker_observed = "HOLDING child=" in logs or context[
+            "released_adapter_marker"
+        ] is not None
+        if marker_observed != (target_stage == "after-release"):
+            raise AssertionError(
+                f"adapter execution did not match crash boundary: {target_stage} {logs!r}"
+            )
+        actions: list[str] = []
+        if inspected["State"]["Running"]:
+            run(
+                "/usr/bin/podman",
+                "stop",
+                "--time=1",
+                context["container_id"],
+                check=False,
+            )
+            actions.append("stop")
+            inspected = json.loads(
+                run("/usr/bin/podman", "inspect", context["container_id"]).stdout
+            )[0]
+            if inspected["State"]["Running"]:
+                run(
+                    "/usr/bin/podman",
+                    "kill",
+                    "--signal=KILL",
+                    context["container_id"],
+                )
+                actions.append("kill")
+        run("/usr/bin/podman", "rm", "--force", context["container_id"])
+        actions.append("remove")
+        cgroup_path = pathlib.Path(str(context["cgroup_path"]))
+        cgroup_empty = not cgroup_path.exists() or not read_text(
+            cgroup_path / "cgroup.procs"
+        ).strip()
+        command_pid = int(context["provider_command_pid"])
+        command_start_ticks = context["provider_command_start_ticks"]
+        command_deadline = time.monotonic() + 10
+        while (
+            pathlib.Path(f"/proc/{command_pid}").exists()
+            and process_start_ticks(command_pid) == command_start_ticks
+            and time.monotonic() < command_deadline
+        ):
+            time.sleep(0.02)
+        command_absent = (
+            not pathlib.Path(f"/proc/{command_pid}").exists()
+            or process_start_ticks(command_pid) != command_start_ticks
+        )
+        result = {
+            "adapter_executed": marker_observed,
+            "actions": actions,
+            "cgroup_empty_or_absent": cgroup_empty,
+            "container_absent": run(
+                "/usr/bin/podman", "inspect", context["container_id"], check=False
+            ).returncode
+            != 0,
+            "journal_record_count": len(journal),
+            "journal_tip_digest": journal[-1]["record_digest"],
+            "provider_command_absent_or_reused": command_absent,
+            "selected_terminal_code": 0,
+            "selected_terminal_name": "BrokerDied",
+            "stage": target_stage,
+        }
+        if not all(
+            result[field]
+            for field in (
+                "cgroup_empty_or_absent",
+                "container_absent",
+                "provider_command_absent_or_reused",
+            )
+        ):
+            raise AssertionError(f"barrier restart cleanup failed: {result!r}")
+        results.append(result)
+    signed_summary = signed_limit_observation(
+        "barrier-provider-death",
+        {
+            "result_count": len(results),
+            "result_digest": blake3(canonical(results)).hex(),
+            "stages": list(stages),
+        },
+    )
+    report = {
+        "results": results,
+        "signed_summary": signed_summary,
+        "verdict": (
+            "authenticated barrier stages fail closed on provider SIGKILL and restart "
+            "reconciliation removes the exact attempt"
+        ),
+    }
+    (artifact_dir / "barrier-provider-death.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if len(results) != len(stages) or not signed_summary["signature_verified"]:
+        raise AssertionError(f"barrier provider-death evidence failed: {report!r}")
 
 
 def transport_rejection_scenario(
@@ -3639,6 +3990,16 @@ def main() -> None:
         barrier_fixture,
     )
     cancellation_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_hold,
+    )
+    barrier_provider_death_scenario(
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,

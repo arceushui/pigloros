@@ -147,6 +147,7 @@ def main() -> None:
         "adapter-transport-runtime-rejections.json",
         "elm-provider-controls.json",
         "terminal-precedence-matrix.json",
+        "barrier-provider-death.json",
         "lifecycle-crash-matrix.json",
         "lifecycle-image-inspect.json",
         "release-barrier-runtime-rejections.json",
@@ -187,6 +188,45 @@ def main() -> None:
         "elm-memory.stderr",
         "elm-memory.stdout",
         "elm-swap.json",
+        *(
+            f"provider-death-{stage}.{suffix}"
+            for stage in (
+                "before-ready",
+                "after-ready",
+                "before-observe",
+                "after-observe",
+                "before-release",
+                "after-release",
+            )
+            for suffix in (
+                "crash-context.json",
+                "installed-seccomp.bpf",
+                "journal.json",
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "launcher.json",
+                "ready2.cbor",
+                "release2.cbor",
+                "release-barrier.json",
+                "seccomp-install.json",
+            )
+            if not (
+                (stage == "before-ready" and suffix in (
+                    "launcher.json",
+                    "ready2.cbor",
+                    "release2.cbor",
+                    "release-barrier.json",
+                ))
+                or (
+                    stage in ("after-ready", "before-observe")
+                    and suffix in ("launcher.json", "release2.cbor", "release-barrier.json")
+                )
+                or (
+                    stage in ("after-observe", "before-release")
+                    and suffix in ("release2.cbor", "release-barrier.json")
+                )
+            )
+        ),
         *(
             f"{scenario}.{suffix}"
             for scenario in (

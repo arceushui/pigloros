@@ -166,6 +166,17 @@ refusal and leave every candidate unchanged. Because Podman 4.9.3 does not offer
 authenticated launcher barrier; Ready, Observe, and Release crash boundaries
 remain a separate barrier-stage experiment.
 
+That complementary barrier experiment forks a provider for each side of Ready,
+Observe, and Release. Every provider persists a BLAKE3-linked, fsynced closed-
+state journal while traversing the unchanged authenticated ReadyV2/ReleaseV2
+path, then receives SIGKILL at the selected stage. Restart discovery requires
+the exact provider, attempt, nonce, image, container, creation, and live PID/start
+identity before touching the candidate. The five pre-release cases must contain
+no adapter descendant marker. The post-release case closes stdin, requires the
+real HOLDING descendant marker, then kills the provider. All six select terminal
+code 0 `BrokerDied`, remove the exact container and cgroup descendants, and bind
+their journal tips into a signed cross-case summary.
+
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported
 BPF. A valid-base64, one-byte mutation is exercised through real crun and must
