@@ -5181,6 +5181,15 @@ fn sqlite_recover_fork_admission(
         return Ok(None);
     };
     let recovered = receipt.recover(operation)?;
+    sqlite_verify_recovered_fork_child(conn, hasher, &recovered)?;
+    Ok(Some(recovered))
+}
+
+fn sqlite_verify_recovered_fork_child(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    recovered: &ErasureForkRecoveryV1,
+) -> Result<(), ErasureErrorV1> {
     let (parent, at_seq) = recovered
         .child()
         .fork_point
@@ -5190,7 +5199,7 @@ fn sqlite_recover_fork_admission(
     if !sqlite_timeline_is_exact(conn, recovered.child(), chain_head)? {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
-    Ok(Some(recovered))
+    Ok(())
 }
 
 fn sqlite_timeline_is_exact(

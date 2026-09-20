@@ -1512,6 +1512,14 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
             return Ok(None);
         };
+        self.verify_memory_fork_child(&result)?;
+        Ok(Some(result))
+    }
+
+    fn verify_memory_fork_child(
+        &self,
+        result: &ErasureForkRecoveryV1,
+    ) -> Result<(), ErasureErrorV1> {
         let (parent, at_seq) = result
             .child()
             .fork_point
@@ -1520,7 +1528,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
             .compute_chain_hash_at_unchecked(parent, at_seq)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         self.memory_fork_child_is_exact(result.child(), chain_head)
-            .then_some(Some(result))
+            .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 }

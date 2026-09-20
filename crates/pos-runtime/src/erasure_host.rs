@@ -1466,6 +1466,14 @@ impl ErasureExecutionHostV1 {
         inventory: ErasureVerifiedInventoryV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        self.publish_inventory_with_limits_inner(inventory, limits)
+    }
+
+    fn publish_inventory_with_limits_inner(
+        &mut self,
+        inventory: ErasureVerifiedInventoryV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         let request_count = inventory.request_count();
         let retained_inventory = Arc::new(inventory);
         let publication = self
@@ -1738,24 +1746,8 @@ impl ErasureExecutionHostV1 {
         let coordinator = self
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        let recovered = match self.store.host_store().recover_fork_admission(operation) {
-            Ok(recovered) => recovered,
-            Err(error) => {
-                self.poison();
-                return Err(map_erasure_error(error));
-            }
-        };
-        let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
-            Some(recovered_child)
-                if recovered_child.mode == TimelineMode::Historical
-                    && recovered_child.name.as_deref() == Some(name)
-                    && recovered_child.fork_point == Some((parent, at_seq)) =>
-            {
-                recovered_child.clone()
-            }
-            Some(_) => return Err(ErasureHostErrorV1::Conflict),
-            None => TimelineMeta::forked_from(parent, at_seq, name),
-        };
+        let (child, recovered) =
+            self.recover_identified_fork_child(operation, parent, at_seq, name)?;
         let transition = IdentifiedForkTransitionInput {
             operation,
             parent,
@@ -1776,6 +1768,34 @@ impl ErasureExecutionHostV1 {
             request_count,
         };
         Ok((timeline, generation))
+    }
+
+    fn recover_identified_fork_child(
+        &mut self,
+        operation: ErasureReferenceV1,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<(TimelineMeta, Option<ErasureForkRecoveryV1>), ErasureHostErrorV1> {
+        let recovered = match self.store.host_store().recover_fork_admission(operation) {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                self.poison();
+                return Err(map_erasure_error(error));
+            }
+        };
+        let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
+            Some(recovered_child)
+                if recovered_child.mode == TimelineMode::Historical
+                    && recovered_child.name.as_deref() == Some(name)
+                    && recovered_child.fork_point == Some((parent, at_seq)) =>
+            {
+                recovered_child.clone()
+            }
+            Some(_) => return Err(ErasureHostErrorV1::Conflict),
+            None => TimelineMeta::forked_from(parent, at_seq, name),
+        };
+        Ok((child, recovered))
     }
 
     fn apply_identified_fork_transition(
@@ -1977,34 +1997,29 @@ impl ErasureExecutionHostV1 {
         publication_error: ErasureHostErrorV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> ErasureHostErrorV1 {
-        let preserves_ready_host = transition_failure.is_some_and(|failure| {
-            matches!(
-                failure,
-                TransitionFailureV1::Erasure(error)
-                    if is_non_poisoning_transition_error(error)
-            )
-        });
-        let mapped = match transition_failure {
-            Some(TransitionFailureV1::Host(error)) => error,
-            Some(TransitionFailureV1::Erasure(error)) => map_erasure_error(error),
-            None => publication_error,
-        };
-        match transition_failure {
-            Some(TransitionFailureV1::Host(ErasureHostErrorV1::StaleGeneration)) => {
-                return mapped;
-            }
-            Some(TransitionFailureV1::Erasure(_))
-                if preserves_ready_host
-                    && self
-                        .install_inventory_from_coordinator_with_limits(limits)
-                        .is_ok() =>
-            {
-                return mapped;
-            }
-            _ => {}
+        let mapped = map_transition_failure(transition_failure, publication_error);
+        if self.preserves_transition_failure(transition_failure, limits) {
+            return mapped;
         }
         self.poison();
         mapped
+    }
+
+    fn preserves_transition_failure(
+        &mut self,
+        transition_failure: Option<TransitionFailureV1>,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> bool {
+        match transition_failure {
+            Some(TransitionFailureV1::Host(ErasureHostErrorV1::StaleGeneration)) => true,
+            Some(TransitionFailureV1::Erasure(error))
+                if is_non_poisoning_transition_error(error) =>
+            {
+                self.install_inventory_from_coordinator_with_limits(limits)
+                    .is_ok()
+            }
+            _ => false,
+        }
     }
 
     fn apply_coordinator_command(
@@ -3103,6 +3118,17 @@ const fn erasure_error_disposition(error: ErasureErrorV1) -> ErasureErrorDisposi
 
 const fn map_erasure_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
     erasure_error_disposition(error).host_error
+}
+
+const fn map_transition_failure(
+    transition_failure: Option<TransitionFailureV1>,
+    publication_error: ErasureHostErrorV1,
+) -> ErasureHostErrorV1 {
+    match transition_failure {
+        Some(TransitionFailureV1::Host(error)) => error,
+        Some(TransitionFailureV1::Erasure(error)) => map_erasure_error(error),
+        None => publication_error,
+    }
 }
 
 const fn is_non_poisoning_transition_error(error: ErasureErrorV1) -> bool {

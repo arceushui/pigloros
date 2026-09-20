@@ -1008,6 +1008,37 @@ impl ErasureContainmentGateV1 {
             Ok(())
         }
     }
+
+    fn authorize_with_fence_state(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        fence_active: bool,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if fence_active {
+            self.ensure_available()?;
+            return self.authorize_from_authority(timeline, operation);
+        }
+        let _fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
+        self.authorize_from_authority(timeline, operation)
+    }
+
+    fn authorize_from_authority(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let authority = self
+            .authority
+            .read()
+            .map_err(containment_recovery_failure)?
+            .clone();
+        self.authorize_state(timeline, operation, &authority)
+    }
 }
 
 impl ErasureGate for ErasureContainmentGateV1 {
@@ -1016,26 +1047,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
         timeline: TimelineId,
         operation: ErasureProtectedOperationV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
-        if self.is_fence_active() {
-            self.ensure_available()?;
-            let authority = self
-                .authority
-                .read()
-                .map_err(containment_recovery_failure)?
-                .clone();
-            return self.authorize_state(timeline, operation, &authority);
-        }
-        let _fence = self
-            .fence_lock
-            .lock()
-            .map_err(containment_recovery_failure)?;
-        self.ensure_available()?;
-        let authority = self
-            .authority
-            .read()
-            .map_err(containment_recovery_failure)?
-            .clone();
-        self.authorize_state(timeline, operation, &authority)
+        self.authorize_with_fence_state(timeline, operation, self.is_fence_active())
     }
 
     fn with_fence(
