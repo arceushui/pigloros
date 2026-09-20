@@ -2252,6 +2252,11 @@ impl ExperimentSession {
             .output_policy_digests()
             .map(|(name, digest)| (name.to_owned(), digest))
             .collect();
+        let replay_policy_identities: Vec<(String, Hash)> = self
+            .registry
+            .replay_policy_identities()
+            .map(|(name, identity)| (name.to_owned(), identity))
+            .collect();
         let consent_gate = self
             .operation_token
             .as_ref()
@@ -2281,6 +2286,9 @@ impl ExperimentSession {
                 }
                 for (name, digest) in &output_policy_digests {
                     manifest = manifest.with_output_policy_digest(name, *digest);
+                }
+                for (name, identity) in &replay_policy_identities {
+                    manifest = manifest.with_replay_policy_identity(name, *identity);
                 }
                 manifest
                     .adapter_records
@@ -2604,9 +2612,15 @@ impl BacktestRunner {
         for (name, digest) in train_registry.output_policy_digests() {
             train_manifest = train_manifest.with_output_policy_digest(name, digest);
         }
+        for (name, identity) in train_registry.replay_policy_identities() {
+            train_manifest = train_manifest.with_replay_policy_identity(name, identity);
+        }
         let mut eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
         for (name, digest) in eval_registry.output_policy_digests() {
             eval_manifest = eval_manifest.with_output_policy_digest(name, digest);
+        }
+        for (name, identity) in eval_registry.replay_policy_identities() {
+            eval_manifest = eval_manifest.with_replay_policy_identity(name, identity);
         }
         let eval_head_seq = store.logical_head(eval_tl_id)?;
         let train_result = build_backtest_run_result(

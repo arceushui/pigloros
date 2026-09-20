@@ -2646,8 +2646,18 @@ impl PluginRegistry {
         self.plugins.values().map(plugin_name_and_version)
     }
 
-    /// Iterate over the output-admission policy digests bound to registered Plugins.
+    /// Iterate over canonical output-admission policy digests bound to registered Plugins.
     pub fn output_policy_digests(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
+        self.plugins.values().filter_map(|entry| {
+            entry
+                .output_admission
+                .as_ref()
+                .map(|admission| (entry.name.as_str(), admission.policy_digest()))
+        })
+    }
+
+    /// Iterate over stable replay identities for registered output policies.
+    pub fn replay_policy_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
         self.plugins.values().filter_map(|entry| {
             entry
                 .output_admission

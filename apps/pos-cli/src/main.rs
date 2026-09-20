@@ -119,6 +119,7 @@ struct StrictReproManifest {
     created_at: WallTime,
     plugin_versions: std::collections::HashMap<String, String>,
     output_policy_digests: std::collections::HashMap<String, Hash>,
+    replay_policy_identities: std::collections::HashMap<String, Hash>,
     adapter_records: Vec<StrictAdapterRecord>,
     label: Option<String>,
 }
@@ -153,6 +154,7 @@ impl From<StrictReproManifest> for pos_core::ReproManifest {
             created_at: manifest.created_at,
             plugin_versions: manifest.plugin_versions,
             output_policy_digests: manifest.output_policy_digests,
+            replay_policy_identities: manifest.replay_policy_identities,
             adapter_records: manifest
                 .adapter_records
                 .into_iter()
@@ -789,8 +791,18 @@ fn reproduce_manifest(
     run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
         .and_then(|reproduced| {
             if reproduced.manifest.head_hash == reproduction.manifest.head_hash
-                && reproduced.manifest.output_policy_digests
-                    == reproduction.manifest.output_policy_digests
+                && reproduced.manifest.replay_policy_identities
+                    == reproduction.manifest.replay_policy_identities
+                && reproduced
+                    .manifest
+                    .output_policy_digests
+                    .keys()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == reproduction
+                        .manifest
+                        .output_policy_digests
+                        .keys()
+                        .collect::<std::collections::BTreeSet<_>>()
             {
                 output_stdout!("OK");
                 Ok(())
