@@ -6131,6 +6131,63 @@ mod tests {
     }
 
     #[test]
+    fn memory_ledger_initialization_covers_registry_and_rollback_boundaries() {
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+
+        let mut mismatch = new_store();
+        mismatch.save_key_registry(&persisted).test_ok();
+        assert!(matches!(
+            mismatch.initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                "mismatch",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(mismatch.list_timelines().test_ok().is_empty());
+
+        let mut existing = new_store();
+        let existing_timeline = existing.create_timeline("existing").test_ok();
+        let reused = existing
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                "existing",
+                &KeyRegistryStateV1::new(),
+            )
+            .test_ok();
+        assert_eq!(reused.id(), existing_timeline.id());
+        assert_eq!(
+            existing.load_key_registry().test_ok(),
+            Some(KeyRegistryStateV1::new())
+        );
+
+        let mut already_registered = new_store();
+        already_registered.save_key_registry(&persisted).test_ok();
+        let created = already_registered
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                "new-ledger",
+                &persisted,
+            )
+            .test_ok();
+        assert_eq!(created.meta.name.as_deref(), Some("new-ledger"));
+
+        let mut rollback = new_store();
+        assert!(matches!(
+            rollback.initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                "invalid-registry",
+                &invalid_registry(),
+            ),
+            Err(CoreError::Serialization(_))
+        ));
+        assert!(rollback.list_timelines().test_ok().is_empty());
+    }
+
+    #[test]
     fn memory_effect_read_rejects_a_mismatched_stored_digest() {
         let mut store = new_store();
         let manifest = ErasureReferenceV1::from_digest([1; 32]);

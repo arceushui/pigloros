@@ -11794,6 +11794,24 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_ledger_initialization_reports_missing_timeline_owner_storage() {
+        let mut store = new_store();
+        store.create_timeline("owner-storage-failure").test_ok();
+        store
+            .conn
+            .execute_batch("DROP TABLE timeline_owners")
+            .test_ok();
+
+        assert!(matches!(
+            store.initialize_timeline_with_key_registry(
+                "owner-storage-failure",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+    }
+
+    #[test]
     fn sqlite_key_registry_persists_and_rejects_stale_authorization() {
         let mut store = new_store();
         let mut persisted = KeyRegistryStateV1::new();
