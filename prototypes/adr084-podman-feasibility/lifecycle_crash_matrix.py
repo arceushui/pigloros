@@ -441,7 +441,17 @@ def exact_identity_matches(
 def last_recorded_identity(records: list[dict[str, object]]) -> dict[str, object] | None:
     for record in reversed(records):
         details = record["details"]
-        if isinstance(details, dict) and "container_id" in details:
+        if isinstance(details, dict) and all(
+            field in details
+            for field in (
+                "container_id",
+                "created",
+                "image_id",
+                "pid",
+                "pid_start_ticks",
+                "running",
+            )
+        ):
             return details
     return None
 
