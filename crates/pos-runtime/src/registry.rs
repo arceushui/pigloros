@@ -1966,10 +1966,6 @@ impl PluginRegistry {
         let Some(pending) = self.take_legacy_pending_step()? else {
             return Err(RuntimeError::PendingDriverStep);
         };
-        if drafts != pending.staged_drafts.as_slice() {
-            let _ = self.abort_drivers(&pending.driver_ids);
-            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
-        }
         let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
@@ -1991,6 +1987,10 @@ impl PluginRegistry {
                 }) {
                     let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(error);
+                }
+                if drafts != pending.staged_drafts.as_slice() {
+                    let _ = self.abort_drivers(&pending.driver_ids);
+                    return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
                 }
                 let mut append_result = Ok(Vec::new());
                 let mut append = || {
@@ -2034,6 +2034,10 @@ impl PluginRegistry {
                 }) {
                     let _ = self.abort_drivers(&pending.driver_ids);
                     return Err(error);
+                }
+                if drafts != pending.staged_drafts.as_slice() {
+                    let _ = self.abort_drivers(&pending.driver_ids);
+                    return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
                 }
                 match self.append_with_erasure_fence(store, pending_timeline, drafts) {
                     Ok(events) => events,
