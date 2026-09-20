@@ -204,6 +204,36 @@ int main(void) {
     if (length == eai1_memory_limit_len &&
         memcmp(input, eai1_memory_limit, length) == 0) {
         const size_t arena_size = 48U * 1024U * 1024U;
+        int backing = open("/memory-reclaimable", O_RDONLY | O_CLOEXEC);
+        if (backing == -1) {
+            fail("memory-limit-backing-open");
+        }
+        int advice = posix_fadvise(backing, 0, (off_t)arena_size,
+                                   POSIX_FADV_DONTNEED);
+        if (advice != 0) {
+            errno = advice;
+            fail("memory-limit-backing-drop");
+        }
+        unsigned char block[4096];
+        unsigned char checksum = 0;
+        size_t file_bytes = 0;
+        for (;;) {
+            ssize_t received = read(backing, block, sizeof(block));
+            if (received == -1) {
+                fail("memory-limit-backing-read");
+            }
+            if (received == 0) {
+                break;
+            }
+            file_bytes += (size_t)received;
+            for (ssize_t offset = 0; offset < received; ++offset) {
+                checksum ^= block[offset];
+            }
+        }
+        if (file_bytes != arena_size || close(backing) == -1) {
+            errno = EPROTO;
+            fail("memory-limit-backing-size");
+        }
         volatile unsigned char *retained = mmap(
             NULL, arena_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
             -1, 0);
@@ -213,37 +243,9 @@ int main(void) {
         for (size_t offset = 0; offset < arena_size; offset += 4096U) {
             retained[offset] = (unsigned char)(offset >> 12);
         }
-        int pipes[30][2];
-        unsigned char block[4096] = {0};
-        size_t pipe_bytes = 0;
-        int allocation_errno = 0;
-        for (size_t pipe_index = 0; pipe_index < 30U; ++pipe_index) {
-            if (pipe2(pipes[pipe_index], O_NONBLOCK | O_CLOEXEC) == -1) {
-                fail("memory-limit-pipe");
-            }
-            if (fcntl(pipes[pipe_index][1], F_SETPIPE_SZ, 1024 * 1024) == -1) {
-                fail("memory-limit-pipe-size");
-            }
-            for (;;) {
-                ssize_t written =
-                    write(pipes[pipe_index][1], block, sizeof(block));
-                if (written > 0) {
-                    pipe_bytes += (size_t)written;
-                    continue;
-                }
-                if (written == -1 && (errno == EAGAIN || errno == ENOMEM)) {
-                    allocation_errno = errno;
-                    break;
-                }
-                fail("memory-limit-pipe-write");
-            }
-            if (allocation_errno == ENOMEM) {
-                break;
-            }
-        }
         dprintf(STDERR_FILENO,
-                "MEMORY_LIMIT_SURVIVED pipe_bytes=%zu allocation_errno=%d\n",
-                pipe_bytes, allocation_errno);
+                "MEMORY_LIMIT_SURVIVED file_bytes=%zu checksum=%u\n",
+                file_bytes, (unsigned int)checksum);
         for (;;) {
             pause();
         }

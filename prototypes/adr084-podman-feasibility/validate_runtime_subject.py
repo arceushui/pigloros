@@ -73,6 +73,7 @@ def main() -> None:
         "/foreign-probe",
         "/launcher",
         "/libseccomp-interface-v1.txt",
+        "/memory-reclaimable",
         "/native-matrix",
         "/seccomp-probe",
     }:

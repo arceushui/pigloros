@@ -62,11 +62,10 @@ counters under `memory.swap.max=0`; a missing `max` delta is reported as a
 separate SwapBytes candidate incompatibility rather than inferred from OOM.
 
 A separate canonical MEMORY_LIMIT attempt tests whether the provider can select
-code 4 `MemoryLimit` without relabelling an OOM. The adapter faults a 48 MiB
-retained anonymous arena, then fills up to thirty nonblocking 1 MiB pipe
-buffers. Pipe-page allocation can return `ENOMEM` without invoking the OOM
-killer, unlike regular order-0 anonymous faults. The provider selects code 4
-only if the
+code 4 `MemoryLimit` without relabelling an OOM. The adapter first evicts and
+then reads a 48 MiB clean file from the signed throwaway rootfs, first-charging
+its reclaimable page cache to the attempt cgroup. It then faults a 48 MiB
+retained anonymous arena. The provider selects code 4 only if the
 local `max` counter advances, both `oom` and `oom_kill` remain unchanged, and
 the adapter emits its survival marker while it is still running. The signed
 observation and cleanup proof are retained. If the hosted kernel or admitted
