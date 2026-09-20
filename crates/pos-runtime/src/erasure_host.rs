@@ -3088,11 +3088,13 @@ mod tests {
         EventStore,
     }
 
+    type TimelineCreatedHookV1 = Arc<dyn Fn(TimelineId) + Send + Sync>;
+
     struct FaultStoreV1 {
         inner: MemoryStore,
         fault: FaultModeV1,
         resolve_control: Arc<ResolveStateControlV1>,
-        timeline_created_hook: Option<Arc<dyn Fn(TimelineId) + Send + Sync>>,
+        timeline_created_hook: Option<TimelineCreatedHookV1>,
     }
 
     #[derive(Clone, Copy)]

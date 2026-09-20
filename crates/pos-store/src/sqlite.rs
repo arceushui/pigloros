@@ -3601,7 +3601,12 @@ impl SqliteStore {
             });
         }
 
-        let fork_hash = self.compute_chain_hash_at_unchecked_on(parent, at_seq)?;
+        let fork_hash = Self::compute_chain_hash_at_unchecked_on(
+            &self.conn,
+            self.hasher.as_ref(),
+            parent,
+            at_seq,
+        )?;
         let meta = self.timeline_owner(parent)?.map_or_else(
             || TimelineMeta::forked_from(parent, at_seq, name),
             |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
