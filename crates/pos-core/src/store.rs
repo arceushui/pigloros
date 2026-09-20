@@ -4386,7 +4386,7 @@ mod key_registry_coverage {
                 ),
                 Err(CoreError::Storage(_))
             ));
-            Ok((inventory, ()))
+            Ok((inventory.clone(), ()))
         };
         assert!(gate
             .install_from_verified_inventory_transition(&mut transition)
