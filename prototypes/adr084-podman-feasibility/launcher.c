@@ -172,10 +172,56 @@ static void expect_text(struct cursor *cursor, const char *expected) {
     cursor->next += length;
 }
 
+static bool valid_utf8(const uint8_t *value, size_t length) {
+    size_t index = 0;
+    while (index < length) {
+        uint8_t first = value[index++];
+        if (first <= 0x7fU) {
+            continue;
+        }
+        size_t continuation_count;
+        uint32_t code_point;
+        uint32_t minimum;
+        if (first >= 0xc2U && first <= 0xdfU) {
+            continuation_count = 1;
+            code_point = first & 0x1fU;
+            minimum = 0x80U;
+        } else if (first >= 0xe0U && first <= 0xefU) {
+            continuation_count = 2;
+            code_point = first & 0x0fU;
+            minimum = 0x800U;
+        } else if (first >= 0xf0U && first <= 0xf4U) {
+            continuation_count = 3;
+            code_point = first & 0x07U;
+            minimum = 0x10000U;
+        } else {
+            return false;
+        }
+        if (continuation_count > length - index) {
+            return false;
+        }
+        for (size_t offset = 0; offset < continuation_count; ++offset) {
+            uint8_t continuation = value[index++];
+            if ((continuation & 0xc0U) != 0x80U) {
+                return false;
+            }
+            code_point = (code_point << 6) | (continuation & 0x3fU);
+        }
+        if (code_point < minimum || code_point > 0x10ffffU ||
+            (code_point >= 0xd800U && code_point <= 0xdfffU)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void skip_text(struct cursor *cursor) {
     uint64_t length = read_head(cursor, 3);
     if (length > (uint64_t)(cursor->end - cursor->next)) {
         protocol_fail("cbor-text");
+    }
+    if (!valid_utf8(cursor->next, (size_t)length)) {
+        protocol_fail("cbor-text-utf8");
     }
     cursor->next += (size_t)length;
 }
