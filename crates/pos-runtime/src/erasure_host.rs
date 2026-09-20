@@ -75,6 +75,18 @@ struct IdentifiedForkTransitionInput<'a> {
     recovered: Option<ErasureForkRecoveryV1>,
 }
 
+struct IdentifiedForkApplicationInput<'a> {
+    operation: ErasureReferenceV1,
+    parent: TimelineId,
+    at_seq: Seq,
+    name: &'a str,
+    current_generation: ErasureReferenceV1,
+    maximum_requests: usize,
+    current_inventory: &'a ErasureVerifiedInventoryV1,
+    authority: &'a dyn ErasureCoordinatorAuthorityV1,
+    coordinator: ErasureReferenceV1,
+}
+
 struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1746,41 +1758,38 @@ impl ErasureExecutionHostV1 {
         let coordinator = self
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        self.apply_identified_fork_with_recovery(
+        let input = IdentifiedForkApplicationInput {
             operation,
             parent,
             at_seq,
             name,
             current_generation,
             maximum_requests,
-            &current_inventory,
-            authority.as_ref(),
+            current_inventory: &current_inventory,
+            authority: authority.as_ref(),
             coordinator,
-        )
+        };
+        self.apply_identified_fork_with_recovery(&input)
     }
 
     fn apply_identified_fork_with_recovery(
         &mut self,
-        operation: ErasureReferenceV1,
-        parent: TimelineId,
-        at_seq: Seq,
-        name: &str,
-        current_generation: ErasureReferenceV1,
-        maximum_requests: usize,
-        current_inventory: &ErasureVerifiedInventoryV1,
-        authority: &dyn ErasureCoordinatorAuthorityV1,
-        coordinator: ErasureReferenceV1,
+        input: &IdentifiedForkApplicationInput<'_>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        let (child, recovered) =
-            self.recover_identified_fork_child(operation, parent, at_seq, name)?;
+        let (child, recovered) = self.recover_identified_fork_child(
+            input.operation,
+            input.parent,
+            input.at_seq,
+            input.name,
+        )?;
         let transition = IdentifiedForkTransitionInput {
-            operation,
-            parent,
+            operation: input.operation,
+            parent: input.parent,
             child: &child,
-            current_generation,
-            current_inventory,
-            authority,
-            coordinator,
+            current_generation: input.current_generation,
+            current_inventory: input.current_inventory,
+            authority: input.authority,
+            coordinator: input.coordinator,
             recovered,
         };
         let (inventory, timeline) = self.apply_identified_fork_transition(&transition)?;
@@ -1789,7 +1798,7 @@ impl ErasureExecutionHostV1 {
         self.inventory = Some(Arc::new(inventory));
         self.state = HostStateV1::Ready {
             generation,
-            maximum_requests,
+            maximum_requests: input.maximum_requests,
             request_count,
         };
         Ok((timeline, generation))
