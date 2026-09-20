@@ -4018,6 +4018,7 @@ mod tests {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                test_only_driver: false,
             },
         );
 
