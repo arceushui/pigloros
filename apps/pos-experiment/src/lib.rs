@@ -6667,25 +6667,6 @@ mod coverage_entrypoints {
         }
     }
 
-    struct EmptyOutputPlugin;
-
-    impl Plugin for EmptyOutputPlugin {
-        fn id(&self) -> PluginId {
-            PluginId::new()
-        }
-
-        fn name(&self) -> &'static str {
-            "coverage-empty-output-plugin"
-        }
-
-        fn capability(&self) -> Capability {
-            Capability {
-                has_driver: true,
-                ..Capability::default()
-            }
-        }
-    }
-
     struct UnknownDraftDriver;
 
     impl Driver for UnknownDraftDriver {
@@ -7276,7 +7257,7 @@ mod coverage_entrypoints {
         let mut store = test_memory_store();
         let timeline = ok(store.create_timeline("coverage-schema-failure"));
         let mut registry = test_registry();
-        ok(registry.register(&EmptyOutputPlugin, None, Some(Box::new(UnknownDraftDriver))));
+        registry.register_test_driver(Box::new(UnknownDraftDriver));
         assert!(append_driver_drafts(
             &mut store,
             timeline.id(),
@@ -7293,9 +7274,9 @@ mod coverage_entrypoints {
             StopCondition::MaxTicks(1),
         ))
         .start());
-        ok(session
+        session
             .registry
-            .register(&EmptyOutputPlugin, None, Some(Box::new(UnknownDraftDriver))));
+            .register_test_driver(Box::new(UnknownDraftDriver));
         assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::Runtime(_))
