@@ -415,10 +415,10 @@ pub struct ErasureTopologyTransitionPermitV1 {
 }
 
 /// Callback used by the host-owned inventory transition fence.
-pub type ErasureInventoryTransitionV1<T> =
-    dyn for<'a> FnMut(
+pub type ErasureInventoryTransitionV1<'transition, T> = dyn for<'a> FnMut(
         &'a ErasureTopologyTransitionPermitV1,
-    ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureErrorV1>;
+    ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureErrorV1>
+    + 'transition;
 
 #[derive(Clone, Default)]
 struct ErasureGateStateV1 {
@@ -848,9 +848,9 @@ impl ErasureContainmentGateV1 {
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
     /// gate is unavailable, the transition cannot produce a complete verified
     /// inventory, or a host lock is poisoned.
-    pub fn install_from_verified_inventory_transition<T>(
+    pub fn install_from_verified_inventory_transition<'transition, T>(
         &self,
-        transition: &mut ErasureInventoryTransitionV1<T>,
+        transition: &mut ErasureInventoryTransitionV1<'transition, T>,
     ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureContainmentErrorV1> {
         self.ensure_available()?;
         let _fence = self
