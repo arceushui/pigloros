@@ -1995,12 +1995,19 @@ impl ErasureExecutionHostV1 {
             Some(TransitionFailureV1::Erasure(error)) => map_erasure_error(error),
             None => publication_error,
         };
-        if preserves_ready_host
-            && self
-                .install_inventory_from_coordinator_with_limits(limits)
-                .is_ok()
-        {
-            return mapped;
+        match transition_failure {
+            Some(TransitionFailureV1::Host(ErasureHostErrorV1::StaleGeneration)) => {
+                return mapped;
+            }
+            Some(TransitionFailureV1::Erasure(_)) if preserves_ready_host => {
+                if self
+                    .install_inventory_from_coordinator_with_limits(limits)
+                    .is_ok()
+                {
+                    return mapped;
+                }
+            }
+            _ => {}
         }
         self.poison();
         mapped
