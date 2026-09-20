@@ -408,6 +408,42 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
 }
 
 #[test]
+fn registry_rejects_policy_declarations_outside_plugin_capability() -> TestResult {
+    let plugin_id = PluginId::new();
+    let budget = budget(plugin_id)?;
+    let declaration = OutputDeclarationV1::new(
+        "plugin.foreign".to_owned(),
+        OutputAuthorityV1::Authoritative,
+        OutputFidelityV1::L0,
+        16,
+        None,
+        None,
+    )?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: "1.0.0".to_owned(),
+        implementation_hash: Hash::from_bytes([1; 32]),
+        base_configuration_digest: Hash::from_bytes([2; 32]),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: Hash::from_bytes([3; 32]),
+        policy_revision: 1,
+        output_declarations: vec![declaration],
+    })?;
+    let mut registry = PluginRegistry::new();
+    assert!(matches!(
+        registry.register_with_output_policy(
+            &FixturePlugin { id: plugin_id },
+            policy,
+            budget,
+            None,
+            None,
+        ),
+        Err(RuntimeError::CapabilityMismatch { .. })
+    ));
+    Ok(())
+}
+
+#[test]
 fn generated_registration_binds_owned_output_policy() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
