@@ -5100,7 +5100,7 @@ mod tests {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
 
-        host.authority = Some(authority);
+        host.authority = Some(Arc::clone(&authority));
         host.coordinator = None;
         assert_eq!(
             host.command_sender()
