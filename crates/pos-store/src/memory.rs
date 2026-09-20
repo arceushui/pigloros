@@ -6180,7 +6180,7 @@ mod tests {
         assert!(matches!(
             rollback.initialize_timeline_with_key_registry_for_host_transition_unchecked(
                 "invalid-registry",
-                &invalid_registry(),
+                &super::coverage_entrypoints::invalid_registry(),
             ),
             Err(CoreError::Serialization(_))
         ));
@@ -6386,7 +6386,7 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn invalid_registry() -> KeyRegistryStateV1 {
+    pub(super) fn invalid_registry() -> KeyRegistryStateV1 {
         fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
             match value {
                 ciborium::value::Value::Integer(integer)
