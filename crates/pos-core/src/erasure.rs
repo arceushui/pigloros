@@ -848,9 +848,9 @@ impl ErasureContainmentGateV1 {
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
     /// gate is unavailable, the transition cannot produce a complete verified
     /// inventory, or a host lock is poisoned.
-    pub fn install_from_verified_inventory_transition<'transition, T>(
+    pub fn install_from_verified_inventory_transition<T>(
         &self,
-        transition: &mut ErasureInventoryTransitionV1<'transition, T>,
+        transition: &mut ErasureInventoryTransitionV1<'_, T>,
     ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureContainmentErrorV1> {
         self.ensure_available()?;
         let _fence = self
