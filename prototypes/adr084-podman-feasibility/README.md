@@ -28,11 +28,18 @@ minimal, deadline-free cache-bypass witness; and one executes the closed native
 syscall-number matrix. The prototype intentionally lives only on the throwaway
 evidence branch.
 
+The normal attempt and cancellation attempt now cross stdin as canonical,
+length-prefixed CBOR EAI1 streams with authenticated BLAKE3 transcripts. The
+normal adapter result crosses stdout as a canonical EAO1 stream. The provider
+driver independently decodes the frames, verifies canonical encoding, member
+digests, and both transcripts; the adapter accepts only the two generated
+throwaway vectors, so this remains a byte-preservation proof rather than a
+production transport implementation.
+
 The canonical ADRs remain Proposed. A green workflow proves only the bounded
 claims named by its retained artifacts; the complete ADR acceptance matrix,
-production provider, native source coverage, canonical EAI1/EAO1 framing,
-installed-BPF capture, complete lifecycle/crash matrix, and ticket rewrites
-remain separate.
+production provider, native source coverage, a general-purpose transport codec,
+complete lifecycle/crash matrix, and ticket rewrites remain separate.
 
 The command below is documentation for the remote workflow. Do not run it in a
 developer worktree; the evidence is produced only by the dedicated GitHub

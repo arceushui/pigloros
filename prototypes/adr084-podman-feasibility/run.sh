@@ -47,7 +47,10 @@ jq -e '.host.ociRuntime.name == "crun" or .host.ociRuntime.path == "/usr/bin/cru
   "${artifact_dir}/podman-info.json" >/dev/null
 
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototype_dir}/launcher.c"
-musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
+python3 "${prototype_dir}/generate_adapter_transport.py" "${build_dir}"
+cp "${build_dir}/adapter-transport-vectors.json" "${artifact_dir}/"
+musl-gcc -static -Os -Wall -Wextra -Werror -I"${build_dir}" \
+  -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/cache-probe" \
   "${prototype_dir}/cache_probe.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/native-matrix" \
@@ -187,6 +190,9 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --distinct-scs1 "${distinct_scs1}" \
   --seccomp-tracer "${build_dir}/trace-seccomp" \
   --prefilter "${build_dir}/prefilter-exec" \
+  --eai1-hello "${build_dir}/eai1_hello.bin" \
+  --eai1-hold "${build_dir}/eai1_hold.bin" \
+  --eao1-hello "${build_dir}/eao1_hello.bin" \
   --artifact-dir "${artifact_dir}"
 
 python3 "${prototype_dir}/write_evidence_manifest.py" \

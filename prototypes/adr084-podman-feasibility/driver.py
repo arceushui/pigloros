@@ -21,9 +21,111 @@ import sys
 import time
 import uuid
 
+import cbor2
+
+
+ATTEMPT_DOMAIN = b"PiglorOS.EvaluatorAttemptStream.v1\0"
+OBSERVATION_DOMAIN = b"PiglorOS.EvaluatorObservationStream.v1\0"
+
 
 def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(arguments, check=check, text=True, capture_output=True)
+
+
+def blake3(value: bytes) -> bytes:
+    result = subprocess.run(
+        ["/usr/bin/b3sum", "--raw"], input=value, check=True, capture_output=True
+    ).stdout
+    if len(result) != 32:
+        raise AssertionError("b3sum returned a non-256-bit digest")
+    return result
+
+
+def transport_frames(stream: bytes) -> list[tuple[bytes, object]]:
+    frames: list[tuple[bytes, object]] = []
+    offset = 0
+    while offset < len(stream):
+        if len(stream) - offset < 4:
+            raise ValueError("truncated transport frame prefix")
+        length = int.from_bytes(stream[offset : offset + 4], "big")
+        if length == 0 or length > 128 * 1024:
+            raise ValueError("transport frame length is out of bounds")
+        end = offset + 4 + length
+        if end > len(stream):
+            raise ValueError("truncated transport frame")
+        framed = stream[offset:end]
+        encoded = framed[4:]
+        value = cbor2.loads(encoded)
+        if cbor2.dumps(value, canonical=True) != encoded:
+            raise ValueError("transport frame is not canonical CBOR")
+        frames.append((framed, value))
+        offset = end
+    return frames
+
+
+def validate_eai1(stream: bytes, expected_payload: bytes) -> dict[str, object]:
+    frames = transport_frames(stream)
+    values = [value for _, value in frames]
+    if len(values) != 6:
+        raise ValueError("unexpected EAI1 frame count")
+    header = values[0]
+    expected_header = [
+        "EAI1",
+        1,
+        "adr084-probe",
+        0,
+        0,
+        0,
+        blake3(b"adr084-fixture"),
+        [1048576, 1000, 1000, 1000, 65536, 65536, 1000, 1000000000],
+        1000,
+        False,
+        0,
+        2,
+        65536,
+        131072,
+    ]
+    if header != expected_header:
+        raise ValueError("invalid EAI1 header")
+    artifacts = ((0, b"opaque-schema-v1"), (1, expected_payload))
+    for artifact_index, (role, expected) in enumerate(artifacts):
+        member = values[1 + artifact_index * 2]
+        chunk = values[2 + artifact_index * 2]
+        if member != ["EIM1", 1, role, 0, len(expected), blake3(expected), 1]:
+            raise ValueError("invalid EAI1 member header")
+        if chunk != ["EIB1", 1, role, 0, 0, expected]:
+            raise ValueError("invalid EAI1 member chunk")
+    transcript = blake3(ATTEMPT_DOMAIN + b"".join(frame for frame, _ in frames[:-1]))
+    if values[-1] != ["EIE1", 1, transcript]:
+        raise ValueError("invalid EAI1 transcript")
+    return {
+        "bytes": len(stream),
+        "frames": len(frames),
+        "payload_sha256": hashlib.sha256(expected_payload).hexdigest(),
+        "transcript_blake3": transcript.hex(),
+    }
+
+
+def validate_eao1(stream: bytes, expected_output: bytes) -> dict[str, object]:
+    frames = transport_frames(stream)
+    values = [value for _, value in frames]
+    if len(values) != 3 or values[:2] != [["EAO1", 1], ["EOB1", 1, 0, expected_output]]:
+        raise ValueError("invalid EAO1 start/output frames")
+    transcript = blake3(
+        OBSERVATION_DOMAIN + b"".join(frame for frame, _ in frames[:-1])
+    )
+    terminal = [
+        "EOE1", 1, 0, len(expected_output), blake3(expected_output), None, None,
+        [0] * 8, transcript,
+    ]
+    if values[-1] != terminal:
+        raise ValueError("invalid EAO1 terminal/transcript")
+    return {
+        "bytes": len(stream),
+        "frames": len(frames),
+        "output_sha256": hashlib.sha256(expected_output).hexdigest(),
+        "transcript_blake3": transcript.hex(),
+    }
 
 
 def wait_for_container(name: str, process: subprocess.Popen[bytes]) -> str:
@@ -440,6 +542,8 @@ def normal_scenario(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    eai1_hello: bytes,
+    eao1_hello: bytes,
 ) -> None:
     process, control, container_id = launch(
         image,
@@ -448,7 +552,7 @@ def normal_scenario(
         seccomp_bpf,
         seccomp_tracer,
         artifact_dir,
-        b"hello\n",
+        eai1_hello,
         "normal",
     )
     assert process.stdin is not None
@@ -461,7 +565,13 @@ def normal_scenario(
     control.close()
     (artifact_dir / "normal.stdout").write_bytes(output)
     (artifact_dir / "normal.stderr").write_bytes(errors)
-    if return_code != 0 or output != b"EAO1:hello\n":
+    validation = validate_eao1(output, b"hello\n")
+    if output != eao1_hello:
+        raise AssertionError("adapter EAO1 differs from independently validated vector")
+    (artifact_dir / "normal-transport-validation.json").write_text(
+        json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if return_code != 0:
         raise AssertionError(
             f"normal adapter failed: code={return_code} output={output!r} stderr={errors!r}"
         )
@@ -475,6 +585,7 @@ def cancellation_scenario(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    eai1_hold: bytes,
 ) -> None:
     process, control, container_id = launch(
         image,
@@ -483,17 +594,19 @@ def cancellation_scenario(
         seccomp_bpf,
         seccomp_tracer,
         artifact_dir,
-        b"HOLD\n",
+        eai1_hold,
         "cancel",
     )
-    assert process.stdout is not None
-    readable, _, _ = select.select([process.stdout], [], [], 10)
+    assert process.stdin is not None
+    process.stdin.close()
+    assert process.stderr is not None
+    readable, _, _ = select.select([process.stderr], [], [], 10)
     if not readable:
         raise TimeoutError("holding adapter did not report its descendant")
-    holding = process.stdout.readline()
+    holding = process.stderr.readline()
     if not holding.startswith(b"HOLDING child="):
         raise AssertionError(f"unexpected holding output: {holding!r}")
-    (artifact_dir / "cancel.stdout").write_bytes(holding)
+    (artifact_dir / "cancel.stderr").write_bytes(holding)
     before = json.loads((artifact_dir / "cancel.launcher.json").read_text(encoding="utf-8"))
     cgroup_path = pathlib.Path(before["cgroup_path"])
     run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
@@ -511,6 +624,72 @@ def cancellation_scenario(
     if residual:
         raise AssertionError(f"descendants survived cancellation: {residual}")
     run("/usr/bin/podman", "rm", "--force", container_id)
+
+
+def transport_rejection_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    valid: bytes,
+) -> None:
+    magic_offset = valid.index(b"EAI1")
+    mutations = {
+        "changed-magic": valid[:magic_offset] + b"X" + valid[magic_offset + 1 :],
+        "changed-transcript": valid[:-1] + bytes([valid[-1] ^ 1]),
+        "truncated": valid[:-1],
+        "trailing": valid + b"\x00",
+    }
+    observations = []
+    for label, malformed in mutations.items():
+        scenario = f"transport-reject-{label}"
+        process, control, container_id = launch(
+            image,
+            seccomp,
+            seccomp_bpf_base64,
+            seccomp_bpf,
+            seccomp_tracer,
+            artifact_dir,
+            malformed,
+            scenario,
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        process.stdin.close()
+        output = process.stdout.read()
+        errors = process.stderr.read()
+        return_code = process.wait(timeout=20)
+        control.close()
+        run("/usr/bin/podman", "rm", "--force", container_id)
+        (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+        (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+        if return_code == 0 or output or b"adapter-error:input-" not in errors:
+            raise AssertionError(
+                f"adapter accepted malformed EAI1 {label}: "
+                f"code={return_code} output={output!r} stderr={errors!r}"
+            )
+        observations.append(
+            {
+                "mutation": label,
+                "return_code": return_code,
+                "stderr": errors.decode("utf-8", errors="replace").strip(),
+            }
+        )
+    (artifact_dir / "adapter-transport-runtime-rejections.json").write_text(
+        json.dumps(
+            {
+                "cases": observations,
+                "verdict": "all incomplete, changed, or trailing EAI1 streams rejected",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def stacked_filter_scenario(
@@ -1249,6 +1428,9 @@ def main() -> None:
     parser.add_argument("--distinct-scs1", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-tracer", required=True, type=pathlib.Path)
     parser.add_argument("--prefilter", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-hello", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-hold", required=True, type=pathlib.Path)
+    parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -1262,6 +1444,22 @@ def main() -> None:
             if line.startswith(("NoNewPrivs:", "Seccomp:", "Seccomp_filters:"))
         )
         + "\n",
+        encoding="utf-8",
+    )
+    eai1_hello = arguments.eai1_hello.read_bytes()
+    eai1_hold = arguments.eai1_hold.read_bytes()
+    eao1_hello = arguments.eao1_hello.read_bytes()
+    (arguments.artifact_dir / "normal.eai1").write_bytes(eai1_hello)
+    (arguments.artifact_dir / "cancel.eai1").write_bytes(eai1_hold)
+    (arguments.artifact_dir / "expected.eao1").write_bytes(eao1_hello)
+    transport_report = {
+        "eai1_hello": validate_eai1(eai1_hello, b"hello\n"),
+        "eai1_hold": validate_eai1(eai1_hold, b"HOLD\n"),
+        "eao1_hello": validate_eao1(eao1_hello, b"hello\n"),
+        "verdict": "canonical framed streams independently validated before launch",
+    }
+    (arguments.artifact_dir / "adapter-transport-validation.json").write_text(
+        json.dumps(transport_report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     seccomp_bpf_base64 = arguments.seccomp_bpf_base64.read_text(
@@ -1293,6 +1491,8 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+        eai1_hello,
+        eao1_hello,
     )
     cancellation_scenario(
         arguments.image,
@@ -1301,6 +1501,16 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+        eai1_hold,
+    )
+    transport_rejection_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        eai1_hello,
     )
     stacked_filter_scenario(
         arguments.image,

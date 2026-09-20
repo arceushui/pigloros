@@ -15,11 +15,24 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "adapter_transport_vectors.h"
+
 extern char **environ;
 
 static void fail(const char *message) {
     dprintf(STDERR_FILENO, "adapter-error:%s:%s\n", message, strerror(errno));
     _exit(71);
+}
+
+static void write_all(const unsigned char *bytes, size_t length) {
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t written = write(STDOUT_FILENO, bytes + offset, length - offset);
+        if (written <= 0) {
+            fail("output");
+        }
+        offset += (size_t)written;
+    }
 }
 
 static void verify_boundary(void) {
@@ -100,14 +113,33 @@ static void verify_boundary(void) {
 }
 
 int main(void) {
-    char input[64];
-    ssize_t length = read(STDIN_FILENO, input, sizeof(input));
-    if (length <= 0) {
-        fail("input");
-    }
+    unsigned char input[4096];
+    size_t length = 0;
     verify_boundary();
+    for (;;) {
+        if (length == sizeof(input)) {
+            errno = EPROTO;
+            fail("input-limit");
+        }
+        ssize_t received = read(STDIN_FILENO, input + length, sizeof(input) - length);
+        if (received < 0) {
+            fail("input-read");
+        }
+        if (received == 0) {
+            break;
+        }
+        length += (size_t)received;
+        bool hello_prefix = length <= eai1_hello_len &&
+                            memcmp(input, eai1_hello, length) == 0;
+        bool hold_prefix = length <= eai1_hold_len &&
+                           memcmp(input, eai1_hold, length) == 0;
+        if (!hello_prefix && !hold_prefix) {
+            errno = EPROTO;
+            fail("input-authentication");
+        }
+    }
 
-    if (length == 5 && memcmp(input, "HOLD\n", 5) == 0) {
+    if (length == eai1_hold_len && memcmp(input, eai1_hold, length) == 0) {
         pid_t child = fork();
         if (child == -1) {
             fail("fork");
@@ -117,16 +149,15 @@ int main(void) {
                 pause();
             }
         }
-        dprintf(STDOUT_FILENO, "HOLDING child=%ld\n", (long)child);
+        dprintf(STDERR_FILENO, "HOLDING child=%ld\n", (long)child);
         for (;;) {
             pause();
         }
     }
-
-    static const char prefix[] = "EAO1:";
-    if (write(STDOUT_FILENO, prefix, sizeof(prefix) - 1) != (ssize_t)(sizeof(prefix) - 1) ||
-        write(STDOUT_FILENO, input, (size_t)length) != length) {
-        fail("output");
+    if (length != eai1_hello_len || memcmp(input, eai1_hello, length) != 0) {
+        errno = EPROTO;
+        fail("input-selection");
     }
+    write_all(eao1_hello, eao1_hello_len);
     return 0;
 }
