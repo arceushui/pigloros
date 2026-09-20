@@ -243,6 +243,10 @@ int main(int argc, char **argv) {
             if (information.op == PTRACE_SYSCALL_INFO_ENTRY &&
                 information.entry.nr == SYS_seccomp &&
                 information.entry.args[0] == SECCOMP_SET_MODE_FILTER) {
+                if (information.entry.args[1] != ADMITTED_SECCOMP_FLAGS) {
+                    ++other_install_attempts;
+                    goto continue_tracee;
+                }
                 struct sock_fprog program;
                 copy_tracee(pid, (uintptr_t)information.entry.args[2], &program,
                             sizeof(program));
@@ -262,8 +266,7 @@ int main(int argc, char **argv) {
                 }
                 if (is_expected) {
                     ++install_attempts;
-                    if (install_attempts != 1 ||
-                        information.entry.args[1] != ADMITTED_SECCOMP_FLAGS) {
+                    if (install_attempts != 1) {
                         errno = EPROTO;
                         fail("install-attempt");
                     }
@@ -285,6 +288,7 @@ int main(int argc, char **argv) {
             }
         }
 
+    continue_tracee:;
         int deliver = 0;
         if (event == 0 && signal != (SIGTRAP | 0x80) && signal != SIGSTOP &&
             signal != SIGTRAP) {
