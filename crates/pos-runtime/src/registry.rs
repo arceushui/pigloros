@@ -79,7 +79,6 @@ fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
         for hash in [
             policy.implementation_hash,
             policy.base_configuration_digest,
-            policy.executable_profile_hash,
             policy.retention_policy_hash,
         ] {
             hasher.update(hash.as_bytes());
