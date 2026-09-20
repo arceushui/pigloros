@@ -73,7 +73,7 @@ def main() -> None:
         raise ValueError("index manifest descriptor is not an object")
     require_keys(
         index_descriptor,
-        {"annotations", "digest", "mediaType", "size"},
+        {"annotations", "digest", "mediaType", "platform", "size"},
         "index descriptor",
     )
     annotations = index_descriptor.get("annotations")
@@ -83,6 +83,11 @@ def main() -> None:
         raise ValueError("unexpected transport-only index annotation")
     if index_descriptor.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
         raise ValueError("unexpected index descriptor media type")
+    if index_descriptor.get("platform") != {
+        "architecture": arguments.architecture,
+        "os": "linux",
+    }:
+        raise ValueError("unexpected index descriptor platform")
     manifest_path = blob(layout, index_descriptor)
     manifest = load_json(manifest_path)
     assert isinstance(manifest, dict)

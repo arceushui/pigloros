@@ -62,6 +62,7 @@ def main() -> None:
         "adr085-vector-validation.json",
         "fixture-sbom.spdx.json",
         "image.oci.tar",
+        "oci-archive-validation.json",
         "oci-validation.json",
         "rootfs-manifest.json",
         "runtime-subject-validation.json",

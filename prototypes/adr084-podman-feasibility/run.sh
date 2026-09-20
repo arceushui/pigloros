@@ -44,14 +44,21 @@ cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 /usr/bin/podman image inspect "${image_tag}" >"${artifact_dir}/image-inspect.json"
 image_id="$(jq -er '.[0].Id' "${artifact_dir}/image-inspect.json")"
 
-/usr/bin/podman save --format oci-archive --output "${artifact_dir}/image.oci.tar" "${image_tag}"
-mkdir -p "${build_dir}/oci-layout"
-tar -xf "${artifact_dir}/image.oci.tar" -C "${build_dir}/oci-layout"
+/usr/bin/podman save --format oci-archive --output "${build_dir}/podman-source.oci.tar" \
+  "${image_tag}"
+mkdir -p "${build_dir}/podman-source-layout"
+tar -xf "${build_dir}/podman-source.oci.tar" -C "${build_dir}/podman-source-layout"
 case "$(uname -m)" in
   x86_64) oci_architecture="amd64" ;;
   aarch64) oci_architecture="arm64" ;;
   *) printf 'unsupported prototype architecture\n' >&2; exit 1 ;;
 esac
+python3 "${prototype_dir}/build_oci_archive.py" \
+  "${build_dir}/podman-source-layout" "${artifact_dir}/image.oci.tar" \
+  --architecture "${oci_architecture}" --image-id "${image_tag}"
+python3 "${prototype_dir}/validate_oci_archive.py" \
+  "${artifact_dir}/image.oci.tar" "${build_dir}/oci-layout" \
+  "${artifact_dir}/oci-archive-validation.json"
 python3 "${prototype_dir}/validate_oci.py" "${build_dir}/oci-layout" \
   "${artifact_dir}/oci-validation.json" --architecture "${oci_architecture}"
 
