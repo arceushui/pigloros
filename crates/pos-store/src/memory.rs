@@ -1515,7 +1515,9 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         self.verify_memory_fork_child(&result)?;
         Ok(Some(result))
     }
+}
 
+impl MemoryStore {
     fn verify_memory_fork_child(
         &self,
         result: &ErasureForkRecoveryV1,
@@ -1531,9 +1533,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
             .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
-}
 
-impl MemoryStore {
     fn memory_fork_child_is_exact(&self, child: &TimelineMeta, chain_head: Hash) -> bool {
         self.timelines.get(&child.id).is_some_and(|state| {
             (
