@@ -494,7 +494,7 @@ impl<'host> HostedCoordinatorPortV1<'host> {
         }
     }
 
-    fn with_topology_candidate(mut self, candidate: TimelineId) -> Self {
+    const fn with_topology_candidate(mut self, candidate: TimelineId) -> Self {
         self.topology_candidate = Some(candidate);
         self
     }

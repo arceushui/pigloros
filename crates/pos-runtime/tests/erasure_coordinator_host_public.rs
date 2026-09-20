@@ -809,9 +809,10 @@ fn assert_active_unaffected_topology_parity(
     )?;
     let request = test_stage("construct active topology request", persistence_request())?;
     let request_reference = request.reference();
+    let request_provenance = request.provenance();
     test_stage(
         "submit active topology request",
-        commands.submit_erasure_request(request, request.provenance()),
+        commands.submit_erasure_request(request, request_provenance),
     )?;
     test_stage(
         "authorize active topology request",
