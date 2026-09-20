@@ -38,6 +38,19 @@ static int64_t monotonic_nanoseconds(void) {
     return (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
 }
 
+static void transfer_byte(int descriptor, bool write_byte, const char *message) {
+    char byte = 'S';
+    ssize_t amount;
+    do {
+        amount = write_byte ? write(descriptor, &byte, 1)
+                            : read(descriptor, &byte, 1);
+    } while (amount < 0 && errno == EINTR);
+    if (amount != 1 || (!write_byte && byte != 'S')) {
+        errno = EPROTO;
+        fail(message);
+    }
+}
+
 static long raw_syscall_six(long number) {
 #if defined(__x86_64__)
     register long fourth __asm__("r10") = 0;
@@ -141,8 +154,14 @@ static void kill_and_reap(pid_t child) {
 
 static void run_case(int number, const struct syscall_record *record) {
     int result_pipe[2];
+    int ready_pipe[2];
+    int start_pipe[2];
     if (pipe2(result_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
         fail("pipe");
+    }
+    if (pipe2(ready_pipe, O_CLOEXEC) != 0 ||
+        pipe2(start_pipe, O_CLOEXEC) != 0) {
+        fail("start-pipe");
     }
     pid_t child = fork();
     if (child < 0) {
@@ -150,22 +169,35 @@ static void run_case(int number, const struct syscall_record *record) {
     }
     if (child == 0) {
         close(result_pipe[0]);
+        close(ready_pipe[0]);
+        close(start_pipe[1]);
         if (setpgid(0, 0) != 0) {
             fail("child-process-group");
         }
+        transfer_byte(ready_pipe[1], true, "child-ready");
+        close(ready_pipe[1]);
+        transfer_byte(start_pipe[0], false, "child-start");
+        close(start_pipe[0]);
         long result = raw_syscall_six(number);
         ssize_t written = write(result_pipe[1], &result, sizeof(result));
         _exit(written == (ssize_t)sizeof(result) ? 0 : 75);
     }
     close(result_pipe[1]);
+    close(ready_pipe[1]);
+    close(start_pipe[0]);
     if (setpgid(child, child) != 0 && errno != EACCES && errno != ESRCH) {
         fail("parent-process-group");
     }
 
+    transfer_byte(ready_pipe[0], false, "parent-ready");
+    close(ready_pipe[0]);
+    int64_t deadline = monotonic_nanoseconds() + DEADLINE_NANOSECONDS;
+    transfer_byte(start_pipe[1], true, "parent-start");
+    close(start_pipe[1]);
+
     int status = 0;
     bool finished = false;
     bool stopped = false;
-    int64_t deadline = monotonic_nanoseconds() + DEADLINE_NANOSECONDS;
     while (monotonic_nanoseconds() < deadline) {
         pid_t waited = waitpid(child, &status, WNOHANG | WUNTRACED);
         if (waited == child) {
