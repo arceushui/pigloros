@@ -32,7 +32,7 @@ readonly host_target=$(rustc -vV | sed -n 's/^host: //p')
 readonly llvm_bin="$(rustc --print sysroot)/lib/rustlib/${host_target}/bin"
 readonly llvm_cov="${llvm_bin}/llvm-cov"
 readonly llvm_profdata="${llvm_bin}/llvm-profdata"
-readonly cargo_target_dir="${CARGO_TARGET_DIR:-${fixture_dir}/target/llvm-cov-target}"
+readonly cargo_target_dir="${CARGO_TARGET_DIR:-${CARGO_LLVM_COV_TARGET_DIR}}"
 readonly launcher="${cargo_target_dir}/${target}/debug/coverage-launcher"
 readonly adapter="${cargo_target_dir}/${target}/debug/coverage-adapter"
 test -x "${launcher}" -a -x "${adapter}"
