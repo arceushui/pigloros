@@ -2252,7 +2252,7 @@ impl PluginRegistry {
                 execution_profile_hash: generated_identity_hash(
                     b"pigloros/generated-execution-profile/v1",
                     plugin,
-                    &plugin_version,
+                    plugin_version,
                 ),
                 max_pass_wall_duration_us: 1_000,
             },
@@ -2303,12 +2303,12 @@ impl PluginRegistry {
                 implementation_hash: generated_identity_hash(
                     b"pigloros/generated-implementation/v1",
                     plugin,
-                    &plugin_version,
+                    plugin_version,
                 ),
                 base_configuration_digest: generated_identity_hash(
                     b"pigloros/generated-configuration/v1",
                     plugin,
-                    &plugin_version,
+                    plugin_version,
                 ),
                 executable_profile_hash: budget.digest(),
                 retention_policy_hash: generated_identity_hash(
