@@ -517,7 +517,13 @@ def reconcile(
             actual_labels.get(key) != value for key, value in expected_labels.items()
         ):
             raise RuntimeError("discovered candidate label identity mismatch")
-        if previous_identity is None:
+        durable_live_identity_missing = actual_identity["running"] and (
+            previous_identity is None
+            or not isinstance(previous_identity.get("pid"), int)
+            or int(previous_identity["pid"]) <= 0
+            or previous_identity.get("pid_start_ticks") is None
+        )
+        if previous_identity is None or durable_live_identity_missing:
             return {
                 "actions": [],
                 "candidate_running": actual_identity["running"],
