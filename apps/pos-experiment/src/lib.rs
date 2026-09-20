@@ -2492,6 +2492,21 @@ fn compute_retained_calibration_report(
         .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))
 }
 
+fn manifest_for_registry(
+    timeline_id: pos_core::ids::TimelineId,
+    chain_head: pos_core::Hash,
+    registry: &pos_runtime::PluginRegistry,
+) -> ReproManifest {
+    let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
+    for (name, digest) in registry.output_policy_digests() {
+        manifest = manifest.with_output_policy_digest(name, digest);
+    }
+    for (name, identity) in registry.replay_policy_identities() {
+        manifest = manifest.with_replay_policy_identity(name, identity);
+    }
+    manifest
+}
+
 impl BacktestRunner {
     /// Create a new backtest runner.
     ///
@@ -2606,20 +2621,8 @@ impl BacktestRunner {
             lift_vs_persistence,
         ) = backtest_metrics(train_ticks, train_events, eval_ticks, eval_events);
 
-        let mut train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
-        for (name, digest) in train_registry.output_policy_digests() {
-            train_manifest = train_manifest.with_output_policy_digest(name, digest);
-        }
-        for (name, identity) in train_registry.replay_policy_identities() {
-            train_manifest = train_manifest.with_replay_policy_identity(name, identity);
-        }
-        let mut eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
-        for (name, digest) in eval_registry.output_policy_digests() {
-            eval_manifest = eval_manifest.with_output_policy_digest(name, digest);
-        }
-        for (name, identity) in eval_registry.replay_policy_identities() {
-            eval_manifest = eval_manifest.with_replay_policy_identity(name, identity);
-        }
+        let train_manifest = manifest_for_registry(train_tl_id, train_chain_head, &train_registry);
+        let eval_manifest = manifest_for_registry(eval_tl_id, eval_chain_head, &eval_registry);
         let eval_head_seq = store.logical_head(eval_tl_id)?;
         let train_result = build_backtest_run_result(
             store,

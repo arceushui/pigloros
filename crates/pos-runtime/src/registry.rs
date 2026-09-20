@@ -2059,6 +2059,101 @@ impl PluginRegistry {
         self.append_and_commit_legacy_step_at(store, timeline_head, commit_now_secs, drafts)
     }
 
+    fn append_and_commit_protected_legacy_step(
+        &mut self,
+        store: &mut dyn pos_core::store::EventStore,
+        pending: &PendingStep,
+        token: &ConsentCapabilityToken,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let Some(gate) = self.consent_gate.clone() else {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(RuntimeError::ConsentOperationUnavailable);
+        };
+        if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
+            self.validate_protected_drafts(
+                pending.timeline,
+                &OperationContext::Protected {
+                    token: token.clone(),
+                    now_secs: commit_now_secs,
+                },
+                timeline_head,
+                drafts,
+            )
+        }) {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(error);
+        }
+        if drafts != pending.staged_drafts.as_slice() {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
+        }
+        let mut append_result = Ok(Vec::new());
+        let mut append = || {
+            append_result = self.append_with_erasure_fence(store, pending.timeline, drafts);
+        };
+        if let Err(error) = gate.with_token_fence(
+            pending.timeline,
+            token,
+            timeline_head.as_u64(),
+            commit_now_secs,
+            &mut append,
+        ) {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(RuntimeError::Consent(error));
+        }
+        match append_result {
+            Ok(events) => Ok(events),
+            Err(error) => {
+                let _ = self.abort_drivers(&pending.driver_ids);
+                Err(error)
+            }
+        }
+    }
+
+    fn append_and_commit_public_legacy_step(
+        &mut self,
+        store: &mut dyn pos_core::store::EventStore,
+        pending: &PendingStep,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, RuntimeError> {
+        if let Err(error) = self.validate_operation(
+            pending.timeline,
+            &OperationContext::Public,
+            timeline_head,
+            Some(commit_now_secs),
+        ) {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(error);
+        }
+        if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
+            self.validate_protected_drafts(
+                pending.timeline,
+                &OperationContext::Public,
+                timeline_head,
+                drafts,
+            )
+        }) {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(error);
+        }
+        if drafts != pending.staged_drafts.as_slice() {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
+        }
+        match self.append_with_erasure_fence(store, pending.timeline, drafts) {
+            Ok(events) => Ok(events),
+            Err(error) => {
+                let _ = self.abort_drivers(&pending.driver_ids);
+                Err(error)
+            }
+        }
+    }
+
     fn append_and_commit_legacy_step_at(
         &mut self,
         store: &mut dyn pos_core::store::EventStore,
@@ -2069,88 +2164,26 @@ impl PluginRegistry {
         let Some(pending) = self.take_legacy_pending_step()? else {
             return Err(RuntimeError::PendingDriverStep);
         };
-        let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
-            OperationContext::Protected { token, now_secs: _ } => {
-                let Some(gate) = self.consent_gate.clone() else {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(RuntimeError::ConsentOperationUnavailable);
-                };
-                if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
-                    self.validate_protected_drafts(
-                        pending_timeline,
-                        &OperationContext::Protected {
-                            token: token.clone(),
-                            now_secs: commit_now_secs,
-                        },
-                        timeline_head,
-                        drafts,
-                    )
-                }) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(error);
-                }
-                if drafts != pending.staged_drafts.as_slice() {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
-                }
-                let mut append_result = Ok(Vec::new());
-                let mut append = || {
-                    append_result = self.append_with_erasure_fence(store, pending_timeline, drafts);
-                };
-                if let Err(error) = gate.with_token_fence(
-                    pending_timeline,
+            OperationContext::Protected { token, .. } => self
+                .append_and_commit_protected_legacy_step(
+                    store,
+                    &pending,
                     &token,
-                    timeline_head.as_u64(),
-                    commit_now_secs,
-                    &mut append,
-                ) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(RuntimeError::Consent(error));
-                }
-                match append_result {
-                    Ok(events) => events,
-                    Err(error) => {
-                        let _ = self.abort_drivers(&pending.driver_ids);
-                        return Err(error);
-                    }
-                }
-            }
-            OperationContext::Public => {
-                if let Err(error) = self.validate_operation(
-                    pending_timeline,
-                    &OperationContext::Public,
                     timeline_head,
-                    Some(commit_now_secs),
-                ) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(error);
-                }
-                if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
-                    self.validate_protected_drafts(
-                        pending_timeline,
-                        &OperationContext::Public,
-                        timeline_head,
-                        drafts,
-                    )
-                }) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(error);
-                }
-                if drafts != pending.staged_drafts.as_slice() {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
-                }
-                match self.append_with_erasure_fence(store, pending_timeline, drafts) {
-                    Ok(events) => events,
-                    Err(error) => {
-                        let _ = self.abort_drivers(&pending.driver_ids);
-                        return Err(error);
-                    }
-                }
-            }
+                    commit_now_secs,
+                    drafts,
+                ),
+            OperationContext::Public => self.append_and_commit_public_legacy_step(
+                store,
+                &pending,
+                timeline_head,
+                commit_now_secs,
+                drafts,
+            ),
         };
+        let events = events?;
         self.commit_pending_step(pending);
         Ok(events)
     }
