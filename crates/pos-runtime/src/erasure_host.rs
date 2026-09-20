@@ -4629,7 +4629,7 @@ mod tests {
             .previous_state()
             .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))?;
-        host.authority = Some(authority);
+        host.authority = Some(authority.clone());
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)?;
         Ok(RejectedHostFixtureV1 {
@@ -5100,7 +5100,7 @@ mod tests {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
 
-        host.authority = Some(authority.clone());
+        host.authority = Some(authority);
         host.coordinator = None;
         assert_eq!(
             host.command_sender()
