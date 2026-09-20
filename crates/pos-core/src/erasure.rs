@@ -7275,9 +7275,8 @@ mod coverage_paths {
     }
 
     #[test]
-    fn corrupted_opaque_fork_inventory_fails_closed() -> Result<(), ErasureErrorV1> {
+    fn corrupted_opaque_fork_inventory_requirements_fail_closed() -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
-        let child = TimelineId::new();
         let state = inventory_state(
             reference(61),
             reference(62),
@@ -7338,6 +7337,29 @@ mod coverage_paths {
             inventory.require_unaffected_topology(TimelineId::new()),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn corrupted_opaque_fork_inventory_batch_fails_closed() -> Result<(), ErasureErrorV1> {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let state = inventory_state(
+            reference(61),
+            reference(62),
+            reference(63),
+            ErasureLifecycleV1::Authorized,
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            Vec::new(),
+            vec![parent],
+        );
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(state, proof)],
+            vec![parent],
+            4,
+        )?;
         let input = ErasureForkAdmissionInputV1 {
             operation: reference(64),
             expected_inventory_generation: inventory.generation(),

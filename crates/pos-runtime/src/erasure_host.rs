@@ -3745,16 +3745,6 @@ mod tests {
         unaffected: std::sync::Mutex<Vec<TimelineId>>,
     }
 
-    impl RejectedCoordinatorAuthorityV1 {
-        fn set_unaffected(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
-            self.unaffected
-                .lock()
-                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
-                .push(timeline);
-            Ok(())
-        }
-    }
-
     impl ErasureFreezeAuthorizationVerifierV1 for RejectedCoordinatorAuthorityV1 {
         fn validate_freeze_authorization(
             &self,
