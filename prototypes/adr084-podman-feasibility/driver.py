@@ -787,7 +787,10 @@ def launch(
                 os.close(saved_fd3)
     child_control.close()
     container_id = wait_for_container(name, process)
-    ready = parent_control.recv(4096)
+    try:
+        ready = parent_control.recv(4096)
+    except ConnectionResetError:
+        ready = b""
     try:
         ready_unsigned, ready_digest = validate_ready(
             ready, barrier_attempt, barrier_fixture
