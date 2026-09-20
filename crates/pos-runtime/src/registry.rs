@@ -292,6 +292,7 @@ mod coverage_paths {
             cadence_updates: Vec::new(),
             event_cursors: Vec::new(),
             operation: OperationContext::Public,
+            staged_drafts: Vec::new(),
             authorized: None,
         });
         registry.abort_step();
@@ -302,6 +303,7 @@ mod coverage_paths {
             cadence_updates: vec![(id, 1)],
             event_cursors: vec![(id, Seq::ZERO)],
             operation: OperationContext::Public,
+            staged_drafts: Vec::new(),
             authorized: None,
         });
         assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
@@ -750,6 +752,7 @@ struct PendingStep {
     cadence_updates: Vec<(PluginId, u128)>,
     event_cursors: Vec<(PluginId, Seq)>,
     operation: OperationContext,
+    staged_drafts: Vec<EventDraft>,
     authorized: Option<AuthorizedPendingStep>,
 }
 
@@ -1601,6 +1604,7 @@ impl PluginRegistry {
             cadence_updates,
             event_cursors,
             operation,
+            staged_drafts: all_drafts.clone(),
             authorized: None,
         });
         Ok(all_drafts)
@@ -1747,6 +1751,7 @@ impl PluginRegistry {
             cadence_updates: Vec::new(),
             event_cursors: vec![(plugin_id, snapshot.observed_through())],
             operation: OperationContext::Public,
+            staged_drafts: drafts.clone(),
             authorized: Some(AuthorizedPendingStep {
                 observation: observation.clone(),
                 drafts: drafts.clone(),
@@ -1880,6 +1885,10 @@ impl PluginRegistry {
         let Some(pending) = self.take_legacy_pending_step()? else {
             return Err(RuntimeError::PendingDriverStep);
         };
+        if drafts != pending.staged_drafts.as_slice() {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
+        }
         let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
