@@ -189,15 +189,21 @@ impl TestAuthority {
         &self,
         _request: ErasureReferenceV1,
         manifest: ErasureReferenceV1,
+        candidate: Option<TimelineId>,
     ) -> Result<ErasureVerifiedTopologyObservationV1, ErasureErrorV1> {
         if self.deny_topology.load(Ordering::Acquire) {
             return Err(ErasureErrorV1::TrustSnapshotInvalid);
         }
-        let timelines = self
+        let mut timelines = self
             .timelines
             .lock()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .clone();
+        if let Some(candidate) = candidate {
+            if !timelines.iter().any(|(timeline, _)| *timeline == candidate) {
+                timelines.push((candidate, reference(9)));
+            }
+        }
         if self.frozen.load(Ordering::Acquire) {
             Ok(ErasureVerifiedTopologyObservationV1::new(
                 manifest,
@@ -251,7 +257,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        self.topology(request, manifest_digest).map(Some)
+        self.topology(request, manifest_digest, None).map(Some)
     }
 
     fn verified_topology_observation_for_candidate(
@@ -260,16 +266,8 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         manifest_digest: ErasureReferenceV1,
         candidate: TimelineId,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        {
-            let mut timelines = self
-                .timelines
-                .lock()
-                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-            if !timelines.iter().any(|(timeline, _)| *timeline == candidate) {
-                timelines.push((candidate, reference(9)));
-            }
-        }
-        self.topology(request, manifest_digest).map(Some)
+        self.topology(request, manifest_digest, Some(candidate))
+            .map(Some)
     }
 
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
@@ -822,6 +820,10 @@ fn assert_active_unaffected_topology_parity(
     let root = test_stage(
         "create unaffected active root",
         commands.create_timeline("active-unaffected-root"),
+    )?;
+    test_stage(
+        "publish unaffected active root",
+        authority.set_timeline(root.id()),
     )?;
     let child = test_stage(
         "fork unaffected active parent",
