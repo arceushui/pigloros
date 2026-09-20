@@ -877,10 +877,11 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     if drafts.is_empty() {
         return Ok(());
     }
-    // The direct-driver seam is deliberately test-only. Production Plugin
-    // registration always carries an explicit or generated admission policy.
+    // Direct drivers are a debug-only fixture seam, but they still pass
+    // through a bounded admission check. This keeps the fixture seam from
+    // becoming an unrestricted way around host output limits.
     if cfg!(debug_assertions) && entry.test_only_driver {
-        return Ok(());
+        return validate_test_driver_output(drafts);
     }
     let Some(admission) = entry.output_admission.as_ref() else {
         return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
@@ -889,6 +890,32 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
         .into());
     };
     admission.validate_batch(drafts).map_err(Into::into)
+}
+
+fn validate_test_driver_output(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
+    const MAX_TEST_DRIVER_EVENTS: usize = 1_000;
+    const MAX_TEST_DRIVER_EVENT_BYTES: usize = 4_096;
+
+    if drafts.len() > MAX_TEST_DRIVER_EVENTS {
+        return Err(crate::OutputAdmissionErrorV1::EventCountExceeded {
+            level: 0,
+            requested: drafts.len() as u64,
+            limit: MAX_TEST_DRIVER_EVENTS as u32,
+        }
+        .into());
+    }
+    if let Some(draft) = drafts
+        .iter()
+        .find(|draft| draft.payload.len() > MAX_TEST_DRIVER_EVENT_BYTES)
+    {
+        return Err(crate::OutputAdmissionErrorV1::EventBytesExceeded {
+            event_type: draft.event_type.as_str().to_owned(),
+            requested: draft.payload.len(),
+            limit: MAX_TEST_DRIVER_EVENT_BYTES as u32,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn invoke_driver(
