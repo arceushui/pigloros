@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import errno
 import hashlib
 import json
@@ -145,6 +147,156 @@ def assert_launcher_snapshot(
         raise AssertionError(f"container root is not uniquely read-only: {root_mounts}")
 
 
+def expected_runtime_annotations(
+    seccomp: pathlib.Path, seccomp_bpf_base64: str
+) -> dict[str, str]:
+    return {
+        "io.container.manager": "libpod",
+        "io.podman.annotations.seccomp": str(seccomp),
+        "org.opencontainers.image.stopSignal": "15",
+        "run.oci.seccomp_bpf_data": seccomp_bpf_base64,
+    }
+
+
+def validate_runtime_annotations(
+    annotations: object, seccomp: pathlib.Path, seccomp_bpf_base64: str
+) -> None:
+    expected = expected_runtime_annotations(seccomp, seccomp_bpf_base64)
+    if annotations != expected:
+        raise ValueError(f"effective runtime annotations differ: {annotations!r}")
+
+
+def validate_bpf_annotation(value: str, expected_bpf: bytes) -> None:
+    if not value or any(character.isspace() for character in value):
+        raise ValueError("seccomp BPF base64 is empty or contains whitespace")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("seccomp BPF base64 is malformed") from error
+    if base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError("seccomp BPF base64 is not canonical padded RFC 4648")
+    if decoded != expected_bpf:
+        raise ValueError("seccomp BPF annotation differs from exported bytes")
+
+
+def validate_launch_arguments(
+    annotations: list[str],
+    seccomp_profiles: list[str],
+    stop_signals: list[str],
+    expected_annotation: str,
+    expected_profile: str,
+) -> None:
+    if annotations != [expected_annotation]:
+        raise ValueError("launch requires exactly one exact BPF annotation argument")
+    if seccomp_profiles != [expected_profile]:
+        raise ValueError("launch requires exactly one descriptor-resolved seccomp profile")
+    if stop_signals != ["15"]:
+        raise ValueError("launch requires exactly one decimal stop signal 15")
+
+
+def annotation_mutation_report(
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+) -> dict[str, object]:
+    expected_bpf = seccomp_bpf.read_bytes()
+    expected = expected_runtime_annotations(seccomp, seccomp_bpf_base64)
+    rejected: list[str] = []
+
+    def rejects(action, label: str) -> None:
+        try:
+            action()
+        except ValueError:
+            rejected.append(label)
+            return
+        raise AssertionError(f"annotation mutation was accepted: {label}")
+
+    for key in expected:
+        missing = {name: value for name, value in expected.items() if name != key}
+        rejects(
+            lambda candidate=missing: validate_runtime_annotations(
+                candidate, seccomp, seccomp_bpf_base64
+            ),
+            f"missing effective map member: {key}",
+        )
+        wrong = {**expected, key: expected[key] + ".mutated"}
+        rejects(
+            lambda candidate=wrong: validate_runtime_annotations(
+                candidate, seccomp, seccomp_bpf_base64
+            ),
+            f"wrong effective map value: {key}",
+        )
+    for label, key in (
+        ("configured-default injection", "io.containers.default.annotation"),
+        ("caller annotation injection", "org.pigloros.caller"),
+        ("image annotation forwarding", "org.opencontainers.image.title"),
+        ("arbitrary extra annotation", "fixture.extra"),
+        ("security-affecting run.oci annotation", "run.oci.hooks"),
+        ("systemd annotation injection", "org.systemd.property.DeviceAllow"),
+    ):
+        injected = {**expected, key: "mutated"}
+        rejects(
+            lambda candidate=injected: validate_runtime_annotations(
+                candidate, seccomp, seccomp_bpf_base64
+            ),
+            label,
+        )
+
+    annotation_argument = f"run.oci.seccomp_bpf_data={seccomp_bpf_base64}"
+    profile_argument = f"seccomp={seccomp}"
+    launch_cases = (
+        ("missing BPF annotation argument", [], [profile_argument], ["15"]),
+        (
+            "duplicate BPF annotation argument",
+            [annotation_argument, annotation_argument],
+            [profile_argument],
+            ["15"],
+        ),
+        ("missing seccomp profile argument", [annotation_argument], [], ["15"]),
+        (
+            "duplicate seccomp profile argument",
+            [annotation_argument],
+            [profile_argument, profile_argument],
+            ["15"],
+        ),
+        ("missing stop signal argument", [annotation_argument], [profile_argument], []),
+        (
+            "duplicate stop signal argument",
+            [annotation_argument],
+            [profile_argument],
+            ["15", "15"],
+        ),
+        ("wrong stop signal argument", [annotation_argument], [profile_argument], ["9"]),
+    )
+    for label, annotations, profiles, stop_signals in launch_cases:
+        rejects(
+            lambda a=annotations, p=profiles, s=stop_signals: validate_launch_arguments(
+                a, p, s, annotation_argument, profile_argument
+            ),
+            label,
+        )
+
+    changed_first = (
+        ("A" if seccomp_bpf_base64[0] != "A" else "B")
+        + seccomp_bpf_base64[1:]
+    )
+    bpf_cases = (
+        ("empty BPF base64", ""),
+        ("BPF base64 whitespace", seccomp_bpf_base64 + "\n"),
+        ("BPF base64 invalid alphabet", "*" + seccomp_bpf_base64[1:]),
+        ("BPF base64 truncation", seccomp_bpf_base64[:-1]),
+        ("BPF base64 byte mutation", changed_first),
+    )
+    for label, candidate in bpf_cases:
+        rejects(
+            lambda value=candidate: validate_bpf_annotation(value, expected_bpf),
+            label,
+        )
+    if len(rejected) != 26:
+        raise AssertionError(f"annotation mutation matrix is incomplete: {len(rejected)}")
+    return {"rejected": rejected, "rejected_count": len(rejected), "verdict": "passed"}
+
+
 def launch(
     image: str,
     seccomp: pathlib.Path,
@@ -166,6 +318,15 @@ def launch(
     child_fd = child_control.fileno()
     child_control.set_inheritable(True)
     name = f"pigloros-adr084-{scenario}-{uuid.uuid4().hex[:12]}"
+    annotation_argument = f"run.oci.seccomp_bpf_data={seccomp_bpf_base64}"
+    profile_argument = f"seccomp={seccomp}"
+    validate_launch_arguments(
+        [annotation_argument],
+        [profile_argument],
+        ["15"],
+        annotation_argument,
+        profile_argument,
+    )
     podman_command = [
         "/usr/bin/podman",
         "run",
@@ -180,8 +341,8 @@ def launch(
         "--read-only-tmpfs=false",
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
-        f"--security-opt=seccomp={seccomp}",
-        f"--annotation=run.oci.seccomp_bpf_data={seccomp_bpf_base64}",
+        f"--security-opt={profile_argument}",
+        f"--annotation={annotation_argument}",
         "--stop-signal=15",
         "--memory=64m",
         "--memory-swap=64m",
@@ -253,19 +414,10 @@ def launch(
     (artifact_dir / f"{scenario}.inspect.json").write_text(inspect, encoding="utf-8")
     inspected = json.loads(inspect)[0]
     annotations = inspected["Config"]["Annotations"]
-    expected_annotations = {
-        "io.container.manager": "libpod",
-        "io.podman.annotations.seccomp": str(seccomp),
-        "org.opencontainers.image.stopSignal": "15",
-        "run.oci.seccomp_bpf_data": seccomp_bpf_base64,
-    }
     (artifact_dir / f"{scenario}.runtime-annotations.json").write_text(
         json.dumps(annotations, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    if annotations != expected_annotations:
-        raise AssertionError(
-            f"effective runtime annotations differ: {annotations!r}"
-        )
+    validate_runtime_annotations(annotations, seccomp, seccomp_bpf_base64)
     pid = int(inspected["State"]["Pid"])
     snapshot = process_snapshot(pid)
     assert_launcher_snapshot(snapshot, expected_filter_count)
@@ -468,14 +620,9 @@ def seccomp_probe_scenario(
         inspect_text, encoding="utf-8"
     )
     inspected = json.loads(inspect_text)[0]
-    expected_annotations = {
-        "io.container.manager": "libpod",
-        "io.podman.annotations.seccomp": str(seccomp),
-        "org.opencontainers.image.stopSignal": "15",
-        "run.oci.seccomp_bpf_data": seccomp_bpf_base64,
-    }
-    if inspected["Config"]["Annotations"] != expected_annotations:
-        raise AssertionError("seccomp probe effective annotations differ")
+    validate_runtime_annotations(
+        inspected["Config"]["Annotations"], seccomp, seccomp_bpf_base64
+    )
     exported = seccomp_bpf.read_bytes()
     installed = (artifact_dir / "normal.installed-seccomp.bpf").read_bytes()
     if installed != exported:
@@ -575,14 +722,9 @@ def cache_probe_scenario(
         inspect_text, encoding="utf-8"
     )
     inspected = json.loads(inspect_text)[0]
-    expected_annotations = {
-        "io.container.manager": "libpod",
-        "io.podman.annotations.seccomp": str(seccomp),
-        "org.opencontainers.image.stopSignal": "15",
-        "run.oci.seccomp_bpf_data": seccomp_bpf_base64,
-    }
-    if inspected["Config"]["Annotations"] != expected_annotations:
-        raise AssertionError("cache probe effective annotations differ")
+    validate_runtime_annotations(
+        inspected["Config"]["Annotations"], seccomp, seccomp_bpf_base64
+    )
     if completed.returncode != 0 or completed.stdout != b"CACHE-OK\n":
         raise AssertionError(
             "cache bypass probe failed: "
@@ -763,10 +905,18 @@ def main() -> None:
     seccomp_bpf_base64 = arguments.seccomp_bpf_base64.read_text(
         encoding="ascii"
     )
-    if not seccomp_bpf_base64 or any(
-        character.isspace() for character in seccomp_bpf_base64
-    ):
-        raise ValueError("seccomp BPF base64 is empty or contains whitespace")
+    validate_bpf_annotation(
+        seccomp_bpf_base64, arguments.seccomp_bpf.resolve().read_bytes()
+    )
+    mutation_report = annotation_mutation_report(
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+    )
+    (arguments.artifact_dir / "annotation-mutation-report.json").write_text(
+        json.dumps(mutation_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     normal_scenario(
         arguments.image,
         arguments.seccomp.resolve(),

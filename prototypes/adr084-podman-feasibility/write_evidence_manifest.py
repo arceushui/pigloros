@@ -91,6 +91,7 @@ def main() -> None:
     retained = (
         "adr085-vectors.json",
         "adr085-vector-validation.json",
+        "annotation-mutation-report.json",
         "fixture-sbom.spdx.json",
         "image.oci.tar",
         "normal.installed-seccomp.bpf",

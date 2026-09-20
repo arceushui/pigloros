@@ -353,7 +353,58 @@ def mutation_report(
         }
         candidate = json.dumps(changed_profile, separators=(",", ":")).encode()
         cases.append(rejected(lambda c=candidate: validate_profile(c, profile), label))
-    if len(cases) < (26 if architecture == "aarch64" else 23):
+    profile_mutations = (
+        (
+            "wrong profile default action",
+            {**parsed_profile, "defaultAction": "SCMP_ACT_KILL"},
+        ),
+        (
+            "wrong profile errno sentinel",
+            {**parsed_profile, "defaultErrnoRet": 1},
+        ),
+        (
+            "wrong profile architecture",
+            {
+                **parsed_profile,
+                "architectures": [
+                    "SCMP_ARCH_AARCH64"
+                    if architecture == "x86_64"
+                    else "SCMP_ARCH_X86_64"
+                ],
+            },
+        ),
+        (
+            "wrong profile syscall action",
+            {
+                **parsed_profile,
+                "syscalls": [{"names": names, "action": "SCMP_ACT_LOG"}],
+            },
+        ),
+        ("extra profile member", {**parsed_profile, "flags": []}),
+    )
+    for label, candidate_document in profile_mutations:
+        candidate = json.dumps(candidate_document, separators=(",", ":")).encode()
+        cases.append(rejected(lambda c=candidate: validate_profile(c, profile), label))
+    raw_profile_mutations = (
+        ("profile leading BOM", b"\xef\xbb\xbf" + profile),
+        ("profile trailing newline", profile + b"\n"),
+        ("profile insignificant whitespace", profile.replace(b":", b": ", 1)),
+        (
+            "profile duplicate JSON key",
+            profile.replace(
+                b'{"defaultAction":',
+                b'{"defaultAction":"SCMP_ACT_ERRNO","defaultAction":',
+                1,
+            ),
+        ),
+        (
+            "profile key reordering",
+            json.dumps(parsed_profile, separators=(",", ":"), sort_keys=True).encode(),
+        ),
+    )
+    for label, candidate in raw_profile_mutations:
+        cases.append(rejected(lambda c=candidate: validate_profile(c, profile), label))
+    if len(cases) < (36 if architecture == "aarch64" else 33):
         raise AssertionError("mutation matrix did not exercise the required cases")
     return {"architecture": architecture, "rejected_count": len(cases), "rejected": cases}
 
