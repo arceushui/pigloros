@@ -116,7 +116,6 @@ cc -O2 -Wall -Wextra -Werror -o "${build_dir}/prefilter-exec" \
   "${prototype_dir}/prefilter_exec.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 cp "${prototype_dir}/Containerfile.lifecycle" "${build_dir}/Containerfile.lifecycle"
-dd if=/dev/zero of="${build_dir}/memory-reclaimable" bs=1048576 count=48 status=none
 
 libseccomp_archive="${build_dir}/libseccomp-2.6.1.tar.gz"
 curl --fail --location --silent --show-error \

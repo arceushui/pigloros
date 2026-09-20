@@ -33,7 +33,6 @@ def main() -> None:
         ("/seccomp-probe", arguments.build_dir / "seccomp-probe"),
         ("/foreign-probe", arguments.build_dir / "foreign-probe"),
         ("/native-matrix", arguments.build_dir / "native-matrix"),
-        ("/memory-reclaimable", arguments.build_dir / "memory-reclaimable"),
         ("lifecycle-fixture/lifecycle-probe", arguments.build_dir / "lifecycle-probe"),
         (
             "/libseccomp-interface-v1.txt",

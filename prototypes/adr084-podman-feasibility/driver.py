@@ -1924,7 +1924,7 @@ def distinct_memory_limit_scenario(
     process.stdin.close()
     final = baseline
     errors = bytearray()
-    marker = b"MEMORY_LIMIT_SURVIVED checksum=0\n"
+    marker = b"MEMORY_LIMIT_SURVIVED pipe_bytes="
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
