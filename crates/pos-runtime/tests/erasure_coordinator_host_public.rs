@@ -254,6 +254,27 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         self.topology(request, manifest_digest).map(Some)
     }
 
+    fn verified_topology_observation_for_candidate(
+        &self,
+        request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+        candidate: TimelineId,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        {
+            let mut timelines = self
+                .timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            if !timelines
+                .iter()
+                .any(|(timeline, _)| *timeline == candidate)
+            {
+                timelines.push((candidate, reference(9)));
+            }
+        }
+        self.topology(request, manifest_digest).map(Some)
+    }
+
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         (!self.deny_authentication.load(Ordering::Acquire))
             .then_some(())
@@ -764,6 +785,74 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     );
     assert_frozen_fork_retries(&mut commands, &authority, timeline.id(), child.id())?;
     Ok(())
+}
+
+fn assert_active_unaffected_topology_parity(
+    config: StoreConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open active topology host",
+        open_with_authority(
+            config,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open active topology sender", host.command_sender())?;
+    let parent = test_stage(
+        "create active topology parent",
+        commands.create_timeline("active-topology-parent"),
+    )?;
+    test_stage(
+        "publish active topology parent",
+        authority.set_timeline(parent.id()),
+    )?;
+    let request = test_stage("construct active topology request", persistence_request())?;
+    let request_reference = request.reference();
+    test_stage(
+        "submit active topology request",
+        commands.submit_erasure_request(request, request.provenance()),
+    )?;
+    test_stage(
+        "authorize active topology request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+
+    let root = test_stage(
+        "create unaffected active root",
+        commands.create_timeline("active-unaffected-root"),
+    )?;
+    let child = test_stage(
+        "fork unaffected active parent",
+        commands.fork_timeline(parent.id(), pos_core::Seq::ZERO, "active-unaffected-fork"),
+    )?;
+    assert_eq!(
+        test_stage("read unaffected active root", commands.timeline(root.id()))?
+            .map(|timeline| timeline.id()),
+        Some(root.id())
+    );
+    assert_eq!(
+        test_stage("read unaffected active fork", commands.timeline(child.id()))?
+            .map(|timeline| timeline.id()),
+        Some(child.id())
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    Ok(())
+}
+
+#[test]
+fn memory_host_admits_active_unaffected_roots_and_forks(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_active_unaffected_topology_parity(StoreConfig::Memory)
+}
+
+#[test]
+fn sqlite_host_admits_active_unaffected_roots_and_forks(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_active_unaffected_topology_parity(StoreConfig::SqliteInMemory)
 }
 
 #[test]

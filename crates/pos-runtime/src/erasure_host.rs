@@ -147,6 +147,22 @@ pub trait ErasureCoordinatorAuthorityV1:
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1>;
 
+    /// Resolve one topology observation after a durable root/Fork candidate
+    /// has been allocated. The candidate ID is supplied explicitly so an
+    /// authority can attest the exact new topology member instead of relying
+    /// on an out-of-band update.
+    ///
+    /// # Errors
+    /// Returns a closed topology, policy, trust, or provenance error.
+    fn verified_topology_observation_for_candidate(
+        &self,
+        request: ErasureReferenceV1,
+        manifest_digest: ErasureReferenceV1,
+        _candidate: TimelineId,
+    ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        self.verified_topology_observation(request, manifest_digest)
+    }
+
     /// Authenticate a newly submitted erasure request.
     ///
     /// # Errors
@@ -463,6 +479,7 @@ impl ErasureCoordinatorCompositionV1 {
 struct HostedCoordinatorPortV1<'host> {
     store: RefCell<&'host mut dyn ErasureHostStore>,
     authority: &'host dyn ErasureCoordinatorAuthorityV1,
+    topology_candidate: Option<TimelineId>,
 }
 
 impl<'host> HostedCoordinatorPortV1<'host> {
@@ -473,7 +490,13 @@ impl<'host> HostedCoordinatorPortV1<'host> {
         Self {
             store: RefCell::new(store),
             authority,
+            topology_candidate: None,
         }
+    }
+
+    fn with_topology_candidate(mut self, candidate: TimelineId) -> Self {
+        self.topology_candidate = Some(candidate);
+        self
     }
 }
 
@@ -640,10 +663,17 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
                             .map_err(|_| ErasureErrorV1::ScopeInvalid)
                             .and_then(|()| {
                                 for (request, manifest) in &request_heads {
-                                    let topology_observation = self
-                                        .authority
-                                        .verified_topology_observation(*request, *manifest)?
-                                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                                    let topology_observation = match self.topology_candidate {
+                                        Some(candidate) => self
+                                            .authority
+                                            .verified_topology_observation_for_candidate(
+                                                *request, *manifest, candidate,
+                                            )?,
+                                        None => self
+                                            .authority
+                                            .verified_topology_observation(*request, *manifest)?,
+                                    }
+                                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
                                     if topology_observation
                                         .bindings()
                                         .len()
@@ -1479,6 +1509,7 @@ impl ErasureExecutionHostV1 {
         &mut self,
         request_count: usize,
         limits: ErasureRecoveryLimitsV1,
+        candidate: TimelineId,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         if request_count == 0 {
             return self
@@ -1492,7 +1523,8 @@ impl ErasureExecutionHostV1 {
         }
         let authority = self.authority.clone().ok_or(ErasureErrorV1::Unauthorized)?;
         let coordinator = self.coordinator.ok_or(ErasureErrorV1::Unauthorized)?;
-        let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+        let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref())
+            .with_topology_candidate(candidate);
         let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
         state_machine.verified_inventory_with_limits(limits)
     }
@@ -1539,13 +1571,14 @@ impl ErasureExecutionHostV1 {
         let timeline_was_absent = current_inventory
             .fork_scope_requirements(timeline.id())
             .is_err();
-        let candidate = match self.verify_unaffected_topology_candidate(request_count, limits) {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
-                return Err(UnaffectedTopologyTransitionError::Erasure(error));
-            }
-        };
+        let candidate =
+            match self.verify_unaffected_topology_candidate(request_count, limits, timeline.id()) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
+                    return Err(UnaffectedTopologyTransitionError::Erasure(error));
+                }
+            };
         if request_count != 0 && timeline_was_absent {
             match candidate.require_unaffected_topology(timeline.id()) {
                 Ok(()) => {}
@@ -1602,13 +1635,14 @@ impl ErasureExecutionHostV1 {
         let mut change = Some(change);
         let mut transition_failure = None;
         let publication = {
-            let mut fenced_transition = |permit| match self.prepare_unaffected_topology_transition(
-                change.take(),
-                permit,
-                &inventory,
-                request_count,
-                limits,
-            ) {
+            let mut fenced_transition = |permit: &ErasureTopologyTransitionPermitV1| match self
+                .prepare_unaffected_topology_transition(
+                    change.take(),
+                    permit,
+                    &inventory,
+                    request_count,
+                    limits,
+                ) {
                 Ok(result) => Ok(result),
                 Err(UnaffectedTopologyTransitionError::Host(error)) => {
                     transition_failure = Some(UnaffectedTopologyTransitionError::Host(error));
@@ -1757,7 +1791,7 @@ impl ErasureExecutionHostV1 {
         let gate = Arc::clone(&self.gate);
         let mut transition_failure = None;
         let publication = {
-            let mut fenced_transition = |_permit| {
+            let mut fenced_transition = |_permit: &ErasureTopologyTransitionPermitV1| {
                 let transition =
                     self.run_identified_fork_transition(input, &mut transition_failure);
                 if let Err(error) = transition {
@@ -1904,7 +1938,7 @@ impl ErasureExecutionHostV1 {
         let gate = Arc::clone(&self.gate);
         let mut transition_failure = None;
         let publication = {
-            let mut fenced_transition = |_permit| {
+            let mut fenced_transition = |_permit: &ErasureTopologyTransitionPermitV1| {
                 let port =
                     HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
                 let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
@@ -3827,6 +3861,24 @@ mod tests {
             )))
         }
 
+        fn verified_topology_observation_for_candidate(
+            &self,
+            request: ErasureReferenceV1,
+            manifest_digest: ErasureReferenceV1,
+            candidate: TimelineId,
+        ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            {
+                let mut unaffected = self
+                    .unaffected
+                    .lock()
+                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+                if !unaffected.contains(&candidate) {
+                    unaffected.push(candidate);
+                }
+            }
+            self.verified_topology_observation(request, manifest_digest)
+        }
+
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
             Ok(())
         }
@@ -4075,6 +4127,24 @@ mod tests {
                     timelines,
                 )))
             }
+        }
+
+        fn verified_topology_observation_for_candidate(
+            &self,
+            request: ErasureReferenceV1,
+            manifest_digest: ErasureReferenceV1,
+            candidate: TimelineId,
+        ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            {
+                let mut timelines = self
+                    .timelines
+                    .lock()
+                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+                if !timelines.contains(&candidate) {
+                    timelines.push(candidate);
+                }
+            }
+            self.verified_topology_observation(request, manifest_digest)
         }
 
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
