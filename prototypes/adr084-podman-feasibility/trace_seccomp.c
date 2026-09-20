@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #define MAX_TRACED 512
+#define MAX_REMOTE_PATH 4096
 #define ADMITTED_SECCOMP_FLAGS SECCOMP_FILTER_FLAG_SPEC_ALLOW
 
 struct traced_process {
@@ -122,6 +123,87 @@ static bool copy_tracee(pid_t pid, uintptr_t address, void *destination,
     return true;
 }
 
+static bool is_crun(pid_t pid) {
+    char proc_path[64];
+    char executable[MAX_REMOTE_PATH];
+    int length = snprintf(proc_path, sizeof(proc_path), "/proc/%ld/exe",
+                          (long)pid);
+    if (length <= 0 || (size_t)length >= sizeof(proc_path)) {
+        return false;
+    }
+    ssize_t amount = readlink(proc_path, executable, sizeof(executable) - 1);
+    if (amount <= 0) {
+        return false;
+    }
+    executable[amount] = '\0';
+    const char *base = strrchr(executable, '/');
+    return strcmp(base == NULL ? executable : base + 1, "crun") == 0;
+}
+
+static bool remote_path_contains_cache(pid_t pid, uintptr_t address) {
+    if (address == 0) {
+        return false;
+    }
+    char path[MAX_REMOTE_PATH];
+    for (size_t offset = 0; offset < sizeof(path); offset += sizeof(long)) {
+        long word = 0;
+        if (!copy_tracee(pid, address + offset, &word, sizeof(word))) {
+            fail("crun-path-read");
+        }
+        size_t remaining = sizeof(path) - offset;
+        size_t amount = remaining < sizeof(word) ? remaining : sizeof(word);
+        memcpy(path + offset, &word, amount);
+        for (size_t index = 0; index < amount; ++index) {
+            if (path[offset + index] == '\0') {
+                return strstr(path, ".cache/seccomp") != NULL;
+            }
+        }
+    }
+    errno = ENAMETOOLONG;
+    fail("crun-path-bound");
+}
+
+static bool crun_cache_path_syscall(pid_t pid,
+                                    const struct __ptrace_syscall_info *info) {
+    if (!is_crun(pid)) {
+        return false;
+    }
+    uint64_t number = info->entry.nr;
+    uintptr_t first = 0;
+    uintptr_t second = 0;
+#ifdef SYS_open
+    if (number == SYS_open) {
+        first = (uintptr_t)info->entry.args[0];
+    }
+#endif
+    if (number == SYS_openat || number == SYS_mkdirat ||
+        number == SYS_unlinkat || number == SYS_newfstatat ||
+        number == SYS_readlinkat) {
+        first = (uintptr_t)info->entry.args[1];
+    }
+#ifdef SYS_openat2
+    if (number == SYS_openat2) {
+        first = (uintptr_t)info->entry.args[1];
+    }
+#endif
+#ifdef SYS_statx
+    if (number == SYS_statx) {
+        first = (uintptr_t)info->entry.args[1];
+    }
+#endif
+#ifdef SYS_faccessat2
+    if (number == SYS_faccessat2) {
+        first = (uintptr_t)info->entry.args[1];
+    }
+#endif
+    if (number == SYS_linkat || number == SYS_renameat2) {
+        first = (uintptr_t)info->entry.args[1];
+        second = (uintptr_t)info->entry.args[3];
+    }
+    return remote_path_contains_cache(pid, first) ||
+           remote_path_contains_cache(pid, second);
+}
+
 static void write_exact(const char *path, const unsigned char *bytes,
                         size_t length) {
     int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -151,6 +233,7 @@ static void write_report(const char *path, pid_t installer, size_t length,
     int written = dprintf(
         descriptor,
         "{\n  \"admitted_flags\": %lu,\n  \"byte_length\": %zu,\n"
+        "  \"checksum_cache_accesses\": 0,\n"
         "  \"equality\": true,\n  \"install_attempts\": 1,\n"
         "  \"installer_pid\": %ld,\n"
         "  \"other_traced_install_attempts\": %u,\n"
@@ -248,6 +331,11 @@ int main(int argc, char **argv) {
                 fail("syscall-info");
             }
             if (information.op == PTRACE_SYSCALL_INFO_ENTRY &&
+                crun_cache_path_syscall(pid, &information)) {
+                errno = EPROTO;
+                fail("checksum-cache-access");
+            }
+            if (information.op == PTRACE_SYSCALL_INFO_ENTRY &&
                 information.entry.nr == SYS_seccomp &&
                 information.entry.args[0] == SECCOMP_SET_MODE_FILTER) {
                 if (information.entry.args[1] != ADMITTED_SECCOMP_FLAGS) {
@@ -282,7 +370,7 @@ int main(int argc, char **argv) {
                 }
                 if (is_expected) {
                     ++install_attempts;
-                    if (install_attempts != 1) {
+                    if (install_attempts != 1 || !is_crun(pid)) {
                         errno = EPROTO;
                         fail("install-attempt");
                     }
