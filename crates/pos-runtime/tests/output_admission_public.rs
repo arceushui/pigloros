@@ -198,7 +198,7 @@ fn output_admission_rejects_identity_and_resource_limits() -> TestResult {
     )?;
     assert!(matches!(
         batch_admission
-            .validate_batch(&[draft("plugin.output", b"ab"), draft("plugin.output", b"c")]),
+            .validate_batch(&[draft("plugin.output", b"ab"), draft("plugin.output", b"cd")]),
         Err(OutputAdmissionErrorV1::BatchBytesExceeded { .. })
     ));
 
