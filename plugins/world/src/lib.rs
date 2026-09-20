@@ -2729,7 +2729,7 @@ mod tests {
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(WorldDriver::new(
