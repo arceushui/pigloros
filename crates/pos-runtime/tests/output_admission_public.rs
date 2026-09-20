@@ -115,7 +115,19 @@ fn multi_fidelity_policy(
     ]
     .into_iter()
     .map(|(event_type, authority, fidelity)| {
-        OutputDeclarationV1::new(event_type.to_owned(), authority, fidelity, 16, None, None)
+        let (stride_ticks, aggregate_min_group) = match fidelity {
+            OutputFidelityV1::L0 => (None, None),
+            OutputFidelityV1::L1 => (Some(1), None),
+            OutputFidelityV1::L2 => (None, Some(10)),
+        };
+        OutputDeclarationV1::new(
+            event_type.to_owned(),
+            authority,
+            fidelity,
+            16,
+            stride_ticks,
+            aggregate_min_group,
+        )
     })
     .collect::<Result<Vec<_>, _>>()?;
     Ok(OutputPolicyV1::new(OutputPolicyInputV1 {
