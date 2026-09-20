@@ -92,6 +92,39 @@ fn policy(
     .map_err(|error| error.to_string().into())
 }
 
+fn multi_fidelity_policy(
+    plugin_id: PluginId,
+    budget: &ExecutableBudgetPolicyV1,
+) -> Result<OutputPolicyV1, Box<dyn Error>> {
+    let declarations = [
+        ("plugin.l0", OutputFidelityV1::L0),
+        ("plugin.l1", OutputFidelityV1::L1),
+        ("plugin.l2", OutputFidelityV1::L2),
+    ]
+    .into_iter()
+    .map(|(event_type, fidelity)| {
+        OutputDeclarationV1::new(
+            event_type.to_owned(),
+            OutputAuthorityV1::Authoritative,
+            fidelity,
+            16,
+            None,
+            None,
+        )
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    Ok(OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: "1.0.0".to_owned(),
+        implementation_hash: Hash::from_bytes([1; 32]),
+        base_configuration_digest: Hash::from_bytes([2; 32]),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: Hash::from_bytes([3; 32]),
+        policy_revision: 1,
+        output_declarations: declarations,
+    })?)
+}
+
 fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {
     EventDraft::new(
         pos_core::EntityId::new(),
@@ -144,6 +177,24 @@ fn output_admission_rejects_policy_plugin_mismatch() -> TestResult {
         OutputAdmissionV1::try_new(other_plugin, "1.0.0", policy(plugin_id, &budget)?, budget),
         Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
+    Ok(())
+}
+
+#[test]
+fn output_admission_accounts_for_each_fidelity_level() -> TestResult {
+    let plugin_id = PluginId::new();
+    let budget = budget(plugin_id)?;
+    let admission = OutputAdmissionV1::try_new(
+        plugin_id,
+        "1.0.0",
+        multi_fidelity_policy(plugin_id, &budget)?,
+        budget,
+    )?;
+    admission.validate_batch(&[
+        draft("plugin.l0", b"a"),
+        draft("plugin.l1", b"b"),
+        draft("plugin.l2", b"c"),
+    ])?;
     Ok(())
 }
 
@@ -294,5 +345,31 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
         missing.step_all_anchored(timeline, pos_core::Seq::ZERO),
         Err(RuntimeError::OutputAdmission(_))
     ));
+    Ok(())
+}
+
+#[test]
+fn generated_registration_binds_owned_output_policy() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_generated(&plugin, None, None)?;
+    assert_eq!(registry.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn generated_registration_with_approver_binds_owned_output_policy() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_generated_with_approver(&plugin, None, None, None, std::iter::empty())?;
+    assert_eq!(registry.len(), 1);
     Ok(())
 }

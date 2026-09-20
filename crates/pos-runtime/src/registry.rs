@@ -2350,42 +2350,6 @@ impl PluginRegistry {
         )
     }
 
-    /// Register a pinned Plugin with its complete host-verified output policy.
-    ///
-    /// # Errors
-    /// Returns an identity, registration, or capability error when the policy
-    /// cannot be bound to the Plugin.
-    pub fn register_pinned_with_output_policy(
-        &mut self,
-        plugin: &dyn Plugin,
-        registration: PluginRegistrationV1,
-        output_policy: pos_core::output_policy::OutputPolicyV1,
-        executable_budget: pos_core::ExecutableBudgetPolicyV1,
-        reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-    ) -> Result<(), RuntimeError> {
-        let context = self.registration_context(plugin)?;
-        self.validate_registration_roles(&registration)?;
-        let admission = OutputAdmissionV1::try_new(
-            plugin.id(),
-            plugin.version(),
-            output_policy,
-            executable_budget,
-        )?;
-        self.register_with_approver_slice(
-            plugin,
-            reducer,
-            driver,
-            None,
-            &[],
-            context,
-            RegistrationOptions {
-                registration: Some(registration),
-                output_admission: Some(admission),
-            },
-        )
-    }
-
     fn registration_context(
         &self,
         plugin: &dyn Plugin,

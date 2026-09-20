@@ -56,6 +56,7 @@ pub struct OutputAdmissionV1 {
     policy_digest: Hash,
     policy: OutputPolicyV1,
     budget: ExecutableBudgetPolicyV1,
+    cpu_reservations_us: [u32; 3],
 }
 
 impl OutputAdmissionV1 {
@@ -79,19 +80,21 @@ impl OutputAdmissionV1 {
         if policy.fields().executable_profile_hash != budget.digest() {
             return Err(OutputAdmissionErrorV1::PolicyIdentityMismatch);
         }
-        if !budget
+        let Some(cpu_reservations_us) = budget
             .fields()
             .plugin_cpu_reservations
             .iter()
-            .any(|row| row.plugin_id == plugin_id)
-        {
+            .find(|row| row.plugin_id == plugin_id)
+            .map(|row| row.cpu_reservations_us)
+        else {
             return Err(OutputAdmissionErrorV1::MissingCpuReservation);
-        }
+        };
         Ok(Self {
             plugin_id,
             policy_digest: policy.digest(),
             policy,
             budget,
+            cpu_reservations_us,
         })
     }
 
@@ -145,13 +148,6 @@ impl OutputAdmissionV1 {
             bytes[level] = bytes[level].saturating_add(payload_bytes as u64);
         }
 
-        let reservations = self
-            .budget
-            .fields()
-            .plugin_cpu_reservations
-            .iter()
-            .find(|row| row.plugin_id == self.plugin_id)
-            .ok_or(OutputAdmissionErrorV1::MissingCpuReservation)?;
         for (level_index, budget) in self.budget.fields().fidelity_budgets.iter().enumerate() {
             let level: u8 = match level_index {
                 0 => 0,
@@ -173,7 +169,7 @@ impl OutputAdmissionV1 {
                 });
             }
             let cpu = counts[level_index]
-                .saturating_mul(u64::from(reservations.cpu_reservations_us[level_index]));
+                .saturating_mul(u64::from(self.cpu_reservations_us[level_index]));
             if cpu > u64::from(budget.max_cpu_us) {
                 return Err(OutputAdmissionErrorV1::CpuExceeded {
                     level,
