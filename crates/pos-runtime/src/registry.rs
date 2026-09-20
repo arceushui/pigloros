@@ -5742,10 +5742,10 @@ mod erasure_gate_coverage {
     #[test]
     fn validate_registered_output_reports_missing_plugin() {
         let registry = PluginRegistry::new();
-        let error = registry
-            .validate_registered_output(PluginId::new(), &[])
-            .test_err();
-        assert!(matches!(error, RuntimeError::NoDriver { .. }));
+        assert!(matches!(
+            registry.validate_registered_output(PluginId::new(), &[]),
+            Err(RuntimeError::NoDriver { .. })
+        ));
     }
 }
 
