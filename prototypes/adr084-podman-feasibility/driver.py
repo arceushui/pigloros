@@ -1351,7 +1351,12 @@ def memory_limit_scenario(
             break
         time.sleep(0.01)
     return_code = process.wait(timeout=20)
-    final = parse_cgroup_events(os.pread(events_fd, 4096, 0).decode("ascii").strip())
+    try:
+        final_text = os.pread(events_fd, 4096, 0).decode("ascii").strip()
+        final = parse_cgroup_events(final_text)
+    except OSError as error:
+        if error.errno != errno.ENODEV:
+            raise
     os.close(events_fd)
     output = process.stdout.read()
     errors = process.stderr.read()
