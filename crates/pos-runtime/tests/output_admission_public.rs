@@ -212,6 +212,7 @@ fn output_admission_accounts_for_each_fidelity_level() -> TestResult {
         draft("plugin.l1", b"b"),
         draft("plugin.l2", b"c"),
     ])?;
+    assert_eq!(admission.plugin_id(), plugin_id);
     Ok(())
 }
 
@@ -375,6 +376,10 @@ fn generated_registration_binds_owned_output_policy() -> TestResult {
     ));
     registry.register_generated(&plugin, None, Some(Box::new(FixtureDriver)))?;
     assert_eq!(registry.len(), 1);
+    assert!(matches!(
+        registry.register_generated(&plugin, None, Some(Box::new(FixtureDriver))),
+        Err(RuntimeError::DuplicatePlugin { .. })
+    ));
     Ok(())
 }
 
@@ -394,5 +399,43 @@ fn generated_registration_with_approver_binds_owned_output_policy() -> TestResul
         std::iter::empty(),
     )?;
     assert_eq!(registry.len(), 1);
+    Ok(())
+}
+
+struct DuplicateFixturePlugin {
+    id: PluginId,
+}
+
+impl Plugin for DuplicateFixturePlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "duplicate-output-admission-fixture"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("plugin.output"), Kind::new("plugin.output")],
+            ..Capability::default()
+        }
+    }
+}
+
+#[test]
+fn generated_registration_rejects_duplicate_owned_event_types() -> TestResult {
+    let plugin = DuplicateFixturePlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new();
+    assert!(matches!(
+        registry.register_generated(&plugin, None, None),
+        Err(RuntimeError::CapabilityMismatch { .. })
+    ));
     Ok(())
 }
