@@ -28,6 +28,8 @@ struct traced_process {
 static struct traced_process traced[MAX_TRACED];
 static size_t traced_count;
 
+static void fail(const char *message) __attribute__((noreturn));
+
 static void fail(const char *message) {
     dprintf(STDERR_FILENO, "seccomp-tracer-error:%s:%s\n", message,
             strerror(errno));
@@ -143,7 +145,7 @@ static void write_report(const char *path, pid_t installer, size_t length,
     }
     int written = dprintf(
         descriptor,
-        "{\n  \"admitted_flags\": %u,\n  \"byte_length\": %zu,\n"
+        "{\n  \"admitted_flags\": %lu,\n  \"byte_length\": %zu,\n"
         "  \"equality\": true,\n  \"install_attempts\": 1,\n"
         "  \"installer_pid\": %ld,\n  \"syscall_return\": %ld\n}\n",
         ADMITTED_SECCOMP_FLAGS, length, (long)installer, result);
