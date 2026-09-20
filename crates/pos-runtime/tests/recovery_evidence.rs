@@ -313,7 +313,7 @@ fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
     let plugin = MetadataOnlyPlugin {
         id: PluginId::new(),
     };
-    driverless.register(&plugin, None, None).test_ok();
+    driverless.register_generated(&plugin, None, None).test_ok();
     driverless.restore_driver_state(&segments, &[]).test_ok();
 
     let mut pending = gated_registry();
@@ -333,7 +333,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     let plugin = MetadataOnlyPlugin {
         id: PluginId::new(),
     };
-    registry.register(&plugin, None, None).test_ok();
+    registry.register_generated(&plugin, None, None).test_ok();
     registry.register_test_driver(Box::new(DefaultRecoveryDriver));
     registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
     registry.commit_step_at(Seq::ZERO, 0).test_ok();

@@ -170,7 +170,7 @@ impl HostFixture {
             store_config,
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(AgentReducer)),
                 Some(Box::new(driver)),
@@ -264,7 +264,7 @@ impl HostFixture {
             Box::new(parent_provider),
         );
         experiment
-            .register(
+            .register_generated(
                 plugin.as_ref(),
                 Some(Box::new(AgentReducer)),
                 Some(Box::new(parent_driver)),
@@ -679,7 +679,7 @@ fn boundary_experiment(name: &str, driver: BoundaryDriver) -> Experiment {
         store_config: StoreConfig::Memory,
     });
     experiment
-        .register(
+        .register_generated(
             &plugin,
             Some(Box::new(AgentReducer)),
             Some(Box::new(driver)),
@@ -1249,7 +1249,7 @@ fn durable_session_reads_appends_empty_boundaries_and_revocations() {
     })
     .with_consent_authority(authority.clone());
     experiment
-        .register_with_approver(
+        .register_generated_with_approver(
             &plugin,
             None,
             None,

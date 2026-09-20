@@ -666,7 +666,7 @@ fn gateway_action_registry_builder(
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    drop(registry.register_with_approver(
+    drop(registry.register_generated_with_approver(
         &descriptor,
         None,
         None,

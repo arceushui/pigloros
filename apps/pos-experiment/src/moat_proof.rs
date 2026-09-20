@@ -465,7 +465,7 @@ fn register_plugins(
     topology: &ProofTopology,
 ) -> Result<(), RuntimeError> {
     result_pipeline! {
-        experiment.register_with_approver(
+        experiment.register_generated_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver(
@@ -476,7 +476,7 @@ fn register_plugins(
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        experiment.register(
+        experiment.register_generated(
             &topology.agent_plugin,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
@@ -484,7 +484,7 @@ fn register_plugins(
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        experiment.register(
+        experiment.register_generated(
             &topology.society_plugin,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
@@ -1526,14 +1526,14 @@ fn failure_probe(
     })
     .with_resource_limit(resource_limit);
     result_pipeline! {
-        experiment.register(
+        experiment.register_generated(
             &sibling_plugin,
             None,
             Some(Box::new(SiblingProbeDriver {
                 steps: Arc::clone(&sibling_steps),
             })),
         ).map_err(MoatProofError::from) => |()|;
-        experiment.register(
+        experiment.register_generated(
             &plugin,
             None,
             Some(Box::new(FailureProbeDriver {
@@ -2392,7 +2392,7 @@ mod tests {
             store_config: pos_store::StoreConfig::Memory,
         });
         experiment
-            .register(
+            .register_generated(
                 &agent_duplicate.world_plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(world_driver(
@@ -2858,7 +2858,7 @@ mod run_coverage_entrypoints {
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
         });
-        test_ok(experiment.register(
+        test_ok(experiment.register_generated(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver(
@@ -2885,7 +2885,7 @@ mod run_coverage_entrypoints {
             store_config: pos_store::StoreConfig::Memory,
         })
         .with_resource_limit(3);
-        test_ok(experiment.register(
+        test_ok(experiment.register_generated(
             &plugin,
             None,
             Some(Box::new(FailureProbeDriver {

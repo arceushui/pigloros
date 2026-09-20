@@ -603,10 +603,10 @@ fn register_experiment(
         },
     });
     experiment
-        .register(&observation, Some(Box::new(EntityStateProjection)), None)
+        .register_generated(&observation, Some(Box::new(EntityStateProjection)), None)
         .test_ok()?;
     experiment
-        .register(&society, Some(Box::new(SocietyReducer)), None)
+        .register_generated(&society, Some(Box::new(SocietyReducer)), None)
         .test_ok()?;
     experiment
         .register_with_output_policy(
@@ -627,7 +627,7 @@ fn register_experiment(
         )
         .test_ok()?;
     experiment
-        .register(
+        .register_generated(
             &probe,
             None,
             Some(Box::new(ObservationProbeDriver {

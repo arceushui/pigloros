@@ -36,6 +36,14 @@ use crate::{
 };
 use std::{collections::HashSet, sync::Arc};
 
+fn generated_identity_hash(label: &[u8], plugin: &dyn Plugin) -> pos_core::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(label);
+    hasher.update(&plugin.id().inner().to_bytes());
+    hasher.update(plugin.version().as_bytes());
+    pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
 fn extend_unique_subscriptions(
     subscriptions: &mut Vec<ProjectionKey>,
     seen: &mut HashSet<ProjectionKey>,
@@ -2080,22 +2088,6 @@ impl PluginRegistry {
         Ok(())
     }
 
-    /// Register a plugin.
-    ///
-    /// Wires event-type schemas and (optionally) a reducer and driver.
-    ///
-    /// # Errors
-    /// Returns [`RuntimeError::DuplicatePlugin`] if a plugin with the same `PluginId`
-    /// is already registered.
-    pub fn register(
-        &mut self,
-        plugin: &dyn Plugin,
-        reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-    ) -> Result<(), RuntimeError> {
-        self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
-    }
-
     /// Register a plugin with a deterministic policy derived from its declared
     /// event namespace and the bounded Interactive executable profile.
     ///
@@ -2155,7 +2147,10 @@ impl PluginRegistry {
                     cpu_reservations_us: [10; 3],
                 }],
                 accounting_semantics: 0,
-                execution_profile_hash: pos_core::Hash::from_bytes([21; 32]),
+                execution_profile_hash: generated_identity_hash(
+                    b"pigloros/generated-execution-profile/v1",
+                    plugin,
+                ),
                 max_pass_wall_duration_us: 1_000,
             },
         )
@@ -2201,10 +2196,19 @@ impl PluginRegistry {
             pos_core::output_policy::OutputPolicyInputV1 {
                 plugin_id: plugin.id(),
                 plugin_version: plugin.version().to_owned(),
-                implementation_hash: pos_core::Hash::from_bytes([22; 32]),
-                base_configuration_digest: pos_core::Hash::from_bytes([23; 32]),
+                implementation_hash: generated_identity_hash(
+                    b"pigloros/generated-implementation/v1",
+                    plugin,
+                ),
+                base_configuration_digest: generated_identity_hash(
+                    b"pigloros/generated-configuration/v1",
+                    plugin,
+                ),
                 executable_profile_hash: budget.digest(),
-                retention_policy_hash: pos_core::Hash::from_bytes([24; 32]),
+                retention_policy_hash: generated_identity_hash(
+                    b"pigloros/generated-retention/v1",
+                    plugin,
+                ),
                 policy_revision: 1,
                 output_declarations: declarations,
             },
@@ -2220,14 +2224,14 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
-    pub fn register_pinned(
+    pub fn register_pinned_generated(
         &mut self,
         plugin: &dyn Plugin,
         registration: PluginRegistrationV1,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        self.register_pinned_with_approver(
+        self.register_pinned_generated_with_approver(
             plugin,
             registration,
             reducer,
@@ -2237,43 +2241,11 @@ impl PluginRegistry {
         )
     }
 
-    /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
-    ///
-    /// Wires event-type schemas, (optionally) a reducer and driver, and (optionally)
-    /// an action approver indexed by the explicitly supplied event types.
-    ///
-    /// # Errors
-    /// Returns [`RuntimeError::DuplicatePlugin`] if a plugin with the same `PluginId`
-    /// is already registered.
-    pub fn register_with_approver(
-        &mut self,
-        plugin: &dyn Plugin,
-        reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-        approver: Option<Box<dyn ActionApprover>>,
-        approver_event_types: impl IntoIterator<Item = Kind>,
-    ) -> Result<(), RuntimeError> {
-        let context = self.registration_context(plugin)?;
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        self.register_with_approver_slice(
-            plugin,
-            reducer,
-            driver,
-            approver,
-            &approver_event_types,
-            context,
-            RegistrationOptions {
-                registration: None,
-                output_admission: None,
-            },
-        )
-    }
-
     /// Register a pinned implementation with an optional action approver.
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
-    pub fn register_pinned_with_approver(
+    pub fn register_pinned_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
         registration: PluginRegistrationV1,
@@ -2282,6 +2254,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
+        let (policy, budget) = Self::generated_output_binding(plugin)?;
         let context = self.registration_context(plugin)?;
         self.validate_registration_roles(&registration)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
@@ -2294,7 +2267,12 @@ impl PluginRegistry {
             context,
             RegistrationOptions {
                 registration: Some(registration),
-                output_admission: None,
+                output_admission: Some(OutputAdmissionV1::try_new(
+                    plugin.id(),
+                    plugin.version(),
+                    policy,
+                    budget,
+                )?),
             },
         )
     }
@@ -3225,7 +3203,7 @@ mod tests {
         let mut registry = gated_registry();
         let plugin = plugin_with_caps("panicking", &["probe.event"], true, false);
         registry
-            .register(&plugin, None, Some(Box::new(PanickingDriver)))
+            .register_generated(&plugin, None, Some(Box::new(PanickingDriver)))
             .test_ok();
 
         let error = registry
@@ -3240,7 +3218,7 @@ mod tests {
         let mut registry = gated_registry();
         let plugin = plugin_with_caps("abort-panicking", &[], true, false);
         registry
-            .register(&plugin, None, Some(Box::new(AbortPanickingDriver)))
+            .register_generated(&plugin, None, Some(Box::new(AbortPanickingDriver)))
             .test_ok();
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
@@ -3365,7 +3343,9 @@ mod tests {
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
         let driverless = simple_plugin("restore-driverless", &[]);
-        registry.register(&driverless, None, None).test_ok();
+        registry
+            .register_generated(&driverless, None, None)
+            .test_ok();
         registry.register_test_driver(Box::new(TransactionalDriver {
             name: "restoring",
             state: Arc::clone(&state),
@@ -3534,7 +3514,9 @@ mod tests {
         let second = Arc::new(Mutex::new(RestoreState::default()));
         let mut registry = gated_registry();
         let driverless = simple_plugin("failed-restore-driverless", &[]);
-        registry.register(&driverless, None, None).test_ok();
+        registry
+            .register_generated(&driverless, None, None)
+            .test_ok();
         registry.register_test_driver(Box::new(RestoreDriver {
             state: Arc::clone(&first),
             rejects: false,
@@ -3640,7 +3622,7 @@ mod tests {
     fn register_plugin_wires_schemas() {
         let mut reg = gated_registry();
         let p = simple_plugin("world", &["world.observation", "world.action"]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         assert!(reg.schemas.contains("world.observation"));
         assert!(reg.schemas.contains("world.action"));
         assert!(!reg.schemas.contains("agent.decision"));
@@ -3651,12 +3633,14 @@ mod tests {
     fn plugins_cannot_claim_core_owned_geographic_event_types() {
         let plugin = simple_plugin("malicious-geo", &[pos_core::GEOGRAPHIC_EVENT_TYPE]);
         let error = PluginRegistry::new()
-            .register(&plugin, None, None)
+            .register_generated(&plugin, None, None)
             .test_err();
         assert!(error.to_string().contains(pos_core::GEOGRAPHIC_EVENT_TYPE));
 
         let cell = simple_plugin("future-geo", &[pos_core::GEOGRAPHIC_CELL_EVENT_TYPE]);
-        let error = PluginRegistry::new().register(&cell, None, None).test_err();
+        let error = PluginRegistry::new()
+            .register_generated(&cell, None, None)
+            .test_err();
         assert!(error
             .to_string()
             .contains(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE));
@@ -3672,7 +3656,7 @@ mod tests {
         ] {
             let plugin = simple_plugin("malicious-consent", &[event_type]);
             assert!(matches!(
-                PluginRegistry::new().register(&plugin, None, None),
+                PluginRegistry::new().register_generated(&plugin, None, None),
                 Err(RuntimeError::ReservedConsentEventType { .. })
             ));
         }
@@ -3683,7 +3667,7 @@ mod tests {
     fn register_plugin_with_reducer_wires_projections() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
-        reg.register(&p, Some(Box::new(CountReducer)), None)
+        reg.register_generated(&p, Some(Box::new(CountReducer)), None)
             .test_ok();
         // Apply an event and verify the reducer ran
         let event = Event {
@@ -3756,7 +3740,7 @@ mod tests {
         let plugin = plugin_with_caps("projection", &["projection.event"], false, true);
         let mut bound = PluginRegistry::new().with_consent_authority(authority);
         bound
-            .register(&plugin, Some(Box::new(CountReducer)), None)
+            .register_generated(&plugin, Some(Box::new(CountReducer)), None)
             .test_ok();
         assert!(bound.clone_consent_gate().is_some());
         let projection_event = |entity, seq| Event {
@@ -3813,8 +3797,8 @@ mod tests {
             name: "dup",
             cap: Capability::default(),
         };
-        reg.register(&p1, None, None).test_ok();
-        let err = reg.register(&p2, None, None).test_err();
+        reg.register_generated(&p1, None, None).test_ok();
+        let err = reg.register_generated(&p2, None, None).test_err();
         assert!(matches!(err, RuntimeError::DuplicatePlugin { .. }));
     }
 
@@ -3828,7 +3812,7 @@ mod tests {
             name: "dup",
             cap: Capability::default(),
         };
-        reg.register(&plugin, None, None).test_ok();
+        reg.register_generated(&plugin, None, None).test_ok();
 
         let consumed = std::cell::Cell::new(false);
         let event_types = std::iter::once_with(|| {
@@ -3836,7 +3820,7 @@ mod tests {
             Kind::new("must.not.be.consumed")
         });
         let error = reg
-            .register_with_approver(&plugin, None, None, None, event_types)
+            .register_generated_with_approver(&plugin, None, None, None, event_types)
             .test_err();
 
         assert!(matches!(error, RuntimeError::DuplicatePlugin { .. }));
@@ -3849,7 +3833,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         assert!(reg.is_empty());
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.driver_count(), 0);
         assert!(reg.contains(&p.id));
@@ -3863,7 +3847,7 @@ mod tests {
         let tl = store.create_timeline("t").test_ok();
         let mut reg = gated_registry();
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         let drafts = reg.tick_cadenced(tl.id(), 0).test_ok();
         assert!(drafts.is_empty());
     }
@@ -3874,8 +3858,8 @@ mod tests {
         let mut reg = gated_registry();
         let p1 = simple_plugin("alpha", &[]);
         let p2 = simple_plugin("beta", &[]);
-        reg.register(&p1, None, None).test_ok();
-        reg.register(&p2, None, None).test_ok();
+        reg.register_generated(&p1, None, None).test_ok();
+        reg.register_generated(&p2, None, None).test_ok();
         let names: Vec<&str> = reg.plugin_names().collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
@@ -3943,7 +3927,7 @@ mod tests {
         let tl = store.create_timeline("t").test_ok();
         let p = simple_plugin("nodrive", &[]);
         let mut reg = gated_registry();
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         let drafts = reg.step_all(tl.id()).test_ok();
         assert!(drafts.is_empty());
     }
@@ -3959,7 +3943,7 @@ mod tests {
 
         let plugin = simple_plugin("registered-without-driver", &[]);
         let plugin_id = plugin.id;
-        registry.register(&plugin, None, None).test_ok();
+        registry.register_generated(&plugin, None, None).test_ok();
         let absent = registry
             .invoke_selected_driver(plugin_id, TimelineId::new(), &snapshot, &[])
             .test_err();
@@ -4428,7 +4412,7 @@ mod tests {
         };
         let token = authority.record_grant_on_timeline(timeline.id(), &grant);
         let mut reg = gated_registry().with_consent_authority(authority);
-        reg.register(&plugin, None, Some(Box::new(driver)))
+        reg.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
 
         let drafts = reg
@@ -5056,7 +5040,7 @@ mod tests {
     fn schema_validation_after_registration() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("agent", &["agent.decision"]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         let valid = EventDraft::new(
             EntityId::new(),
             Kind::new("agent.decision"),
@@ -5076,17 +5060,17 @@ mod tests {
     fn register_rejects_capability_mismatch() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("mismatch", &["x.y"], true, false);
-        let err = reg.register(&p, None, None).test_err();
+        let err = reg.register_generated(&p, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p2 = plugin_with_caps("mismatch2", &["x.y"], false, false);
         let err = reg
-            .register(&p2, Some(Box::new(CountReducer)), None)
+            .register_generated(&p2, Some(Box::new(CountReducer)), None)
             .test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p3 = plugin_with_caps("mismatch3", &["x.y"], false, true);
-        let err = reg.register(&p3, None, None).test_err();
+        let err = reg.register_generated(&p3, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p4 = plugin_with_caps("mismatch4", &["x.y"], false, false);
@@ -5097,7 +5081,9 @@ mod tests {
             TimelineId::new(),
             ObservationView::empty(),
         ));
-        let err = reg.register(&p4, None, Some(Box::new(noop))).test_err();
+        let err = reg
+            .register_generated(&p4, None, Some(Box::new(noop)))
+            .test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
     }
 
@@ -5125,8 +5111,8 @@ mod tests {
             },
         };
         let mut registry = PluginRegistry::new();
-        registry.register(&first, None, None).test_ok();
-        registry.register(&second, None, None).test_ok();
+        registry.register_generated(&first, None, None).test_ok();
+        registry.register_generated(&second, None, None).test_ok();
         let composition = registry.composition();
         assert_eq!(
             composition
@@ -5252,7 +5238,7 @@ mod tests {
         let mut unavailable = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         unavailable
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5269,7 +5255,7 @@ mod tests {
 
         let mut missing = PluginRegistry::new().without_erasure_gate();
         missing
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5286,7 +5272,7 @@ mod tests {
         frozen_gate.freeze_timeline_for_test(timeline);
         let mut frozen = PluginRegistry::new().with_erasure_gate(frozen_gate);
         frozen
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5311,7 +5297,7 @@ mod tests {
     fn registry_with_mock_action_approver() -> PluginRegistry {
         let plugin = plugin_with_caps("approver_plugin", &["action.type"], false, false);
         let mut reg = gated_registry();
-        reg.register_with_approver(
+        reg.register_generated_with_approver(
             &plugin,
             None,
             None,
@@ -5333,7 +5319,7 @@ mod tests {
         let duplicate_plugin =
             plugin_with_caps("duplicate_approver", &["action.type"], false, false);
         let duplicate = reg
-            .register_with_approver(
+            .register_generated_with_approver(
                 &duplicate_plugin,
                 None,
                 None,
@@ -5345,13 +5331,19 @@ mod tests {
 
         let no_approver = plugin_with_caps("missing_approver", &["missing.type"], false, false);
         let missing = reg
-            .register_with_approver(&no_approver, None, None, None, [Kind::new("missing.type")])
+            .register_generated_with_approver(
+                &no_approver,
+                None,
+                None,
+                None,
+                [Kind::new("missing.type")],
+            )
             .test_err();
         assert!(matches!(missing, RuntimeError::CapabilityMismatch { .. }));
 
         let foreign_type = plugin_with_caps("foreign_type", &["owned.type"], false, false);
         let foreign = reg
-            .register_with_approver(
+            .register_generated_with_approver(
                 &foreign_type,
                 None,
                 None,
@@ -5463,7 +5455,7 @@ mod tests {
         let plugin = plugin_with_caps("forged_actor", &["action.type"], false, false);
         let mut actor_registry = gated_registry();
         actor_registry
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5486,7 +5478,7 @@ mod tests {
         let plugin = plugin_with_caps("forged_event_type", &["action.type"], false, false);
         let mut event_type_registry = gated_registry();
         event_type_registry
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5509,7 +5501,7 @@ mod tests {
     fn driverless_registry_ticks_without_drafts() {
         let mut driverless = gated_registry();
         let plugin = simple_plugin("coverage-driverless", &[]);
-        driverless.register(&plugin, None, None).test_ok();
+        driverless.register_generated(&plugin, None, None).test_ok();
         driverless.tick_cadenced(TimelineId::new(), 0).test_ok();
         driverless.commit_step_at(Seq::ZERO, 0).test_ok();
     }

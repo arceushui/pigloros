@@ -1017,7 +1017,7 @@ fn public_registry_steps_a_registered_driverless_plugin() {
     let timeline = TimelineId::new();
     let mut driverless = PluginRegistry::new();
     let plugin = configured_plugin("driverless", &[], false, false);
-    test_ok(driverless.register(&plugin, None, None));
+    test_ok(driverless.register_generated(&plugin, None, None));
     assert!(test_ok(driverless.step_all_anchored(timeline, Seq::ZERO)).is_empty());
     test_ok(driverless.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(driverless.tick_cadenced(timeline, 0)).is_empty());
@@ -1281,7 +1281,7 @@ fn public_registry_requires_authorization_context_for_projections() {
 fn public_registry_rejects_oversized_actions() {
     let mut action_registry = PluginRegistry::new();
     let action_plugin = configured_plugin("action", &["action.type"], false, false);
-    test_ok(action_registry.register_with_approver(
+    test_ok(action_registry.register_generated_with_approver(
         &action_plugin,
         None,
         None,
@@ -1315,7 +1315,7 @@ fn public_registry_fails_closed_before_action_approval() {
     let timeline = TimelineId::new();
 
     let mut unavailable = RuntimePluginRegistry::new();
-    test_ok(unavailable.register_with_approver(
+    test_ok(unavailable.register_generated_with_approver(
         &action_plugin,
         None,
         None,
@@ -1330,7 +1330,7 @@ fn public_registry_fails_closed_before_action_approval() {
     ));
 
     let mut missing = RuntimePluginRegistry::new().without_erasure_gate();
-    test_ok(missing.register_with_approver(
+    test_ok(missing.register_generated_with_approver(
         &action_plugin,
         None,
         None,
@@ -1475,7 +1475,7 @@ fn public_registry_gate_projection_and_control_marker_seams_are_distinguishable(
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    test_ok(registry.register(
+    test_ok(registry.register_generated(
         &ProjectionPlugin {
             id: PluginId::new(),
         },
@@ -1608,7 +1608,7 @@ fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
     let failing_aborts = Arc::new(Mutex::new(0));
     let mut registry = PluginRegistry::new();
     let driverless = configured_plugin("restore-driverless", &[], false, false);
-    test_ok(registry.register(&driverless, None, None));
+    test_ok(registry.register_generated(&driverless, None, None));
     registry.register_test_driver(Box::new(RestoreTrackingDriver {
         aborts: Arc::clone(&tracking_aborts),
         commits: Arc::clone(&tracking_commits),
@@ -1653,7 +1653,7 @@ fn public_restore_failure_aborts_prior_driver_and_reports_commit_panic() {
     let mut successful = PluginRegistry::new();
     let successful_driverless =
         configured_plugin("successful-restore-driverless", &[], false, false);
-    test_ok(successful.register(&successful_driverless, None, None));
+    test_ok(successful.register_generated(&successful_driverless, None, None));
     successful.register_test_driver(Box::new(RestoreTrackingDriver {
         aborts: Arc::new(Mutex::new(0)),
         commits: Arc::clone(&successful_commits),
@@ -1692,7 +1692,7 @@ fn public_registry_rejects_invalid_capabilities() {
         pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
     ] {
         assert!(PluginRegistry::new()
-            .register(
+            .register_generated(
                 &configured_plugin("reserved", &[event_type], false, false),
                 None,
                 None,
@@ -1700,28 +1700,28 @@ fn public_registry_rejects_invalid_capabilities() {
             .is_err());
     }
     assert!(PluginRegistry::new()
-        .register(
+        .register_generated(
             &configured_plugin("driver-required", &[], true, false),
             None,
             None,
         )
         .is_err());
     assert!(PluginRegistry::new()
-        .register(
+        .register_generated(
             &configured_plugin("unexpected-driver", &[], false, false),
             None,
             Some(Box::new(EmptyDriver)),
         )
         .is_err());
     assert!(PluginRegistry::new()
-        .register(
+        .register_generated(
             &configured_plugin("reducer-required", &[], false, true),
             None,
             None,
         )
         .is_err());
     assert!(PluginRegistry::new()
-        .register(
+        .register_generated(
             &configured_plugin("unexpected-reducer", &[], false, false),
             Some(Box::new(CountingReducer)),
             None,
@@ -1733,7 +1733,7 @@ fn public_registry_rejects_invalid_capabilities() {
 fn public_registry_rejects_invalid_approver_routes() {
     let mut approvers = PluginRegistry::new();
     let owned = configured_plugin("approver", &["action.type"], false, false);
-    test_ok(approvers.register_with_approver(
+    test_ok(approvers.register_generated_with_approver(
         &owned,
         None,
         None,
@@ -1741,7 +1741,7 @@ fn public_registry_rejects_invalid_approver_routes() {
         [Kind::new("action.type")],
     ));
     assert!(approvers
-        .register_with_approver(
+        .register_generated_with_approver(
             &configured_plugin("missing-approver", &["missing.type"], false, false),
             None,
             None,
@@ -1750,7 +1750,7 @@ fn public_registry_rejects_invalid_approver_routes() {
         )
         .is_err());
     assert!(approvers
-        .register_with_approver(
+        .register_generated_with_approver(
             &configured_plugin("foreign-approver", &["owned.type"], false, false),
             None,
             None,
@@ -1759,7 +1759,7 @@ fn public_registry_rejects_invalid_approver_routes() {
         )
         .is_err());
     assert!(approvers
-        .register_with_approver(
+        .register_generated_with_approver(
             &configured_plugin("duplicate-approver", &["action.type"], false, false),
             None,
             None,
@@ -1774,7 +1774,7 @@ fn public_registry_reports_registered_plugin_metadata() {
     let mut registry = PluginRegistry::new();
     assert!(registry.is_empty());
     let plugin = configured_plugin("metadata", &["metadata.event"], false, false);
-    test_ok(registry.register(&plugin, None, None));
+    test_ok(registry.register_generated(&plugin, None, None));
     assert!(registry.contains(&plugin.id));
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.plugin_names().collect::<Vec<_>>(), ["metadata"]);

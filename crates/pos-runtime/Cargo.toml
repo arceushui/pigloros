@@ -13,6 +13,7 @@ pos-state = { path = "../pos-state" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../pos-core", features = ["test-support"] }

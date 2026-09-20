@@ -87,7 +87,7 @@ mod tests {
     fn registers_with_runtime_without_reducer() -> Result<(), Box<dyn std::error::Error>> {
         let mut registry = PluginRegistry::new();
         let plugin = LedgerPlugin::new();
-        registry.register(&plugin, None, None)?;
+        registry.register_generated(&plugin, None, None)?;
         assert!(registry.plugin_names().any(|n| n == "ledger"));
         Ok(())
     }

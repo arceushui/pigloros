@@ -393,7 +393,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
     let mut missing = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    missing.register(
+    missing.register_generated(
         &FixturePlugin {
             id: PluginId::new(),
         },

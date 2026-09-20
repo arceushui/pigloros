@@ -27,7 +27,7 @@
 //! let mut registry = PluginRegistry::new();
 //! let plugin = SocietyPlugin::new();
 //! assert!(registry
-//!     .register(&plugin, Some(Box::new(SocietyReducer)), None)
+//!     .register_generated(&plugin, Some(Box::new(SocietyReducer)), None)
 //!     .is_ok());
 //!
 //! let draft = draft_signal(
