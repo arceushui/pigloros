@@ -1041,6 +1041,16 @@ fn assert_fork_retry_rejects_excluded_parent_with_included_child(
         parent_excluded.fork_retry_scope_requirements(parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    parent_excluded
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Excluded;
+    assert!(parent_excluded
+        .fork_retry_scope_requirements(parent, child)?
+        .is_empty());
     Ok(())
 }
 
