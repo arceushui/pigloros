@@ -59,14 +59,21 @@ fn generated_identity_hash(
     pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
+fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
 fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/replay-policy-identity/v1");
-    hasher.update(entry.name.as_bytes());
-    hasher.update(entry.version.as_bytes());
-    for event_type in &entry.owned_event_types {
-        hasher.update(event_type.as_str().as_bytes());
-        hasher.update(&[0]);
+    hash_framed(&mut hasher, entry.name.as_bytes());
+    hash_framed(&mut hasher, entry.version.as_bytes());
+    let mut owned_event_types: Vec<&str> =
+        entry.owned_event_types.iter().map(Kind::as_str).collect();
+    owned_event_types.sort_unstable();
+    for event_type in owned_event_types {
+        hash_framed(&mut hasher, event_type.as_bytes());
     }
     if let Some(admission) = &entry.output_admission {
         let policy = admission.policy().fields();
@@ -80,7 +87,7 @@ fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
         }
         hasher.update(&policy.policy_revision.to_le_bytes());
         for declaration in &policy.output_declarations {
-            hasher.update(declaration.event_type().as_bytes());
+            hash_framed(&mut hasher, declaration.event_type().as_bytes());
             hasher.update(&[match declaration.authority() {
                 pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
                 pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,

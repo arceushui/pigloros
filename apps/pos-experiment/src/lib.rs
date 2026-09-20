@@ -1152,8 +1152,7 @@ impl Experiment {
     /// Register a plugin (wires schemas + reducer + driver).
     ///
     /// # Errors
-    /// Returns [`pos_runtime::RuntimeError::DuplicatePlugin`] if a plugin with the same id
-    /// is already registered.
+    /// Returns registration, generated-policy, or output-admission errors.
     pub fn register_generated(
         &mut self,
         plugin: &dyn pos_core::Plugin,
@@ -1187,8 +1186,7 @@ impl Experiment {
     /// Register a plugin with an optional action approver.
     ///
     /// # Errors
-    /// Returns [`pos_runtime::RuntimeError::DuplicatePlugin`] if a plugin with the same id
-    /// is already registered.
+    /// Returns registration, generated-policy, or output-admission errors.
     pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn pos_core::Plugin,
