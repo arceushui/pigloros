@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::os::fd::IntoRawFd;
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_int, c_long};
 use std::ptr;
 
 #[used]
@@ -12,16 +12,14 @@ pub static __llvm_profile_filename: [u8; b"/work/launcher-%m%c.profraw\0".len()]
 
 unsafe extern "C" {
     fn clearenv() -> c_int;
-    fn execveat(
-        fd: c_int,
-        path: *const c_char,
-        argv: *const *const c_char,
-        envp: *const *const c_char,
-        flags: c_int,
-    ) -> c_int;
+    fn syscall(number: c_long, ...) -> c_long;
 }
 
 const AT_EMPTY_PATH: c_int = 0x1000;
+#[cfg(target_arch = "x86_64")]
+const SYS_EXECVEAT: c_long = 322;
+#[cfg(target_arch = "aarch64")]
+const SYS_EXECVEAT: c_long = 281;
 
 fn live_descriptors() -> Vec<i32> {
     let entries = fs::read_dir("/proc/self/fd")
@@ -74,7 +72,8 @@ fn main() {
     let environment = [ptr::null()];
     let empty_path = CString::new("").expect("empty execveat path");
     let result = unsafe {
-        execveat(
+        syscall(
+            SYS_EXECVEAT,
             adapter,
             empty_path.as_ptr(),
             arguments.as_ptr(),
