@@ -239,7 +239,7 @@ def mutation_report(
     names = parsed_profile["syscalls"][0]["names"]
     for label, changed_names in (
         ("audit name removal", names[1:]),
-        ("audit name substitution", ["accept"] + names[1:]),
+        ("audit name substitution", ["zzzz_mutated_name"] + names[1:]),
         ("audit name reordering", list(reversed(names))),
         ("audit name addition", names + ["writev_extra"]),
     ):
