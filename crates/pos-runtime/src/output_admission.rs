@@ -136,6 +136,10 @@ impl OutputAdmissionV1 {
         &self.budget
     }
 
+    pub(crate) fn reset_usage(&self) {
+        self.usage.set(AdmissionUsage::default());
+    }
+
     /// Validate every draft against declarations and the complete step budget.
     ///
     /// # Errors

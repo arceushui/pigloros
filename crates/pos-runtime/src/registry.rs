@@ -1587,6 +1587,11 @@ impl PluginRegistry {
 
     fn abort_drivers(&mut self, driver_ids: &[PluginId]) -> Option<RuntimeError> {
         let mut first_error = None;
+        for entry in self.plugins.values() {
+            if let Some(admission) = entry.output_admission.as_ref() {
+                admission.reset_usage();
+            }
+        }
         for id in driver_ids {
             if let Some(driver) = self
                 .plugins
@@ -1973,6 +1978,13 @@ impl PluginRegistry {
 
     fn commit_pending_step(&mut self, pending: PendingStep) {
         for id in &pending.driver_ids {
+            if let Some(admission) = self
+                .plugins
+                .get(id)
+                .and_then(|entry| entry.output_admission.as_ref())
+            {
+                admission.reset_usage();
+            }
             if let Some(driver) = self
                 .plugins
                 .get_mut(id)
