@@ -735,6 +735,7 @@ def cache_probe_scenario(
 
 
 def native_matrix_scenario(
+    architecture: str,
     image: str,
     seccomp: pathlib.Path,
     seccomp_bpf_base64: str,
@@ -836,9 +837,14 @@ def native_matrix_scenario(
         elif expected_name in terminating:
             if outcome != "exit" or observed.get("status") != 0:
                 raise AssertionError(f"terminating syscall outcome mismatch: {observed}")
-        elif expected_name == "rt_sigreturn":
-            if outcome != "signal" or observed.get("signal") != signal.SIGSEGV:
-                raise AssertionError(f"rt_sigreturn outcome mismatch: {observed}")
+        elif expected_name == "rt_sigreturn" or (
+            architecture == "x86_64" and expected_name == "uretprobe"
+        ):
+            expected_signal = (
+                signal.SIGILL if expected_name == "uretprobe" else signal.SIGSEGV
+            )
+            if outcome != "signal" or observed.get("signal") != expected_signal:
+                raise AssertionError(f"terminating signal mismatch: {observed}")
         elif outcome != "return" or observed.get("raw") == -4094:
             raise AssertionError(f"allowed syscall outcome mismatch: {observed}")
     if summary != {
@@ -1098,6 +1104,7 @@ def main() -> None:
         arguments.artifact_dir,
     )
     native_matrix_scenario(
+        arguments.architecture,
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,
