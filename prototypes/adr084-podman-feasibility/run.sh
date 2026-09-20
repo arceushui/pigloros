@@ -46,7 +46,35 @@ jq -e '.host.cgroupVersion == "v2"' "${artifact_dir}/podman-info.json" >/dev/nul
 jq -e '.host.ociRuntime.name == "crun" or .host.ociRuntime.path == "/usr/bin/crun"' \
   "${artifact_dir}/podman-info.json" >/dev/null
 
-musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototype_dir}/launcher.c"
+blake3_commit="df610ddc3b93841ffc59a87e3da659a15910eb46"
+blake3_source="${build_dir}/blake3-source"
+git init --quiet "${blake3_source}"
+git -C "${blake3_source}" remote add origin https://github.com/BLAKE3-team/BLAKE3.git
+git -C "${blake3_source}" fetch --quiet --depth=1 origin "${blake3_commit}"
+git -C "${blake3_source}" checkout --quiet --detach FETCH_HEAD
+test "$(git -C "${blake3_source}" rev-parse HEAD)" = "${blake3_commit}"
+{
+  printf 'repository=https://github.com/BLAKE3-team/BLAKE3.git\n'
+  printf 'commit=%s\n' "${blake3_commit}"
+  printf 'tree=%s\n' "$(git -C "${blake3_source}" rev-parse 'HEAD^{tree}')"
+  git -C "${blake3_source}" archive --format=tar HEAD | sha256sum | \
+    sed 's/  -$/  git-archive.tar/'
+  sha256sum \
+    "${blake3_source}/c/blake3.c" \
+    "${blake3_source}/c/blake3_dispatch.c" \
+    "${blake3_source}/c/blake3_portable.c" \
+    "${blake3_source}/c/blake3.h" \
+    "${blake3_source}/c/blake3_impl.h"
+} >"${artifact_dir}/blake3-source-identity.txt"
+cp "${blake3_source}/LICENSE_A2" "${artifact_dir}/blake3-LICENSE_A2.txt"
+musl-gcc -static -Os -Wall -Wextra -Werror \
+  -DBLAKE3_USE_NEON=0 -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 \
+  -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
+  -I"${blake3_source}/c" -o "${build_dir}/launcher" \
+  "${prototype_dir}/launcher.c" \
+  "${blake3_source}/c/blake3.c" \
+  "${blake3_source}/c/blake3_dispatch.c" \
+  "${blake3_source}/c/blake3_portable.c"
 python3 "${prototype_dir}/generate_adapter_transport.py" "${build_dir}"
 cp "${build_dir}/adapter-transport-vectors.json" "${artifact_dir}/"
 musl-gcc -static -Os -Wall -Wextra -Werror -I"${build_dir}" \
@@ -193,6 +221,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --eai1-hello "${build_dir}/eai1_hello.bin" \
   --eai1-hold "${build_dir}/eai1_hold.bin" \
   --eao1-hello "${build_dir}/eao1_hello.bin" \
+  --runtime-subject "${artifact_dir}/runtime-subject.json" \
   --configured-defaults "${prototype_dir}/configured-default-injection.conf" \
   --configured-security-defaults \
     "${prototype_dir}/configured-security-default-injection.conf" \

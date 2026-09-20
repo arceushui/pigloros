@@ -38,6 +38,20 @@ def main() -> None:
             arguments.build_dir / "libseccomp-interface-v1.txt",
         ),
         ("prototype/launcher.c", arguments.prototype_dir / "launcher.c"),
+        ("dependency/blake3.c", arguments.build_dir / "blake3-source/c/blake3.c"),
+        (
+            "dependency/blake3_dispatch.c",
+            arguments.build_dir / "blake3-source/c/blake3_dispatch.c",
+        ),
+        (
+            "dependency/blake3_portable.c",
+            arguments.build_dir / "blake3-source/c/blake3_portable.c",
+        ),
+        ("dependency/blake3.h", arguments.build_dir / "blake3-source/c/blake3.h"),
+        (
+            "dependency/blake3_impl.h",
+            arguments.build_dir / "blake3-source/c/blake3_impl.h",
+        ),
         ("prototype/adapter.c", arguments.prototype_dir / "adapter.c"),
         (
             "prototype/configured-default-injection.conf",
@@ -121,6 +135,8 @@ def main() -> None:
         "adapter-transport-vectors.json",
         "adapter-transport-validation.json",
         "adapter-transport-runtime-rejections.json",
+        "blake3-LICENSE_A2.txt",
+        "blake3-source-identity.txt",
         "fixture-sbom.spdx.json",
         "image.oci.tar",
         "installed-byte-mutation.json",
@@ -159,6 +175,35 @@ def main() -> None:
         "stacked-rejection.json",
         "stacked.stderr",
         "stacked.stdout",
+        *(
+            f"{scenario}.{suffix}"
+            for scenario in (
+                "normal",
+                "cancel",
+                "transport-reject-changed-magic",
+                "transport-reject-changed-transcript",
+                "transport-reject-truncated",
+                "transport-reject-trailing",
+            )
+            for suffix in (
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "ready2.cbor",
+                "release2.cbor",
+                "release-barrier.json",
+            )
+        ),
+        *(
+            f"{scenario}.{suffix}"
+            for scenario in ("configured-default-injection", "stacked")
+            for suffix in (
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "ready2.cbor",
+            )
+        ),
+        "configured-security-default-injection.launch-context.cbor",
+        "configured-security-default-injection.launcher-starting.json",
         *(
             f"cache-{state}.{suffix}"
             for state in ("empty", "valid", "stale", "corrupt", "adversarial")

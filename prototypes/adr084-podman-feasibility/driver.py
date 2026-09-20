@@ -20,12 +20,38 @@ import struct
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 
 import cbor2
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ATTEMPT_DOMAIN = b"PiglorOS.EvaluatorAttemptStream.v1\0"
 OBSERVATION_DOMAIN = b"PiglorOS.EvaluatorObservationStream.v1\0"
+RUNTIME_KEY_ID = "prototype-runtime-key-01"
+WATCHDOG_NS = 60_000_000_000
+
+
+@dataclass(frozen=True)
+class BarrierFixture:
+    architecture: int
+    ois_digest: bytes
+    ort_digest: bytes
+    launcher_digest: bytes
+    adapter_digest: bytes
+
+
+@dataclass(frozen=True)
+class BarrierAttempt:
+    attempt_id: bytes
+    nonce: bytes
+    lpv: list[object]
+    lpv_digest: bytes
+    context_packet: bytes
+    launch_anchor_ns: int
+    deadline_ns: int
+    fdl_digest: bytes
 
 
 def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -39,6 +65,257 @@ def blake3(value: bytes) -> bytes:
     if len(result) != 32:
         raise AssertionError("b3sum returned a non-256-bit digest")
     return result
+
+
+def canonical(value: object) -> bytes:
+    return cbor2.dumps(value, canonical=True)
+
+
+def record_digest(domain: str, unsigned: list[object]) -> bytes:
+    return blake3(domain.encode("ascii") + b"\0" + canonical(unsigned))
+
+
+def fixture_digest(label: str) -> bytes:
+    return blake3(b"PiglorOS.ADR084PrototypeIdentity.v1\0" + label.encode("ascii"))
+
+
+def load_barrier_fixture(path: pathlib.Path, architecture: str) -> BarrierFixture:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    unsigned_bytes = bytes.fromhex(document["ois1"]["unsigned_cbor_hex"])
+    unsigned = cbor2.loads(unsigned_bytes)
+    if canonical(unsigned) != unsigned_bytes:
+        raise ValueError("runtime OIS1 is not canonical CBOR")
+    expected_architecture = {"x86_64": 0, "aarch64": 1}[architecture]
+    if (
+        not isinstance(unsigned, list)
+        or len(unsigned) != 17
+        or unsigned[0:2] != ["OIS1", 1]
+        or unsigned[3] != expected_architecture
+    ):
+        raise ValueError("runtime OIS1 shape or architecture mismatch")
+    ois_digest = bytes.fromhex(document["ois1"]["self_digest_hex"])
+    if record_digest("PiglorOS.OciImageSubject.v1", unsigned) != ois_digest:
+        raise ValueError("runtime OIS1 self-digest mismatch")
+    launcher = unsigned[9]
+    adapter = unsigned[10]
+    if (
+        not isinstance(launcher, list)
+        or len(launcher) != 6
+        or launcher[0] != "/launcher"
+        or not isinstance(adapter, list)
+        or len(adapter) != 6
+        or adapter[0] != "/adapter"
+        or unsigned[11] != []
+    ):
+        raise ValueError("runtime OIS1 executable contract mismatch")
+    return BarrierFixture(
+        architecture=expected_architecture,
+        ois_digest=ois_digest,
+        ort_digest=bytes.fromhex(document["ort1"]["self_digest_hex"]),
+        launcher_digest=launcher[2],
+        adapter_digest=adapter[2],
+    )
+
+
+def prepare_barrier_attempt(
+    fixture: BarrierFixture, artifact_dir: pathlib.Path, scenario: str
+) -> BarrierAttempt:
+    attempt_id = uuid.uuid4().bytes
+    nonce = os.urandom(32)
+    fdl_unsigned = ["FDL1", 1, 1, [[3, 1]]]
+    fdl_digest = record_digest("PiglorOS.FDL1.v1", fdl_unsigned)
+    lpv_unsigned = [
+        "LPV2",
+        2,
+        attempt_id,
+        nonce,
+        fixture.ois_digest,
+        "/adapter",
+        [],
+        fdl_digest,
+    ]
+    lpv_digest = record_digest("PiglorOS.LPV2.v2", lpv_unsigned)
+    lpv = [lpv_unsigned, lpv_digest]
+    context = [
+        "PBC1",
+        1,
+        lpv,
+        fixture.ort_digest,
+        fixture.launcher_digest,
+        fixture.adapter_digest,
+    ]
+    anchor = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    deadline = anchor + WATCHDOG_NS
+    state = {
+        "attempt_id": attempt_id.hex(),
+        "deadline_ns": deadline,
+        "expected_fdl1_digest": fdl_digest.hex(),
+        "launch_anchor_monotonic_ns": anchor,
+        "lpv2_digest": lpv_digest.hex(),
+        "nonce": nonce.hex(),
+        "scenario": scenario,
+        "state": "LauncherStarting",
+    }
+    context_packet = canonical(context)
+    (artifact_dir / f"{scenario}.launch-context.cbor").write_bytes(context_packet)
+    state_path = artifact_dir / f"{scenario}.launcher-starting.json"
+    with state_path.open("w", encoding="utf-8") as stream:
+        json.dump(state, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    directory_fd = os.open(artifact_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return BarrierAttempt(
+        attempt_id=attempt_id,
+        nonce=nonce,
+        lpv=lpv,
+        lpv_digest=lpv_digest,
+        context_packet=context_packet,
+        launch_anchor_ns=anchor,
+        deadline_ns=deadline,
+        fdl_digest=fdl_digest,
+    )
+
+
+def validate_ready(
+    packet: bytes, attempt: BarrierAttempt, fixture: BarrierFixture
+) -> tuple[list[object], bytes]:
+    record = cbor2.loads(packet)
+    if canonical(record) != packet or not isinstance(record, list) or len(record) != 2:
+        raise ValueError("ReadyV2 is not one exact canonical record")
+    unsigned, self_digest = record
+    if (
+        not isinstance(unsigned, list)
+        or len(unsigned) != 14
+        or unsigned[0:2] != ["RDY2", 2]
+        or not isinstance(self_digest, bytes)
+        or len(self_digest) != 32
+        or record_digest("PiglorOS.RDY2.v2", unsigned) != self_digest
+    ):
+        raise ValueError("ReadyV2 shape or self-digest mismatch")
+    expected = {
+        2: attempt.attempt_id,
+        3: attempt.nonce,
+        5: fixture.launcher_digest,
+        7: fixture.ois_digest,
+        8: fixture.ort_digest,
+        9: fixture.adapter_digest,
+        11: attempt.lpv_digest,
+        12: attempt.fdl_digest,
+        13: attempt.fdl_digest,
+    }
+    for index, value in expected.items():
+        if unsigned[index] != value:
+            raise ValueError(f"ReadyV2 equality mismatch at ordinal {index}")
+    for index in (4, 6, 10):
+        identity = unsigned[index]
+        if (
+            not isinstance(identity, list)
+            or len(identity) != 2
+            or any(not isinstance(value, int) or value < 0 for value in identity)
+        ):
+            raise ValueError(f"ReadyV2 identity mismatch at ordinal {index}")
+    return unsigned, self_digest
+
+
+def build_rbs2(fixture: BarrierFixture, fdl_digest: bytes) -> tuple[list[object], bytes]:
+    features = sorted(
+        [
+            "broker-lifecycle",
+            "cgroup-kill",
+            "cgroup-v2-cpu",
+            "cgroup-v2-memory",
+            "cgroup-v2-pids",
+            "ipc-namespace",
+            "limit-observation",
+            "managed-attempt-exec",
+            "mount-namespace",
+            "network-namespace",
+            "nftables-atomic",
+            "pid-namespace",
+            "process-isolation-controls",
+            "signed-root-image",
+            "user-namespace",
+            "uts-namespace",
+        ],
+        key=canonical,
+    )
+    unsigned = [
+        "RBS2",
+        2,
+        0,
+        "podman-rootless",
+        fixture_digest("spm1"),
+        fixture_digest("provider-binary"),
+        fixture_digest("provider-public-contract"),
+        fixture_digest("hcp1"),
+        fixture.architecture,
+        RUNTIME_KEY_ID,
+        ["pigloros.sandbox.air-gapped", 1, 1],
+        1,
+        fixture_digest("lps2"),
+        fixture.ois_digest,
+        fixture_digest("scs1"),
+        fixture_digest("elm2"),
+        fdl_digest,
+        features,
+        [],
+    ]
+    return unsigned, record_digest("PiglorOS.SandboxReadbackSet.v2", unsigned)
+
+
+def build_and_verify_release(
+    ready_digest: bytes, attempt: BarrierAttempt, fixture: BarrierFixture
+) -> tuple[bytes, list[object], bytes]:
+    _, rbs_digest = build_rbs2(fixture, attempt.fdl_digest)
+    unsigned = [
+        "RLS2",
+        2,
+        attempt.attempt_id,
+        attempt.nonce,
+        ready_digest,
+        fixture_digest("trs1"),
+        fixture_digest("rvs2"),
+        fixture_digest("apt2"),
+        1,
+        1,
+        1,
+        rbs_digest,
+        rbs_digest,
+        attempt.launch_anchor_ns,
+        attempt.deadline_ns,
+        RUNTIME_KEY_ID,
+    ]
+    self_digest = record_digest("PiglorOS.RLS2.v2", unsigned)
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    signature = key.sign(b"PiglorOS.RLS2.Signature.v2\0" + self_digest)
+    packet = canonical([unsigned, self_digest, signature])
+
+    decoded = cbor2.loads(packet)
+    if canonical(decoded) != packet or decoded != [unsigned, self_digest, signature]:
+        raise ValueError("ReleaseV2 independent canonical verification failed")
+    if (
+        record_digest("PiglorOS.RLS2.v2", decoded[0]) != decoded[1]
+        or unsigned[2:5] != [attempt.attempt_id, attempt.nonce, ready_digest]
+        or unsigned[11] != unsigned[12]
+        or unsigned[13] != attempt.launch_anchor_ns
+        or unsigned[14] != attempt.launch_anchor_ns + WATCHDOG_NS
+        or unsigned[13] >= unsigned[14]
+        or time.clock_gettime_ns(time.CLOCK_MONOTONIC) >= unsigned[14]
+        or unsigned[15] != RUNTIME_KEY_ID
+    ):
+        raise ValueError("ReleaseV2 independent equality verification failed")
+    try:
+        key.public_key().verify(
+            decoded[2], b"PiglorOS.RLS2.Signature.v2\0" + decoded[1]
+        )
+    except InvalidSignature as error:
+        raise ValueError("ReleaseV2 independent signature verification failed") from error
+    return packet, unsigned, self_digest
 
 
 def transport_frames(stream: bytes) -> list[tuple[bytes, object]]:
@@ -407,6 +684,7 @@ def launch(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
     input_bytes: bytes,
     scenario: str,
     prefilter: pathlib.Path | None = None,
@@ -423,6 +701,11 @@ def launch(
     child_fd = child_control.fileno()
     child_control.set_inheritable(True)
     name = f"pigloros-adr084-{scenario}-{uuid.uuid4().hex[:12]}"
+    barrier_attempt = prepare_barrier_attempt(barrier_fixture, artifact_dir, scenario)
+    if parent_control.send(barrier_attempt.context_packet) != len(
+        barrier_attempt.context_packet
+    ):
+        raise RuntimeError("provider-private launch context was not sent atomically")
     annotation_argument = f"run.oci.seccomp_bpf_data={seccomp_bpf_base64}"
     profile_argument = f"seccomp={seccomp}"
     validate_launch_arguments(
@@ -504,8 +787,12 @@ def launch(
                 os.close(saved_fd3)
     child_control.close()
     container_id = wait_for_container(name, process)
-    ready = parent_control.recv(64)
-    if ready != b"READY\n":
+    ready = parent_control.recv(4096)
+    try:
+        ready_unsigned, ready_digest = validate_ready(
+            ready, barrier_attempt, barrier_fixture
+        )
+    except (TypeError, ValueError, cbor2.CBORDecodeError) as ready_error:
         return_code = process.wait(timeout=10)
         stderr = process.stderr.read().decode("utf-8", errors="replace")
         (artifact_dir / f"{scenario}.pre-ready.stderr").write_text(
@@ -555,13 +842,14 @@ def launch(
             )
             return None
         raise AssertionError(
-            f"unexpected launcher readiness: {ready!r}; "
-            f"exit={return_code}; stderr={stderr!r}"
-        )
+            f"unexpected launcher readiness: {ready.hex()}; "
+            f"exit={return_code}; stderr={stderr!r}; error={ready_error}"
+        ) from ready_error
+    (artifact_dir / f"{scenario}.ready2.cbor").write_bytes(ready)
     readable, _, _ = select.select([process.stdout], [], [], 0.2)
     if readable:
         premature = process.stdout.read1(64)
-        raise AssertionError(f"adapter emitted before ReleaseV1: {premature!r}")
+        raise AssertionError(f"adapter emitted before ReleaseV2: {premature!r}")
     inspect = run("/usr/bin/podman", "inspect", container_id).stdout
     (artifact_dir / f"{scenario}.inspect.json").write_text(inspect, encoding="utf-8")
     inspected = json.loads(inspect)[0]
@@ -626,7 +914,35 @@ def launch(
         json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     if release:
-        parent_control.sendall(b"RELEASE\n")
+        release_packet, release_unsigned, release_digest = build_and_verify_release(
+            ready_digest, barrier_attempt, barrier_fixture
+        )
+        if parent_control.send(release_packet) != len(release_packet):
+            raise RuntimeError("ReleaseV2 was not sent atomically")
+        (artifact_dir / f"{scenario}.release2.cbor").write_bytes(release_packet)
+        (artifact_dir / f"{scenario}.release-barrier.json").write_text(
+            json.dumps(
+                {
+                    "attempt_id": barrier_attempt.attempt_id.hex(),
+                    "context_packet_sha256": hashlib.sha256(
+                        barrier_attempt.context_packet
+                    ).hexdigest(),
+                    "deadline_ns": release_unsigned[14],
+                    "launch_anchor_monotonic_ns": release_unsigned[13],
+                    "lpv2_digest": barrier_attempt.lpv_digest.hex(),
+                    "ready2_digest": ready_digest.hex(),
+                    "ready2_mount_namespace": ready_unsigned[4],
+                    "release2_digest": release_digest.hex(),
+                    "release_signature_verified_before_send": True,
+                    "runtime_key_id": release_unsigned[15],
+                    "verdict": "canonical signed ReleaseV2 sent only after ReadyV2 and observations",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         assert process.stdin is not None
         process.stdin.write(input_bytes)
         process.stdin.flush()
@@ -640,6 +956,7 @@ def configured_default_rejection_scenario(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
     containers_conf: pathlib.Path,
     scenario: str,
     injection: str,
@@ -651,6 +968,7 @@ def configured_default_rejection_scenario(
         seccomp_bpf,
         seccomp_tracer,
         artifact_dir,
+        barrier_fixture,
         b"",
         scenario,
         release=False,
@@ -668,6 +986,7 @@ def normal_scenario(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
     eai1_hello: bytes,
     eao1_hello: bytes,
 ) -> None:
@@ -678,6 +997,7 @@ def normal_scenario(
         seccomp_bpf,
         seccomp_tracer,
         artifact_dir,
+        barrier_fixture,
         eai1_hello,
         "normal",
     )
@@ -711,6 +1031,7 @@ def cancellation_scenario(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
     eai1_hold: bytes,
 ) -> None:
     process, control, container_id = launch(
@@ -720,6 +1041,7 @@ def cancellation_scenario(
         seccomp_bpf,
         seccomp_tracer,
         artifact_dir,
+        barrier_fixture,
         eai1_hold,
         "cancel",
     )
@@ -759,6 +1081,7 @@ def transport_rejection_scenario(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
     valid: bytes,
 ) -> None:
     magic_offset = valid.index(b"EAI1")
@@ -778,6 +1101,7 @@ def transport_rejection_scenario(
             seccomp_bpf,
             seccomp_tracer,
             artifact_dir,
+            barrier_fixture,
             malformed,
             scenario,
         )
@@ -950,6 +1274,7 @@ def stacked_filter_scenario(
     seccomp_tracer: pathlib.Path,
     prefilter: pathlib.Path,
     artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
 ) -> None:
     process, control, container_id = launch(
         image,
@@ -958,6 +1283,7 @@ def stacked_filter_scenario(
         seccomp_bpf,
         seccomp_tracer,
         artifact_dir,
+        barrier_fixture,
         b"",
         "stacked",
         prefilter=prefilter,
@@ -1687,6 +2013,7 @@ def main() -> None:
     parser.add_argument("--eai1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-hold", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
+    parser.add_argument("--runtime-subject", required=True, type=pathlib.Path)
     parser.add_argument("--configured-defaults", required=True, type=pathlib.Path)
     parser.add_argument(
         "--configured-security-defaults", required=True, type=pathlib.Path
@@ -1694,6 +2021,9 @@ def main() -> None:
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
+    barrier_fixture = load_barrier_fixture(
+        arguments.runtime_subject.resolve(), arguments.architecture
+    )
     provider_status = read_text(pathlib.Path("/proc/self/status"))
     if "Seccomp:\t0" not in provider_status or "Seccomp_filters:\t0" not in provider_status:
         raise AssertionError("provider process did not begin with a clean seccomp baseline")
@@ -1758,6 +2088,7 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+        barrier_fixture,
         arguments.configured_defaults.resolve(),
         "configured-default-injection",
         "fixture.configured-default=injected",
@@ -1769,6 +2100,7 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+        barrier_fixture,
         arguments.configured_security_defaults.resolve(),
         "configured-security-default-injection",
         "org.systemd.property.DeviceAllow=injected",
@@ -1780,6 +2112,7 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+        barrier_fixture,
         eai1_hello,
         eao1_hello,
     )
@@ -1790,6 +2123,7 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+        barrier_fixture,
         eai1_hold,
     )
     transport_rejection_scenario(
@@ -1799,6 +2133,7 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+        barrier_fixture,
         eai1_hello,
     )
     stacked_filter_scenario(
@@ -1809,6 +2144,7 @@ def main() -> None:
         arguments.seccomp_tracer.resolve(),
         arguments.prefilter.resolve(),
         arguments.artifact_dir,
+        barrier_fixture,
     )
     seccomp_probe_scenario(
         arguments.architecture,

@@ -38,6 +38,23 @@ digests, and both transcripts; the adapter accepts only the two generated
 throwaway vectors, so this remains a byte-preservation proof rather than a
 production transport implementation.
 
+The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
+records rather than literal readiness/release tokens. Before invoking Podman,
+the driver durably records an attempt-bound monotonic launch anchor and passes a
+bounded provider-private canonical context over the inherited `SOCK_SEQPACKET`
+channel. The static launcher hashes the held launcher and adapter descriptors
+with the ADR-085 executable domain, records `statx` mount/inode identities and
+its current mount namespace in ReadyV2, and remains blocked. Only after the
+driver validates ReadyV2 and the live runtime observations does it build, sign,
+and independently verify the exact ReleaseV2 bytes. The launcher then validates
+canonical encoding, self-digest, attempt/nonce/Ready binding, anchor ordering,
+and expiry; freshly rechecks both descriptors and the mount namespace; closes
+control; and calls `execveat` on the held adapter descriptor. A missing packet
+has a separate 30-second bound. The launcher uses the official BLAKE3 C
+implementation pinned by Git commit and built only in the hosted workflow; as
+the accepted ADR requires, it has no Ed25519 public key and does not repeat the
+provider's durable signature-policy decision.
+
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported
 BPF. A valid-base64, one-byte mutation is exercised through real crun and must
