@@ -2313,7 +2313,7 @@ impl PluginRegistry {
                 retention_policy_hash: generated_identity_hash(
                     b"pigloros/generated-retention/v1",
                     plugin,
-                    &plugin_version,
+                    plugin_version,
                 ),
                 policy_revision: 1,
                 output_declarations: declarations,
