@@ -1625,7 +1625,15 @@ def watchdog_scenario(
         time.sleep(min((deadline_ns - now_ns) / 1_000_000_000, 0.005))
     termination_requested_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     run("/usr/bin/podman", "kill", "--signal=TERM", container_id)
-    return_code = process.wait(timeout=2)
+    kill_escalated = False
+    kill_requested_ns = None
+    try:
+        return_code = process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        kill_escalated = True
+        kill_requested_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
+        return_code = process.wait(timeout=5)
     finish_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     output = process.stdout.read()
     errors = process.stderr.read()
@@ -1644,7 +1652,8 @@ def watchdog_scenario(
         "effective_watchdog_ms": 1000,
         "final_cgroup_procs": final_cgroup_procs,
         "finish_ns": finish_ns,
-        "kill_escalated": False,
+        "kill_escalated": kill_escalated,
+        "kill_requested_ns": kill_requested_ns,
         "podman_exit_code": inspected["State"]["ExitCode"],
         "release_sent_start_ns": start_ns,
         "return_code": return_code,
@@ -1652,7 +1661,7 @@ def watchdog_scenario(
         "terminal_name": "Watchdog",
         "termination_lateness_ns": termination_requested_ns - deadline_ns,
         "termination_requested_ns": termination_requested_ns,
-        "termination_signal": "SIGTERM",
+        "termination_signal": "SIGTERM then SIGKILL",
         "verdict": "provider monotonic deadline selected Watchdog",
     }
     (artifact_dir / f"{scenario}.json").write_text(
@@ -1661,8 +1670,9 @@ def watchdog_scenario(
     run("/usr/bin/podman", "rm", "--force", container_id)
     if (
         termination_requested_ns < deadline_ns
-        or return_code != 143
-        or inspected["State"]["ExitCode"] != 143
+        or kill_escalated is not True
+        or return_code != 137
+        or inspected["State"]["ExitCode"] != 137
         or final_cgroup_procs != ""
         or output
         or errors

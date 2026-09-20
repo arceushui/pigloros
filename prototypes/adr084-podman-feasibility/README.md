@@ -68,7 +68,8 @@ selects fallback code 8 `ProcessCrash`, not code 7 `FileOrOutputLimit`; this is
 a manifest-bound incompatibility finding, not a successful prerequisite.
 
 A canonical WATCHDOG attempt remains alive until the provider's exact one-second
-monotonic deadline, then receives the provider-owned TERM/kill lifecycle. The
+monotonic deadline, then receives provider-owned TERM and bounded SIGKILL
+escalation. The
 retained release/start/deadline/termination/finish times, process result, and
 empty post-exit cgroup select terminal code 6 `Watchdog`.
 
