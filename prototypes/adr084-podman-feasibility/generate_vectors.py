@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 
-import json
 import gzip
 import hashlib
 import io
+import json
 import struct
 import subprocess
 import tarfile
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from oci_layer import MAX_UNCOMPRESSED_LAYER_BYTES, MAX_UNCOMPRESSED_TOTAL_BYTES
 
 
 def head(major: int, value: int) -> bytes:
@@ -112,6 +114,19 @@ def layer(path: str, content: bytes) -> tuple[bytes, bytes]:
         archive.addfile(entry, io.BytesIO(content))
     uncompressed = stream.getvalue()
     return gzip.compress(uncompressed, compresslevel=9, mtime=0), sha256(uncompressed)
+
+
+def repeated_gzip(byte_count: int) -> bytes:
+    """Create a deterministic compact gzip stream without retaining its input."""
+    stream = io.BytesIO()
+    block = bytes(1_048_576)
+    with gzip.GzipFile(fileobj=stream, mode="wb", compresslevel=9, mtime=0) as archive:
+        remaining = byte_count
+        while remaining:
+            portion = min(remaining, len(block))
+            archive.write(block[:portion])
+            remaining -= portion
+    return stream.getvalue()
 
 
 def digest(index: int) -> bytes:
@@ -392,6 +407,11 @@ def main() -> None:
     wrong_architecture[3] = 2
     wrong_layer_order = [*ois]
     wrong_layer_order[6] = list(reversed(ois[6]))
+    wrong_diff_id = [*ois]
+    wrong_diff_id[6] = [[[*subject[0]], subject[1]] for subject in ois[6]]
+    wrong_diff_id[6][0][1] = digest(30)
+    wrong_chain_id = [*ois]
+    wrong_chain_id[7] = digest(30)
     wrong_rootfs = [*ois]
     wrong_rootfs[8] = digest(31)
     wrong_executable = [*ois]
@@ -409,6 +429,10 @@ def main() -> None:
                   "unsupported architecture", "OciImageSubject", True),
         rejection("OIS1-wrong-layer-order", wrong_layer_order,
                   "ordered layer closure mismatch", "OciImageSubject", True),
+        rejection("OIS1-wrong-DiffID", wrong_diff_id,
+                  "fixture DiffID mismatch", "OciImageSubject", True),
+        rejection("OIS1-wrong-ChainID", wrong_chain_id,
+                  "fixture ChainID mismatch", "OciImageSubject", True),
         rejection("OIS1-wrong-rootfs", wrong_rootfs,
                   "mounted ORT1 digest mismatch", "OciImageSubject", True),
         rejection("OIS1-wrong-executable", wrong_executable,
@@ -496,6 +520,26 @@ def main() -> None:
                     "rootfs": {"type": "layers", "diff_ids": ["sha256:" + "00" * 32]},
                 }
             ).hex(),
+        },
+        {
+            "record": "layer-uncompressed-limit",
+            "expected_rejection": "layer exceeds uncompressed byte ceiling",
+            "input_hex": repeated_gzip(MAX_UNCOMPRESSED_LAYER_BYTES + 1).hex(),
+        },
+        {
+            "record": "layers-cumulative-limit",
+            "expected_rejection": "layers exceed cumulative uncompressed byte ceiling",
+            "inputs_hex": [
+                repeated_gzip(MAX_UNCOMPRESSED_LAYER_BYTES).hex()
+                for _ in range(
+                    MAX_UNCOMPRESSED_TOTAL_BYTES // MAX_UNCOMPRESSED_LAYER_BYTES
+                )
+            ]
+            + [
+                repeated_gzip(
+                    MAX_UNCOMPRESSED_TOTAL_BYTES % MAX_UNCOMPRESSED_LAYER_BYTES + 1
+                ).hex()
+            ],
         },
     ]
     print(

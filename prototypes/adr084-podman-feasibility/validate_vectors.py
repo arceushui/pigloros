@@ -20,6 +20,8 @@ import tempfile
 import cbor2
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from oci_layer import diff_id_bytes
+
 
 def blake3(domain: str, encoded: bytes) -> bytes:
     result = subprocess.run(
@@ -272,14 +274,16 @@ def validate_ois(
     config = load_json_bytes(config_bytes, "config")
     layer_contents: list[bytes] = []
     diff_ids: list[bytes] = []
+    cumulative_uncompressed_bytes = 0
     for subject in ois[6]:
         compressed = descriptor_blob(subject[0], blobs, 2)
-        uncompressed = gzip.decompress(compressed)
-        observed_diff = hashlib.sha256(uncompressed).digest()
+        observed_diff, cumulative_uncompressed_bytes = diff_id_bytes(
+            compressed, cumulative_uncompressed_bytes
+        )
         if observed_diff != subject[1]:
             raise ValueError("fixture DiffID mismatch")
         diff_ids.append(observed_diff)
-        layer_contents.append(uncompressed)
+        layer_contents.append(gzip.decompress(compressed))
     validate_config(config, ois, diff_ids)
     chain_text = f"sha256:{diff_ids[0].hex()}"
     for diff_id in diff_ids[1:]:
@@ -394,6 +398,8 @@ def validate_rejections(
     for name in (
         "OIS1-wrong-architecture",
         "OIS1-wrong-layer-order",
+        "OIS1-wrong-DiffID",
+        "OIS1-wrong-ChainID",
         "OIS1-wrong-rootfs",
         "OIS1-wrong-executable",
     ):
@@ -484,6 +490,22 @@ def validate_malformed(document: dict[str, object], ois: list[object]) -> None:
     expect_rejection(
         cases["config-DiffID-mismatch"]["expected_rejection"],
         lambda: validate_config(config, ois, [subject[1] for subject in ois[6]]),
+    )
+    expect_rejection(
+        cases["layer-uncompressed-limit"]["expected_rejection"],
+        lambda: diff_id_bytes(
+            bytes.fromhex(cases["layer-uncompressed-limit"]["input_hex"]), 0
+        ),
+    )
+
+    def validate_cumulative_limit() -> None:
+        cumulative = 0
+        for encoded in cases["layers-cumulative-limit"]["inputs_hex"]:
+            _, cumulative = diff_id_bytes(bytes.fromhex(encoded), cumulative)
+
+    expect_rejection(
+        cases["layers-cumulative-limit"]["expected_rejection"],
+        validate_cumulative_limit,
     )
 
 

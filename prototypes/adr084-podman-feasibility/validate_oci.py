@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 import hashlib
 import json
 import pathlib
 import re
+
+from oci_layer import diff_id
 
 
 def require_keys(value: dict[str, object], allowed: set[str], context: str) -> None:
@@ -160,10 +161,13 @@ def main() -> None:
     if rootfs.get("type") != "layers":
         raise ValueError("unsupported rootfs type")
     verified_diff_ids: list[str] = []
+    cumulative_uncompressed_bytes = 0
     for path, expected in zip(layer_paths, rootfs["diff_ids"], strict=True):
-        compressed = path.read_bytes()
-        uncompressed = gzip.decompress(compressed) if compressed.startswith(b"\x1f\x8b") else compressed
-        observed = "sha256:" + hashlib.sha256(uncompressed).hexdigest()
+        with path.open("rb") as stream:
+            observed_bytes, cumulative_uncompressed_bytes = diff_id(
+                stream, cumulative_uncompressed_bytes
+            )
+        observed = "sha256:" + observed_bytes.hex()
         if observed != expected:
             raise ValueError(f"layer DiffID mismatch: expected {expected}, observed {observed}")
         verified_diff_ids.append(observed)
@@ -183,6 +187,7 @@ def main() -> None:
         "native_platform": f"linux/{arguments.architecture}",
         "verified_chain_id": chain_id,
         "verified_diff_ids": verified_diff_ids,
+        "verified_uncompressed_bytes": cumulative_uncompressed_bytes,
         "verified_blob_paths": [str(config_path), str(manifest_path), *map(str, layer_paths)],
     }
     arguments.output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
