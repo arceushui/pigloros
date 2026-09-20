@@ -829,10 +829,12 @@ impl ErasureContainmentGateV1 {
     /// inventory, or a host lock is poisoned.
     pub fn install_from_verified_inventory_transition<T>(
         &self,
-        transition: &mut dyn FnMut(
-            &ErasureTopologyTransitionPermitV1,
-        )
-            -> Result<(ErasureVerifiedInventoryV1, T), ErasureErrorV1>,
+        transition: &mut dyn for<'a> FnMut(
+            &'a ErasureTopologyTransitionPermitV1,
+        ) -> Result<
+            (ErasureVerifiedInventoryV1, T),
+            ErasureErrorV1,
+        >,
     ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureContainmentErrorV1> {
         self.ensure_available()?;
         let _fence = self
