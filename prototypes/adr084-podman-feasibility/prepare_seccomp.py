@@ -188,7 +188,7 @@ def validate_interface(
                 raise ValueError("LibseccompInterfaceV1 has an invalid PNR marker")
             continue
         if (
-            not encoded_number.isdecimal()
+            not encoded_number.isdigit()
             or (len(encoded_number) > 1 and encoded_number.startswith(b"0"))
         ):
             raise ValueError("LibseccompInterfaceV1 has a noncanonical number")
