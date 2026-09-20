@@ -21,11 +21,12 @@ readback-only PNR `D`; materializes an exact-`R` libseccomp interface and exact
 `E` audit profile; compiles numeric `R` with pinned libseccomp 2.6.1; and uses an
 independent symbolic verifier over the exported BPF's complete 32-bit syscall
 domain, including the x86_64 x32-kill range and tracer-skip sentinel. It
-also includes three signed-rootfs evidence helpers that are deliberately absent
+also includes four signed-rootfs evidence helpers that are deliberately absent
 from OIS1's admitted launcher and adapter executable fields. Two observe the
-foreign-ABI and x86_64 boundary outcomes from a bounded parent; the third is a
-minimal, deadline-free cache-bypass witness. The prototype intentionally lives
-only on the throwaway evidence branch.
+foreign-ABI and x86_64 boundary outcomes from a bounded parent; one is a
+minimal, deadline-free cache-bypass witness; and one executes the closed native
+syscall-number matrix. The prototype intentionally lives only on the throwaway
+evidence branch.
 
 The canonical ADRs remain Proposed. A green workflow proves only the bounded
 claims named by its retained artifacts; the complete ADR acceptance matrix,

@@ -72,6 +72,8 @@ def main() -> None:
         "/cache-probe",
         "/foreign-probe",
         "/launcher",
+        "/libseccomp-interface-v1.txt",
+        "/native-matrix",
         "/seccomp-probe",
     }:
         raise ValueError("mounted fixture contains an unexpected path")

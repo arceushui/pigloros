@@ -734,6 +734,152 @@ def cache_probe_scenario(
     run("/usr/bin/podman", "rm", name)
 
 
+def native_matrix_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_interface: pathlib.Path,
+    artifact_dir: pathlib.Path,
+) -> None:
+    interface: dict[int, str] = {}
+    for line in seccomp_interface.read_text(encoding="ascii").splitlines():
+        encoded_number, name = line.split(":", 1)
+        if encoded_number != "PNR":
+            interface[int(encoded_number)] = name
+    maximum = max(interface)
+    name = f"pigloros-adr084-native-matrix-{uuid.uuid4().hex[:12]}"
+    podman_command = [
+        "/usr/bin/podman",
+        "run",
+        "--runtime=/usr/bin/crun",
+        "--pull=never",
+        f"--name={name}",
+        "--network=none",
+        "--no-hosts",
+        "--hostname=pigloros-native-matrix",
+        "--read-only",
+        "--read-only-tmpfs=false",
+        "--cap-drop=all",
+        "--security-opt=no-new-privileges",
+        f"--security-opt=seccomp={seccomp}",
+        f"--annotation=run.oci.seccomp_bpf_data={seccomp_bpf_base64}",
+        "--stop-signal=15",
+        "--memory=64m",
+        "--memory-swap=64m",
+        "--pids-limit=16",
+        "--cpus=0.5",
+        "--ulimit=nofile=64:64",
+        "--ulimit=fsize=1048576:1048576",
+        "--user=65532:65532",
+        "--label=io.pigloros.prototype=adr084",
+        "--label=io.pigloros.scenario=native-matrix",
+        "--entrypoint=/native-matrix",
+        "--rm=false",
+        image,
+    ]
+    process = subprocess.Popen(
+        podman_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    container_id = wait_for_container(name, process)
+    running_inspect: dict[str, object] | None = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        inspected = json.loads(run("/usr/bin/podman", "inspect", container_id).stdout)[0]
+        if inspected["State"]["Running"] and int(inspected["State"]["Pid"]) > 0:
+            running_inspect = inspected
+            break
+        if process.poll() is not None:
+            break
+        time.sleep(0.01)
+    if running_inspect is None:
+        raise AssertionError("native matrix exited before running identity observation")
+    (artifact_dir / "native-matrix.inspect.json").write_text(
+        json.dumps([running_inspect], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    validate_runtime_annotations(
+        running_inspect["Config"]["Annotations"],  # type: ignore[index]
+        seccomp,
+        seccomp_bpf_base64,
+    )
+    pid = int(running_inspect["State"]["Pid"])  # type: ignore[index]
+    cgroup_path = pathlib.Path(process_snapshot(pid)["cgroup_path"])  # type: ignore[arg-type]
+    output, errors = process.communicate(timeout=120)
+    (artifact_dir / "native-matrix.stdout").write_bytes(output)
+    (artifact_dir / "native-matrix.stderr").write_bytes(errors)
+    if process.returncode != 0:
+        raise AssertionError(
+            f"native matrix helper failed: {process.returncode}: {errors!r}"
+        )
+    documents = [json.loads(line) for line in output.splitlines()]
+    if len(documents) != maximum + 3:
+        raise AssertionError("native matrix result count mismatch")
+    results = documents[:-1]
+    summary = documents[-1]
+    blocking = {"pause", "select", "pselect6", "ppoll"}
+    terminating = {"exit", "exit_group"}
+    for number, observed in enumerate(results):
+        expected_name = interface.get(number, "")
+        if observed.get("nr") != number or observed.get("name") != expected_name:
+            raise AssertionError(f"native matrix identity mismatch at {number}")
+        allowed = number in interface
+        if observed.get("allowed") is not allowed:
+            raise AssertionError(f"native matrix membership mismatch at {number}")
+        outcome = observed.get("outcome")
+        if not allowed:
+            if outcome != "return" or observed.get("raw") != -4094:
+                raise AssertionError(f"native hole was not denied at {number}: {observed}")
+        elif expected_name in blocking:
+            if outcome != "timeout":
+                raise AssertionError(f"blocking syscall outcome mismatch: {observed}")
+        elif expected_name in terminating:
+            if outcome != "exit" or observed.get("status") != 0:
+                raise AssertionError(f"terminating syscall outcome mismatch: {observed}")
+        elif expected_name == "rt_sigreturn":
+            if outcome != "signal" or observed.get("signal") != signal.SIGSEGV:
+                raise AssertionError(f"rt_sigreturn outcome mismatch: {observed}")
+        elif outcome != "return" or observed.get("raw") == -4094:
+            raise AssertionError(f"allowed syscall outcome mismatch: {observed}")
+    if summary != {
+        "summary": True,
+        "case_count": maximum + 2,
+        "maximum_interface_number": maximum,
+        "residual_children": 0,
+    }:
+        raise AssertionError(f"native matrix summary mismatch: {summary}")
+    deadline = time.monotonic() + 10
+    while cgroup_path.exists() and time.monotonic() < deadline:
+        if not read_text(cgroup_path / "cgroup.procs").strip():
+            break
+        time.sleep(0.01)
+    residual = (
+        read_text(cgroup_path / "cgroup.procs").strip()
+        if cgroup_path.exists()
+        else ""
+    )
+    if residual:
+        raise AssertionError(f"native matrix cgroup is not empty: {residual}")
+    exported = seccomp_bpf.read_bytes()
+    installed = (artifact_dir / "normal.installed-seccomp.bpf").read_bytes()
+    report = {
+        "case_count": len(results),
+        "interface_sha256": hashlib.sha256(seccomp_interface.read_bytes()).hexdigest(),
+        "maximum_interface_number": maximum,
+        "results": results,
+        "seccomp_bpf_sha256": hashlib.sha256(exported).hexdigest(),
+        "installed_bpf_sha256": hashlib.sha256(installed).hexdigest(),
+        "residual_cgroup_procs": residual,
+        "verdict": "passed",
+    }
+    if exported != installed:
+        raise AssertionError("native matrix filter binding differs from captured install")
+    (artifact_dir / "native-matrix.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    run("/usr/bin/podman", "rm", container_id)
+
+
 def crun_cache_checksum(profile: dict[str, object]) -> tuple[str, dict[str, object]]:
     package_version = "1.14.1"
     libseccomp_version = (2, 5, 5)
@@ -885,6 +1031,7 @@ def main() -> None:
     parser.add_argument("--seccomp", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-bpf-base64", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-bpf", required=True, type=pathlib.Path)
+    parser.add_argument("--seccomp-interface", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-tracer", required=True, type=pathlib.Path)
     parser.add_argument("--prefilter", required=True, type=pathlib.Path)
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
@@ -948,6 +1095,14 @@ def main() -> None:
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,
         arguments.seccomp_bpf.resolve(),
+        arguments.artifact_dir,
+    )
+    native_matrix_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_interface.resolve(),
         arguments.artifact_dir,
     )
     cache_matrix_scenario(

@@ -50,6 +50,8 @@ musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototy
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/cache-probe" \
   "${prototype_dir}/cache_probe.c"
+musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/native-matrix" \
+  "${prototype_dir}/native_matrix.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/seccomp-probe" \
   "${prototype_dir}/seccomp_probe.c"
 case "${evidence_architecture}" in
@@ -107,6 +109,8 @@ python3 "${prototype_dir}/verify_seccomp_bpf.py" \
   --interface "${seccomp_dir}/libseccomp-interface-v1.txt" \
   --report "${seccomp_dir}/bpf-verification.json" \
   --base64 "${seccomp_dir}/exported-seccomp.base64"
+cp "${seccomp_dir}/libseccomp-interface-v1.txt" \
+  "${build_dir}/libseccomp-interface-v1.txt"
 
 /usr/bin/podman build --runtime=/usr/bin/crun --pull=never --identity-label=false \
   --timestamp=0 --unsetenv=PATH --unsetlabel=io.buildah.version \
@@ -156,6 +160,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --seccomp "${seccomp_dir}/oci-seccomp-profile.json" \
   --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
   --seccomp-bpf "${seccomp_dir}/exported-seccomp.bpf" \
+  --seccomp-interface "${seccomp_dir}/libseccomp-interface-v1.txt" \
   --seccomp-tracer "${build_dir}/trace-seccomp" \
   --prefilter "${build_dir}/prefilter-exec" \
   --artifact-dir "${artifact_dir}"
