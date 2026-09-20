@@ -551,6 +551,7 @@ def process_snapshot(pid: int) -> dict[str, object]:
     return {
         "pid": pid,
         "status": read_text(proc / "status"),
+        "limits": read_text(proc / "limits"),
         "cgroup": cgroup_text,
         "cgroup_path": str(cgroup_root),
         "cgroup_values": cgroup_values,
@@ -589,6 +590,19 @@ def assert_launcher_snapshot(
         raise AssertionError(f"pids.max not enforced: {values['pids.max']}")  # type: ignore[index]
     if not str(values["cpu.max"]).startswith("50000 100000"):  # type: ignore[index]
         raise AssertionError(f"cpu.max not enforced: {values['cpu.max']}")  # type: ignore[index]
+    limits = str(snapshot["limits"])
+    nofile = next(
+        (line.split() for line in limits.splitlines() if line.startswith("Max open files")),
+        None,
+    )
+    if nofile is None or nofile[-3:] != ["64", "64", "files"]:
+        raise AssertionError(f"RLIMIT_NOFILE not enforced: {nofile}")
+    fsize = next(
+        (line.split() for line in limits.splitlines() if line.startswith("Max file size")),
+        None,
+    )
+    if fsize is None or fsize[-3:] != ["32768", "32768", "bytes"]:
+        raise AssertionError(f"RLIMIT_FSIZE not enforced: {fsize}")
     root_mounts = [
         line for line in str(snapshot["mountinfo"]).splitlines() if " / / " in line
     ]
@@ -818,7 +832,7 @@ def launch(
         "--pids-limit=16",
         "--cpus=0.5",
         "--ulimit=nofile=64:64",
-        "--ulimit=fsize=1048576:1048576",
+        "--ulimit=fsize=32768:32768",
         "--user=65532:65532",
         "--label=io.pigloros.prototype=adr084",
         f"--label=io.pigloros.scenario={scenario}",
@@ -1488,6 +1502,69 @@ def cpu_throttling_scenario(
         raise AssertionError(f"CPU quota did not produce throttling evidence: {report!r}")
 
 
+def file_limit_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_file: bytes,
+) -> None:
+    scenario = "elm-file"
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_file,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    snapshot = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    process.stdin.close()
+    return_code = process.wait(timeout=20)
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    control.close()
+    inspected = json.loads(run("/usr/bin/podman", "inspect", container_id).stdout)[0]
+    state = inspected["State"]
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "container_id": container_id,
+        "podman_exit_code": state["ExitCode"],
+        "podman_oom_killed": state["OOMKilled"],
+        "process_limits": snapshot["limits"],
+        "return_code": return_code,
+        "signal": "SIGXFSZ",
+        "signal_number": 25,
+        "terminal_code": 7,
+        "terminal_name": "FileOrOutputLimit",
+        "verdict": "unambiguous SIGXFSZ selected FileOrOutputLimit",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    if (
+        return_code != 128 + 25
+        or state["ExitCode"] != 128 + 25
+        or state["OOMKilled"] is not False
+        or output
+        or errors
+    ):
+        raise AssertionError(f"file limit did not force SIGXFSZ evidence: {report!r}")
+
+
 def concurrent_lifecycle_worker(
     index: int,
     image: str,
@@ -1785,7 +1862,7 @@ def installed_byte_mutation_scenario(
         "--pids-limit=16",
         "--cpus=0.5",
         "--ulimit=nofile=64:64",
-        "--ulimit=fsize=1048576:1048576",
+        "--ulimit=fsize=32768:32768",
         "--user=65532:65532",
         "--label=io.pigloros.prototype=adr084",
         "--label=io.pigloros.scenario=installed-byte-mutation",
@@ -1956,7 +2033,7 @@ def seccomp_probe_scenario(
         "--pids-limit=16",
         "--cpus=0.5",
         "--ulimit=nofile=64:64",
-        "--ulimit=fsize=1048576:1048576",
+        "--ulimit=fsize=32768:32768",
         "--user=65532:65532",
         "--label=io.pigloros.prototype=adr084",
         f"--label=io.pigloros.scenario={scenario}",
@@ -2052,7 +2129,7 @@ def cache_probe_scenario(
         "--pids-limit=16",
         "--cpus=0.5",
         "--ulimit=nofile=64:64",
-        "--ulimit=fsize=1048576:1048576",
+        "--ulimit=fsize=32768:32768",
         "--user=65532:65532",
         "--label=io.pigloros.prototype=adr084",
         f"--label=io.pigloros.scenario={scenario}",
@@ -2130,7 +2207,7 @@ def native_matrix_scenario(
         "--pids-limit=16",
         "--cpus=0.5",
         "--ulimit=nofile=64:64",
-        "--ulimit=fsize=1048576:1048576",
+        "--ulimit=fsize=32768:32768",
         "--user=65532:65532",
         "--label=io.pigloros.prototype=adr084",
         "--label=io.pigloros.scenario=native-matrix",
@@ -2620,6 +2697,7 @@ def main() -> None:
     parser.add_argument("--eai1-memory", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-tasks", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-cpu", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-file", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--runtime-subject", required=True, type=pathlib.Path)
     parser.add_argument("--configured-defaults", required=True, type=pathlib.Path)
@@ -2649,12 +2727,14 @@ def main() -> None:
     eai1_memory = arguments.eai1_memory.read_bytes()
     eai1_tasks = arguments.eai1_tasks.read_bytes()
     eai1_cpu = arguments.eai1_cpu.read_bytes()
+    eai1_file = arguments.eai1_file.read_bytes()
     eao1_hello = arguments.eao1_hello.read_bytes()
     (arguments.artifact_dir / "normal.eai1").write_bytes(eai1_hello)
     (arguments.artifact_dir / "cancel.eai1").write_bytes(eai1_hold)
     (arguments.artifact_dir / "elm-memory.eai1").write_bytes(eai1_memory)
     (arguments.artifact_dir / "elm-tasks.eai1").write_bytes(eai1_tasks)
     (arguments.artifact_dir / "elm-cpu-throttling.eai1").write_bytes(eai1_cpu)
+    (arguments.artifact_dir / "elm-file.eai1").write_bytes(eai1_file)
     (arguments.artifact_dir / "expected.eao1").write_bytes(eao1_hello)
     transport_report = {
         "eai1_hello": validate_eai1(eai1_hello, b"hello\n"),
@@ -2662,6 +2742,7 @@ def main() -> None:
         "eai1_memory": validate_eai1(eai1_memory, b"MEMORY\n"),
         "eai1_tasks": validate_eai1(eai1_tasks, b"TASKS\n"),
         "eai1_cpu": validate_eai1(eai1_cpu, b"CPU\n"),
+        "eai1_file": validate_eai1(eai1_file, b"FILE\n"),
         "eao1_hello": validate_eao1(eao1_hello, b"hello\n"),
         "verdict": "canonical framed streams independently validated before launch",
     }
@@ -2762,6 +2843,16 @@ def main() -> None:
         arguments.artifact_dir,
         barrier_fixture,
         eai1_cpu,
+    )
+    file_limit_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_file,
     )
     concurrent_lifecycle_scenario(
         arguments.image,

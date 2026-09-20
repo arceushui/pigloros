@@ -57,6 +57,11 @@ selects terminal code 5 `TaskLimit`. A separate canonical CPU attempt crosses
 the 0.5-CPU quota and retains an `nr_throttled` delta without selecting a
 terminal, because CPU throttling is telemetry only.
 
+Every launch also retains the exact `RLIMIT_NOFILE=64:64` and
+`RLIMIT_FSIZE=32768:32768` process readback. NOFILE remains safety evidence only.
+A canonical FILE attempt crosses the file-size limit inside `/work`; only the
+unambiguous SIGXFSZ process result selects terminal code 7 `FileOrOutputLimit`.
+
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
 the driver durably records an attempt-bound monotonic launch anchor and passes a
