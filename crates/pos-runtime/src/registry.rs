@@ -2550,6 +2550,7 @@ impl PluginRegistry {
     ///
     /// Release builds still require output admission even when this helper is
     /// called by an external crate.
+    #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {
         let name = driver.name().to_owned();
