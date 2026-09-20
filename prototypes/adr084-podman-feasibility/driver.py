@@ -480,6 +480,21 @@ def read_text(path: pathlib.Path) -> str:
         return f"UNAVAILABLE: {error}\n"
 
 
+def parse_cgroup_events(value: str) -> dict[str, int]:
+    events: dict[str, int] = {}
+    for line in value.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or fields[0] in events:
+            raise ValueError(f"invalid cgroup event record: {line!r}")
+        count = int(fields[1])
+        if count < 0:
+            raise ValueError(f"negative cgroup event counter: {line!r}")
+        events[fields[0]] = count
+    if not events:
+        raise ValueError("empty cgroup event record")
+    return events
+
+
 def process_snapshot(pid: int) -> dict[str, object]:
     proc = pathlib.Path("/proc") / str(pid)
     descriptors: list[dict[str, object]] = []
@@ -524,9 +539,12 @@ def process_snapshot(pid: int) -> dict[str, object]:
             "cpu.max",
             "cpu.stat",
             "memory.max",
+            "memory.events.local",
             "memory.swap.max",
+            "memory.swap.events",
             "pids.max",
             "pids.events",
+            "pids.events.local",
         )
     }
     cgroup_values["cgroup.kill_exists"] = str((cgroup_root / "cgroup.kill").exists())
@@ -1247,6 +1265,83 @@ def normal_scenario(
             f"normal adapter failed: code={return_code} output={output!r} stderr={errors!r}"
         )
     run("/usr/bin/podman", "rm", container_id)
+
+
+def memory_limit_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_memory: bytes,
+) -> None:
+    scenario = "elm-memory"
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_memory,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    snapshot = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    cgroup_path = pathlib.Path(snapshot["cgroup_path"])
+    baseline_text = snapshot["cgroup_values"]["memory.events.local"]
+    baseline = parse_cgroup_events(baseline_text)
+    process.stdin.close()
+    final = baseline
+    observation_deadline = time.monotonic() + 20
+    while time.monotonic() < observation_deadline:
+        current_text = read_text(cgroup_path / "memory.events.local").strip()
+        if not current_text.startswith("UNAVAILABLE:"):
+            final = parse_cgroup_events(current_text)
+            if final.get("oom_kill", 0) > baseline.get("oom_kill", 0):
+                break
+        if process.poll() is not None:
+            break
+        time.sleep(0.01)
+    return_code = process.wait(timeout=20)
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    control.close()
+    inspected = json.loads(run("/usr/bin/podman", "inspect", container_id).stdout)[0]
+    oom_delta = final.get("oom_kill", 0) - baseline.get("oom_kill", 0)
+    oom_flag = inspected["State"]["OOMKilled"]
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "baseline_memory_events_local": baseline,
+        "container_id": container_id,
+        "final_memory_events_local": final,
+        "memory_max": snapshot["cgroup_values"]["memory.max"],
+        "oom_kill_delta": oom_delta,
+        "podman_oom_killed": oom_flag,
+        "return_code": return_code,
+        "terminal_code": 3,
+        "terminal_name": "OomKilled",
+        "verdict": "forced memory allocation selected OomKilled",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    if (
+        return_code == 0
+        or output
+        or snapshot["cgroup_values"]["memory.max"] != "67108864"
+        or (oom_delta <= 0 and oom_flag is not True)
+    ):
+        raise AssertionError(f"memory limit did not force OOM evidence: {report!r}")
 
 
 def concurrent_lifecycle_worker(
@@ -2378,6 +2473,7 @@ def main() -> None:
     parser.add_argument("--prefilter", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-hold", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-memory", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--runtime-subject", required=True, type=pathlib.Path)
     parser.add_argument("--configured-defaults", required=True, type=pathlib.Path)
@@ -2404,13 +2500,16 @@ def main() -> None:
     )
     eai1_hello = arguments.eai1_hello.read_bytes()
     eai1_hold = arguments.eai1_hold.read_bytes()
+    eai1_memory = arguments.eai1_memory.read_bytes()
     eao1_hello = arguments.eao1_hello.read_bytes()
     (arguments.artifact_dir / "normal.eai1").write_bytes(eai1_hello)
     (arguments.artifact_dir / "cancel.eai1").write_bytes(eai1_hold)
+    (arguments.artifact_dir / "elm-memory.eai1").write_bytes(eai1_memory)
     (arguments.artifact_dir / "expected.eao1").write_bytes(eao1_hello)
     transport_report = {
         "eai1_hello": validate_eai1(eai1_hello, b"hello\n"),
         "eai1_hold": validate_eai1(eai1_hold, b"HOLD\n"),
+        "eai1_memory": validate_eai1(eai1_memory, b"MEMORY\n"),
         "eao1_hello": validate_eao1(eao1_hello, b"hello\n"),
         "verdict": "canonical framed streams independently validated before launch",
     }
@@ -2481,6 +2580,16 @@ def main() -> None:
         barrier_fixture,
         eai1_hello,
         eao1_hello,
+    )
+    memory_limit_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_memory,
     )
     concurrent_lifecycle_scenario(
         arguments.image,

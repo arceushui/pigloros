@@ -133,7 +133,9 @@ int main(void) {
                             memcmp(input, eai1_hello, length) == 0;
         bool hold_prefix = length <= eai1_hold_len &&
                            memcmp(input, eai1_hold, length) == 0;
-        if (!hello_prefix && !hold_prefix) {
+        bool memory_prefix = length <= eai1_memory_len &&
+                             memcmp(input, eai1_memory, length) == 0;
+        if (!hello_prefix && !hold_prefix && !memory_prefix) {
             errno = EPROTO;
             fail("input-authentication");
         }
@@ -152,6 +154,18 @@ int main(void) {
         dprintf(STDERR_FILENO, "HOLDING child=%ld\n", (long)child);
         for (;;) {
             pause();
+        }
+    }
+    if (length == eai1_memory_len && memcmp(input, eai1_memory, length) == 0) {
+        const size_t allocation_size = 8U * 1024U * 1024U;
+        for (;;) {
+            volatile unsigned char *allocation = malloc(allocation_size);
+            if (allocation == NULL) {
+                fail("memory-allocation");
+            }
+            for (size_t offset = 0; offset < allocation_size; offset += 4096U) {
+                allocation[offset] = (unsigned char)(offset >> 12);
+            }
         }
     }
     if (length != eai1_hello_len || memcmp(input, eai1_hello, length) != 0) {

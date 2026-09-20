@@ -46,7 +46,11 @@ The EAI1 fixture's authenticated memory and storage ceilings equal the runtime
 controls: 64 MiB `memory.max`, zero swap, and one 64 KiB `/work` tmpfs. Every
 launch requires `/work` to be exactly `rw,nosuid,nodev,noexec` with the retained
 mountinfo size while the image root remains read-only. Forced terminal outcomes
-and their ADR-069 precedence remain a separate, still-open evidence slice.
+begin with a canonical MEMORY attempt: only after ReleaseV2, the adapter faults
+memory beyond `memory.max`; the provider retains the before/after
+`memory.events.local` counters and Podman `OOMKilled` state and selects ADR-069
+terminal code 3 `OomKilled`. The other forced outcomes and their precedence
+remain an open evidence slice.
 
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,

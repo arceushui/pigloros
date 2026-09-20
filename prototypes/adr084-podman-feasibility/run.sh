@@ -230,6 +230,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --prefilter "${build_dir}/prefilter-exec" \
   --eai1-hello "${build_dir}/eai1_hello.bin" \
   --eai1-hold "${build_dir}/eai1_hold.bin" \
+  --eai1-memory "${build_dir}/eai1_memory.bin" \
   --eao1-hello "${build_dir}/eao1_hello.bin" \
   --runtime-subject "${artifact_dir}/runtime-subject.json" \
   --configured-defaults "${prototype_dir}/configured-default-injection.conf" \
