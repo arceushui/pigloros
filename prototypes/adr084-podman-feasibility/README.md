@@ -57,6 +57,9 @@ child crosses `memory.max`. This prevents rootless Podman from deleting the
 empty cgroup before the provider can collect `memory.events.local`; the provider
 kills the retained parent only after the child SIGKILL marker and authoritative
 `oom_kill` delta are both observed. Exit 137 by itself is still rejected.
+The same still-live cgroup retains the before/after `memory.swap.events`
+counters under `memory.swap.max=0`; a missing `max` delta is reported as a
+separate SwapBytes candidate incompatibility rather than inferred from OOM.
 
 A canonical TASKS attempt forces `pids.max=16`; its retained local `max` event
 selects terminal code 5 `TaskLimit`. A separate canonical CPU attempt crosses

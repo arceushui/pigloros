@@ -1708,7 +1708,9 @@ def memory_limit_scenario(
     cgroup_path = pathlib.Path(snapshot["cgroup_path"])
     baseline_text = snapshot["cgroup_values"]["memory.events.local"]
     baseline = parse_cgroup_events(baseline_text)
+    swap_baseline = parse_cgroup_events(snapshot["cgroup_values"]["memory.swap.events"])
     events_fd = os.open(cgroup_path / "memory.events.local", os.O_RDONLY)
+    swap_events_fd = os.open(cgroup_path / "memory.swap.events", os.O_RDONLY)
     process.stdin.close()
     final = baseline
     observation_deadline = time.monotonic() + 20
@@ -1730,6 +1732,9 @@ def memory_limit_scenario(
             if not chunk:
                 break
             pre_cleanup_errors.extend(chunk)
+    swap_final = parse_cgroup_events(
+        os.pread(swap_events_fd, 4096, 0).decode("ascii").strip()
+    )
     run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
     return_code = process.wait(timeout=20)
     try:
@@ -1739,6 +1744,7 @@ def memory_limit_scenario(
         if error.errno != errno.ENODEV:
             raise
     os.close(events_fd)
+    os.close(swap_events_fd)
     output = process.stdout.read()
     pre_cleanup_errors.extend(process.stderr.read())
     errors = bytes(pre_cleanup_errors)
@@ -1763,6 +1769,23 @@ def memory_limit_scenario(
     }
     (artifact_dir / f"{scenario}.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    swap_max_delta = swap_final.get("max", 0) - swap_baseline.get("max", 0)
+    swap_report = {
+        "adr084_compatible": swap_max_delta > 0,
+        "baseline_memory_swap_events": swap_baseline,
+        "final_memory_swap_events": swap_final,
+        "memory_swap_max": snapshot["cgroup_values"]["memory.swap.max"],
+        "required_observation": "forced memory.swap.events max delta",
+        "swap_max_delta": swap_max_delta,
+        "verdict": (
+            "forced zero-swap boundary produced the required swap event"
+            if swap_max_delta > 0
+            else "zero-swap hosted runtime produced no distinguishable swap-bound event"
+        ),
+    }
+    (artifact_dir / "elm-swap.json").write_text(
+        json.dumps(swap_report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     run("/usr/bin/podman", "rm", "--force", container_id)
     if (

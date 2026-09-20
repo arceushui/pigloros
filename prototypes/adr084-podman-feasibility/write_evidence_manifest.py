@@ -173,6 +173,7 @@ def main() -> None:
         "elm-memory.seccomp-install.json",
         "elm-memory.stderr",
         "elm-memory.stdout",
+        "elm-swap.json",
         *(
             f"{scenario}.{suffix}"
             for scenario in (
