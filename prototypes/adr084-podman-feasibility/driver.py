@@ -422,7 +422,6 @@ def seccomp_probe_scenario(
     seccomp: pathlib.Path,
     seccomp_bpf_base64: str,
     seccomp_bpf: pathlib.Path,
-    seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
     scenario: str = "probe",
 ) -> None:
@@ -457,14 +456,7 @@ def seccomp_probe_scenario(
         image,
     ]
     completed = subprocess.run(
-        [
-            str(seccomp_tracer),
-            str(seccomp_bpf),
-            str(artifact_dir / f"{scenario}.installed-seccomp.bpf"),
-            str(artifact_dir / f"{scenario}.seccomp-install.json"),
-            "--",
-            *podman_command,
-        ],
+        podman_command,
         check=False,
         capture_output=True,
         timeout=20,
@@ -484,6 +476,26 @@ def seccomp_probe_scenario(
     }
     if inspected["Config"]["Annotations"] != expected_annotations:
         raise AssertionError("seccomp probe effective annotations differ")
+    exported = seccomp_bpf.read_bytes()
+    installed = (artifact_dir / "normal.installed-seccomp.bpf").read_bytes()
+    if installed != exported:
+        raise AssertionError("normal installed BPF differs from boundary probe input")
+    (artifact_dir / f"{scenario}-filter-binding.json").write_text(
+        json.dumps(
+            {
+                "annotation_bpf_sha256": hashlib.sha256(exported).hexdigest(),
+                "installed_bpf_sha256": hashlib.sha256(installed).hexdigest(),
+                "installed_capture": "normal.installed-seccomp.bpf",
+                "install_report": "normal.seccomp-install.json",
+                "runtime_annotation_map": f"{scenario}.inspect.json",
+                "verdict": "boundary helper uses the independently captured exact filter",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     try:
         observed = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -786,7 +798,6 @@ def main() -> None:
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,
         arguments.seccomp_bpf.resolve(),
-        arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
     )
     cache_matrix_scenario(
