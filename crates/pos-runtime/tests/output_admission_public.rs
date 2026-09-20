@@ -97,20 +97,25 @@ fn multi_fidelity_policy(
     budget: &ExecutableBudgetPolicyV1,
 ) -> Result<OutputPolicyV1, Box<dyn Error>> {
     let declarations = [
-        ("plugin.l0", OutputFidelityV1::L0),
-        ("plugin.l1", OutputFidelityV1::L1),
-        ("plugin.l2", OutputFidelityV1::L2),
+        (
+            "plugin.l0",
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+        ),
+        (
+            "plugin.l1",
+            OutputAuthorityV1::ReproducibleDerived,
+            OutputFidelityV1::L1,
+        ),
+        (
+            "plugin.l2",
+            OutputAuthorityV1::Ephemeral,
+            OutputFidelityV1::L2,
+        ),
     ]
     .into_iter()
-    .map(|(event_type, fidelity)| {
-        OutputDeclarationV1::new(
-            event_type.to_owned(),
-            OutputAuthorityV1::Authoritative,
-            fidelity,
-            16,
-            None,
-            None,
-        )
+    .map(|(event_type, authority, fidelity)| {
+        OutputDeclarationV1::new(event_type.to_owned(), authority, fidelity, 16, None, None)
     })
     .collect::<Result<Vec<_>, _>>()?;
     Ok(OutputPolicyV1::new(OutputPolicyInputV1 {
@@ -356,7 +361,7 @@ fn generated_registration_binds_owned_output_policy() -> TestResult {
     let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    registry.register_generated(&plugin, None, None)?;
+    registry.register_generated(&plugin, None, Some(Box::new(FixtureDriver)))?;
     assert_eq!(registry.len(), 1);
     Ok(())
 }
@@ -369,7 +374,13 @@ fn generated_registration_with_approver_binds_owned_output_policy() -> TestResul
     let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    registry.register_generated_with_approver(&plugin, None, None, None, std::iter::empty())?;
+    registry.register_generated_with_approver(
+        &plugin,
+        None,
+        Some(Box::new(FixtureDriver)),
+        None,
+        std::iter::empty(),
+    )?;
     assert_eq!(registry.len(), 1);
     Ok(())
 }
