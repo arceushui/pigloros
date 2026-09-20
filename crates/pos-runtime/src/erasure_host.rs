@@ -5068,7 +5068,7 @@ mod tests {
         }));
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(authority.clone());
+        host.authority = Some(authority);
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
