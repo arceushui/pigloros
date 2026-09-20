@@ -898,6 +898,15 @@ fn reset_admission_usage(entry: &PluginEntry) {
     }
 }
 
+fn commit_driver_entry(entry: &mut PluginEntry) -> Option<String> {
+    reset_admission_usage(entry);
+    let driver = entry.driver.as_mut()?;
+    let name = driver.name().to_owned();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.commit_step()))
+        .is_err()
+        .then_some(name)
+}
+
 fn validate_test_driver_output(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
     const MAX_TEST_DRIVER_EVENTS: u32 = 1_000;
     const MAX_TEST_DRIVER_EVENT_BYTES: u32 = 4_096;
@@ -2038,20 +2047,8 @@ impl PluginRegistry {
 
     fn commit_pending_step(&mut self, pending: PendingStep) {
         for id in &pending.driver_ids {
-            if let Some(entry) = self.plugins.get(id) {
-                reset_admission_usage(entry);
-            }
-            if let Some(driver) = self
-                .plugins
-                .get_mut(id)
-                .and_then(|entry| entry.driver.as_mut())
-            {
-                let name = driver.name().to_owned();
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.commit_step()))
-                    .is_err()
-                {
-                    self.poisoned_driver = Some(name);
-                }
+            if let Some(name) = self.plugins.get_mut(id).and_then(commit_driver_entry) {
+                self.poisoned_driver = Some(name);
             }
         }
         for (id, now_ns) in pending.cadence_updates {
