@@ -40,7 +40,19 @@ fn generated_identity_hash(label: &[u8], plugin: &dyn Plugin) -> pos_core::Hash 
     let mut hasher = blake3::Hasher::new();
     hasher.update(label);
     hasher.update(&plugin.id().inner().to_bytes());
+    hasher.update(plugin.name().as_bytes());
     hasher.update(plugin.version().as_bytes());
+    let mut owned_event_types = plugin
+        .capability()
+        .owned_event_types
+        .into_iter()
+        .map(|kind| kind.as_str().to_owned())
+        .collect::<Vec<_>>();
+    owned_event_types.sort_unstable();
+    for event_type in owned_event_types {
+        hasher.update(event_type.as_bytes());
+        hasher.update(&[0]);
+    }
     pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 

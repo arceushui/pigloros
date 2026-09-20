@@ -714,7 +714,7 @@ fn run_builtin_reference_experiment(
     // Register reference plugins
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
-    exp.register(
+    exp.register_generated(
         &agent_plugin,
         Some(Box::new(RuleAgentReducer)),
         Some(Box::new(RuleAgentDriver::new(
@@ -725,7 +725,7 @@ fn run_builtin_reference_experiment(
 
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
-    exp.register(
+    exp.register_generated(
         &obs_plugin,
         Some(Box::new(SyntheticReducer)),
         Some(Box::new(SyntheticDriver::new(obs_entity))),
