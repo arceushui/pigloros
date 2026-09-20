@@ -172,8 +172,10 @@ def main() -> None:
             raise ValueError(f"layer DiffID mismatch: expected {expected}, observed {observed}")
         verified_diff_ids.append(observed)
     chain_id = verified_diff_ids[0]
-    for diff_id in verified_diff_ids[1:]:
-        chain_id = "sha256:" + hashlib.sha256(f"{chain_id} {diff_id}".encode("ascii")).hexdigest()
+    for layer_diff_id in verified_diff_ids[1:]:
+        chain_id = "sha256:" + hashlib.sha256(
+            f"{chain_id} {layer_diff_id}".encode("ascii")
+        ).hexdigest()
     reachable = {manifest_path.resolve(), config_path.resolve(), *(path.resolve() for path in layer_paths)}
     actual = {path.resolve() for path in (layout / "blobs" / "sha256").iterdir() if path.is_file()}
     if actual != reachable:
