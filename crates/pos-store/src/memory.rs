@@ -1512,8 +1512,8 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
             return Ok(None);
         };
-        self.verify_memory_fork_child(&result)?;
-        Ok(Some(result))
+        self.verify_memory_fork_child(&result)
+            .map(|()| Some(result))
     }
 }
 
