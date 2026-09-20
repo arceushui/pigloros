@@ -4,6 +4,7 @@
 //! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -421,6 +422,20 @@ struct ErasureGateStateV1 {
     states: BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
     blocked_timelines: BTreeSet<TimelineId>,
     frozen_timelines: BTreeSet<TimelineId>,
+}
+
+thread_local! {
+    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveContainmentFence;
+
+impl Drop for ActiveContainmentFence {
+    fn drop(&mut self) {
+        ACTIVE_CONTAINMENT_FENCES.with(|active| {
+            let _ = active.borrow_mut().pop();
+        });
+    }
 }
 
 impl Default for ErasureContainmentGateV1 {
@@ -842,6 +857,9 @@ impl ErasureContainmentGateV1 {
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
+        let identity = std::ptr::from_ref(self) as usize;
+        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
+        let _active = ActiveContainmentFence;
         let permit = ErasureTopologyTransitionPermitV1 { _private: () };
         let (candidate, result) = transition(&permit).map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
@@ -853,6 +871,11 @@ impl ErasureContainmentGateV1 {
             .write()
             .map_err(containment_recovery_failure)? = Arc::new(replacement);
         Ok((candidate, result))
+    }
+
+    fn is_fence_active(&self) -> bool {
+        let identity = std::ptr::from_ref(self) as usize;
+        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity))
     }
 
     /// Return the installed complete-inventory generation.
@@ -992,6 +1015,15 @@ impl ErasureGate for ErasureContainmentGateV1 {
         timeline: TimelineId,
         operation: ErasureProtectedOperationV1,
     ) -> Result<(), ErasureContainmentErrorV1> {
+        if self.is_fence_active() {
+            self.ensure_available()?;
+            let authority = self
+                .authority
+                .read()
+                .map_err(containment_recovery_failure)?
+                .clone();
+            return self.authorize_state(timeline, operation, &authority);
+        }
         let _fence = self
             .fence_lock
             .lock()
@@ -1011,6 +1043,17 @@ impl ErasureGate for ErasureContainmentGateV1 {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(),
     ) -> Result<(), ErasureContainmentErrorV1> {
+        if self.is_fence_active() {
+            self.ensure_available()?;
+            let authority = self
+                .authority
+                .read()
+                .map_err(containment_recovery_failure)?
+                .clone();
+            self.authorize_state(timeline, operation, &authority)?;
+            effect();
+            return self.ensure_available();
+        }
         let _fence = self
             .fence_lock
             .lock()
@@ -1022,6 +1065,9 @@ impl ErasureGate for ErasureContainmentGateV1 {
             .map_err(containment_recovery_failure)?
             .clone();
         self.authorize_state(timeline, operation, &authority)?;
+        let identity = std::ptr::from_ref(self) as usize;
+        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
+        let _active = ActiveContainmentFence;
         effect();
         self.ensure_available()
     }
