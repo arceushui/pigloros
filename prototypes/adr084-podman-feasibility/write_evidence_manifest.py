@@ -33,7 +33,7 @@ def main() -> None:
         ("/seccomp-probe", arguments.build_dir / "seccomp-probe"),
         ("/foreign-probe", arguments.build_dir / "foreign-probe"),
         ("/native-matrix", arguments.build_dir / "native-matrix"),
-        ("/lifecycle-probe", arguments.build_dir / "lifecycle-probe"),
+        ("lifecycle-fixture/lifecycle-probe", arguments.build_dir / "lifecycle-probe"),
         (
             "/libseccomp-interface-v1.txt",
             arguments.build_dir / "libseccomp-interface-v1.txt",
@@ -88,6 +88,10 @@ def main() -> None:
         ("prototype/trace_seccomp.c", arguments.prototype_dir / "trace_seccomp.c"),
         ("prototype/verify_seccomp_bpf.py", arguments.prototype_dir / "verify_seccomp_bpf.py"),
         ("prototype/Containerfile", arguments.prototype_dir / "Containerfile"),
+        (
+            "prototype/Containerfile.lifecycle",
+            arguments.prototype_dir / "Containerfile.lifecycle",
+        ),
         ("build/compile-seccomp", arguments.build_dir / "compile-seccomp"),
         ("build/trace-seccomp", arguments.build_dir / "trace-seccomp"),
         ("build/prefilter-exec", arguments.build_dir / "prefilter-exec"),
@@ -144,6 +148,7 @@ def main() -> None:
         "elm-provider-controls.json",
         "terminal-precedence-matrix.json",
         "lifecycle-crash-matrix.json",
+        "lifecycle-image-inspect.json",
         "release-barrier-runtime-rejections.json",
         "lifecycle-concurrent.json",
         "lifecycle-concurrent.release",

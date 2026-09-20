@@ -744,6 +744,8 @@ def main() -> None:
     report = {
         "closed_states": sorted(CLOSED_STATES),
         "crash_boundary_count": len(results),
+        "fixture_image_id": image_id,
+        "fixture_scope": "throwaway lifecycle image; not the admitted ADR-085 image",
         "identity_defenses": negative,
         "provider_id": PROVIDER_ID,
         "results": results,

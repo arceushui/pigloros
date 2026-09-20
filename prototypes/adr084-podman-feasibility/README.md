@@ -148,8 +148,10 @@ does the coordinator open the release gate. The retained report requires eight
 unique attempt IDs, container IDs, launcher PIDs, and cgroup paths, and proves
 the earliest ReleaseV2 occurs after the latest `Observed` timestamp.
 
-A separate provider-death matrix uses an inert static lifecycle probe that forks
-one descendant and then blocks. It deliberately SIGKILLs the provider process
+A separate provider-death matrix uses an inert static lifecycle probe in its own
+explicitly throwaway fixture image, leaving the admitted ADR-085 image and its
+exact mounted-root manifest unchanged. The probe forks one descendant and then
+blocks. The matrix deliberately SIGKILLs the provider process
 immediately before and after split Podman create, start, identity capture, stop,
 kill, remove, and journal-fsync boundaries. Restart recovery trusts labels only
 for discovery: before acting it requires the exact provider, attempt, creation

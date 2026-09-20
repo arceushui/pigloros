@@ -115,6 +115,7 @@ cc -O2 -Wall -Wextra -Werror -o "${build_dir}/trace-seccomp" \
 cc -O2 -Wall -Wextra -Werror -o "${build_dir}/prefilter-exec" \
   "${prototype_dir}/prefilter_exec.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
+cp "${prototype_dir}/Containerfile.lifecycle" "${build_dir}/Containerfile.lifecycle"
 
 libseccomp_archive="${build_dir}/libseccomp-2.6.1.tar.gz"
 curl --fail --location --silent --show-error \
@@ -201,6 +202,15 @@ image_id="$(jq -er '.[0].Id' "${artifact_dir}/image-import-inspect.json")"
 image_reference="${image_id}"
 printf '%s\n' "${image_reference}" >"${artifact_dir}/image-reference.txt"
 
+lifecycle_image_tag="localhost/pigloros-adr084-lifecycle:${GITHUB_SHA:-prototype}"
+/usr/bin/podman build --runtime=/usr/bin/crun --pull=never --identity-label=false \
+  --timestamp=0 --unsetenv=PATH --unsetlabel=io.buildah.version \
+  --file "${build_dir}/Containerfile.lifecycle" --tag "${lifecycle_image_tag}" \
+  "${build_dir}" 2>&1 | tee "${artifact_dir}/lifecycle-image-build.log"
+/usr/bin/podman image inspect "${lifecycle_image_tag}" \
+  >"${artifact_dir}/lifecycle-image-inspect.json"
+lifecycle_image_id="$(jq -er '.[0].Id' "${artifact_dir}/lifecycle-image-inspect.json")"
+
 /usr/bin/podman unshare bash "${prototype_dir}/mount_and_manifest.sh" \
   "${image_id}" "${prototype_dir}/rootfs_manifest.py" \
   "${artifact_dir}/rootfs-manifest.json"
@@ -246,7 +256,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --artifact-dir "${artifact_dir}"
 
 python3 "${prototype_dir}/lifecycle_crash_matrix.py" \
-  --image "${image_reference}" \
+  --image "${lifecycle_image_id}" \
   --seccomp "${seccomp_dir}/oci-seccomp-profile.json" \
   --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
   --artifact-dir "${artifact_dir}"
