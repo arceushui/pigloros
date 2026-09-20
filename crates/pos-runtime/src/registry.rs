@@ -893,25 +893,24 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
 }
 
 fn validate_test_driver_output(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
-    const MAX_TEST_DRIVER_EVENTS: usize = 1_000;
-    const MAX_TEST_DRIVER_EVENT_BYTES: usize = 4_096;
+    const MAX_TEST_DRIVER_EVENTS: u32 = 1_000;
+    const MAX_TEST_DRIVER_EVENT_BYTES: u32 = 4_096;
 
-    if drafts.len() > MAX_TEST_DRIVER_EVENTS {
+    if u32::try_from(drafts.len()).unwrap_or(u32::MAX) > MAX_TEST_DRIVER_EVENTS {
         return Err(crate::OutputAdmissionErrorV1::EventCountExceeded {
             level: 0,
-            requested: drafts.len() as u64,
-            limit: MAX_TEST_DRIVER_EVENTS as u32,
+            requested: u64::try_from(drafts.len()).unwrap_or(u64::MAX),
+            limit: MAX_TEST_DRIVER_EVENTS,
         }
         .into());
     }
-    if let Some(draft) = drafts
-        .iter()
-        .find(|draft| draft.payload.len() > MAX_TEST_DRIVER_EVENT_BYTES)
-    {
+    if let Some(draft) = drafts.iter().find(|draft| {
+        u32::try_from(draft.payload.len()).unwrap_or(u32::MAX) > MAX_TEST_DRIVER_EVENT_BYTES
+    }) {
         return Err(crate::OutputAdmissionErrorV1::EventBytesExceeded {
             event_type: draft.event_type.as_str().to_owned(),
             requested: draft.payload.len(),
-            limit: MAX_TEST_DRIVER_EVENT_BYTES as u32,
+            limit: MAX_TEST_DRIVER_EVENT_BYTES,
         }
         .into());
     }

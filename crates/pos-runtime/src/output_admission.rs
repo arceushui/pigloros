@@ -61,19 +61,10 @@ pub struct OutputAdmissionV1 {
     usage: Mutex<AdmissionUsage>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AdmissionUsage {
     events: [u64; 3],
     bytes: [u64; 3],
-}
-
-impl Default for AdmissionUsage {
-    fn default() -> Self {
-        Self {
-            events: [0; 3],
-            bytes: [0; 3],
-        }
-    }
 }
 
 impl Clone for OutputAdmissionV1 {
