@@ -33,7 +33,9 @@ jobs:
       - name: Install distribution probe dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes b3sum crun jq musl-tools podman python3-cbor2 python3-cryptography
+          sudo apt-get install --yes \
+            autoconf automake b3sum build-essential crun gperf jq libtool \
+            musl-tools podman python3-cbor2 python3-cryptography python3-z3
           probe_user="$(id -un)"
           if ! grep -q "^${probe_user}:" /etc/subuid; then
             sudo usermod --add-subuids 100000-165535 "${probe_user}"

@@ -27,7 +27,21 @@ def main() -> None:
         ("/adapter", arguments.build_dir / "adapter"),
         ("prototype/launcher.c", arguments.prototype_dir / "launcher.c"),
         ("prototype/adapter.c", arguments.prototype_dir / "adapter.c"),
+        ("prototype/compile_seccomp.c", arguments.prototype_dir / "compile_seccomp.c"),
+        ("prototype/prepare_seccomp.py", arguments.prototype_dir / "prepare_seccomp.py"),
+        ("prototype/verify_seccomp_bpf.py", arguments.prototype_dir / "verify_seccomp_bpf.py"),
         ("prototype/Containerfile", arguments.prototype_dir / "Containerfile"),
+        ("build/compile-seccomp", arguments.build_dir / "compile-seccomp"),
+        (
+            "build/libseccomp-2.6.1.tar.gz",
+            arguments.build_dir / "libseccomp-2.6.1.tar.gz",
+        ),
+        (
+            "build/libseccomp.a",
+            arguments.build_dir / "libseccomp-install/lib/libseccomp.a",
+        ),
+        ("runtime/crun", pathlib.Path("/usr/bin/crun")),
+        ("runtime/podman", pathlib.Path("/usr/bin/podman")),
     ]
     sbom = {
         "SPDXID": "SPDXRef-DOCUMENT",
@@ -67,6 +81,15 @@ def main() -> None:
         "rootfs-manifest.json",
         "runtime-subject-validation.json",
         "runtime-subject.json",
+        "seccomp/bpf-verification.json",
+        "seccomp/compiler-metadata.json",
+        "seccomp/exported-seccomp.base64",
+        "seccomp/exported-seccomp.bpf",
+        "seccomp/libseccomp-interface-v1.txt",
+        "seccomp/oci-seccomp-profile.json",
+        "seccomp/readback-only-pnr.txt",
+        "seccomp/seccomp-mapping-report.json",
+        "seccomp/seccomp-mutation-report.json",
     )
     provenance = {
         "architecture": arguments.architecture,

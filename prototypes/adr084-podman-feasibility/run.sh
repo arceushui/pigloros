@@ -9,6 +9,18 @@ image_tag="localhost/pigloros-adr084-probe:${GITHUB_SHA:-prototype}"
 
 mkdir -p "${artifact_dir}" "${build_dir}"
 
+case "$(uname -m)" in
+  x86_64)
+    evidence_architecture="x86_64"
+    oci_architecture="amd64"
+    ;;
+  aarch64)
+    evidence_architecture="aarch64"
+    oci_architecture="arm64"
+    ;;
+  *) printf 'unsupported prototype architecture\n' >&2; exit 1 ;;
+esac
+
 cleanup() {
   /usr/bin/podman rm --all --force --filter label=io.pigloros.prototype=adr084 >/dev/null 2>&1 || true
 }
@@ -38,6 +50,43 @@ musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototy
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 
+libseccomp_archive="${build_dir}/libseccomp-2.6.1.tar.gz"
+curl --fail --location --silent --show-error \
+  https://github.com/seccomp/libseccomp/releases/download/v2.6.1/libseccomp-2.6.1.tar.gz \
+  --output "${libseccomp_archive}"
+printf '%s  %s\n' \
+  '501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be' \
+  "${libseccomp_archive}" | sha256sum --check --strict -
+tar -xzf "${libseccomp_archive}" -C "${build_dir}"
+libseccomp_prefix="${build_dir}/libseccomp-install"
+(
+  cd "${build_dir}/libseccomp-2.6.1"
+  ./configure --prefix="${libseccomp_prefix}" --disable-shared --enable-static
+  make -j2
+  make install
+) 2>&1 | tee "${artifact_dir}/libseccomp-build.log"
+
+seccomp_dir="${artifact_dir}/seccomp"
+mkdir -p "${seccomp_dir}"
+scs1="${workspace_dir}/crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-${evidence_architecture}.scs1.cbor"
+python3 "${prototype_dir}/prepare_seccomp.py" \
+  --architecture "${evidence_architecture}" --scs1 "${scs1}" \
+  --libseccomp-archive "${libseccomp_archive}" --output-dir "${seccomp_dir}"
+cc -O2 -Wall -Wextra -Werror \
+  -I"${libseccomp_prefix}/include" "${prototype_dir}/compile_seccomp.c" \
+  "${libseccomp_prefix}/lib/libseccomp.a" -o "${build_dir}/compile-seccomp"
+"${build_dir}/compile-seccomp" "${evidence_architecture}" \
+  "${seccomp_dir}/libseccomp-interface-v1.txt" \
+  "${seccomp_dir}/readback-only-pnr.txt" \
+  "${seccomp_dir}/exported-seccomp.bpf" \
+  "${seccomp_dir}/compiler-metadata.json"
+python3 "${prototype_dir}/verify_seccomp_bpf.py" \
+  --architecture "${evidence_architecture}" \
+  --bpf "${seccomp_dir}/exported-seccomp.bpf" \
+  --interface "${seccomp_dir}/libseccomp-interface-v1.txt" \
+  --report "${seccomp_dir}/bpf-verification.json" \
+  --base64 "${seccomp_dir}/exported-seccomp.base64"
+
 /usr/bin/podman build --runtime=/usr/bin/crun --pull=never --identity-label=false \
   --timestamp=0 --unsetenv=PATH --unsetlabel=io.buildah.version \
   --tag "${image_tag}" "${build_dir}" 2>&1 | tee "${artifact_dir}/podman-build.log"
@@ -48,11 +97,6 @@ image_id="$(jq -er '.[0].Id' "${artifact_dir}/image-inspect.json")"
   "${image_tag}"
 mkdir -p "${build_dir}/podman-source-layout"
 tar -xf "${build_dir}/podman-source.oci.tar" -C "${build_dir}/podman-source-layout"
-case "$(uname -m)" in
-  x86_64) oci_architecture="amd64" ;;
-  aarch64) oci_architecture="arm64" ;;
-  *) printf 'unsupported prototype architecture\n' >&2; exit 1 ;;
-esac
 python3 "${prototype_dir}/build_oci_archive.py" \
   "${build_dir}/podman-source-layout" "${artifact_dir}/image.oci.tar" \
   --architecture "${oci_architecture}" --image-id "${image_tag}"
@@ -87,7 +131,9 @@ python3 "${prototype_dir}/generate_vectors.py" >"${artifact_dir}/adr085-vectors.
 python3 "${prototype_dir}/validate_vectors.py" "${artifact_dir}/adr085-vectors.json" \
   "${artifact_dir}/adr085-vector-validation.json"
 python3 "${prototype_dir}/driver.py" --image "${image_reference}" \
-  --seccomp "${prototype_dir}/seccomp.json" --artifact-dir "${artifact_dir}"
+  --seccomp "${seccomp_dir}/oci-seccomp-profile.json" \
+  --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
+  --artifact-dir "${artifact_dir}"
 
 python3 "${prototype_dir}/write_evidence_manifest.py" \
   "${artifact_dir}" "${build_dir}" "${prototype_dir}" \

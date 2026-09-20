@@ -15,13 +15,18 @@ non-stdio descriptor?
 The prototype also emits ADR-085 canonical vectors, independently verifies the
 OCI manifest/config/layer/DiffID/ChainID closure, removes and rootlessly imports
 the saved OCI archive, and records runtime, namespace, mount, cgroup,
-descriptor, environment, and negative-probe evidence. It intentionally lives
-only on the throwaway evidence branch.
+descriptor, environment, and negative-probe evidence. For ADR-084 revision 24,
+it partitions the signed SCS1 into requested `R`, effective audit `E`, and
+readback-only PNR `D`; materializes an exact-`R` libseccomp interface and exact
+`E` audit profile; compiles numeric `R` with pinned libseccomp 2.6.1; and uses an
+independent symbolic verifier over the exported BPF's complete 32-bit syscall
+domain. It intentionally lives only on the throwaway evidence branch.
 
 The canonical ADRs remain Proposed. A green workflow proves only the bounded
-claims named by its retained artifacts; the ADR acceptance matrix, production
-provider, native source coverage, canonical EAI1/EAO1 framing, SCS1-to-seccomp
-mapping, complete lifecycle/crash matrix, and ticket rewrites remain separate.
+claims named by its retained artifacts; the complete ADR acceptance matrix,
+production provider, native source coverage, canonical EAI1/EAO1 framing,
+installed-BPF capture, complete lifecycle/crash matrix, and ticket rewrites
+remain separate.
 
 The command below is documentation for the remote workflow. Do not run it in a
 developer worktree; the evidence is produced only by the dedicated GitHub

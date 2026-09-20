@@ -135,6 +135,7 @@ def assert_launcher_snapshot(snapshot: dict[str, object]) -> None:
 def launch(
     image: str,
     seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
     artifact_dir: pathlib.Path,
     input_bytes: bytes,
     scenario: str,
@@ -164,6 +165,8 @@ def launch(
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
         f"--security-opt=seccomp={seccomp}",
+        f"--annotation=run.oci.seccomp_bpf_data={seccomp_bpf_base64}",
+        "--stop-signal=15",
         "--memory=64m",
         "--memory-swap=64m",
         "--pids-limit=16",
@@ -219,7 +222,22 @@ def launch(
         raise AssertionError(f"adapter emitted before ReleaseV1: {premature!r}")
     inspect = run("/usr/bin/podman", "inspect", container_id).stdout
     (artifact_dir / f"{scenario}.inspect.json").write_text(inspect, encoding="utf-8")
-    pid = int(json.loads(inspect)[0]["State"]["Pid"])
+    inspected = json.loads(inspect)[0]
+    annotations = inspected["Config"]["Annotations"]
+    expected_annotations = {
+        "io.container.manager": "libpod",
+        "io.podman.annotations.seccomp": str(seccomp),
+        "org.opencontainers.image.stopSignal": "15",
+        "run.oci.seccomp_bpf_data": seccomp_bpf_base64,
+    }
+    (artifact_dir / f"{scenario}.runtime-annotations.json").write_text(
+        json.dumps(annotations, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if annotations != expected_annotations:
+        raise AssertionError(
+            f"effective runtime annotations differ: {annotations!r}"
+        )
+    pid = int(inspected["State"]["Pid"])
     snapshot = process_snapshot(pid)
     assert_launcher_snapshot(snapshot)
     (artifact_dir / f"{scenario}.launcher.json").write_text(
@@ -232,9 +250,14 @@ def launch(
     return process, parent_control, container_id, cidfile
 
 
-def normal_scenario(image: str, seccomp: pathlib.Path, artifact_dir: pathlib.Path) -> None:
+def normal_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    artifact_dir: pathlib.Path,
+) -> None:
     process, control, container_id, _ = launch(
-        image, seccomp, artifact_dir, b"hello\n", "normal"
+        image, seccomp, seccomp_bpf_base64, artifact_dir, b"hello\n", "normal"
     )
     assert process.stdin is not None
     process.stdin.close()
@@ -254,10 +277,13 @@ def normal_scenario(image: str, seccomp: pathlib.Path, artifact_dir: pathlib.Pat
 
 
 def cancellation_scenario(
-    image: str, seccomp: pathlib.Path, artifact_dir: pathlib.Path
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    artifact_dir: pathlib.Path,
 ) -> None:
     process, control, container_id, _ = launch(
-        image, seccomp, artifact_dir, b"HOLD\n", "cancel"
+        image, seccomp, seccomp_bpf_base64, artifact_dir, b"HOLD\n", "cancel"
     )
     assert process.stdout is not None
     readable, _, _ = select.select([process.stdout], [], [], 10)
@@ -290,12 +316,28 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
     parser.add_argument("--seccomp", required=True, type=pathlib.Path)
+    parser.add_argument("--seccomp-bpf-base64", required=True, type=pathlib.Path)
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
-    normal_scenario(arguments.image, arguments.seccomp.resolve(), arguments.artifact_dir)
+    seccomp_bpf_base64 = arguments.seccomp_bpf_base64.read_text(
+        encoding="ascii"
+    )
+    if not seccomp_bpf_base64 or any(
+        character.isspace() for character in seccomp_bpf_base64
+    ):
+        raise ValueError("seccomp BPF base64 is empty or contains whitespace")
+    normal_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.artifact_dir,
+    )
     cancellation_scenario(
-        arguments.image, arguments.seccomp.resolve(), arguments.artifact_dir
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.artifact_dir,
     )
     print("ADR-084 Podman release-barrier prototype passed")
 
