@@ -836,10 +836,11 @@ fn append_driver_drafts(
             return Err(error.into());
         }
     };
-    if let Err(error) = registry.schemas.validate_batch(&drafts) {
-        registry.abort_step();
-        return Err(error.into());
-    }
+    registry
+        .schemas
+        .validate_batch(&drafts)
+        .map_err(ExperimentError::from)
+        .inspect_err(|_| registry.abort_step())?;
     if drafts.is_empty() {
         registry
             .commit_step_at(observed_through, 0)
@@ -1896,11 +1897,14 @@ impl ExperimentSession {
             self.registry.abort_step();
             return Err(ExperimentError::ConsentRevokedV1);
         }
-        if let Err(error) = self.registry.schemas.validate_batch(&drafts) {
-            self.registry.abort_step();
-            self.health = SessionHealth::Faulted;
-            return Err(error.into());
-        }
+        self.registry
+            .schemas
+            .validate_batch(&drafts)
+            .map_err(ExperimentError::from)
+            .inspect_err(|_| {
+                self.registry.abort_step();
+                self.health = SessionHealth::Faulted;
+            })?;
         let emitted_events = if drafts.is_empty() {
             self.registry
                 .commit_step_at(self.boundary.folded_through, current_now_secs())?;
