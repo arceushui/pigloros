@@ -93,10 +93,21 @@ def main() -> None:
         "normal.seccomp-install.json",
         "cancel.installed-seccomp.bpf",
         "cancel.seccomp-install.json",
+        "cache-matrix.json",
         "probe.installed-seccomp.bpf",
         "probe.seccomp-install.json",
         "probe.stderr",
         "probe.stdout",
+        *(
+            f"cache-{state}.{suffix}"
+            for state in ("empty", "valid", "stale", "corrupt", "adversarial")
+            for suffix in (
+                "installed-seccomp.bpf",
+                "seccomp-install.json",
+                "stderr",
+                "stdout",
+            )
+        ),
         "oci-archive-validation.json",
         "oci-validation.json",
         "rootfs-manifest.json",

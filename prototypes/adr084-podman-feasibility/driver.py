@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import pathlib
@@ -12,6 +13,7 @@ import select
 import signal
 import socket
 import subprocess
+import struct
 import sys
 import time
 import uuid
@@ -357,8 +359,9 @@ def seccomp_probe_scenario(
     seccomp_bpf: pathlib.Path,
     seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
+    scenario: str = "probe",
 ) -> None:
-    name = f"pigloros-adr084-seccomp-probe-{uuid.uuid4().hex[:12]}"
+    name = f"pigloros-adr084-{scenario}-{uuid.uuid4().hex[:12]}"
     podman_command = [
         "/usr/bin/podman",
         "run",
@@ -383,7 +386,7 @@ def seccomp_probe_scenario(
         "--ulimit=fsize=1048576:1048576",
         "--user=65532:65532",
         "--label=io.pigloros.prototype=adr084",
-        "--label=io.pigloros.scenario=seccomp-probe",
+        f"--label=io.pigloros.scenario={scenario}",
         "--entrypoint=/seccomp-probe",
         "--rm=false",
         image,
@@ -392,8 +395,8 @@ def seccomp_probe_scenario(
         [
             str(seccomp_tracer),
             str(seccomp_bpf),
-            str(artifact_dir / "probe.installed-seccomp.bpf"),
-            str(artifact_dir / "probe.seccomp-install.json"),
+            str(artifact_dir / f"{scenario}.installed-seccomp.bpf"),
+            str(artifact_dir / f"{scenario}.seccomp-install.json"),
             "--",
             *podman_command,
         ],
@@ -401,10 +404,12 @@ def seccomp_probe_scenario(
         capture_output=True,
         timeout=20,
     )
-    (artifact_dir / "probe.stdout").write_bytes(completed.stdout)
-    (artifact_dir / "probe.stderr").write_bytes(completed.stderr)
+    (artifact_dir / f"{scenario}.stdout").write_bytes(completed.stdout)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(completed.stderr)
     inspect_text = run("/usr/bin/podman", "inspect", name).stdout
-    (artifact_dir / "probe.inspect.json").write_text(inspect_text, encoding="utf-8")
+    (artifact_dir / f"{scenario}.inspect.json").write_text(
+        inspect_text, encoding="utf-8"
+    )
     inspected = json.loads(inspect_text)[0]
     expected_annotations = {
         "io.container.manager": "libpod",
@@ -433,6 +438,152 @@ def seccomp_probe_scenario(
             f"stderr={completed.stderr!r}"
         )
     run("/usr/bin/podman", "rm", name)
+
+
+def crun_cache_checksum(profile: dict[str, object]) -> tuple[str, dict[str, object]]:
+    package_version = "1.14.1"
+    libseccomp_version = (2, 5, 5)
+    installed_version = run(
+        "/usr/bin/dpkg-query", "-W", "-f=${Version}", "libseccomp2"
+    ).stdout
+    if not installed_version.startswith("2.5.5-"):
+        raise AssertionError(f"unexpected crun libseccomp package: {installed_version}")
+    uname = os.uname()
+    chunks = [package_version.encode("ascii")]
+    chunks.extend(struct.pack("=I", value) for value in libseccomp_version)
+    chunks.extend(
+        value.encode("utf-8") for value in (uname.release, uname.version, uname.machine)
+    )
+    chunks.append(struct.pack("=I", 0))
+    default_errno = profile.get("defaultErrnoRet")
+    default_action = profile.get("defaultAction")
+    architectures = profile.get("architectures")
+    syscalls = profile.get("syscalls")
+    if (
+        not isinstance(default_errno, int)
+        or not isinstance(default_action, str)
+        or not isinstance(architectures, list)
+        or not isinstance(syscalls, list)
+    ):
+        raise ValueError("seccomp profile cannot be checksummed")
+    chunks.extend((struct.pack("=I", default_errno), default_action.encode("ascii")))
+    for architecture in architectures:
+        if not isinstance(architecture, str):
+            raise ValueError("invalid seccomp architecture")
+        chunks.append(architecture.encode("ascii"))
+    for rule in syscalls:
+        if not isinstance(rule, dict) or set(rule) != {"action", "names"}:
+            raise ValueError("unsupported seccomp rule for checksum")
+        action = rule["action"]
+        names = rule["names"]
+        if not isinstance(action, str) or not isinstance(names, list):
+            raise ValueError("invalid seccomp rule for checksum")
+        chunks.append(action.encode("ascii"))
+        for name in names:
+            if not isinstance(name, str):
+                raise ValueError("invalid seccomp syscall name")
+            chunks.append(name.encode("ascii"))
+    result = subprocess.run(
+        ["/usr/bin/b3sum"], input=b"".join(chunks), check=True, capture_output=True
+    )
+    checksum = result.stdout.decode("ascii").split()[0]
+    return checksum, {
+        "crun_package_version": package_version,
+        "libseccomp_api_version": list(libseccomp_version),
+        "libseccomp_package_version": installed_version,
+        "seccomp_gen_options": 0,
+        "uname": [uname.release, uname.version, uname.machine],
+    }
+
+
+def cache_snapshot(cache_dir: pathlib.Path) -> dict[str, object]:
+    entries = []
+    if cache_dir.exists():
+        for entry in sorted(cache_dir.iterdir(), key=lambda item: item.name):
+            if not entry.is_file() or entry.is_symlink():
+                raise AssertionError(f"unexpected cache entry: {entry}")
+            content = entry.read_bytes()
+            metadata = entry.stat()
+            entries.append(
+                {
+                    "name": entry.name,
+                    "length": len(content),
+                    "mode": metadata.st_mode & 0o7777,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "mtime_ns": metadata.st_mtime_ns,
+                }
+            )
+    return {"directory": str(cache_dir), "entries": entries}
+
+
+def cache_matrix_scenario(
+    architecture: str,
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+) -> None:
+    profile = json.loads(seccomp.read_text(encoding="utf-8"))
+    if not isinstance(profile, dict):
+        raise ValueError("seccomp profile is not an object")
+    candidate_checksum, checksum_inputs = crun_cache_checksum(profile)
+    cache_dir = pathlib.Path(f"/run/user/{os.getuid()}/crun/.cache/seccomp")
+    cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    exported = seccomp_bpf.read_bytes()
+    if candidate_checksum in {"0" * 64, "1" * 64, "2" * 64}:
+        raise AssertionError("candidate checksum collides with fixed cache fixture")
+    states: list[tuple[str, str | None, bytes | None, int | None]] = [
+        ("empty", None, None, None),
+        ("valid", "0" * 64, exported, None),
+        ("stale", "1" * 64, exported, 0),
+        ("corrupt", "2" * 64, b"not-a-classic-bpf-program", None),
+        ("adversarial", candidate_checksum, bytes(len(exported)), None),
+    ]
+    observations = []
+    for state, filename, content, mtime_ns in states:
+        for entry in cache_dir.iterdir():
+            if not entry.is_file() or entry.is_symlink():
+                raise AssertionError(f"refusing to clear unexpected cache entry: {entry}")
+            entry.unlink()
+        if filename is not None and content is not None:
+            cache_file = cache_dir / filename
+            cache_file.write_bytes(content)
+            cache_file.chmod(0o700)
+            if mtime_ns is not None:
+                os.utime(cache_file, ns=(mtime_ns, mtime_ns))
+        before = cache_snapshot(cache_dir)
+        seccomp_probe_scenario(
+            architecture,
+            image,
+            seccomp,
+            seccomp_bpf_base64,
+            seccomp_bpf,
+            seccomp_tracer,
+            artifact_dir,
+            f"cache-{state}",
+        )
+        after = cache_snapshot(cache_dir)
+        if after != before:
+            raise AssertionError(f"crun checksum cache changed in {state} case")
+        observations.append({"state": state, "before": before, "after": after})
+    for entry in cache_dir.iterdir():
+        entry.unlink()
+    (artifact_dir / "cache-matrix.json").write_text(
+        json.dumps(
+            {
+                "candidate_checksum": candidate_checksum,
+                "checksum_inputs": checksum_inputs,
+                "observations": observations,
+                "verdict": "all states byte-identical before/after; tracer observed zero accesses",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> None:
@@ -470,6 +621,15 @@ def main() -> None:
         arguments.artifact_dir,
     )
     seccomp_probe_scenario(
+        arguments.architecture,
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+    )
+    cache_matrix_scenario(
         arguments.architecture,
         arguments.image,
         arguments.seccomp.resolve(),

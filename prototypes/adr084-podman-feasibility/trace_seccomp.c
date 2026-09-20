@@ -278,6 +278,10 @@ int main(int argc, char **argv) {
     while (traced_count != 0) {
         pid_t pid = waitpid(-1, &status, __WALL);
         if (pid == -1) {
+            if (errno == ECHILD && child_reaped && install_succeeded) {
+                traced_count = 0;
+                break;
+            }
             fail("wait");
         }
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
