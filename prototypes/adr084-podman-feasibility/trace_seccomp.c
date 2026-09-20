@@ -101,7 +101,7 @@ static unsigned char *read_file(const char *path, size_t *length) {
     return bytes;
 }
 
-static void copy_tracee(pid_t pid, uintptr_t address, void *destination,
+static bool copy_tracee(pid_t pid, uintptr_t address, void *destination,
                         size_t length) {
     unsigned char *output = destination;
     size_t offset = 0;
@@ -109,6 +109,9 @@ static void copy_tracee(pid_t pid, uintptr_t address, void *destination,
         errno = 0;
         long word = ptrace(PTRACE_PEEKDATA, pid, (void *)(address + offset), 0);
         if (word == -1 && errno != 0) {
+            if (errno == EIO || errno == EFAULT || errno == ESRCH) {
+                return false;
+            }
             fail("tracee-read");
         }
         size_t remaining = length - offset;
@@ -116,6 +119,7 @@ static void copy_tracee(pid_t pid, uintptr_t address, void *destination,
         memcpy(output + offset, &word, amount);
         offset += amount;
     }
+    return true;
 }
 
 static void write_exact(const char *path, const unsigned char *bytes,
@@ -138,7 +142,8 @@ static void write_exact(const char *path, const unsigned char *bytes,
 }
 
 static void write_report(const char *path, pid_t installer, size_t length,
-                         long result, unsigned int other_attempts) {
+                         long result, unsigned int other_attempts,
+                         unsigned int unreadable_attempts) {
     int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (descriptor == -1) {
         fail("report-open");
@@ -149,9 +154,10 @@ static void write_report(const char *path, pid_t installer, size_t length,
         "  \"equality\": true,\n  \"install_attempts\": 1,\n"
         "  \"installer_pid\": %ld,\n"
         "  \"other_traced_install_attempts\": %u,\n"
+        "  \"unreadable_traced_install_attempts\": %u,\n"
         "  \"syscall_return\": %ld\n}\n",
         ADMITTED_SECCOMP_FLAGS, length, (long)installer, other_attempts,
-        result);
+        unreadable_attempts, result);
     if (written < 0 || fsync(descriptor) == -1 || close(descriptor) == -1) {
         fail("report-write");
     }
@@ -198,6 +204,7 @@ int main(int argc, char **argv) {
 
     unsigned int install_attempts = 0;
     unsigned int other_install_attempts = 0;
+    unsigned int unreadable_install_attempts = 0;
     bool install_succeeded = false;
     pid_t installer = -1;
     int child_status = 0;
@@ -248,8 +255,12 @@ int main(int argc, char **argv) {
                     goto continue_tracee;
                 }
                 struct sock_fprog program;
-                copy_tracee(pid, (uintptr_t)information.entry.args[2], &program,
-                            sizeof(program));
+                if (!copy_tracee(pid, (uintptr_t)information.entry.args[2],
+                                 &program, sizeof(program))) {
+                    ++other_install_attempts;
+                    ++unreadable_install_attempts;
+                    goto continue_tracee;
+                }
                 size_t installed_length =
                     (size_t)program.len * sizeof(struct sock_filter);
                 bool is_expected = false;
@@ -259,8 +270,13 @@ int main(int argc, char **argv) {
                     if (installed == NULL) {
                         fail("installed-allocate");
                     }
-                    copy_tracee(pid, (uintptr_t)program.filter, installed,
-                                installed_length);
+                    if (!copy_tracee(pid, (uintptr_t)program.filter, installed,
+                                     installed_length)) {
+                        free(installed);
+                        ++other_install_attempts;
+                        ++unreadable_install_attempts;
+                        goto continue_tracee;
+                    }
                     is_expected =
                         memcmp(installed, expected, installed_length) == 0;
                 }
@@ -305,7 +321,7 @@ int main(int argc, char **argv) {
         fail("install-proof");
     }
     write_report(argv[3], installer, expected_length, 0,
-                 other_install_attempts);
+                 other_install_attempts, unreadable_install_attempts);
     if (WIFEXITED(child_status)) {
         return WEXITSTATUS(child_status);
     }
