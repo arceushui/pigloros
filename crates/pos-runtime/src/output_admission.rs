@@ -5,7 +5,7 @@ use pos_core::{
     output_policy::{OutputFidelityV1, OutputPolicyV1},
     ExecutableBudgetPolicyV1, Hash, PluginId,
 };
-use std::cell::Cell;
+use std::sync::Mutex;
 
 /// Closed failures returned by the production output gate.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -51,14 +51,14 @@ pub enum OutputAdmissionErrorV1 {
 /// The validator is intentionally immutable: a rejected staged step cannot
 /// consume budget. The host invokes it before append and exposes the policy
 /// digest to the surrounding evidence pipeline.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct OutputAdmissionV1 {
     plugin_id: PluginId,
     policy_digest: Hash,
     policy: OutputPolicyV1,
     budget: ExecutableBudgetPolicyV1,
     cpu_reservations_us: [u32; 3],
-    usage: Cell<AdmissionUsage>,
+    usage: Mutex<AdmissionUsage>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +72,24 @@ impl Default for AdmissionUsage {
         Self {
             events: [0; 3],
             bytes: [0; 3],
+        }
+    }
+}
+
+impl Clone for OutputAdmissionV1 {
+    fn clone(&self) -> Self {
+        Self {
+            plugin_id: self.plugin_id,
+            policy_digest: self.policy_digest,
+            policy: self.policy.clone(),
+            budget: self.budget.clone(),
+            cpu_reservations_us: self.cpu_reservations_us,
+            usage: Mutex::new(
+                *self
+                    .usage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
         }
     }
 }
@@ -112,7 +130,7 @@ impl OutputAdmissionV1 {
             policy,
             budget,
             cpu_reservations_us,
-            usage: Cell::new(AdmissionUsage::default()),
+            usage: Mutex::new(AdmissionUsage::default()),
         })
     }
 
@@ -137,7 +155,10 @@ impl OutputAdmissionV1 {
     }
 
     pub(crate) fn reset_usage(&self) {
-        self.usage.set(AdmissionUsage::default());
+        *self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = AdmissionUsage::default();
     }
 
     /// Validate every draft against declarations and the complete step budget.
@@ -146,7 +167,10 @@ impl OutputAdmissionV1 {
     /// Returns a declaration or resource-limit error when any draft exceeds
     /// the bound policy.
     pub fn validate_batch(&self, drafts: &[EventDraft]) -> Result<(), OutputAdmissionErrorV1> {
-        let previous = self.usage.get();
+        let previous = *self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut counts = previous.events;
         let mut bytes = previous.bytes;
         for draft in drafts {
@@ -211,10 +235,13 @@ impl OutputAdmissionV1 {
                 });
             }
         }
-        self.usage.set(AdmissionUsage {
+        *self
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = AdmissionUsage {
             events: counts,
             bytes,
-        });
+        };
         Ok(())
     }
 }
