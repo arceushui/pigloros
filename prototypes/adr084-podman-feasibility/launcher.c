@@ -23,8 +23,15 @@ static void verify_descriptors(void) {
         fail("descriptor-directory");
     }
     int scan_fd = dirfd(directory);
-    errno = 0;
-    for (struct dirent *entry = readdir(directory); entry != NULL; entry = readdir(directory)) {
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (entry == NULL) {
+            if (errno != 0) {
+                fail("descriptor-read");
+            }
+            break;
+        }
         char *end = NULL;
         long fd = strtol(entry->d_name, &end, 10);
         if (end == entry->d_name || *end != '\0') {
@@ -38,9 +45,6 @@ static void verify_descriptors(void) {
             fail("descriptor-set");
         }
         seen[fd] = true;
-    }
-    if (errno != 0) {
-        fail("descriptor-read");
     }
     if (closedir(directory) == -1) {
         fail("descriptor-close");
