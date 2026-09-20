@@ -706,12 +706,20 @@ def installed_byte_mutation_scenario(
     name = f"pigloros-adr084-installed-byte-mutation-{uuid.uuid4().hex[:12]}"
     installed = artifact_dir / "installed-byte-mutation.installed-seccomp.bpf"
     install_report = artifact_dir / "installed-byte-mutation.seccomp-install.json"
+    parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    if parent_control.fileno() == 3:
+        relocated_parent = socket.socket(fileno=os.dup(parent_control.fileno()))
+        parent_control.close()
+        parent_control = relocated_parent
+    child_fd = child_control.fileno()
+    child_control.set_inheritable(True)
     podman_command = [
         "/usr/bin/podman",
         "run",
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
+        "--preserve-fds=1",
         "--network=none",
         "--no-hosts",
         "--hostname=pigloros-adapter",
@@ -732,20 +740,47 @@ def installed_byte_mutation_scenario(
         "--label=io.pigloros.prototype=adr084",
         "--label=io.pigloros.scenario=installed-byte-mutation",
         "--rm=false",
+        "-i",
         image,
     ]
-    completed = subprocess.run(
-        [
-            str(seccomp_tracer),
-            str(seccomp_bpf),
-            str(installed),
-            str(install_report),
-            "--",
-            *podman_command,
-        ],
-        input=b"",
-        capture_output=True,
-        timeout=30,
+    command = [
+        str(seccomp_tracer),
+        str(seccomp_bpf),
+        str(installed),
+        str(install_report),
+        "--",
+        *podman_command,
+    ]
+    saved_fd3: int | None = None
+    if child_fd != 3:
+        try:
+            saved_fd3 = os.dup(3)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        os.dup2(child_fd, 3, inheritable=True)
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=(3,),
+        )
+    finally:
+        if child_fd != 3:
+            os.close(3)
+            if saved_fd3 is not None:
+                os.dup2(saved_fd3, 3)
+                os.close(saved_fd3)
+    child_control.close()
+    stdout, stderr = process.communicate(input=b"", timeout=30)
+    parent_control.close()
+    completed = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
     )
     run("/usr/bin/podman", "rm", "--force", name, check=False)
     (artifact_dir / "installed-byte-mutation.stdout").write_bytes(completed.stdout)

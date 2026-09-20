@@ -356,14 +356,15 @@ int main(int argc, char **argv) {
                 struct sock_fprog program;
                 if (!copy_tracee(pid, (uintptr_t)information.entry.args[2],
                                  &program, sizeof(program))) {
-                    errno = EPROTO;
-                    fail("installed-program-unreadable");
+                    ++other_install_attempts;
+                    ++unreadable_install_attempts;
+                    goto continue_tracee;
                 }
                 size_t installed_length =
                     (size_t)program.len * sizeof(struct sock_filter);
                 if (installed_length != expected_length) {
-                    errno = EPROTO;
-                    fail("installed-length-mismatch");
+                    ++other_install_attempts;
+                    goto continue_tracee;
                 }
                 unsigned char *installed = malloc(installed_length);
                 if (installed == NULL) {
@@ -372,8 +373,9 @@ int main(int argc, char **argv) {
                 if (!copy_tracee(pid, (uintptr_t)program.filter, installed,
                                  installed_length)) {
                     free(installed);
-                    errno = EPROTO;
-                    fail("installed-bytes-unreadable");
+                    ++other_install_attempts;
+                    ++unreadable_install_attempts;
+                    goto continue_tracee;
                 }
                 if (memcmp(installed, expected, installed_length) != 0) {
                     free(installed);
