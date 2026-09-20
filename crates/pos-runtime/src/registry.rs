@@ -2116,8 +2116,9 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
-        let budget =
-            pos_core::ExecutableBudgetPolicyV1::new(pos_core::ExecutableBudgetPolicyInputV1 {
+        Self::generated_output_binding_with_budget_input(
+            plugin,
+            pos_core::ExecutableBudgetPolicyInputV1 {
                 revision: 1,
                 workload_profile: pos_core::WorkloadProfileV1::Interactive,
                 cut_budget_family: 0,
@@ -2152,11 +2153,26 @@ impl PluginRegistry {
                 accounting_semantics: 0,
                 execution_profile_hash: pos_core::Hash::from_bytes([21; 32]),
                 max_pass_wall_duration_us: 1_000,
-            })
-            .map_err(|error| RuntimeError::CapabilityMismatch {
+            },
+        )
+    }
+
+    fn generated_output_binding_with_budget_input(
+        plugin: &dyn Plugin,
+        budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+    ) -> Result<
+        (
+            pos_core::output_policy::OutputPolicyV1,
+            pos_core::ExecutableBudgetPolicyV1,
+        ),
+        RuntimeError,
+    > {
+        let budget = pos_core::ExecutableBudgetPolicyV1::new(budget_input).map_err(|error| {
+            RuntimeError::CapabilityMismatch {
                 name: plugin.name().to_owned(),
                 reason: error.to_string(),
-            })?;
+            }
+        })?;
         let mut declarations = plugin
             .capability()
             .owned_event_types
@@ -5746,6 +5762,33 @@ mod erasure_gate_coverage {
             registry.validate_registered_output(PluginId::new(), &[]),
             Err(RuntimeError::NoDriver { .. })
         ));
+    }
+
+    #[test]
+    fn generated_binding_reports_invalid_budget_input() {
+        let plugin = simple_plugin("invalid-budget", &[]);
+        let error = PluginRegistry::generated_output_binding_with_budget_input(
+            &plugin,
+            pos_core::ExecutableBudgetPolicyInputV1 {
+                revision: 0,
+                workload_profile: pos_core::WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 1,
+                fidelity_budgets: [pos_core::FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1,
+                    max_bytes: 1,
+                    max_cpu_us: 1,
+                    shared_host_cpu_reservation_us: 0,
+                }; 3],
+                plugin_cpu_reservations: vec![],
+                accounting_semantics: 0,
+                execution_profile_hash: pos_core::Hash::zero(),
+                max_pass_wall_duration_us: 0,
+            },
+        )
+        .expect_err("invalid generated budget should be rejected");
+        assert!(matches!(error, RuntimeError::CapabilityMismatch { .. }));
     }
 }
 

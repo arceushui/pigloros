@@ -328,6 +328,46 @@ impl Driver for FixtureDriver {
     }
 }
 
+struct RejectingDriver;
+
+impl Driver for RejectingDriver {
+    fn step(
+        &mut self,
+        _timeline: pos_core::TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![draft(
+            "plugin.undeclared",
+            b"rejected",
+        )]))
+    }
+
+    fn name(&self) -> &'static str {
+        "output-admission-rejecting-driver"
+    }
+}
+
+#[test]
+fn public_tick_and_step_report_output_admission_failures() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_generated(&plugin, None, Some(Box::new(RejectingDriver)))?;
+    let timeline = pos_core::TimelineId::new();
+    assert!(matches!(
+        registry.tick_cadenced(timeline, 0),
+        Err(RuntimeError::OutputAdmission(_))
+    ));
+    assert!(matches!(
+        registry.step_all(timeline),
+        Err(RuntimeError::OutputAdmission(_))
+    ));
+    Ok(())
+}
+
 #[test]
 fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult {
     let plugin_id = PluginId::new();
@@ -439,6 +479,21 @@ impl Plugin for InvalidDeclarationPlugin {
             ..Capability::default()
         }
     }
+}
+
+#[test]
+fn generated_approver_registration_rejects_invalid_owned_event_declaration() {
+    let mut registry = PluginRegistry::new();
+    assert!(matches!(
+        registry.register_generated_with_approver(
+            &InvalidDeclarationPlugin,
+            None,
+            None,
+            None,
+            std::iter::empty(),
+        ),
+        Err(RuntimeError::CapabilityMismatch { .. })
+    ));
 }
 
 struct FlippingVersionPlugin {
