@@ -917,6 +917,65 @@ fn validate_test_driver_output(drafts: &[EventDraft]) -> Result<(), RuntimeError
     Ok(())
 }
 
+#[cfg(test)]
+mod admission_validation_tests {
+    use super::*;
+    use pos_core::{event::CanonicalBytes, ids::EntityId};
+
+    fn entry(test_only_driver: bool) -> PluginEntry {
+        PluginEntry {
+            name: "test".to_owned(),
+            version: "0.1.0".to_owned(),
+            owned_event_types: Vec::new(),
+            driver: None,
+            approver: None,
+            last_tick: None,
+            event_cursor: Seq::ZERO,
+            registration: None,
+            output_admission: None,
+            test_only_driver,
+        }
+    }
+
+    fn draft(payload: Vec<u8>) -> EventDraft {
+        EventDraft::new(
+            EntityId::new(),
+            Kind::new("test.output"),
+            CanonicalBytes::from_vec(payload),
+        )
+    }
+
+    #[test]
+    fn test_driver_output_limits_are_enforced() {
+        let entry = entry(true);
+        let oversized = draft(vec![0; 4_097]);
+        assert!(matches!(
+            validate_plugin_output(&entry, &[oversized]),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::EventBytesExceeded { .. }
+            ))
+        ));
+        let drafts = (0..1_001).map(|_| draft(Vec::new())).collect::<Vec<_>>();
+        assert!(matches!(
+            validate_plugin_output(&entry, &drafts),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::EventCountExceeded { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn missing_production_admission_is_rejected() {
+        let entry = entry(false);
+        assert!(matches!(
+            validate_plugin_output(&entry, &[draft(Vec::new())]),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::MissingDeclaration { .. }
+            ))
+        ));
+    }
+}
+
 fn invoke_driver(
     driver: &mut dyn Driver,
     timeline: pos_core::ids::TimelineId,
