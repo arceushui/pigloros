@@ -556,7 +556,9 @@ def reconcile(
         cgroup_path = actual_identity["cgroup_path"] or (
             prior_running.get("cgroup_path") if prior_running else None
         )
-        merged_dir = actual_identity["merged_dir"]
+        merged_dir = actual_identity["merged_dir"] or (
+            prior_running.get("merged_dir") if prior_running else None
+        )
         was_ever_running = actual_identity["running"] or prior_running is not None
         if was_ever_running and (merged_dir is None or cgroup_path is None):
             raise RuntimeError("durable cleanup identity is unavailable")
