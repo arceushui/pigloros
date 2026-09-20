@@ -4787,7 +4787,7 @@ mod tests {
         let mut missing_gate = gated_registry().with_consent_authority(authority.clone());
         missing_gate.register_test_driver(Box::new(EmptyDriver));
         missing_gate
-            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .test_ok();
         missing_gate.consent_gate = None;
         let mut missing_gate_store = gated_store();
