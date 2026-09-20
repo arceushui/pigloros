@@ -93,6 +93,8 @@ musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/cache-probe" \
   "${prototype_dir}/cache_probe.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/native-matrix" \
   "${prototype_dir}/native_matrix.c"
+musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/lifecycle-probe" \
+  "${prototype_dir}/lifecycle_probe.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/seccomp-probe" \
   "${prototype_dir}/seccomp_probe.c"
 case "${evidence_architecture}" in
@@ -241,6 +243,12 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --configured-defaults "${prototype_dir}/configured-default-injection.conf" \
   --configured-security-defaults \
     "${prototype_dir}/configured-security-default-injection.conf" \
+  --artifact-dir "${artifact_dir}"
+
+python3 "${prototype_dir}/lifecycle_crash_matrix.py" \
+  --image "${image_reference}" \
+  --seccomp "${seccomp_dir}/oci-seccomp-profile.json" \
+  --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
   --artifact-dir "${artifact_dir}"
 
 python3 "${prototype_dir}/write_evidence_manifest.py" \

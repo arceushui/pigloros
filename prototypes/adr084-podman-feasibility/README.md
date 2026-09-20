@@ -148,6 +148,22 @@ does the coordinator open the release gate. The retained report requires eight
 unique attempt IDs, container IDs, launcher PIDs, and cgroup paths, and proves
 the earliest ReleaseV2 occurs after the latest `Observed` timestamp.
 
+A separate provider-death matrix uses an inert static lifecycle probe that forks
+one descendant and then blocks. It deliberately SIGKILLs the provider process
+immediately before and after split Podman create, start, identity capture, stop,
+kill, remove, and journal-fsync boundaries. Restart recovery trusts labels only
+for discovery: before acting it requires the exact provider, attempt, creation
+nonce, image, container, creation-time, and live PID/start-time identities from
+the hash-chained fsynced journal. Every case terminates descendants, removes the
+exact container, verifies the retained cgroup is empty or absent, verifies the
+merged root is no longer mounted, and replays reconciliation without another
+action. A continuously running lookalike sentinel proves unrelated state is not
+touched. Separate ambiguity and identity-reuse mutations require operator-visible
+refusal and leave every candidate unchanged. Because Podman 4.9.3 does not offer
+`--preserve-fds` on `create`, this split lifecycle matrix does not claim the
+authenticated launcher barrier; Ready, Observe, and Release crash boundaries
+remain a separate barrier-stage experiment.
+
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported
 BPF. A valid-base64, one-byte mutation is exercised through real crun and must

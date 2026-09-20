@@ -5,6 +5,7 @@ COPY --chown=65532:65532 cache-probe /cache-probe
 COPY --chown=65532:65532 seccomp-probe /seccomp-probe
 COPY --chown=65532:65532 foreign-probe /foreign-probe
 COPY --chown=65532:65532 native-matrix /native-matrix
+COPY --chown=65532:65532 lifecycle-probe /lifecycle-probe
 COPY --chown=65532:65532 libseccomp-interface-v1.txt /libseccomp-interface-v1.txt
 USER 65532:65532
 WORKDIR /

@@ -33,6 +33,7 @@ def main() -> None:
         ("/seccomp-probe", arguments.build_dir / "seccomp-probe"),
         ("/foreign-probe", arguments.build_dir / "foreign-probe"),
         ("/native-matrix", arguments.build_dir / "native-matrix"),
+        ("/lifecycle-probe", arguments.build_dir / "lifecycle-probe"),
         (
             "/libseccomp-interface-v1.txt",
             arguments.build_dir / "libseccomp-interface-v1.txt",
@@ -71,6 +72,11 @@ def main() -> None:
             arguments.prototype_dir / "derive_distinct_scs1.py",
         ),
         ("prototype/native_matrix.c", arguments.prototype_dir / "native_matrix.c"),
+        ("prototype/lifecycle_probe.c", arguments.prototype_dir / "lifecycle_probe.c"),
+        (
+            "prototype/lifecycle_crash_matrix.py",
+            arguments.prototype_dir / "lifecycle_crash_matrix.py",
+        ),
         ("prototype/compile_seccomp.c", arguments.prototype_dir / "compile_seccomp.c"),
         ("prototype/seccomp_probe.c", arguments.prototype_dir / "seccomp_probe.c"),
         (
@@ -137,6 +143,7 @@ def main() -> None:
         "adapter-transport-runtime-rejections.json",
         "elm-provider-controls.json",
         "terminal-precedence-matrix.json",
+        "lifecycle-crash-matrix.json",
         "release-barrier-runtime-rejections.json",
         "lifecycle-concurrent.json",
         "lifecycle-concurrent.release",
