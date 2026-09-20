@@ -4018,7 +4018,8 @@ mod key_registry_coverage {
         ids::{EntityId, EventId, TimelineId},
         key_registry::{KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1},
         timeline::{Timeline, TimelineMeta},
-        CoreError, Event, EventStore, PublicKey, SeqRange,
+        CoreError, ErasureContainmentGateV1, ErasureTopologyTransitionPermitV1,
+        ErasureVerifiedInventoryV1, Event, EventStore, PublicKey, SeqRange,
     };
 
     struct MinimalStore {
