@@ -5766,11 +5766,19 @@ mod erasure_gate_coverage {
 
     #[test]
     fn generated_binding_reports_invalid_budget_input() {
-        let plugin = TestPlugin {
-            id: PluginId::new(),
-            name: "invalid-budget",
-            cap: Capability::default(),
-        };
+        struct BudgetFixturePlugin;
+        impl Plugin for BudgetFixturePlugin {
+            fn id(&self) -> PluginId {
+                PluginId::new()
+            }
+            fn name(&self) -> &'static str {
+                "invalid-budget"
+            }
+            fn capability(&self) -> Capability {
+                Capability::default()
+            }
+        }
+        let plugin = BudgetFixturePlugin;
         let error = PluginRegistry::generated_output_binding_with_budget_input(
             &plugin,
             pos_core::ExecutableBudgetPolicyInputV1 {
