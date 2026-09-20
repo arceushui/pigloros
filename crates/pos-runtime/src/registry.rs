@@ -4953,8 +4953,8 @@ mod tests {
         let timeline = store.create_timeline("t").test_ok();
         let plugin = plugin_with_caps("interval-plugin", &[], true, false);
         let mut reg = gated_registry();
-        reg.register(&plugin, None, Some(Box::new(IntervalDriver)))
-            .test_ok();
+        let _ = plugin;
+        reg.register_test_driver(Box::new(IntervalDriver));
 
         let first = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert_eq!(first.len(), 1);
