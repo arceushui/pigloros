@@ -94,6 +94,11 @@ def main() -> None:
     )
     rejected(
         "prototypes/adr084-podman-feasibility/run.sh",
+        '"${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"',
+        '"${GITHUB_SHA}" "${GITHUB_RUN_ID}" "1"',
+    )
+    rejected(
+        "prototypes/adr084-podman-feasibility/run.sh",
         "find . -type f ! -name SHA256SUMS -printf '%P\\0'",
         "find . -type f -print0",
     )

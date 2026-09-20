@@ -275,7 +275,9 @@ python3 "${prototype_dir}/write_evidence_manifest.py" \
   "${artifact_dir}" "${build_dir}" "${prototype_dir}" \
   --architecture "${oci_architecture}"
 python3 "${workspace_dir}/scripts/check_spdx_sbom.py" \
-  "${artifact_dir}/fixture-sbom.spdx.json" "${SOURCE_DATE_EPOCH}"
+  "${artifact_dir}/fixture-sbom.spdx.json" "${SOURCE_DATE_EPOCH}" \
+  "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
+  "${oci_architecture}"
 
 jq -e '.adr069_compatible == false and .observed_terminal_code == 8 and .required_terminal_code == 7' \
   "${artifact_dir}/elm-file.json" >/dev/null

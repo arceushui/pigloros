@@ -264,5 +264,7 @@ ADR-079 subprobe invokes pinned Cargo/cargo-llvm-cov remotely. Nothing in this
 README authorizes running it in a developer worktree. The uploaded bundle
 retains the exact production and derived SCS1 inputs, validates the closed SPDX
 2.3 document shape and source-epoch timestamp independently of its generator,
-and uses extraction-portable relative paths in `SHA256SUMS`. The SPDX checker
-does not claim to recompute the generator's logical-path inventory.
+versions the Tool creator with the exact Git commit, gives each
+run-attempt/architecture document a unique namespace, and uses
+extraction-portable relative paths in `SHA256SUMS`. The SPDX checker does not
+claim to recompute the generator's logical-path inventory.

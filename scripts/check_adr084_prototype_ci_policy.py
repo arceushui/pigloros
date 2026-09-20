@@ -92,6 +92,11 @@ def check(root: pathlib.Path) -> None:
         in run_source,
         "SPDX validation must bind creation time to the source epoch",
     )
+    require(
+        '"${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"'
+        in run_source,
+        "SPDX validation must bind the tool and unique run attempt",
+    )
     ordered(
         run_source,
         (

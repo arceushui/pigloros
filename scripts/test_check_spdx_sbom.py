@@ -15,16 +15,23 @@ if SPEC is None or SPEC.loader is None:
 CHECKER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CHECKER)
 SOURCE_DATE_EPOCH = 1789948800
+GITHUB_SHA = "a" * 40
+GITHUB_RUN_ID = "12345"
+GITHUB_RUN_ATTEMPT = "2"
+ARCHITECTURE = "amd64"
 
 
 VALID = {
     "SPDXID": "SPDXRef-DOCUMENT",
     "creationInfo": {
         "created": CHECKER.expected_created(SOURCE_DATE_EPOCH),
-        "creators": ["Tool: test"],
+        "creators": [f"Tool: PiglorOS-ADR-084-evidence-workflow-{GITHUB_SHA}"],
     },
     "dataLicense": "CC0-1.0",
-    "documentNamespace": "https://example.invalid/evidence/1",
+    "documentNamespace": (
+        "https://github.com/arceushui/pigloros/adr084-evidence/"
+        f"{GITHUB_RUN_ID}/{GITHUB_RUN_ATTEMPT}/{ARCHITECTURE}"
+    ),
     "files": [
         {
             "SPDXID": "SPDXRef-File-1",
@@ -38,21 +45,38 @@ VALID = {
             "licenseInfoInFiles": ["NOASSERTION"],
         }
     ],
-    "name": "test inventory",
+    "name": "PiglorOS ADR-084 throwaway OCI fixture",
     "spdxVersion": "SPDX-2.3",
 }
 
 
 def rejected(document: object) -> None:
     try:
-        CHECKER.check(document, SOURCE_DATE_EPOCH)
+        CHECKER.check(
+            document,
+            SOURCE_DATE_EPOCH,
+            GITHUB_SHA,
+            GITHUB_RUN_ID,
+            GITHUB_RUN_ATTEMPT,
+            ARCHITECTURE,
+        )
     except CHECKER.SpdxError:
         return
     raise AssertionError("SPDX checker accepted an adversarial mutation")
 
 
 def main() -> None:
-    CHECKER.check(VALID, SOURCE_DATE_EPOCH)
+    CHECKER.check(
+        VALID,
+        SOURCE_DATE_EPOCH,
+        GITHUB_SHA,
+        GITHUB_RUN_ID,
+        GITHUB_RUN_ATTEMPT,
+        ARCHITECTURE,
+    )
+    extra_root = copy.deepcopy(VALID)
+    extra_root["unexpected"] = True
+    rejected(extra_root)
     missing_created = copy.deepcopy(VALID)
     del missing_created["creationInfo"]["created"]
     rejected(missing_created)
@@ -67,6 +91,15 @@ def main() -> None:
         SOURCE_DATE_EPOCH + 1
     )
     rejected(mismatched_created)
+    unversioned_creator = copy.deepcopy(VALID)
+    unversioned_creator["creationInfo"]["creators"] = ["Tool: test"]
+    rejected(unversioned_creator)
+    reused_namespace = copy.deepcopy(VALID)
+    reused_namespace["documentNamespace"] = (
+        "https://github.com/arceushui/pigloros/adr084-evidence/"
+        f"{GITHUB_RUN_ID}/1/{ARCHITECTURE}"
+    )
+    rejected(reused_namespace)
     absolute_name = copy.deepcopy(VALID)
     absolute_name["files"][0]["fileName"] = "/input.bin"
     rejected(absolute_name)
@@ -76,6 +109,18 @@ def main() -> None:
     duplicate = copy.deepcopy(VALID)
     duplicate["files"].append(copy.deepcopy(duplicate["files"][0]))
     rejected(duplicate)
+    invalid_spdxid = copy.deepcopy(VALID)
+    invalid_spdxid["files"][0]["SPDXID"] = "invalid"
+    rejected(invalid_spdxid)
+    invalid_copyright = copy.deepcopy(VALID)
+    invalid_copyright["files"][0]["copyrightText"] = ""
+    rejected(invalid_copyright)
+    invalid_concluded = copy.deepcopy(VALID)
+    invalid_concluded["files"][0]["licenseConcluded"] = ""
+    rejected(invalid_concluded)
+    invalid_license = copy.deepcopy(VALID)
+    invalid_license["files"][0]["licenseInfoInFiles"] = []
+    rejected(invalid_license)
     invalid_checksum = copy.deepcopy(VALID)
     invalid_checksum["files"][0]["checksums"][1]["checksumValue"] = "not-sha256"
     rejected(invalid_checksum)

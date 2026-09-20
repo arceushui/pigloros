@@ -52,6 +52,9 @@ def main() -> None:
     if production_scs1.read_bytes() != retained_production_scs1.read_bytes():
         raise ValueError("retained production SCS1 differs from the executed input")
     source_date_epoch = int(os.environ["SOURCE_DATE_EPOCH"])
+    github_sha = os.environ["GITHUB_SHA"]
+    github_run_id = os.environ["GITHUB_RUN_ID"]
+    github_run_attempt = os.environ["GITHUB_RUN_ATTEMPT"]
     created = datetime.datetime.fromtimestamp(
         source_date_epoch, datetime.UTC
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -243,12 +246,14 @@ def main() -> None:
         "SPDXID": "SPDXRef-DOCUMENT",
         "creationInfo": {
             "created": created,
-            "creators": ["Tool: PiglorOS ADR-084 throwaway evidence workflow"],
+            "creators": [
+                f"Tool: PiglorOS-ADR-084-evidence-workflow-{github_sha}"
+            ],
         },
         "dataLicense": "CC0-1.0",
         "documentNamespace": (
             "https://github.com/arceushui/pigloros/adr084-evidence/"
-            f"{os.environ.get('GITHUB_RUN_ID', 'unknown')}/{arguments.architecture}"
+            f"{github_run_id}/{github_run_attempt}/{arguments.architecture}"
         ),
         "files": [
             {
