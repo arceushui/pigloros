@@ -275,7 +275,7 @@ python3 "${prototype_dir}/write_evidence_manifest.py" \
   "${artifact_dir}" "${build_dir}" "${prototype_dir}" \
   --architecture "${oci_architecture}"
 python3 "${workspace_dir}/scripts/check_spdx_sbom.py" \
-  "${artifact_dir}/fixture-sbom.spdx.json"
+  "${artifact_dir}/fixture-sbom.spdx.json" "${SOURCE_DATE_EPOCH}"
 
 jq -e '.adr069_compatible == false and .observed_terminal_code == 8 and .required_terminal_code == 7' \
   "${artifact_dir}/elm-file.json" >/dev/null
@@ -287,7 +287,7 @@ jq -e '
     .observed_terminal_code != 4
   end
 ' "${artifact_dir}/elm-memory-limit.json" >/dev/null
-printf 'ADR-084 prototype completed on %s; #379 acceptance fails: FileBytes lacks required SIGXFSZ, SwapBytes and distinct MemoryLimit lack distinguishable max events, three split lifecycle boundaries lack durable action-authorizing identity, and ADR-079 continuous profiling injects a non-empty adapter environment\n' \
+printf 'ADR-084 prototype completed on %s; #379 acceptance fails: FileBytes lacks required SIGXFSZ; SwapBytes and distinct MemoryLimit lack distinguishable max events; three split lifecycle boundaries lack durable action-authorizing identity; ADR-079 continuous profiling injects a non-empty adapter environment; provider controls remain model-only; dedicated provider deployment is unproved; ReleaseV2 lacks admitted AGR2/RBS2/ELM2 authority closure; and ADR-085 lacks native per-architecture vectors, the complete rejection matrix, and PCF1/PCR1 closure\n' \
   "$(uname -m)" | tee "${artifact_dir}/verdict.txt"
 (
   cd "${artifact_dir}"

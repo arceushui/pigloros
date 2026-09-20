@@ -12,10 +12,13 @@ carry a launcher-only release socket, keep adapter bytes blocked until release,
 and expose stable process/cgroup evidence while leaving the adapter with no
 non-stdio descriptor?
 
-The prototype also emits ADR-085 canonical vectors, independently verifies the
-OCI manifest/config/layer/DiffID/ChainID closure, removes and rootlessly imports
-the saved OCI archive, and records runtime, namespace, mount, cgroup,
-descriptor, environment, and negative-probe evidence. For ADR-084 revision 27,
+The prototype emits a partial x86_64 ADR-085 vector set, independently verifies
+the OCI manifest/config/layer/DiffID/ChainID closure, removes and rootlessly
+imports the saved OCI archive, and records runtime, namespace, mount, cgroup,
+descriptor, environment, and negative-probe evidence. Both hosted jobs validate
+that same x86_64 vector fixture; this is not native per-architecture vector
+evidence, does not cover the complete ADR-085 rejection matrix, and does not
+materialize PCF1/PCR1 authority closure. For ADR-084 revision 27,
 it partitions the signed SCS1 into requested `R`, effective audit `E`, and
 readback-only PNR `D`; materializes an exact-`R` libseccomp interface and exact
 `E` audit profile; compiles numeric `R` with pinned libseccomp 2.6.1; and uses an
@@ -140,6 +143,13 @@ implementation pinned by Git commit and built only in the hosted workflow; as
 the accepted ADR requires, it has no Ed25519 public key and does not repeat the
 provider's durable signature-policy decision.
 
+This is a held-descriptor barrier experiment, not an authority-complete
+ReleaseV2 implementation. The driver does not admit and verify the governing
+AGR2 and ELM2 objects or derive RBS2 from that closure, and its live negative
+packets are sent after a valid base packet was verified rather than rejected by
+the provider before send. Those gaps are acceptance blockers retained in the
+final verdict.
+
 The hosted runtime matrix also replaces a verified base release with narrowly
 scoped conformance injections and proves that the still-blocked launcher emits
 no adapter bytes. It covers a non-minimal record head, trailing data, wrong
@@ -172,10 +182,12 @@ remaining actionable cases terminate descendants, remove the exact container,
 verify the retained cgroup is empty or absent, verify the merged root is no
 longer mounted, and replay reconciliation without another action. Live cleanup
 fails closed unless durable cgroup and merged-root identities are available;
-never-created and durably-never-started cases are labelled separately. A continuously
-running lookalike sentinel proves unrelated state is not touched. Separate
-ambiguity and identity-reuse mutations require operator-visible refusal and leave
-every candidate unchanged. Because Podman 4.9.3 does not offer
+live inspection may confirm those paths but cannot supply a missing journaled
+value. Never-created and durably-never-started cases are labelled separately. A
+continuously running lookalike sentinel proves unrelated state is not touched.
+Separate ambiguity and identity-reuse mutations, including missing and
+mismatched cgroup and merged-root paths, require operator-visible refusal and
+leave every candidate unchanged. Because Podman 4.9.3 does not offer
 `--preserve-fds` on `create`, this split lifecycle matrix does not claim the
 authenticated launcher barrier; Ready, Observe, and Release crash boundaries
 remain a separate barrier-stage experiment.
@@ -250,5 +262,7 @@ In GitHub Actions the command writes beneath
 coverage fixture's Cargo target directory, and rootless Podman storage. Its
 ADR-079 subprobe invokes pinned Cargo/cargo-llvm-cov remotely. Nothing in this
 README authorizes running it in a developer worktree. The uploaded bundle
-retains the exact production and derived SCS1 inputs, validates its SPDX 2.3
-inventory, and uses extraction-portable relative paths in `SHA256SUMS`.
+retains the exact production and derived SCS1 inputs, validates the closed SPDX
+2.3 document shape and source-epoch timestamp independently of its generator,
+and uses extraction-portable relative paths in `SHA256SUMS`. The SPDX checker
+does not claim to recompute the generator's logical-path inventory.

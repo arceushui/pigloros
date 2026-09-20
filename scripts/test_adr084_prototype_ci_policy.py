@@ -89,6 +89,11 @@ def main() -> None:
     )
     rejected(
         "prototypes/adr084-podman-feasibility/run.sh",
+        '"${artifact_dir}/fixture-sbom.spdx.json" "${SOURCE_DATE_EPOCH}"',
+        '"${artifact_dir}/fixture-sbom.spdx.json" "0"',
+    )
+    rejected(
+        "prototypes/adr084-podman-feasibility/run.sh",
         "find . -type f ! -name SHA256SUMS -printf '%P\\0'",
         "find . -type f -print0",
     )

@@ -87,6 +87,11 @@ def check(root: pathlib.Path) -> None:
     prototype_dir = root / "prototypes/adr084-podman-feasibility"
     run_source = (prototype_dir / "run.sh").read_text(encoding="utf-8")
     require(run_source.startswith("#!/usr/bin/env bash\nset -euo pipefail\n"), "run.sh must fail closed")
+    require(
+        '"${artifact_dir}/fixture-sbom.spdx.json" "${SOURCE_DATE_EPOCH}"'
+        in run_source,
+        "SPDX validation must bind creation time to the source epoch",
+    )
     ordered(
         run_source,
         (

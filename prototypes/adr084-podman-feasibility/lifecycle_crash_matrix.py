@@ -435,6 +435,13 @@ def exact_identity_matches(
             "pid_start_ticks"
         ) != expected.get("pid_start_ticks"):
             return False
+        for field in ("cgroup_path", "merged_dir"):
+            if (
+                not isinstance(expected.get(field), str)
+                or not expected[field]
+                or actual.get(field) != expected.get(field)
+            ):
+                return False
     return True
 
 
@@ -534,13 +541,26 @@ def reconcile(
             actual_labels.get(key) != value for key, value in expected_labels.items()
         ):
             raise RuntimeError("discovered candidate label identity mismatch")
-        durable_live_identity_missing = actual_identity["running"] and (
+        prior_running = last_running_identity(records)
+        was_ever_running = actual_identity["running"] or prior_running is not None
+        durable_pid_identity_missing = actual_identity["running"] and (
             previous_identity is None
             or not isinstance(previous_identity.get("pid"), int)
             or int(previous_identity["pid"]) <= 0
             or previous_identity.get("pid_start_ticks") is None
         )
-        if previous_identity is None or durable_live_identity_missing:
+        durable_cleanup_identity_missing = was_ever_running and (
+            prior_running is None
+            or not isinstance(prior_running.get("cgroup_path"), str)
+            or not prior_running["cgroup_path"]
+            or not isinstance(prior_running.get("merged_dir"), str)
+            or not prior_running["merged_dir"]
+        )
+        if (
+            previous_identity is None
+            or durable_pid_identity_missing
+            or durable_cleanup_identity_missing
+        ):
             return {
                 "actions": [],
                 "candidate_running": actual_identity["running"],
@@ -551,17 +571,9 @@ def reconcile(
                 "scenario": scenario,
             }
         if not exact_identity_matches(actual_identity, previous_identity):
-            raise RuntimeError("durable container creation/PID identity mismatch")
-        prior_running = last_running_identity(records)
-        cgroup_path = actual_identity["cgroup_path"] or (
-            prior_running.get("cgroup_path") if prior_running else None
-        )
-        merged_dir = actual_identity["merged_dir"] or (
-            prior_running.get("merged_dir") if prior_running else None
-        )
-        was_ever_running = actual_identity["running"] or prior_running is not None
-        if was_ever_running and (merged_dir is None or cgroup_path is None):
-            raise RuntimeError("durable cleanup identity is unavailable")
+            raise RuntimeError("durable container/process/cleanup identity mismatch")
+        cgroup_path = prior_running.get("cgroup_path") if prior_running else None
+        merged_dir = prior_running.get("merged_dir") if prior_running else None
         actions: list[str] = []
         if actual_identity["running"]:
             run("/usr/bin/podman", "stop", "--time=1", container_id, check=False)
@@ -658,18 +670,36 @@ def negative_identity_cases(
     run("/usr/bin/podman", "start", container_id)
     wait_for_probe(container_id)
     actual = identity_from_inspect(inspect_container(container_id))
+    if not exact_identity_matches(actual, actual):
+        raise AssertionError("complete live identity did not authorize itself")
     rejected: list[str] = []
-    for field, changed in (
-        ("container_id", "0" * 64),
-        ("created", str(actual["created"]) + ".changed"),
-        ("pid_start_ticks", int(actual["pid_start_ticks"]) + 1),
+    for case, field, changed in (
+        ("container_id", "container_id", "0" * 64),
+        ("created", "created", str(actual["created"]) + ".changed"),
+        (
+            "pid_start_ticks",
+            "pid_start_ticks",
+            int(actual["pid_start_ticks"]) + 1,
+        ),
+        ("cgroup_path_missing", "cgroup_path", None),
+        (
+            "cgroup_path_mismatch",
+            "cgroup_path",
+            str(actual["cgroup_path"]) + ".changed",
+        ),
+        ("merged_dir_missing", "merged_dir", None),
+        (
+            "merged_dir_mismatch",
+            "merged_dir",
+            str(actual["merged_dir"]) + ".changed",
+        ),
     ):
         candidate = {**actual, field: changed}
         if exact_identity_matches(actual, candidate):
             raise AssertionError(f"identity mutation was accepted: {field}")
         if not inspect_container(container_id)["State"]["Running"]:  # type: ignore[index]
             raise AssertionError("identity refusal changed unrelated candidate state")
-        rejected.append(field)
+        rejected.append(case)
     if actual["image_id"] != image_id:
         raise AssertionError("identity defense used an unexpected image")
     cleanup_container(container_id)

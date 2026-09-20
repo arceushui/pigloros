@@ -15,6 +15,18 @@ def sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def sha1(path: pathlib.Path) -> str:
+    return hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest()
+
+
+def spdx_file_name(name: str) -> str:
+    relative = name.lstrip("/")
+    parsed = pathlib.PurePosixPath(relative)
+    if not relative or parsed.is_absolute() or ".." in parsed.parts:
+        raise ValueError(f"invalid SPDX inventory path: {name!r}")
+    return f"./{relative}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact_dir", type=pathlib.Path)
@@ -241,9 +253,12 @@ def main() -> None:
         "files": [
             {
                 "SPDXID": f"SPDXRef-File-{index}",
-                "checksums": [{"algorithm": "SHA256", "checksumValue": sha256(path)}],
+                "checksums": [
+                    {"algorithm": "SHA1", "checksumValue": sha1(path)},
+                    {"algorithm": "SHA256", "checksumValue": sha256(path)},
+                ],
                 "copyrightText": "NOASSERTION",
-                "fileName": name,
+                "fileName": spdx_file_name(name),
                 "licenseConcluded": "NOASSERTION",
                 "licenseInfoInFiles": ["NOASSERTION"],
             }
