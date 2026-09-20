@@ -495,6 +495,19 @@ def parse_cgroup_events(value: str) -> dict[str, int]:
     return events
 
 
+def statvfs_report(value: os.statvfs_result) -> dict[str, int]:
+    return {
+        "available_blocks": value.f_bavail,
+        "available_bytes": value.f_bavail * value.f_frsize,
+        "block_size": value.f_bsize,
+        "fragment_size": value.f_frsize,
+        "free_blocks": value.f_bfree,
+        "free_bytes": value.f_bfree * value.f_frsize,
+        "total_blocks": value.f_blocks,
+        "total_bytes": value.f_blocks * value.f_frsize,
+    }
+
+
 def process_snapshot(pid: int) -> dict[str, object]:
     proc = pathlib.Path("/proc") / str(pid)
     descriptors: list[dict[str, object]] = []
@@ -548,6 +561,12 @@ def process_snapshot(pid: int) -> dict[str, object]:
         )
     }
     cgroup_values["cgroup.kill_exists"] = str((cgroup_root / "cgroup.kill").exists())
+    work_statvfs: dict[str, int] | None = None
+    work_statvfs_error: str | None = None
+    try:
+        work_statvfs = statvfs_report(os.statvfs(proc / "root" / "work"))
+    except OSError as error:
+        work_statvfs_error = f"UNAVAILABLE: {error}"
     return {
         "pid": pid,
         "status": read_text(proc / "status"),
@@ -560,6 +579,8 @@ def process_snapshot(pid: int) -> dict[str, object]:
         "mountinfo": read_text(proc / "mountinfo"),
         "namespace_access_error": namespace_access_error,
         "namespaces": namespaces,
+        "work_statvfs": work_statvfs,
+        "work_statvfs_error": work_statvfs_error,
     }
 
 
@@ -1581,6 +1602,96 @@ def file_limit_scenario(
         != b"adapter-error:file-limit-write-without-sigxfsz:File too large\n"
     ):
         raise AssertionError(f"file limit negative result changed: {report!r}")
+
+
+def work_limit_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_work: bytes,
+) -> None:
+    scenario = "elm-work"
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_work,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    snapshot = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    before = snapshot["work_statvfs"]
+    if before is None:
+        raise AssertionError(
+            f"pre-release /work statvfs unavailable: {snapshot['work_statvfs_error']}"
+        )
+    pid = int(snapshot["pid"])
+    work_fd = os.open(
+        pathlib.Path("/proc") / str(pid) / "root" / "work",
+        os.O_RDONLY | os.O_DIRECTORY,
+    )
+    process.stdin.close()
+    errors = bytearray()
+    observation_deadline = time.monotonic() + 20
+    while b"WORK_LIMIT " not in errors and time.monotonic() < observation_deadline:
+        readable, _, _ = select.select([process.stderr], [], [], 0.05)
+        if readable:
+            chunk = process.stderr.read1(4096)
+            if not chunk:
+                break
+            errors.extend(chunk)
+        if process.poll() is not None:
+            break
+    live = statvfs_report(os.fstatvfs(work_fd))
+    run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
+    return_code = process.wait(timeout=20)
+    errors.extend(process.stderr.read())
+    output = process.stdout.read()
+    after = statvfs_report(os.fstatvfs(work_fd))
+    os.close(work_fd)
+    control.close()
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "after_termination_statvfs": after,
+        "before_release_mountinfo": snapshot["mountinfo"],
+        "before_release_statvfs": before,
+        "container_id": container_id,
+        "live_limit_statvfs": live,
+        "observed_errno": "ENOSPC",
+        "retained_directory_fd_across_process_death": True,
+        "return_code_after_cleanup": return_code,
+        "work_bytes_limit": 65536,
+        "verdict": "sole /work tmpfs reached its byte ceiling and remained observable after termination",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    if (
+        before["total_bytes"] != 65536
+        or live["total_bytes"] != 65536
+        or after["total_bytes"] != 65536
+        or live["available_bytes"] != 0
+        or after != live
+        or return_code != 137
+        or output
+        or b"WORK_LIMIT " not in errors
+        or b"errno=28\n" not in errors
+    ):
+        raise AssertionError(f"work limit evidence did not match: {report!r}")
 
 
 def watchdog_scenario(
@@ -2816,6 +2927,7 @@ def main() -> None:
     parser.add_argument("--eai1-tasks", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-cpu", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-file", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-work", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-watchdog", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--runtime-subject", required=True, type=pathlib.Path)
@@ -2847,6 +2959,7 @@ def main() -> None:
     eai1_tasks = arguments.eai1_tasks.read_bytes()
     eai1_cpu = arguments.eai1_cpu.read_bytes()
     eai1_file = arguments.eai1_file.read_bytes()
+    eai1_work = arguments.eai1_work.read_bytes()
     eai1_watchdog = arguments.eai1_watchdog.read_bytes()
     eao1_hello = arguments.eao1_hello.read_bytes()
     (arguments.artifact_dir / "normal.eai1").write_bytes(eai1_hello)
@@ -2855,6 +2968,7 @@ def main() -> None:
     (arguments.artifact_dir / "elm-tasks.eai1").write_bytes(eai1_tasks)
     (arguments.artifact_dir / "elm-cpu-throttling.eai1").write_bytes(eai1_cpu)
     (arguments.artifact_dir / "elm-file.eai1").write_bytes(eai1_file)
+    (arguments.artifact_dir / "elm-work.eai1").write_bytes(eai1_work)
     (arguments.artifact_dir / "elm-watchdog.eai1").write_bytes(eai1_watchdog)
     (arguments.artifact_dir / "expected.eao1").write_bytes(eao1_hello)
     transport_report = {
@@ -2864,6 +2978,7 @@ def main() -> None:
         "eai1_tasks": validate_eai1(eai1_tasks, b"TASKS\n"),
         "eai1_cpu": validate_eai1(eai1_cpu, b"CPU\n"),
         "eai1_file": validate_eai1(eai1_file, b"FILE\n"),
+        "eai1_work": validate_eai1(eai1_work, b"WORK\n"),
         "eai1_watchdog": validate_eai1(eai1_watchdog, b"WATCHDOG\n"),
         "eao1_hello": validate_eao1(eao1_hello, b"hello\n"),
         "verdict": "canonical framed streams independently validated before launch",
@@ -2975,6 +3090,16 @@ def main() -> None:
         arguments.artifact_dir,
         barrier_fixture,
         eai1_file,
+    )
+    work_limit_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_work,
     )
     watchdog_scenario(
         arguments.image,

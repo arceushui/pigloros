@@ -141,10 +141,12 @@ int main(void) {
                           memcmp(input, eai1_cpu, length) == 0;
         bool file_prefix = length <= eai1_file_len &&
                            memcmp(input, eai1_file, length) == 0;
+        bool work_prefix = length <= eai1_work_len &&
+                           memcmp(input, eai1_work, length) == 0;
         bool watchdog_prefix = length <= eai1_watchdog_len &&
                                memcmp(input, eai1_watchdog, length) == 0;
         if (!hello_prefix && !hold_prefix && !memory_prefix && !tasks_prefix &&
-            !cpu_prefix && !file_prefix && !watchdog_prefix) {
+            !cpu_prefix && !file_prefix && !work_prefix && !watchdog_prefix) {
             errno = EPROTO;
             fail("input-authentication");
         }
@@ -215,6 +217,48 @@ int main(void) {
             ssize_t written = write(file, block, sizeof(block));
             if (written != (ssize_t)sizeof(block)) {
                 fail("file-limit-write-without-sigxfsz");
+            }
+        }
+    }
+    if (length == eai1_work_len && memcmp(input, eai1_work, length) == 0) {
+        unsigned char block[4096] = {0};
+        for (unsigned int file_index = 0;; ++file_index) {
+            char path[64];
+            int path_length = snprintf(path, sizeof(path), "/work/block-%u", file_index);
+            if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
+                errno = EPROTO;
+                fail("work-path");
+            }
+            int file = open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+            if (file == -1) {
+                if (errno != ENOSPC) {
+                    fail("work-open");
+                }
+                dprintf(STDERR_FILENO, "WORK_LIMIT operation=open errno=%d\n", errno);
+                for (;;) {
+                    pause();
+                }
+            }
+            for (unsigned int block_index = 0; block_index < 4; ++block_index) {
+                ssize_t written = write(file, block, sizeof(block));
+                if (written != (ssize_t)sizeof(block)) {
+                    int write_errno = errno;
+                    if (close(file) == -1) {
+                        fail("work-close-after-write");
+                    }
+                    if (write_errno != ENOSPC) {
+                        errno = write_errno;
+                        fail("work-write");
+                    }
+                    dprintf(STDERR_FILENO, "WORK_LIMIT operation=write errno=%d\n",
+                            write_errno);
+                    for (;;) {
+                        pause();
+                    }
+                }
+            }
+            if (close(file) == -1) {
+                fail("work-close");
             }
         }
     }

@@ -174,7 +174,12 @@ def main() -> None:
         "elm-memory.stdout",
         *(
             f"{scenario}.{suffix}"
-            for scenario in ("elm-tasks", "elm-cpu-throttling", "elm-watchdog")
+            for scenario in (
+                "elm-tasks",
+                "elm-cpu-throttling",
+                "elm-work",
+                "elm-watchdog",
+            )
             for suffix in (
                 "eai1",
                 "installed-seccomp.bpf",

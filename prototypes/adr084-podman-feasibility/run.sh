@@ -234,6 +234,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --eai1-tasks "${build_dir}/eai1_tasks.bin" \
   --eai1-cpu "${build_dir}/eai1_cpu.bin" \
   --eai1-file "${build_dir}/eai1_file.bin" \
+  --eai1-work "${build_dir}/eai1_work.bin" \
   --eai1-watchdog "${build_dir}/eai1_watchdog.bin" \
   --eao1-hello "${build_dir}/eao1_hello.bin" \
   --runtime-subject "${artifact_dir}/runtime-subject.json" \

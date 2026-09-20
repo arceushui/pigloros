@@ -73,6 +73,13 @@ escalation. The
 retained release/start/deadline/termination/finish times, process result, and
 empty post-exit cgroup select terminal code 6 `Watchdog`.
 
+A canonical WORK attempt writes only 16 KiB files, each below the independently
+read-back 32 KiB `RLIMIT_FSIZE`, until the sole 64 KiB `/work` tmpfs returns
+`ENOSPC`. The provider records mountinfo and statfs before release, retains an
+open directory descriptor to that same mount across process death, and records
+the exhausted statfs again after forced termination. This separates WorkBytes
+evidence from the candidate's unresolved FileBytes/SIGXFSZ incompatibility.
+
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
 the driver durably records an attempt-bound monotonic launch anchor and passes a
