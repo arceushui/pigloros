@@ -667,13 +667,6 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     if drafts.is_empty() {
         return Ok(());
     }
-    // Directly late-bound drivers have no Plugin capability or owned event
-    // namespace from which an output policy can be constructed. They remain
-    // outside policy-backed Plugin registration; all capability registrations
-    // still require an explicit or generated policy.
-    if entry.owned_event_types.is_empty() && entry.registration.is_none() {
-        return Ok(());
-    }
     let Some(admission) = entry.output_admission.as_ref() else {
         return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
             event_type: "<unregistered-output-policy>".to_owned(),
@@ -2351,6 +2344,26 @@ impl PluginRegistry {
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
+        let owned_event_types = &context.2.owned_event_types;
+        if let Some(declaration) =
+            output_policy
+                .fields()
+                .output_declarations
+                .iter()
+                .find(|declaration| {
+                    !owned_event_types
+                        .iter()
+                        .any(|kind| kind.as_str() == declaration.event_type())
+                })
+        {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: format!(
+                    "output policy declares event type '{}' outside the Plugin capability",
+                    declaration.event_type()
+                ),
+            });
+        }
         let admission = OutputAdmissionV1::try_new(
             plugin.id(),
             plugin.version(),
