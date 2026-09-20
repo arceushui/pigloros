@@ -5779,7 +5779,7 @@ mod erasure_gate_coverage {
             }
         }
         let plugin = BudgetFixturePlugin;
-        let error = PluginRegistry::generated_output_binding_with_budget_input(
+        let result = PluginRegistry::generated_output_binding_with_budget_input(
             &plugin,
             pos_core::ExecutableBudgetPolicyInputV1 {
                 revision: 0,
@@ -5798,9 +5798,11 @@ mod erasure_gate_coverage {
                 execution_profile_hash: pos_core::Hash::zero(),
                 max_pass_wall_duration_us: 0,
             },
-        )
-        .expect_err("invalid generated budget should be rejected");
-        assert!(matches!(error, RuntimeError::CapabilityMismatch { .. }));
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
     }
 }
 
