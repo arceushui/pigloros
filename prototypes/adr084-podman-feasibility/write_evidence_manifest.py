@@ -135,6 +135,7 @@ def main() -> None:
         "adapter-transport-vectors.json",
         "adapter-transport-validation.json",
         "adapter-transport-runtime-rejections.json",
+        "release-barrier-runtime-rejections.json",
         "blake3-LICENSE_A2.txt",
         "blake3-source-identity.txt",
         "fixture-sbom.spdx.json",
@@ -191,6 +192,40 @@ def main() -> None:
                 "ready2.cbor",
                 "release2.cbor",
                 "release-barrier.json",
+            )
+        ),
+        *(
+            f"release-reject-{mutation}.{suffix}"
+            for mutation in (
+                "noncanonical-record-length",
+                "trailing-byte",
+                "wrong-self-digest",
+                "wrong-attempt",
+                "wrong-nonce",
+                "wrong-ready-binding",
+                "invalid-anchor-order",
+                "expired",
+                "invalid-runtime-key-utf8",
+            )
+            for suffix in (
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "ready2.cbor",
+                "release2.cbor",
+                "release-barrier.json",
+                "stderr",
+                "stdout",
+            )
+        ),
+        *(
+            f"release-reject-{state}.{suffix}"
+            for state in ("revoked", "missing")
+            for suffix in (
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "ready2.cbor",
+                "stderr",
+                "stdout",
             )
         ),
         *(

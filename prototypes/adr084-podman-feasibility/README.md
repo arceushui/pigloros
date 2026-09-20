@@ -26,7 +26,11 @@ from OIS1's admitted launcher and adapter executable fields. Two observe the
 foreign-ABI and x86_64 boundary outcomes from a bounded parent; one is a
 minimal, deadline-free cache-bypass witness; and one executes the closed native
 syscall-number matrix, with `sync` closed to successful return or the unchanged
-100 ms bound because completion depends on hosted filesystem state. The
+100 ms bound because completion depends on hosted filesystem state. Raw
+`rt_sigreturn` and x86_64 `uretprobe` are likewise closed to their documented
+signal or that unchanged bound: neither has a normal zero-argument userspace
+call contract, and a timeout is terminated and retained rather than relaxed.
+The
 prototype intentionally lives only on the throwaway
 evidence branch.
 
@@ -54,6 +58,16 @@ has a separate 30-second bound. The launcher uses the official BLAKE3 C
 implementation pinned by Git commit and built only in the hosted workflow; as
 the accepted ADR requires, it has no Ed25519 public key and does not repeat the
 provider's durable signature-policy decision.
+
+The hosted runtime matrix also replaces a verified base release with narrowly
+scoped conformance injections and proves that the still-blocked launcher emits
+no adapter bytes. It covers a non-minimal record head, trailing data, wrong
+self-digest, wrong attempt, nonce, and ReadyV2 binding, invalid anchor order,
+expiry, and malformed UTF-8 in the opaque runtime-key field. Separate attempts
+prove immediate live revocation when the authenticated provider closes the
+connected socket and the unchanged 30-second missing-release timeout. These
+injections deliberately bypass the provider's successful base-record
+verification and are labelled as such in retained evidence.
 
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported

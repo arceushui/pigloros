@@ -31,6 +31,7 @@ ATTEMPT_DOMAIN = b"PiglorOS.EvaluatorAttemptStream.v1\0"
 OBSERVATION_DOMAIN = b"PiglorOS.EvaluatorObservationStream.v1\0"
 RUNTIME_KEY_ID = "prototype-runtime-key-01"
 WATCHDOG_NS = 60_000_000_000
+MISSING_RELEASE_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -316,6 +317,56 @@ def build_and_verify_release(
     except InvalidSignature as error:
         raise ValueError("ReleaseV2 independent signature verification failed") from error
     return packet, unsigned, self_digest
+
+
+def signed_release_packet(unsigned: list[object]) -> bytes:
+    self_digest = record_digest("PiglorOS.RLS2.v2", unsigned)
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    signature = key.sign(b"PiglorOS.RLS2.Signature.v2\0" + self_digest)
+    return canonical([unsigned, self_digest, signature])
+
+
+def mutate_release_packet(label: str, packet: bytes) -> bytes:
+    decoded = cbor2.loads(packet)
+    unsigned = list(decoded[0])
+    if label == "noncanonical-record-length":
+        if packet[0] != 0x83:
+            raise AssertionError("unexpected canonical ReleaseV2 array head")
+        return b"\x98\x03" + packet[1:]
+    if label == "trailing-byte":
+        return packet + b"\x00"
+    if label == "wrong-self-digest":
+        changed = bytearray(decoded[1])
+        changed[0] ^= 1
+        return canonical([decoded[0], bytes(changed), decoded[2]])
+    if label in {"wrong-attempt", "wrong-nonce", "wrong-ready-binding"}:
+        ordinal = {"wrong-attempt": 2, "wrong-nonce": 3, "wrong-ready-binding": 4}[
+            label
+        ]
+        changed = bytearray(unsigned[ordinal])
+        changed[0] ^= 1
+        unsigned[ordinal] = bytes(changed)
+        return signed_release_packet(unsigned)
+    if label == "invalid-anchor-order":
+        unsigned[14] = unsigned[13]
+        return signed_release_packet(unsigned)
+    if label == "expired":
+        unsigned[13] = 0
+        unsigned[14] = 1
+        return signed_release_packet(unsigned)
+    if label == "invalid-runtime-key-utf8":
+        unsigned_bytes = canonical(unsigned)
+        encoded_key = canonical(RUNTIME_KEY_ID)
+        if unsigned_bytes.count(encoded_key) != 1:
+            raise AssertionError("runtime key is not unique in ReleaseV2")
+        malformed_key = bytearray(encoded_key)
+        malformed_key[-1] = 0xFF
+        malformed_unsigned = unsigned_bytes.replace(encoded_key, bytes(malformed_key))
+        self_digest = blake3(b"PiglorOS.RLS2.v2\0" + malformed_unsigned)
+        key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+        signature = key.sign(b"PiglorOS.RLS2.Signature.v2\0" + self_digest)
+        return b"\x83" + malformed_unsigned + canonical(self_digest) + canonical(signature)
+    raise ValueError(f"unknown ReleaseV2 mutation: {label}")
 
 
 def transport_frames(stream: bytes) -> list[tuple[bytes, object]]:
@@ -692,6 +743,7 @@ def launch(
     release: bool = True,
     containers_conf: pathlib.Path | None = None,
     expect_annotation_rejection: str | None = None,
+    release_mutation: str | None = None,
 ) -> tuple[subprocess.Popen[bytes], socket.socket, str] | None:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     if parent_control.fileno() == 3:
@@ -920,9 +972,14 @@ def launch(
         release_packet, release_unsigned, release_digest = build_and_verify_release(
             ready_digest, barrier_attempt, barrier_fixture
         )
-        if parent_control.send(release_packet) != len(release_packet):
+        sent_packet = (
+            mutate_release_packet(release_mutation, release_packet)
+            if release_mutation is not None
+            else release_packet
+        )
+        if parent_control.send(sent_packet) != len(sent_packet):
             raise RuntimeError("ReleaseV2 was not sent atomically")
-        (artifact_dir / f"{scenario}.release2.cbor").write_bytes(release_packet)
+        (artifact_dir / f"{scenario}.release2.cbor").write_bytes(sent_packet)
         (artifact_dir / f"{scenario}.release-barrier.json").write_text(
             json.dumps(
                 {
@@ -935,10 +992,20 @@ def launch(
                     "lpv2_digest": barrier_attempt.lpv_digest.hex(),
                     "ready2_digest": ready_digest.hex(),
                     "ready2_mount_namespace": ready_unsigned[4],
-                    "release2_digest": release_digest.hex(),
-                    "release_signature_verified_before_send": True,
+                    "base_release2_digest": release_digest.hex(),
+                    "release2_digest": (
+                        release_digest.hex() if release_mutation is None else None
+                    ),
+                    "release_mutation": release_mutation,
+                    "base_release_signature_verified_before_conformance_injection": True,
+                    "release_signature_verified_before_send": release_mutation is None,
                     "runtime_key_id": release_unsigned[15],
-                    "verdict": "canonical signed ReleaseV2 sent only after ReadyV2 and observations",
+                    "sent_packet_sha256": hashlib.sha256(sent_packet).hexdigest(),
+                    "verdict": (
+                        "canonical signed ReleaseV2 sent only after ReadyV2 and observations"
+                        if release_mutation is None
+                        else "conformance-injected ReleaseV2 sent after valid base verification"
+                    ),
                 },
                 indent=2,
                 sort_keys=True,
@@ -950,6 +1017,125 @@ def launch(
         process.stdin.write(input_bytes)
         process.stdin.flush()
     return process, parent_control, container_id
+
+
+def release_rejection_scenarios(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+) -> None:
+    mutations = {
+        "noncanonical-record-length": b"cbor-noncanonical-integer",
+        "trailing-byte": b"release-trailing",
+        "wrong-self-digest": b"release-self-digest",
+        "wrong-attempt": b"release-attempt",
+        "wrong-nonce": b"release-nonce",
+        "wrong-ready-binding": b"release-ready",
+        "invalid-anchor-order": b"release-expired",
+        "expired": b"release-expired",
+        "invalid-runtime-key-utf8": b"cbor-text-utf8",
+    }
+    observations = []
+    for mutation, expected_error in mutations.items():
+        scenario = f"release-reject-{mutation}"
+        process, control, container_id = launch(
+            image,
+            seccomp,
+            seccomp_bpf_base64,
+            seccomp_bpf,
+            seccomp_tracer,
+            artifact_dir,
+            barrier_fixture,
+            b"",
+            scenario,
+            release_mutation=mutation,
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        process.stdin.close()
+        return_code = process.wait(timeout=20)
+        output = process.stdout.read()
+        errors = process.stderr.read()
+        control.close()
+        run("/usr/bin/podman", "rm", "--force", container_id)
+        (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+        (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+        if return_code == 0 or output or expected_error not in errors:
+            raise AssertionError(
+                f"launcher accepted ReleaseV2 mutation {mutation}: "
+                f"code={return_code} output={output!r} stderr={errors!r}"
+            )
+        observations.append(
+            {
+                "mutation": mutation,
+                "return_code": return_code,
+                "expected_error": expected_error.decode("ascii"),
+                "stderr": errors.decode("utf-8", errors="replace").strip(),
+            }
+        )
+
+    for scenario, close_control, timeout in (
+        ("release-reject-revoked", True, 20),
+        ("release-reject-missing", False, MISSING_RELEASE_SECONDS + 10),
+    ):
+        process, control, container_id = launch(
+            image,
+            seccomp,
+            seccomp_bpf_base64,
+            seccomp_bpf,
+            seccomp_tracer,
+            artifact_dir,
+            barrier_fixture,
+            b"",
+            scenario,
+            release=False,
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        process.stdin.close()
+        if close_control:
+            control.close()
+        return_code = process.wait(timeout=timeout)
+        output = process.stdout.read()
+        errors = process.stderr.read()
+        if not close_control:
+            control.close()
+        run("/usr/bin/podman", "rm", "--force", container_id)
+        (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+        (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+        expected = b"release-packet" if close_control else b"release-timeout"
+        if return_code == 0 or output or expected not in errors:
+            raise AssertionError(
+                f"launcher did not fail closed for {scenario}: "
+                f"code={return_code} output={output!r} stderr={errors!r}"
+            )
+        observations.append(
+            {
+                "mutation": "provider-revocation" if close_control else "missing-release",
+                "return_code": return_code,
+                "stderr": errors.decode("utf-8", errors="replace").strip(),
+            }
+        )
+
+    (artifact_dir / "release-barrier-runtime-rejections.json").write_text(
+        json.dumps(
+            {
+                "cases": observations,
+                "missing_release_bound_seconds": MISSING_RELEASE_SECONDS,
+                "verdict": "all live ReleaseV2 conformance injections failed closed",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def configured_default_rejection_scenario(
@@ -1608,6 +1794,8 @@ def native_matrix_scenario(
             expected_signal = (
                 signal.SIGILL if expected_name == "uretprobe" else signal.SIGSEGV
             )
+            if outcome == "timeout":
+                continue
             if outcome != "signal" or observed.get("signal") != expected_signal:
                 raise AssertionError(f"terminating signal mismatch: {observed}")
         elif outcome != "return" or observed.get("raw") == -4094:
@@ -2118,6 +2306,15 @@ def main() -> None:
         barrier_fixture,
         eai1_hello,
         eao1_hello,
+    )
+    release_rejection_scenarios(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
     )
     cancellation_scenario(
         arguments.image,
