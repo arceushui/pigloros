@@ -428,7 +428,7 @@ impl Plugin for DuplicateFixturePlugin {
 }
 
 #[test]
-fn generated_registration_rejects_duplicate_owned_event_types() -> TestResult {
+fn generated_registration_rejects_duplicate_owned_event_types() {
     let plugin = DuplicateFixturePlugin {
         id: PluginId::new(),
     };
@@ -437,5 +437,4 @@ fn generated_registration_rejects_duplicate_owned_event_types() -> TestResult {
         registry.register_generated(&plugin, None, None),
         Err(RuntimeError::CapabilityMismatch { .. })
     ));
-    Ok(())
 }
