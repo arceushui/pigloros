@@ -139,6 +139,8 @@ def launch(
     image: str,
     seccomp: pathlib.Path,
     seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
     input_bytes: bytes,
     scenario: str,
@@ -151,7 +153,7 @@ def launch(
     child_fd = child_control.fileno()
     child_control.set_inheritable(True)
     name = f"pigloros-adr084-{scenario}-{uuid.uuid4().hex[:12]}"
-    command = [
+    podman_command = [
         "/usr/bin/podman",
         "run",
         "--runtime=/usr/bin/crun",
@@ -180,6 +182,16 @@ def launch(
         "--rm=false",
         "-i",
         image,
+    ]
+    installed_bpf = artifact_dir / f"{scenario}.installed-seccomp.bpf"
+    install_report = artifact_dir / f"{scenario}.seccomp-install.json"
+    command = [
+        str(seccomp_tracer),
+        str(seccomp_bpf),
+        str(installed_bpf),
+        str(install_report),
+        "--",
+        *podman_command,
     ]
 
     saved_fd3: int | None = None
@@ -255,10 +267,19 @@ def normal_scenario(
     image: str,
     seccomp: pathlib.Path,
     seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
 ) -> None:
     process, control, container_id = launch(
-        image, seccomp, seccomp_bpf_base64, artifact_dir, b"hello\n", "normal"
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        b"hello\n",
+        "normal",
     )
     assert process.stdin is not None
     process.stdin.close()
@@ -281,10 +302,19 @@ def cancellation_scenario(
     image: str,
     seccomp: pathlib.Path,
     seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
     artifact_dir: pathlib.Path,
 ) -> None:
     process, control, container_id = launch(
-        image, seccomp, seccomp_bpf_base64, artifact_dir, b"HOLD\n", "cancel"
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        b"HOLD\n",
+        "cancel",
     )
     assert process.stdout is not None
     readable, _, _ = select.select([process.stdout], [], [], 10)
@@ -318,6 +348,8 @@ def main() -> None:
     parser.add_argument("--image", required=True)
     parser.add_argument("--seccomp", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-bpf-base64", required=True, type=pathlib.Path)
+    parser.add_argument("--seccomp-bpf", required=True, type=pathlib.Path)
+    parser.add_argument("--seccomp-tracer", required=True, type=pathlib.Path)
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -332,12 +364,16 @@ def main() -> None:
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
     )
     cancellation_scenario(
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
     )
     print("ADR-084 Podman release-barrier prototype passed")

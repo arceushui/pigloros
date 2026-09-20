@@ -48,6 +48,8 @@ jq -e '.host.ociRuntime.name == "crun" or .host.ociRuntime.path == "/usr/bin/cru
 
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototype_dir}/launcher.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
+musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/trace-seccomp" \
+  "${prototype_dir}/trace_seccomp.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 
 libseccomp_archive="${build_dir}/libseccomp-2.6.1.tar.gz"
@@ -133,6 +135,8 @@ python3 "${prototype_dir}/validate_vectors.py" "${artifact_dir}/adr085-vectors.j
 python3 "${prototype_dir}/driver.py" --image "${image_reference}" \
   --seccomp "${seccomp_dir}/oci-seccomp-profile.json" \
   --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
+  --seccomp-bpf "${seccomp_dir}/exported-seccomp.bpf" \
+  --seccomp-tracer "${build_dir}/trace-seccomp" \
   --artifact-dir "${artifact_dir}"
 
 python3 "${prototype_dir}/write_evidence_manifest.py" \
