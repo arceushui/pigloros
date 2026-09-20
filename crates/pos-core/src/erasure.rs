@@ -7183,6 +7183,10 @@ mod coverage_paths {
         let mut nested_result = None;
         let mut outer_effect = || {
             nested_gate.poison();
+            assert_eq!(
+                nested_gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+            );
             let mut inner_effect = || {};
             nested_result = Some(nested_gate.with_fence(
                 timeline,
