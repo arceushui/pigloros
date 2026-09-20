@@ -937,6 +937,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
 
     assert_fork_retry_rejects_missing_classifications(&inventory, parent, child);
     assert_fork_retry_rejects_no_lineage(parent, child)?;
+    assert_fork_retry_rejects_excluded_parent_with_included_child(&inventory, parent, child)?;
     assert_fork_retry_rejects_parent_corruption(&inventory, parent, child)?;
     assert_fork_retry_rejects_child_corruption(&inventory, parent, child)?;
     assert_fork_retry_rejects_included_excluded_child(excluded, parent, child)?;
@@ -1018,6 +1019,26 @@ fn assert_fork_retry_rejects_no_lineage(
         .membership = ErasureInventoryMembershipV1::Included(scope.reference());
     assert_eq!(
         child_included.fork_retry_scope_requirements(parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+fn assert_fork_retry_rejects_excluded_parent_with_included_child(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    let mut parent_excluded = inventory.clone();
+    parent_excluded
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == parent)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Excluded;
+    assert_eq!(
+        parent_excluded.fork_retry_scope_requirements(parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
