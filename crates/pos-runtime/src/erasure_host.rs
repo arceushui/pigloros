@@ -5169,7 +5169,9 @@ mod tests {
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             closed.apply_unaffected_topology_change(None, |_permit, _store| {
-                unreachable!("closed hosts do not invoke topology changes")
+                Err(CoreError::Storage(
+                    "closed host executed transition".to_owned(),
+                ))
             }),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
@@ -5181,7 +5183,9 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             unknown.apply_unaffected_topology_change(Some(TimelineId::new()), |_permit, _store| {
-                unreachable!("unknown parents fail before the store effect")
+                Err(CoreError::Storage(
+                    "unknown parent executed transition".to_owned(),
+                ))
             }),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
@@ -5208,7 +5212,9 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             missing.apply_unaffected_topology_change(Some(parent), |_permit, _store| {
-                unreachable!("missing parents fail before the store effect")
+                Err(CoreError::Storage(
+                    "missing parent executed transition".to_owned(),
+                ))
             }),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
