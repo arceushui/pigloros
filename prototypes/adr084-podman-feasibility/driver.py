@@ -412,7 +412,9 @@ def launch(
     prefilter: pathlib.Path | None = None,
     expected_filter_count: int = 1,
     release: bool = True,
-) -> tuple[subprocess.Popen[bytes], socket.socket, str]:
+    containers_conf: pathlib.Path | None = None,
+    expect_annotation_rejection: str | None = None,
+) -> tuple[subprocess.Popen[bytes], socket.socket, str] | None:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     if parent_control.fileno() == 3:
         relocated_parent = socket.socket(fileno=os.dup(parent_control.fileno()))
@@ -483,12 +485,16 @@ def launch(
                 raise
         os.dup2(child_fd, 3, inheritable=True)
     try:
+        process_environment = os.environ.copy()
+        if containers_conf is not None:
+            process_environment["CONTAINERS_CONF"] = str(containers_conf)
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             pass_fds=(3,),
+            env=process_environment,
         )
     finally:
         if child_fd != 3:
@@ -520,7 +526,47 @@ def launch(
     (artifact_dir / f"{scenario}.runtime-annotations.json").write_text(
         json.dumps(annotations, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    validate_runtime_annotations(annotations, seccomp, seccomp_bpf_base64)
+    annotation_error: ValueError | None = None
+    try:
+        validate_runtime_annotations(annotations, seccomp, seccomp_bpf_base64)
+    except ValueError as error:
+        annotation_error = error
+    if expect_annotation_rejection is not None:
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        process.stdin.close()
+        run("/usr/bin/podman", "kill", "--signal=KILL", container_id, check=False)
+        return_code = process.wait(timeout=20)
+        parent_control.close()
+        output = process.stdout.read()
+        errors = process.stderr.read()
+        run("/usr/bin/podman", "rm", "--force", container_id)
+        if annotation_error is None or output:
+            raise AssertionError(
+                f"runtime annotation injection was not rejected: {annotations!r}"
+            )
+        (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+        (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+        (artifact_dir / f"{scenario}.json").write_text(
+            json.dumps(
+                {
+                    "actual_annotations": annotations,
+                    "injection": expect_annotation_rejection,
+                    "release_sent": False,
+                    "return_code": return_code,
+                    "validation_error": str(annotation_error),
+                    "verdict": "configured default rejected before release",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return None
+    if annotation_error is not None:
+        raise annotation_error
     pid = int(inspected["State"]["Pid"])
     snapshot = process_snapshot(pid)
     assert_launcher_snapshot(snapshot, expected_filter_count)
@@ -533,6 +579,32 @@ def launch(
         process.stdin.write(input_bytes)
         process.stdin.flush()
     return process, parent_control, container_id
+
+
+def configured_default_rejection_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    containers_conf: pathlib.Path,
+) -> None:
+    result = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        b"",
+        "configured-default-injection",
+        release=False,
+        containers_conf=containers_conf,
+        expect_annotation_rejection="org.systemd.property.DeviceAllow=injected",
+    )
+    if result is not None:
+        raise AssertionError("configured-default injection unexpectedly returned a launch")
 
 
 def normal_scenario(
@@ -1561,6 +1633,7 @@ def main() -> None:
     parser.add_argument("--eai1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-hold", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
+    parser.add_argument("--configured-defaults", required=True, type=pathlib.Path)
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -1620,6 +1693,15 @@ def main() -> None:
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
+    )
+    configured_default_rejection_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        arguments.configured_defaults.resolve(),
     )
     normal_scenario(
         arguments.image,

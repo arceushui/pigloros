@@ -193,6 +193,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --eai1-hello "${build_dir}/eai1_hello.bin" \
   --eai1-hold "${build_dir}/eai1_hold.bin" \
   --eao1-hello "${build_dir}/eao1_hello.bin" \
+  --configured-defaults "${prototype_dir}/configured-default-injection.conf" \
   --artifact-dir "${artifact_dir}"
 
 python3 "${prototype_dir}/write_evidence_manifest.py" \

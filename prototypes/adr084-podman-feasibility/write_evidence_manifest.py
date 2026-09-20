@@ -40,6 +40,10 @@ def main() -> None:
         ("prototype/launcher.c", arguments.prototype_dir / "launcher.c"),
         ("prototype/adapter.c", arguments.prototype_dir / "adapter.c"),
         (
+            "prototype/configured-default-injection.conf",
+            arguments.prototype_dir / "configured-default-injection.conf",
+        ),
+        (
             "prototype/generate_adapter_transport.py",
             arguments.prototype_dir / "generate_adapter_transport.py",
         ),
@@ -136,6 +140,9 @@ def main() -> None:
         "cache-matrix.json",
         "cache-concurrent-identical.json",
         "cache-concurrent-distinct.json",
+        "configured-default-injection.json",
+        "configured-default-injection.stderr",
+        "configured-default-injection.stdout",
         "probe-filter-binding.json",
         "probe.stderr",
         "probe.stdout",

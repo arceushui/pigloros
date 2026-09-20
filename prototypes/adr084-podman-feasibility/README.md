@@ -43,6 +43,12 @@ continuation when the mapped install buffer differs from the provider-exported
 BPF. A valid-base64, one-byte mutation is exercised through real crun and must
 terminate under `PTRACE_O_EXITKILL` without an installed-byte artifact.
 
+An isolated pinned-Podman `CONTAINERS_CONF` also injects a configured default
+`org.systemd.property.DeviceAllow` annotation. The provider observes the real
+five-member effective runtime map and kills the still-blocked attempt without
+sending release; this distinguishes configured-default injection from the
+in-memory map mutation matrix.
+
 The canonical ADRs remain Proposed. A green workflow proves only the bounded
 claims named by its retained artifacts; the complete ADR acceptance matrix,
 production provider, native source coverage, a general-purpose transport codec,
