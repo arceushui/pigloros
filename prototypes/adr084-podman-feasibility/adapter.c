@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -204,17 +205,30 @@ int main(void) {
     if (length == eai1_memory_limit_len &&
         memcmp(input, eai1_memory_limit, length) == 0) {
         const size_t arena_size = 48U * 1024U * 1024U;
-        volatile unsigned char *reclaimable = mmap(
-            NULL, arena_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
-            -1, 0);
+        int backing = open("/memory-reclaimable", O_RDONLY | O_CLOEXEC);
+        if (backing == -1) {
+            fail("memory-limit-backing-open");
+        }
+        struct stat backing_stat;
+        if (fstat(backing, &backing_stat) == -1 ||
+            backing_stat.st_size != (off_t)arena_size) {
+            errno = EPROTO;
+            fail("memory-limit-backing-stat");
+        }
+        volatile unsigned char *reclaimable =
+            mmap(NULL, arena_size, PROT_READ, MAP_PRIVATE, backing, 0);
         if (reclaimable == MAP_FAILED) {
-            fail("memory-limit-first-map");
+            fail("memory-limit-backing-map");
         }
+        if (close(backing) == -1) {
+            fail("memory-limit-backing-close");
+        }
+        if (madvise((void *)reclaimable, arena_size, MADV_DONTNEED) == -1) {
+            fail("memory-limit-backing-drop");
+        }
+        unsigned char checksum = 0;
         for (size_t offset = 0; offset < arena_size; offset += 4096U) {
-            reclaimable[offset] = (unsigned char)(offset >> 12);
-        }
-        if (madvise((void *)reclaimable, arena_size, MADV_FREE) == -1) {
-            fail("memory-limit-madvise");
+            checksum ^= reclaimable[offset];
         }
         volatile unsigned char *retained = mmap(
             NULL, arena_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
@@ -225,7 +239,8 @@ int main(void) {
         for (size_t offset = 0; offset < arena_size; offset += 4096U) {
             retained[offset] = (unsigned char)(offset >> 12);
         }
-        dprintf(STDERR_FILENO, "MEMORY_LIMIT_SURVIVED\n");
+        dprintf(STDERR_FILENO, "MEMORY_LIMIT_SURVIVED checksum=%u\n",
+                (unsigned int)checksum);
         for (;;) {
             pause();
         }

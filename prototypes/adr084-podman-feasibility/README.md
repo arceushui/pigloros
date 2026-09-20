@@ -62,9 +62,11 @@ counters under `memory.swap.max=0`; a missing `max` delta is reported as a
 separate SwapBytes candidate incompatibility rather than inferred from OOM.
 
 A separate canonical MEMORY_LIMIT attempt tests whether the provider can select
-code 4 `MemoryLimit` without relabelling an OOM. The adapter first faults a
-48 MiB anonymous arena, marks it `MADV_FREE`, then faults a second 48 MiB arena
-under the same 64 MiB `memory.max`. The provider selects code 4 only if the
+code 4 `MemoryLimit` without relabelling an OOM. The adapter first drops and
+then faults a 48 MiB clean, read-only file from the signed throwaway rootfs,
+then faults a 48 MiB retained anonymous arena under the same 64 MiB
+`memory.max`. This makes the first arena directly reclaimable while the second
+remains charged. The provider selects code 4 only if the
 local `max` counter advances, both `oom` and `oom_kill` remain unchanged, and
 the adapter emits its survival marker while it is still running. The signed
 observation and cleanup proof are retained. If the hosted kernel or admitted
