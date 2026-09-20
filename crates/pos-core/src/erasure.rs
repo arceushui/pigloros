@@ -4692,28 +4692,32 @@ impl ErasureVerifiedInventoryV1 {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let mut retry_requirements = Vec::new();
-        retry_requirements
-            .try_reserve(self.request_heads.len())
-            .map_err(allocation_failure)?;
         for ((state, _), parent_classification) in self.members.iter().zip(parent_classifications) {
             let request = state.request().reference();
             if parent_classification.request != request {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
             let parent_scope = parent_classification.membership.included_scope();
-            if parent_scope.is_some() && state.scope().is_none() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
             let child_classification = child_classifications
                 .iter()
                 .find(|classification| classification.request == request)
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let requires_extension = parent_scope.is_some()
-                && state
-                    .scope()
-                    .and_then(ErasureScopeCommitmentV1::lineage_rule)
-                    .is_some();
-            if !requires_extension {
+
+            let Some(scope) = state.scope() else {
+                if parent_scope.is_some()
+                    || child_classification.membership.included_scope().is_some()
+                {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+                continue;
+            };
+            let Some(lineage_rule) = scope.lineage_rule() else {
+                if child_classification.membership.included_scope().is_some() {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+                continue;
+            };
+            if parent_scope.is_none() {
                 if child_classification.membership.included_scope().is_some() {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
@@ -4723,7 +4727,6 @@ impl ErasureVerifiedInventoryV1 {
                 .membership
                 .included_scope()
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let scope = state.scope().ok_or(ErasureErrorV1::ProvenanceMissing)?;
             let extensions = state.scope_extensions();
             let extension = extensions
                 .last()
@@ -4733,9 +4736,7 @@ impl ErasureVerifiedInventoryV1 {
             let requirement = ErasureForkScopeRequirementV1 {
                 request,
                 scope_commitment: scope.reference(),
-                lineage_rule: scope
-                    .lineage_rule()
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+                lineage_rule,
                 predecessor_extension: extensions
                     .iter()
                     .rev()
@@ -7380,6 +7381,18 @@ mod coverage_paths {
         assert_eq!(
             included.require_unaffected_topology(parent),
             Err(ErasureErrorV1::PolicyConflict)
+        );
+        let mut incomplete_classifications = included.clone();
+        incomplete_classifications
+            .classifications
+            .iter_mut()
+            .find(|(timeline, _)| *timeline == parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .1
+            .clear();
+        assert_eq!(
+            incomplete_classifications.require_unaffected_topology(parent),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
         let mut missing_scope = included;
         missing_scope.members[0].0.scope = None;

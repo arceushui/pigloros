@@ -1497,7 +1497,7 @@ impl ErasureExecutionHostV1 {
 
     fn apply_root_topology_change(
         &mut self,
-        change: impl FnOnce(
+        change: impl FnMut(
             &ErasureTopologyTransitionPermitV1,
             &mut dyn ErasureHostStore,
         ) -> Result<Timeline, CoreError>,
@@ -1548,23 +1548,18 @@ impl ErasureExecutionHostV1 {
 
     fn prepare_unaffected_topology_transition<F>(
         &mut self,
-        change: Option<F>,
+        change: &mut F,
         permit: &ErasureTopologyTransitionPermitV1,
         current_inventory: &ErasureVerifiedInventoryV1,
         request_count: usize,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), UnaffectedTopologyTransitionError>
     where
-        F: FnOnce(
+        F: FnMut(
             &ErasureTopologyTransitionPermitV1,
             &mut dyn ErasureHostStore,
         ) -> Result<Timeline, CoreError>,
     {
-        let Some(change) = change else {
-            return Err(UnaffectedTopologyTransitionError::Erasure(
-                ErasureErrorV1::ProvenanceMissing,
-            ));
-        };
         let timeline = change(permit, self.store.host_store())
             .map_store_error()
             .map_err(UnaffectedTopologyTransitionError::Host)?;
@@ -1605,7 +1600,7 @@ impl ErasureExecutionHostV1 {
     fn apply_unaffected_topology_change(
         &mut self,
         parent: Option<TimelineId>,
-        change: impl FnOnce(
+        mut change: impl FnMut(
             &ErasureTopologyTransitionPermitV1,
             &mut dyn ErasureHostStore,
         ) -> Result<Timeline, CoreError>,
@@ -1632,12 +1627,11 @@ impl ErasureExecutionHostV1 {
         }
         let request_count = inventory.request_count();
         let gate = Arc::clone(&self.gate);
-        let mut change = Some(change);
         let mut transition_failure = None;
         let publication = {
             let mut fenced_transition = |permit: &ErasureTopologyTransitionPermitV1| match self
                 .prepare_unaffected_topology_transition(
-                    change.take(),
+                    &mut change,
                     permit,
                     &inventory,
                     request_count,
@@ -3158,6 +3152,8 @@ mod tests {
         ForkCommit,
         Recovery,
         EventStore,
+        DeleteTimeline,
+        NonemptyInventoryDeleteFailure,
     }
 
     type TimelineCreatedHookV1 = Arc<dyn Fn(TimelineId) + Send + Sync>;
@@ -3437,7 +3433,12 @@ mod tests {
         }
 
         fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
-            if self.fault == FaultModeV1::EventStore {
+            if matches!(
+                self.fault,
+                FaultModeV1::EventStore
+                    | FaultModeV1::DeleteTimeline
+                    | FaultModeV1::NonemptyInventoryDeleteFailure
+            ) {
                 Err(CoreError::Storage("fault delete".to_owned()))
             } else {
                 self.inner.delete_timeline(id)
@@ -3499,7 +3500,11 @@ mod tests {
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot(maximum_requests)?;
-            if self.fault == FaultModeV1::NonemptyInventory && !snapshot.topology().is_empty() {
+            if matches!(
+                self.fault,
+                FaultModeV1::NonemptyInventory | FaultModeV1::NonemptyInventoryDeleteFailure
+            ) && !snapshot.topology().is_empty()
+            {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
                 Ok(snapshot)
@@ -3526,7 +3531,11 @@ mod tests {
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot_with_limits(limits)?;
-            if self.fault == FaultModeV1::NonemptyInventory && !snapshot.topology().is_empty() {
+            if matches!(
+                self.fault,
+                FaultModeV1::NonemptyInventory | FaultModeV1::NonemptyInventoryDeleteFailure
+            ) && !snapshot.topology().is_empty()
+            {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
                 Ok(snapshot)
@@ -3830,6 +3839,7 @@ mod tests {
     #[derive(Default)]
     struct RejectedCoordinatorAuthorityV1 {
         unaffected: std::sync::Mutex<Vec<TimelineId>>,
+        candidate_missing: std::sync::atomic::AtomicBool,
     }
 
     impl ErasureFreezeAuthorizationVerifierV1 for RejectedCoordinatorAuthorityV1 {
@@ -3882,6 +3892,12 @@ mod tests {
             manifest_digest: ErasureReferenceV1,
             candidate: TimelineId,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            if self
+                .candidate_missing
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Ok(None);
+            }
             {
                 let mut unaffected = self
                     .unaffected
@@ -4441,6 +4457,34 @@ mod tests {
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn hosted_coordinator_port_rejects_missing_candidate_observation() {
+        let authority = RejectedCoordinatorAuthorityV1::default();
+        authority
+            .candidate_missing
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        let port = HostedCoordinatorPortV1::new(&mut store, &authority)
+            .with_topology_candidate(TimelineId::new());
+        assert_eq!(
+            port.complete_erasure_inventory_observation(4),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn default_candidate_observation_delegates_to_the_legacy_method() {
+        assert_eq!(
+            ErasureCoordinatorAuthorityV1::verified_topology_observation_for_candidate(
+                &ClosedErasureCoordinatorAuthorityV1,
+                reference(1),
+                reference(2),
+                TimelineId::new(),
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
 
@@ -5041,6 +5085,69 @@ mod tests {
     }
 
     #[test]
+    fn topology_candidate_verification_requires_both_credentials() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let limits = host.recovery_limits;
+        assert_eq!(
+            host.verify_unaffected_topology_candidate(1, limits, TimelineId::new()),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
+        assert_eq!(
+            host.verify_unaffected_topology_candidate(1, limits, TimelineId::new()),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn topology_change_rejects_closed_unknown_and_missing_parent_states() {
+        let mut closed =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            closed.apply_unaffected_topology_change(None, |_permit, _store| {
+                unreachable!("closed hosts do not invoke topology changes")
+            }),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+
+        let mut unknown = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            unknown.apply_unaffected_topology_change(Some(TimelineId::new()), |_permit, _store| {
+                unreachable!("unknown parents fail before the store effect")
+            }),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+
+        let parent = TimelineId::new();
+        let snapshot = ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let inventory = verified_empty_inventory(snapshot, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut missing =
+            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut query = OneShotInventoryV1(Some(inventory));
+        missing
+            .install_inventory(&mut query, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            missing.apply_unaffected_topology_change(Some(parent), |_permit, _store| {
+                unreachable!("missing parents fail before the store effect")
+            }),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
     fn active_topology_changes_require_both_recovery_credentials() {
         let RejectedHostFixtureV1 {
             mut host,
@@ -5147,6 +5254,36 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         assert_eq!(recovery_failure.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
+    fn unaffected_topology_transition_poisons_when_rollback_delete_fails() {
+        let mut publication_failure = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::DeleteTimeline)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        publication_failure.fail_inventory_publication = true;
+        assert_eq!(
+            publication_failure
+                .command_sender()
+                .and_then(|mut sender| sender.create_timeline("rollback-publication-failure")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(publication_failure.status(), ErasureHostStatusV1::Poisoned);
+
+        let mut verification_failure = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::NonemptyInventoryDeleteFailure)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            verification_failure
+                .command_sender()
+                .and_then(|mut sender| sender.create_timeline("rollback-verification-failure")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(verification_failure.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]
