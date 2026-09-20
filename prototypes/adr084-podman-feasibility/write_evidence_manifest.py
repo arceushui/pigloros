@@ -437,6 +437,11 @@ def main() -> None:
         "seccomp-distinct/readback-only-pnr.txt",
         "seccomp-distinct/seccomp-mapping-report.json",
         "seccomp-distinct/seccomp-mutation-report.json",
+        *(
+            str(path.relative_to(arguments.artifact_dir))
+            for path in sorted((arguments.artifact_dir / "adr079").rglob("*"))
+            if path.is_file()
+        ),
     )
     provenance = {
         "architecture": arguments.architecture,

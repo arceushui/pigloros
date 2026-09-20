@@ -1,0 +1,9 @@
+[package]
+name = "adr079-coverage-adapter"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "coverage-adapter"
+path = "src/main.rs"

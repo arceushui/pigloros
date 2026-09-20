@@ -1,0 +1,6 @@
+[workspace]
+members = ["adapter", "launcher"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"

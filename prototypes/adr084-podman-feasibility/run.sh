@@ -263,6 +263,9 @@ python3 "${prototype_dir}/lifecycle_crash_matrix.py" \
   --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
   --artifact-dir "${artifact_dir}"
 
+bash "${prototype_dir}/run_coverage_probe.sh" \
+  "${evidence_architecture}" "${artifact_dir}"
+
 python3 "${prototype_dir}/write_evidence_manifest.py" \
   "${artifact_dir}" "${build_dir}" "${prototype_dir}" \
   --architecture "${oci_architecture}"

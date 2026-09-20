@@ -198,6 +198,21 @@ the provider closes its own stdout transport endpoint and observes `EBADF` on
 the real pipe before any process-crash observation; cleanup follows terminal
 selection and cannot retroactively relabel the outcome.
 
+The ADR-079 slice is likewise throwaway evidence, not coverage of production
+provider code. Two Rust 1.97.1 static-musl objects are built once per native
+architecture under pinned cargo-llvm-cov 0.9.0 instrumentation and LLVM counter
+relocation. Compile-time `%m%c` profile names avoid a profile environment
+variable. The instrumented launcher clears its environment, verifies its
+closed descriptor set and mapped profile, executes the held adapter descriptor,
+and is replaced. The adapter verifies empty environment, stdio-only
+descriptors, and its separately mapped profile. One attempt exits normally and
+one is forcibly SIGKILLed after a known counter. Matching bundled LLVM tools
+merge the four raw profiles and emit per-component and combined JSON/LCOV;
+cargo-llvm-cov independently emits the composed JSON/LCOV. Validation requires
+both known-covered and deliberately uncovered regions to remain visible, and a
+truncated raw profile to be rejected. These instrumented mappings and files are
+recorded differences and never stand in for exact release conformance.
+
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported
 BPF. A valid-base64, one-byte mutation is exercised through real crun and must

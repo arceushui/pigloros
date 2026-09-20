@@ -1,0 +1,4 @@
+FROM scratch
+COPY coverage-launcher /launcher
+COPY coverage-adapter /adapter
+ENTRYPOINT ["/launcher"]
