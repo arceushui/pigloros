@@ -5,7 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/stat.h>
+#include <stddef.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -21,6 +21,29 @@
 #ifndef STATX_MNT_ID
 #define STATX_MNT_ID 0x00001000U
 #endif
+#ifndef STATX_INO
+#define STATX_INO 0x00000100U
+#endif
+
+/* Stable Linux statx UAPI offsets; the syscall has no userspace size argument. */
+struct kernel_statx {
+    uint32_t mask;
+    uint32_t block_size;
+    uint64_t attributes;
+    uint32_t link_count;
+    uint32_t uid;
+    uint32_t gid;
+    uint16_t mode;
+    uint16_t spare0;
+    uint64_t inode;
+    uint8_t through_device_numbers[104];
+    uint64_t mount_id;
+    uint8_t remaining[104];
+};
+
+_Static_assert(offsetof(struct kernel_statx, inode) == 32, "statx inode offset");
+_Static_assert(offsetof(struct kernel_statx, mount_id) == 144, "statx mount offset");
+_Static_assert(sizeof(struct kernel_statx) == 256, "statx UAPI size");
 
 #define CONTROL_FD 3
 #define DIGEST_SIZE 32
@@ -242,16 +265,16 @@ static void digest_file(int fd, const char *domain, uint8_t output[DIGEST_SIZE])
 }
 
 static struct identity descriptor_identity(int fd) {
-    struct statx value;
+    struct kernel_statx value;
     memset(&value, 0, sizeof(value));
     if (syscall(SYS_statx, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
                 STATX_INO | STATX_MNT_ID, &value) == -1) {
         fail("descriptor-statx");
     }
-    if ((value.stx_mask & (STATX_INO | STATX_MNT_ID)) != (STATX_INO | STATX_MNT_ID)) {
+    if ((value.mask & (STATX_INO | STATX_MNT_ID)) != (STATX_INO | STATX_MNT_ID)) {
         protocol_fail("descriptor-statx-mask");
     }
-    return (struct identity){.mount = value.stx_mnt_id, .inode = value.stx_ino};
+    return (struct identity){.mount = value.mount_id, .inode = value.inode};
 }
 
 static struct identity namespace_identity(void) {
