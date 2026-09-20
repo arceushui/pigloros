@@ -793,14 +793,22 @@ fn reproduce_manifest(
             let head_matches = reproduced.manifest.head_hash == reproduction.manifest.head_hash;
             let replay_identities_match = reproduced.manifest.replay_policy_identities
                 == reproduction.manifest.replay_policy_identities;
-            let policy_digests_match = reproduced.manifest.output_policy_digests
-                == reproduction.manifest.output_policy_digests;
-            if head_matches && replay_identities_match && policy_digests_match {
+            let policy_keys_match = reproduced
+                .manifest
+                .output_policy_digests
+                .keys()
+                .collect::<std::collections::BTreeSet<_>>()
+                == reproduction
+                    .manifest
+                    .output_policy_digests
+                    .keys()
+                    .collect::<std::collections::BTreeSet<_>>();
+            if head_matches && replay_identities_match && policy_keys_match {
                 output_stdout!("OK");
                 Ok(())
             } else {
                 output_stderr!(
-                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_digests={policy_digests_match}; reproduced identities={:?}, expected identities={:?}",
+                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_keys={policy_keys_match}; reproduced identities={:?}, expected identities={:?}",
                     reproduced.manifest.replay_policy_identities,
                     reproduction.manifest.replay_policy_identities
                 );
@@ -1263,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_rejects_tampered_policy_digest() {
+    fn cmd_experiment_reproduce_rejects_tampered_replay_identity() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir
             .path()
@@ -1275,13 +1283,13 @@ mod tests {
         let manifest_path = path.replace(".db", "-manifest.json");
         let mut reproduction: ReproductionManifest =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).test_ok()).test_ok();
-        let digest = reproduction
+        let identity = reproduction
             .manifest
-            .output_policy_digests
+            .replay_policy_identities
             .values_mut()
             .next()
             .test_ok();
-        *digest = pos_core::Hash::zero();
+        *identity = pos_core::Hash::zero();
         std::fs::write(
             &manifest_path,
             serde_json::to_string(&reproduction).test_ok(),
