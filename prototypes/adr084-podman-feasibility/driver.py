@@ -111,7 +111,12 @@ def process_snapshot(pid: int) -> dict[str, object]:
 
 def assert_launcher_snapshot(snapshot: dict[str, object]) -> None:
     status = str(snapshot["status"])
-    required_status = ("NoNewPrivs:\t1", "Seccomp:\t2", "CapEff:\t0000000000000000")
+    required_status = (
+        "NoNewPrivs:\t1",
+        "Seccomp:\t2",
+        "Seccomp_filters:\t1",
+        "CapEff:\t0000000000000000",
+    )
     for expected in required_status:
         if expected not in status:
             raise AssertionError(f"missing launcher status evidence: {expected}")

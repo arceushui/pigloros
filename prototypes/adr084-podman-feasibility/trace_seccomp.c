@@ -138,7 +138,7 @@ static void write_exact(const char *path, const unsigned char *bytes,
 }
 
 static void write_report(const char *path, pid_t installer, size_t length,
-                         long result) {
+                         long result, unsigned int other_attempts) {
     int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (descriptor == -1) {
         fail("report-open");
@@ -147,8 +147,11 @@ static void write_report(const char *path, pid_t installer, size_t length,
         descriptor,
         "{\n  \"admitted_flags\": %lu,\n  \"byte_length\": %zu,\n"
         "  \"equality\": true,\n  \"install_attempts\": 1,\n"
-        "  \"installer_pid\": %ld,\n  \"syscall_return\": %ld\n}\n",
-        ADMITTED_SECCOMP_FLAGS, length, (long)installer, result);
+        "  \"installer_pid\": %ld,\n"
+        "  \"other_traced_install_attempts\": %u,\n"
+        "  \"syscall_return\": %ld\n}\n",
+        ADMITTED_SECCOMP_FLAGS, length, (long)installer, other_attempts,
+        result);
     if (written < 0 || fsync(descriptor) == -1 || close(descriptor) == -1) {
         fail("report-write");
     }
@@ -194,6 +197,7 @@ int main(int argc, char **argv) {
     }
 
     unsigned int install_attempts = 0;
+    unsigned int other_install_attempts = 0;
     bool install_succeeded = false;
     pid_t installer = -1;
     int child_status = 0;
@@ -239,35 +243,37 @@ int main(int argc, char **argv) {
             if (information.op == PTRACE_SYSCALL_INFO_ENTRY &&
                 information.entry.nr == SYS_seccomp &&
                 information.entry.args[0] == SECCOMP_SET_MODE_FILTER) {
-                ++install_attempts;
-                if (install_attempts != 1 ||
-                    information.entry.args[1] != ADMITTED_SECCOMP_FLAGS) {
-                    errno = EPROTO;
-                    fail("install-attempt");
-                }
                 struct sock_fprog program;
                 copy_tracee(pid, (uintptr_t)information.entry.args[2], &program,
                             sizeof(program));
                 size_t installed_length =
                     (size_t)program.len * sizeof(struct sock_filter);
-                if (installed_length != expected_length) {
-                    errno = EPROTO;
-                    fail("installed-length");
+                bool is_expected = false;
+                unsigned char *installed = NULL;
+                if (installed_length == expected_length) {
+                    installed = malloc(installed_length);
+                    if (installed == NULL) {
+                        fail("installed-allocate");
+                    }
+                    copy_tracee(pid, (uintptr_t)program.filter, installed,
+                                installed_length);
+                    is_expected =
+                        memcmp(installed, expected, installed_length) == 0;
                 }
-                unsigned char *installed = malloc(installed_length);
-                if (installed == NULL) {
-                    fail("installed-allocate");
+                if (is_expected) {
+                    ++install_attempts;
+                    if (install_attempts != 1 ||
+                        information.entry.args[1] != ADMITTED_SECCOMP_FLAGS) {
+                        errno = EPROTO;
+                        fail("install-attempt");
+                    }
+                    write_exact(argv[2], installed, installed_length);
+                    process->awaiting_install_exit = true;
+                    installer = pid;
+                } else {
+                    ++other_install_attempts;
                 }
-                copy_tracee(pid, (uintptr_t)program.filter, installed,
-                            installed_length);
-                if (memcmp(installed, expected, installed_length) != 0) {
-                    errno = EPROTO;
-                    fail("installed-equality");
-                }
-                write_exact(argv[2], installed, installed_length);
                 free(installed);
-                process->awaiting_install_exit = true;
-                installer = pid;
             } else if (information.op == PTRACE_SYSCALL_INFO_EXIT &&
                        process->awaiting_install_exit) {
                 if (information.exit.rval != 0 || information.exit.is_error) {
@@ -276,8 +282,6 @@ int main(int argc, char **argv) {
                 }
                 process->awaiting_install_exit = false;
                 install_succeeded = true;
-                write_report(argv[3], installer, expected_length,
-                             information.exit.rval);
             }
         }
 
@@ -296,6 +300,8 @@ int main(int argc, char **argv) {
         errno = EPROTO;
         fail("install-proof");
     }
+    write_report(argv[3], installer, expected_length, 0,
+                 other_install_attempts);
     if (WIFEXITED(child_status)) {
         return WEXITSTATUS(child_status);
     }
