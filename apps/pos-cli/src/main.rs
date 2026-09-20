@@ -793,22 +793,14 @@ fn reproduce_manifest(
             let head_matches = reproduced.manifest.head_hash == reproduction.manifest.head_hash;
             let replay_identities_match = reproduced.manifest.replay_policy_identities
                 == reproduction.manifest.replay_policy_identities;
-            let policy_keys_match = reproduced
-                .manifest
-                .output_policy_digests
-                .keys()
-                .collect::<std::collections::BTreeSet<_>>()
-                == reproduction
-                    .manifest
-                    .output_policy_digests
-                    .keys()
-                    .collect::<std::collections::BTreeSet<_>>();
-            if head_matches && replay_identities_match && policy_keys_match {
+            let policy_digests_match = reproduced.manifest.output_policy_digests
+                == reproduction.manifest.output_policy_digests;
+            if head_matches && replay_identities_match && policy_digests_match {
                 output_stdout!("OK");
                 Ok(())
             } else {
                 output_stderr!(
-                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_keys={policy_keys_match}; reproduced identities={:?}, expected identities={:?}",
+                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_digests={policy_digests_match}; reproduced identities={:?}, expected identities={:?}",
                     reproduced.manifest.replay_policy_identities,
                     reproduction.manifest.replay_policy_identities
                 );
