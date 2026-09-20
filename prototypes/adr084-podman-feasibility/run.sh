@@ -67,14 +67,24 @@ test "$(git -C "${blake3_source}" rev-parse HEAD)" = "${blake3_commit}"
     "${blake3_source}/c/blake3_impl.h"
 } >"${artifact_dir}/blake3-source-identity.txt"
 cp "${blake3_source}/LICENSE_A2" "${artifact_dir}/blake3-LICENSE_A2.txt"
-musl-gcc -static -Os -Wall -Wextra -Werror \
-  -DBLAKE3_USE_NEON=0 -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 \
-  -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
-  -I"${blake3_source}/c" -o "${build_dir}/launcher" \
-  "${prototype_dir}/launcher.c" \
-  "${blake3_source}/c/blake3.c" \
-  "${blake3_source}/c/blake3_dispatch.c" \
-  "${blake3_source}/c/blake3_portable.c"
+blake3_defines=(
+  -DBLAKE3_USE_NEON=0
+  -DBLAKE3_NO_SSE2
+  -DBLAKE3_NO_SSE41
+  -DBLAKE3_NO_AVX2
+  -DBLAKE3_NO_AVX512
+)
+musl-gcc -Os -Wall -Wextra -Werror "${blake3_defines[@]}" \
+  -I"${blake3_source}/c" -c "${prototype_dir}/launcher.c" \
+  -o "${build_dir}/launcher.o"
+for source in blake3 blake3_dispatch blake3_portable; do
+  musl-gcc -Os -Wall -Wextra -Werror -Wno-unused-function \
+    "${blake3_defines[@]}" -I"${blake3_source}/c" \
+    -c "${blake3_source}/c/${source}.c" -o "${build_dir}/${source}.o"
+done
+musl-gcc -static -o "${build_dir}/launcher" \
+  "${build_dir}/launcher.o" "${build_dir}/blake3.o" \
+  "${build_dir}/blake3_dispatch.o" "${build_dir}/blake3_portable.o"
 python3 "${prototype_dir}/generate_adapter_transport.py" "${build_dir}"
 cp "${build_dir}/adapter-transport-vectors.json" "${artifact_dir}/"
 musl-gcc -static -Os -Wall -Wextra -Werror -I"${build_dir}" \

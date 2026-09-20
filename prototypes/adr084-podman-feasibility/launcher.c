@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/stat.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
