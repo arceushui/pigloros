@@ -5056,7 +5056,7 @@ mod tests {
         let (mut store, _) = fault_store_with_control(FaultModeV1::Recovery);
         let authority_for_creation = Arc::clone(&authority);
         store.timeline_created_hook = Some(Arc::new(move |timeline| {
-            drop(authority_for_creation.set_timeline(timeline));
+            let _result = authority_for_creation.set_timeline(timeline);
         }));
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
