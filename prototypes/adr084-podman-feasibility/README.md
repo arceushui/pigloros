@@ -52,6 +52,12 @@ memory beyond `memory.max`; the provider retains the before/after
 terminal code 3 `OomKilled`. The other forced outcomes and their precedence
 remain an open evidence slice.
 
+The memory attempt keeps a minimal adapter parent alive while its allocating
+child crosses `memory.max`. This prevents rootless Podman from deleting the
+empty cgroup before the provider can collect `memory.events.local`; the provider
+kills the retained parent only after the child SIGKILL marker and authoritative
+`oom_kill` delta are both observed. Exit 137 by itself is still rejected.
+
 A canonical TASKS attempt forces `pids.max=16`; its retained local `max` event
 selects terminal code 5 `TaskLimit`. A separate canonical CPU attempt crosses
 the 0.5-CPU quota and retains an `nr_throttled` delta without selecting a

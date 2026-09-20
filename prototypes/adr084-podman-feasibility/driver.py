@@ -1718,6 +1718,19 @@ def memory_limit_scenario(
         if final.get("oom_kill", 0) > baseline.get("oom_kill", 0):
             break
         time.sleep(0.01)
+    pre_cleanup_errors = bytearray()
+    marker_deadline = time.monotonic() + 1
+    while (
+        b"MEMORY_OOM_CHILD signal=9\n" not in pre_cleanup_errors
+        and time.monotonic() < marker_deadline
+    ):
+        readable, _, _ = select.select([process.stderr], [], [], 0.01)
+        if readable:
+            chunk = process.stderr.read1(4096)
+            if not chunk:
+                break
+            pre_cleanup_errors.extend(chunk)
+    run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
     return_code = process.wait(timeout=20)
     try:
         final_text = os.pread(events_fd, 4096, 0).decode("ascii").strip()
@@ -1727,7 +1740,8 @@ def memory_limit_scenario(
             raise
     os.close(events_fd)
     output = process.stdout.read()
-    errors = process.stderr.read()
+    pre_cleanup_errors.extend(process.stderr.read())
+    errors = bytes(pre_cleanup_errors)
     control.close()
     inspected = json.loads(run("/usr/bin/podman", "inspect", container_id).stdout)[0]
     oom_delta = final.get("oom_kill", 0) - baseline.get("oom_kill", 0)
@@ -1741,6 +1755,7 @@ def memory_limit_scenario(
         "memory_max": snapshot["cgroup_values"]["memory.max"],
         "oom_kill_delta": oom_delta,
         "podman_oom_killed": oom_flag,
+        "provider_cleanup_after_event": "SIGKILL",
         "return_code": return_code,
         "terminal_code": 3,
         "terminal_name": "OomKilled",
@@ -1755,6 +1770,7 @@ def memory_limit_scenario(
         or output
         or snapshot["cgroup_values"]["memory.max"] != "67108864"
         or (oom_delta <= 0 and oom_flag is not True)
+        or b"MEMORY_OOM_CHILD signal=9\n" not in errors
     ):
         raise AssertionError(f"memory limit did not force OOM evidence: {report!r}")
 

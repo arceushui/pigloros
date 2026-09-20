@@ -168,15 +168,33 @@ int main(void) {
         }
     }
     if (length == eai1_memory_len && memcmp(input, eai1_memory, length) == 0) {
-        const size_t allocation_size = 8U * 1024U * 1024U;
+        pid_t allocator = fork();
+        if (allocator == -1) {
+            fail("memory-fork");
+        }
+        if (allocator == 0) {
+            const size_t allocation_size = 8U * 1024U * 1024U;
+            for (;;) {
+                volatile unsigned char *allocation = malloc(allocation_size);
+                if (allocation == NULL) {
+                    fail("memory-allocation");
+                }
+                for (size_t offset = 0; offset < allocation_size; offset += 4096U) {
+                    allocation[offset] = (unsigned char)(offset >> 12);
+                }
+            }
+        }
+        int allocator_status = 0;
+        if (waitpid(allocator, &allocator_status, 0) != allocator) {
+            fail("memory-wait");
+        }
+        if (!WIFSIGNALED(allocator_status) || WTERMSIG(allocator_status) != SIGKILL) {
+            errno = EPROTO;
+            fail("memory-child-result");
+        }
+        dprintf(STDERR_FILENO, "MEMORY_OOM_CHILD signal=%d\n", SIGKILL);
         for (;;) {
-            volatile unsigned char *allocation = malloc(allocation_size);
-            if (allocation == NULL) {
-                fail("memory-allocation");
-            }
-            for (size_t offset = 0; offset < allocation_size; offset += 4096U) {
-                allocation[offset] = (unsigned char)(offset >> 12);
-            }
+            pause();
         }
     }
     if (length == eai1_tasks_len && memcmp(input, eai1_tasks, length) == 0) {
