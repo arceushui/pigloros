@@ -67,6 +67,15 @@ printf '%s\n' "${image_reference}" >"${artifact_dir}/image-reference.txt"
   "${image_id}" "${prototype_dir}/rootfs_manifest.py" \
   "${artifact_dir}/rootfs-manifest.json"
 
+python3 "${prototype_dir}/generate_runtime_subject.py" \
+  "${artifact_dir}/oci-validation.json" "${artifact_dir}/rootfs-manifest.json" \
+  "${build_dir}/launcher" "${build_dir}/adapter" \
+  "${artifact_dir}/runtime-subject.json"
+python3 "${prototype_dir}/validate_runtime_subject.py" \
+  "${artifact_dir}/runtime-subject.json" "${artifact_dir}/oci-validation.json" \
+  "${artifact_dir}/rootfs-manifest.json" "${build_dir}/launcher" \
+  "${build_dir}/adapter" "${artifact_dir}/runtime-subject-validation.json"
+
 python3 "${prototype_dir}/generate_vectors.py" >"${artifact_dir}/adr085-vectors.json"
 python3 "${prototype_dir}/validate_vectors.py" "${artifact_dir}/adr085-vectors.json" \
   "${artifact_dir}/adr085-vector-validation.json"

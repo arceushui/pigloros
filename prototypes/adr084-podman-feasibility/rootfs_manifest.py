@@ -9,6 +9,34 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
+
+
+ROOTFS_FILE_DOMAIN = b"PiglorOS.OciRootfsFile.v1\0"
+
+
+def regular_file_digests(path: pathlib.Path) -> tuple[int, str, str]:
+    """Stream both raw SHA-256 and domain-separated BLAKE3 for one file."""
+    sha256 = hashlib.sha256()
+    length = 0
+    process = subprocess.Popen(
+        ["b3sum"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    assert process.stdin is not None
+    process.stdin.write(ROOTFS_FILE_DOMAIN)
+    with path.open("rb") as stream:
+        while chunk := stream.read(65_536):
+            length += len(chunk)
+            sha256.update(chunk)
+            process.stdin.write(chunk)
+    process.stdin.close()
+    assert process.stdout is not None
+    assert process.stderr is not None
+    output = process.stdout.read().decode("ascii")
+    error = process.stderr.read().decode("utf-8", errors="replace")
+    if process.wait() != 0:
+        raise RuntimeError(f"b3sum failed for {path}: {error}")
+    return length, sha256.hexdigest(), output.split()[0]
 
 
 def main() -> None:
@@ -32,11 +60,14 @@ def main() -> None:
         if stat.S_ISDIR(metadata.st_mode):
             item.update(kind="directory", length=0)
         elif stat.S_ISREG(metadata.st_mode):
-            content = path.read_bytes()
+            if metadata.st_nlink != 1:
+                raise ValueError(f"hard-linked rootfs file {normalized}")
+            length, sha256, content_digest = regular_file_digests(path)
             item.update(
                 kind="regular",
-                length=len(content),
-                sha256=hashlib.sha256(content).hexdigest(),
+                length=length,
+                sha256=sha256,
+                content_digest=content_digest,
             )
         elif stat.S_ISLNK(metadata.st_mode):
             item.update(kind="symlink", length=0, target=os.readlink(path))

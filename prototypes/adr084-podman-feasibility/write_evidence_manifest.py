@@ -64,6 +64,8 @@ def main() -> None:
         "image.oci.tar",
         "oci-validation.json",
         "rootfs-manifest.json",
+        "runtime-subject-validation.json",
+        "runtime-subject.json",
     )
     provenance = {
         "architecture": arguments.architecture,
