@@ -108,6 +108,12 @@ signs every rate transition, both transfer observations, and the complete
 semaphore/FIFO transition chain, and the driver verifies every signature before
 retention.
 
+A separate closed precedence matrix evaluates all 2,048 subsets of the eleven
+ADR-069 terminal observations plus the empty Completed case. It retains every
+input subset and selected code, binds the complete matrix with a BLAKE3 digest,
+and signs and verifies the summary. This proves selection order only; it does
+not relabel an outcome whose authoritative runtime signal was not forced.
+
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
 the driver durably records an attempt-bound monotonic launch anchor and passes a

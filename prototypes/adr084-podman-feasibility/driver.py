@@ -674,6 +674,78 @@ def provider_control_limit_scenarios(artifact_dir: pathlib.Path) -> None:
         raise AssertionError(f"provider control evidence did not match: {report!r}")
 
 
+def terminal_precedence_scenario(artifact_dir: pathlib.Path) -> None:
+    precedence = [
+        "BrokerDied",
+        "Cancelled",
+        "CleanupFailed",
+        "OomKilled",
+        "MemoryLimit",
+        "TaskLimit",
+        "Watchdog",
+        "FileOrOutputLimit",
+        "ProcessCrash",
+        "IpcFailure",
+        "ProtocolFailure",
+    ]
+    cases: list[dict[str, object]] = []
+    selection_counts = {name: 0 for name in [*precedence, "Completed"]}
+    for mask in range(1 << len(precedence)):
+        active = [name for index, name in enumerate(precedence) if mask & (1 << index)]
+        selected = active[0] if active else "Completed"
+        selected_code = precedence.index(selected) if active else None
+        selection_counts[selected] += 1
+        cases.append(
+            {
+                "active": active,
+                "mask": mask,
+                "selected_code": selected_code,
+                "selected_name": selected,
+            }
+        )
+    matrix_digest = blake3(
+        b"PiglorOS.ADR069TerminalPrecedenceMatrix.v1\0" + canonical(cases)
+    ).hex()
+    signed_summary = signed_limit_observation(
+        "terminal-precedence",
+        {
+            "case_count": len(cases),
+            "matrix_digest": matrix_digest,
+            "precedence": precedence,
+            "selection_counts": selection_counts,
+        },
+    )
+    report = {
+        "case_count": len(cases),
+        "cases": cases,
+        "completed_terminal_code": None,
+        "matrix_digest": matrix_digest,
+        "precedence": precedence,
+        "selection_counts": selection_counts,
+        "signed_summary": signed_summary,
+        "verdict": "all terminal-observation subsets select the lowest ADR-069 code",
+    }
+    (artifact_dir / "terminal-precedence-matrix.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if (
+        len(cases) != 2048
+        or cases[0]["selected_name"] != "Completed"
+        or cases[-1]["selected_name"] != "BrokerDied"
+        or any(
+            cases[1 << index]["selected_code"] != index
+            for index in range(len(precedence))
+        )
+        or any(
+            cases[(1 << higher) | (1 << lower)]["selected_code"] != higher
+            for higher in range(len(precedence))
+            for lower in range(higher + 1, len(precedence))
+        )
+        or not signed_summary["signature_verified"]
+    ):
+        raise AssertionError(f"terminal precedence evidence did not match: {report!r}")
+
+
 def wait_for_container(name: str, process: subprocess.Popen[bytes]) -> str:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -3421,6 +3493,7 @@ def main() -> None:
         encoding="utf-8",
     )
     provider_control_limit_scenarios(arguments.artifact_dir)
+    terminal_precedence_scenario(arguments.artifact_dir)
     installed_byte_mutation_scenario(
         arguments.image,
         arguments.seccomp.resolve(),

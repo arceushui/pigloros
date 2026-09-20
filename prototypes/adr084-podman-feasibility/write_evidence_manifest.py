@@ -136,6 +136,7 @@ def main() -> None:
         "adapter-transport-validation.json",
         "adapter-transport-runtime-rejections.json",
         "elm-provider-controls.json",
+        "terminal-precedence-matrix.json",
         "release-barrier-runtime-rejections.json",
         "lifecycle-concurrent.json",
         "lifecycle-concurrent.release",
