@@ -935,7 +935,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         .fork_retry_scope_requirements(parent, child)?
         .is_empty());
 
-    assert_fork_retry_rejects_missing_classifications(&inventory, parent, child)?;
+    assert_fork_retry_rejects_missing_classifications(&inventory, parent, child);
     assert_fork_retry_rejects_no_lineage(parent, child)?;
     assert_fork_retry_rejects_parent_corruption(&inventory, parent, child)?;
     assert_fork_retry_rejects_child_corruption(&inventory, parent, child)?;
@@ -967,7 +967,7 @@ fn assert_fork_retry_rejects_missing_classifications(
     inventory: &ErasureVerifiedInventoryV1,
     parent: TimelineId,
     child: TimelineId,
-) -> Result<(), ErasureErrorV1> {
+) {
     assert_eq!(
         inventory.fork_retry_scope_requirements(TimelineId::new(), child),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -976,7 +976,6 @@ fn assert_fork_retry_rejects_missing_classifications(
         inventory.fork_retry_scope_requirements(parent, TimelineId::new()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    Ok(())
 }
 
 fn assert_fork_retry_rejects_no_lineage(
