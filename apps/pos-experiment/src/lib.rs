@@ -2595,8 +2595,14 @@ impl BacktestRunner {
             lift_vs_persistence,
         ) = backtest_metrics(train_ticks, train_events, eval_ticks, eval_events);
 
-        let train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
-        let eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
+        let mut train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
+        for (name, digest) in train_registry.output_policy_digests() {
+            train_manifest = train_manifest.with_output_policy_digest(name, digest);
+        }
+        let mut eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
+        for (name, digest) in eval_registry.output_policy_digests() {
+            eval_manifest = eval_manifest.with_output_policy_digest(name, digest);
+        }
         let eval_head_seq = store.logical_head(eval_tl_id)?;
         let train_result = build_backtest_run_result(
             store,

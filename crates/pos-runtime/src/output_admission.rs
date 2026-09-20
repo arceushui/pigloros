@@ -108,6 +108,16 @@ impl OutputAdmissionV1 {
         self.policy_digest
     }
 
+    #[must_use]
+    pub const fn policy(&self) -> &OutputPolicyV1 {
+        &self.policy
+    }
+
+    #[must_use]
+    pub const fn budget(&self) -> &ExecutableBudgetPolicyV1 {
+        &self.budget
+    }
+
     /// Validate every draft against declarations and the complete step budget.
     ///
     /// # Errors

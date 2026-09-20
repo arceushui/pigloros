@@ -43,7 +43,6 @@ fn generated_identity_hash(
 ) -> pos_core::Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(label);
-    hasher.update(&plugin.id().inner().to_bytes());
     hasher.update(plugin.name().as_bytes());
     hasher.update(plugin_version.as_bytes());
     let mut owned_event_types = plugin
@@ -56,6 +55,71 @@ fn generated_identity_hash(
     for event_type in owned_event_types {
         hasher.update(event_type.as_bytes());
         hasher.update(&[0]);
+    }
+    pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/replay-policy-identity/v1");
+    hasher.update(entry.name.as_bytes());
+    hasher.update(entry.version.as_bytes());
+    for event_type in &entry.owned_event_types {
+        hasher.update(event_type.as_str().as_bytes());
+        hasher.update(&[0]);
+    }
+    if let Some(admission) = &entry.output_admission {
+        let policy = admission.policy().fields();
+        for hash in [
+            policy.implementation_hash,
+            policy.base_configuration_digest,
+            policy.executable_profile_hash,
+            policy.retention_policy_hash,
+        ] {
+            hasher.update(hash.as_bytes());
+        }
+        hasher.update(&policy.policy_revision.to_le_bytes());
+        for declaration in &policy.output_declarations {
+            hasher.update(declaration.event_type().as_bytes());
+            hasher.update(&[match declaration.authority() {
+                pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
+                pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
+                pos_core::output_policy::OutputAuthorityV1::Ephemeral => 2,
+            }]);
+            hasher.update(&[match declaration.fidelity() {
+                pos_core::output_policy::OutputFidelityV1::L0 => 0,
+                pos_core::output_policy::OutputFidelityV1::L1 => 1,
+                pos_core::output_policy::OutputFidelityV1::L2 => 2,
+            }]);
+            hasher.update(&declaration.max_bytes().to_le_bytes());
+            hasher.update(&declaration.stride_ticks().unwrap_or_default().to_le_bytes());
+            hasher.update(
+                &declaration
+                    .aggregate_min_group()
+                    .unwrap_or_default()
+                    .to_le_bytes(),
+            );
+        }
+        let budget = admission.budget().fields();
+        hasher.update(&budget.revision.to_le_bytes());
+        hasher.update(&[budget.workload_profile.code()]);
+        hasher.update(&[budget.cut_budget_family]);
+        hasher.update(&budget.max_event_bytes.to_le_bytes());
+        for fidelity in budget.fidelity_budgets {
+            hasher.update(&[fidelity.level]);
+            hasher.update(&fidelity.max_events.to_le_bytes());
+            hasher.update(&fidelity.max_bytes.to_le_bytes());
+            hasher.update(&fidelity.max_cpu_us.to_le_bytes());
+            hasher.update(&fidelity.shared_host_cpu_reservation_us.to_le_bytes());
+        }
+        for reservation in &budget.plugin_cpu_reservations {
+            hasher.update(&reservation.cpu_reservations_us[0].to_le_bytes());
+            hasher.update(&reservation.cpu_reservations_us[1].to_le_bytes());
+            hasher.update(&reservation.cpu_reservations_us[2].to_le_bytes());
+        }
+        hasher.update(&[budget.accounting_semantics]);
+        hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
+        hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
     }
     pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
@@ -2584,7 +2648,7 @@ impl PluginRegistry {
             entry
                 .output_admission
                 .as_ref()
-                .map(|admission| (entry.name.as_str(), admission.policy_digest()))
+                .map(|_| (entry.name.as_str(), replay_policy_identity_digest(entry)))
         })
     }
 

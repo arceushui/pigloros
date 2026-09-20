@@ -26,7 +26,6 @@ pub struct ReproManifest {
     pub created_at: WallTime,
     pub plugin_versions: HashMap<String, String>,
     /// Output-admission policy digests bound to each registered Plugin.
-    #[serde(default)]
     pub output_policy_digests: HashMap<String, Hash>,
     pub adapter_records: Vec<AdapterRecord>,
     /// Human-readable label for this experiment run.

@@ -118,7 +118,6 @@ struct StrictReproManifest {
     head_hash: Hash,
     created_at: WallTime,
     plugin_versions: std::collections::HashMap<String, String>,
-    #[serde(default)]
     output_policy_digests: std::collections::HashMap<String, Hash>,
     adapter_records: Vec<StrictAdapterRecord>,
     label: Option<String>,
@@ -789,7 +788,10 @@ fn reproduce_manifest(
     let recipe = reproduce_cli_recipe(reproduction.recipe)?;
     run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
         .and_then(|reproduced| {
-            if reproduced.manifest.head_hash == reproduction.manifest.head_hash {
+            if reproduced.manifest.head_hash == reproduction.manifest.head_hash
+                && reproduced.manifest.output_policy_digests
+                    == reproduction.manifest.output_policy_digests
+            {
                 output_stdout!("OK");
                 Ok(())
             } else {
