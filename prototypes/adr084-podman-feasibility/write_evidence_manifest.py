@@ -174,7 +174,7 @@ def main() -> None:
         "elm-memory.stdout",
         *(
             f"{scenario}.{suffix}"
-            for scenario in ("elm-tasks", "elm-cpu-throttling", "elm-file")
+            for scenario in ("elm-tasks", "elm-cpu-throttling")
             for suffix in (
                 "eai1",
                 "installed-seccomp.bpf",
@@ -186,6 +186,21 @@ def main() -> None:
                 "release2.cbor",
                 "release-barrier.json",
                 "seccomp-install.json",
+                "stderr",
+                "stdout",
+            )
+        ),
+        *(
+            f"elm-file.{suffix}"
+            for suffix in (
+                "eai1",
+                "json",
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "launcher.json",
+                "ready2.cbor",
+                "release2.cbor",
+                "release-barrier.json",
                 "stderr",
                 "stdout",
             )

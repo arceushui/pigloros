@@ -61,6 +61,9 @@ Every launch also retains the exact `RLIMIT_NOFILE=64:64` and
 `RLIMIT_FSIZE=32768:32768` process readback. NOFILE remains safety evidence only.
 A canonical FILE attempt crosses the file-size limit inside `/work`; only the
 unambiguous SIGXFSZ process result selects terminal code 7 `FileOrOutputLimit`.
+The SIGXFSZ attempt runs without the ptrace install observer so the observer
+cannot suppress or alter the signal; it still validates the exact runtime BPF
+annotation/profile tuple already captured byte-for-byte by the global proof.
 
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,

@@ -786,6 +786,7 @@ def launch(
     expect_annotation_rejection: str | None = None,
     release_mutation: str | None = None,
     release_gate: tuple[pathlib.Path, pathlib.Path] | None = None,
+    trace_seccomp_install: bool = True,
 ) -> tuple[subprocess.Popen[bytes], socket.socket, str] | None:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     if parent_control.fileno() == 3:
@@ -845,14 +846,18 @@ def launch(
     traced_command = (
         [str(prefilter), *podman_command] if prefilter is not None else podman_command
     )
-    command = [
-        str(seccomp_tracer),
-        str(seccomp_bpf),
-        str(installed_bpf),
-        str(install_report),
-        "--",
-        *traced_command,
-    ]
+    command = (
+        [
+            str(seccomp_tracer),
+            str(seccomp_bpf),
+            str(installed_bpf),
+            str(install_report),
+            "--",
+            *traced_command,
+        ]
+        if trace_seccomp_install
+        else traced_command
+    )
 
     saved_fd3: int | None = None
     if child_fd != 3:
@@ -1523,6 +1528,7 @@ def file_limit_scenario(
         barrier_fixture,
         eai1_file,
         scenario,
+        trace_seccomp_install=False,
     )
     assert process.stdin is not None
     assert process.stdout is not None
@@ -1545,8 +1551,10 @@ def file_limit_scenario(
         "podman_oom_killed": state["OOMKilled"],
         "process_limits": snapshot["limits"],
         "return_code": return_code,
+        "runtime_annotations": inspected["Config"]["Annotations"],
         "signal": "SIGXFSZ",
         "signal_number": 25,
+        "seccomp_install_observer": "untraced exact annotation after global install proof",
         "terminal_code": 7,
         "terminal_name": "FileOrOutputLimit",
         "verdict": "unambiguous SIGXFSZ selected FileOrOutputLimit",
