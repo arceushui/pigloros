@@ -790,23 +790,26 @@ fn reproduce_manifest(
     let recipe = reproduce_cli_recipe(reproduction.recipe)?;
     run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
         .and_then(|reproduced| {
-            if reproduced.manifest.head_hash == reproduction.manifest.head_hash
-                && reproduced.manifest.replay_policy_identities
-                    == reproduction.manifest.replay_policy_identities
-                && reproduced
+            let head_matches = reproduced.manifest.head_hash == reproduction.manifest.head_hash;
+            let replay_identities_match = reproduced.manifest.replay_policy_identities
+                == reproduction.manifest.replay_policy_identities;
+            let policy_keys_match = reproduced
+                .manifest
+                .output_policy_digests
+                .keys()
+                .collect::<std::collections::BTreeSet<_>>()
+                == reproduction
                     .manifest
                     .output_policy_digests
                     .keys()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    == reproduction
-                        .manifest
-                        .output_policy_digests
-                        .keys()
-                        .collect::<std::collections::BTreeSet<_>>()
-            {
+                    .collect::<std::collections::BTreeSet<_>>();
+            if head_matches && replay_identities_match && policy_keys_match {
                 output_stdout!("OK");
                 Ok(())
             } else {
+                output_stderr!(
+                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_keys={policy_keys_match}"
+                );
                 output_stdout!("MISMATCH");
                 Err("reproduced chain_head does not match manifest".into())
             }
