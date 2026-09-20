@@ -4703,7 +4703,7 @@ mod tests {
         let mut store_error = gated_registry().with_consent_authority(authority.clone());
         store_error.register_test_driver(Box::new(EmptyDriver));
         store_error
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
         let mut failing_store = AppendFailStore;
         assert!(matches!(
@@ -4711,6 +4711,42 @@ mod tests {
                 .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[],)
                 .test_err(),
             RuntimeError::Store(CoreError::Storage(_))
+        ));
+
+        let mut protected_mismatch = gated_registry().with_consent_authority(authority.clone());
+        protected_mismatch.register_test_driver(Box::new(EmptyDriver));
+        protected_mismatch
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .test_ok();
+        let mut protected_mismatch_store = gated_store();
+        assert!(matches!(
+            protected_mismatch
+                .append_and_commit_step_at(
+                    protected_mismatch_store.as_mut(),
+                    Seq::ZERO,
+                    0,
+                    &append_drafts,
+                )
+                .test_err(),
+            RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource)
+        ));
+
+        let mut public_mismatch = gated_registry();
+        public_mismatch.register_test_driver(Box::new(EmptyDriver));
+        public_mismatch
+            .step_all_anchored(timeline, Seq::ZERO)
+            .test_ok();
+        let mut public_mismatch_store = gated_store();
+        assert!(matches!(
+            public_mismatch
+                .append_and_commit_step_at(
+                    public_mismatch_store.as_mut(),
+                    Seq::ZERO,
+                    0,
+                    &append_drafts,
+                )
+                .test_err(),
+            RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource)
         ));
 
         let mut public_fence = gated_registry().with_consent_authority(authority);
