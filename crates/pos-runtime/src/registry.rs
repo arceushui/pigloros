@@ -4708,7 +4708,7 @@ mod tests {
         let mut failing_store = AppendFailStore;
         assert!(matches!(
             store_error
-                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &append_drafts,)
+                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[],)
                 .test_err(),
             RuntimeError::Store(CoreError::Storage(_))
         ));
