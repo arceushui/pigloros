@@ -50,9 +50,10 @@ use pos_core::{
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureStateResolverV1, ErasureTopologyTransitionPermitV1, KeyRegistryStateV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -1246,7 +1247,7 @@ impl MemoryStore {
             })
     }
 
-    fn fork_visible_timeline(
+    fn fork_timeline_unchecked(
         &mut self,
         parent: TimelineId,
         at_seq: Seq,
@@ -2712,7 +2713,11 @@ impl EventStore for MemoryStore {
         Ok(timeline)
     }
 
-    fn create_timeline_for_host_transition(&mut self, name: &str) -> Result<Timeline, CoreError> {
+    fn create_timeline_for_host_transition(
+        &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        name: &str,
+    ) -> Result<Timeline, CoreError> {
         self.create_timeline(name)
     }
 
@@ -2746,6 +2751,7 @@ impl EventStore for MemoryStore {
 
     fn initialize_timeline_with_key_registry_for_host_transition(
         &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
@@ -2977,18 +2983,19 @@ impl EventStore for MemoryStore {
         self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
             store
                 .ensure_generic_timeline_visibility(parent)
-                .and_then(|()| store.fork_visible_timeline(parent, at_seq, name))
+                .and_then(|()| store.fork_timeline_unchecked(parent, at_seq, name))
         })
     }
 
     fn fork_for_host_transition(
         &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
         parent: TimelineId,
         at_seq: Seq,
         name: &str,
     ) -> Result<Timeline, CoreError> {
         self.ensure_generic_timeline_visibility(parent)
-            .and_then(|()| self.fork_visible_timeline(parent, at_seq, name))
+            .and_then(|()| self.fork_timeline_unchecked(parent, at_seq, name))
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {

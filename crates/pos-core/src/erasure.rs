@@ -400,6 +400,19 @@ pub struct ErasureContainmentGateV1 {
     poisoned: AtomicBool,
 }
 
+/// Capability proving that a store mutation is executing inside the host's
+/// topology-transition fence.
+///
+/// The only safe constructor is the callback passed to
+/// [`ErasureContainmentGateV1::install_from_verified_inventory_transition`].
+/// Store adapters require this capability for raw topology mutations so a
+/// caller cannot bypass successor-inventory publication by calling an adapter
+/// directly.
+#[derive(Debug)]
+pub struct ErasureTopologyTransitionPermitV1 {
+    _private: (),
+}
+
 #[derive(Clone, Default)]
 struct ErasureGateStateV1 {
     inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
@@ -816,7 +829,10 @@ impl ErasureContainmentGateV1 {
     /// inventory, or a host lock is poisoned.
     pub fn install_from_verified_inventory_transition<T>(
         &self,
-        transition: &mut dyn FnMut() -> Result<(ErasureVerifiedInventoryV1, T), ErasureErrorV1>,
+        transition: &mut dyn FnMut(
+            &ErasureTopologyTransitionPermitV1,
+        )
+            -> Result<(ErasureVerifiedInventoryV1, T), ErasureErrorV1>,
     ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureContainmentErrorV1> {
         self.ensure_available()?;
         let _fence = self
@@ -824,7 +840,8 @@ impl ErasureContainmentGateV1 {
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
-        let (candidate, result) = transition().map_err(containment_recovery_failure)?;
+        let permit = ErasureTopologyTransitionPermitV1 { _private: () };
+        let (candidate, result) = transition(&permit).map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(Arc::new(candidate.clone())),
             ..ErasureGateStateV1::default()
@@ -7045,7 +7062,7 @@ mod coverage_paths {
         let mut successor = Some(inventory);
         let mut nested_result = None;
         assert_eq!(
-            gate.install_from_verified_inventory_transition(&mut || {
+            gate.install_from_verified_inventory_transition(&mut |_permit| {
                 let mut effect = || {};
                 nested_result = Some(gate.with_fence(
                     nested_timeline,
@@ -7062,7 +7079,7 @@ mod coverage_paths {
         );
         assert_eq!(nested_result, Some(Ok(())));
         assert_eq!(
-            gate.install_from_verified_inventory_transition(&mut || {
+            gate.install_from_verified_inventory_transition(&mut |_permit| {
                 Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::PolicyConflict)
             }),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
@@ -7073,7 +7090,7 @@ mod coverage_paths {
         poisoned.poison();
         let mut called = false;
         assert_eq!(
-            poisoned.install_from_verified_inventory_transition(&mut || {
+            poisoned.install_from_verified_inventory_transition(&mut |_permit| {
                 called = true;
                 Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::ProvenanceMissing)
             }),

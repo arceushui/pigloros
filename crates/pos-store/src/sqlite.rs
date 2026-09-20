@@ -49,11 +49,11 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
-    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureStateResolverV1,
+    ErasureTopologyTransitionPermitV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -3792,7 +3792,11 @@ impl EventStore for SqliteStore {
         Ok(timeline)
     }
 
-    fn create_timeline_for_host_transition(&mut self, name: &str) -> Result<Timeline, CoreError> {
+    fn create_timeline_for_host_transition(
+        &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        name: &str,
+    ) -> Result<Timeline, CoreError> {
         self.create_timeline(name)
     }
 
@@ -3852,6 +3856,7 @@ impl EventStore for SqliteStore {
 
     fn initialize_timeline_with_key_registry_for_host_transition(
         &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
@@ -4293,6 +4298,7 @@ impl EventStore for SqliteStore {
 
     fn fork_for_host_transition(
         &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
         parent: TimelineId,
         at_seq: Seq,
         name: &str,

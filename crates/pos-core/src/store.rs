@@ -29,7 +29,7 @@ use crate::{
     hasher::Hasher,
     ids::{EventId, TimelineId},
     timeline::{Timeline, TimelineMeta},
-    ErasureContainmentErrorV1, ErasureContainmentGateV1,
+    ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureTopologyTransitionPermitV1,
 };
 use std::sync::Arc;
 
@@ -373,7 +373,11 @@ pub trait EventStore: Send {
     /// # Errors
     /// Returns [`CoreError::Storage`] when the adapter has no host-transition
     /// topology implementation or cannot persist the Timeline.
-    fn create_timeline_for_host_transition(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+    fn create_timeline_for_host_transition(
+        &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        _name: &str,
+    ) -> Result<Timeline, CoreError> {
         Err(CoreError::Storage(
             "host topology transitions are unsupported by this EventStore".to_owned(),
         ))
@@ -675,6 +679,7 @@ pub trait EventStore: Send {
     /// host-owned seam.
     fn fork_for_host_transition(
         &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
         _parent: TimelineId,
         _at_seq: Seq,
         _name: &str,
@@ -899,6 +904,7 @@ pub trait EventStore: Send {
     #[cfg_attr(test, inline(never))]
     fn initialize_timeline_with_key_registry_for_host_transition(
         &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
         _name: &str,
         _expected_registry: &crate::KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
@@ -4302,21 +4308,37 @@ mod key_registry_coverage {
             ),
             Err(CoreError::Storage(_))
         ));
-        assert!(matches!(
-            store.create_timeline_for_host_transition("minimal-host-transition"),
-            Err(CoreError::Storage(_))
-        ));
-        assert!(matches!(
-            store.fork_for_host_transition(TimelineId::new(), Seq::ZERO, "minimal-host-fork"),
-            Err(CoreError::Storage(_))
-        ));
-        assert!(matches!(
-            store.initialize_timeline_with_key_registry_for_host_transition(
-                "minimal-host-ledger",
-                &KeyRegistryStateV1::new(),
-            ),
-            Err(CoreError::Storage(_))
-        ));
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)
+                .map_err(|_| CoreError::Storage("test inventory construction failed".to_owned()))?;
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(matches!(
+                store.create_timeline_for_host_transition(permit, "minimal-host-transition"),
+                Err(CoreError::Storage(_))
+            ));
+            assert!(matches!(
+                store.fork_for_host_transition(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    "minimal-host-fork",
+                ),
+                Err(CoreError::Storage(_))
+            ));
+            assert!(matches!(
+                store.initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "minimal-host-ledger",
+                    &KeyRegistryStateV1::new(),
+                ),
+                Err(CoreError::Storage(_))
+            ));
+            Ok((inventory, ()))
+        };
+        assert!(gate
+            .install_from_verified_inventory_transition(&mut transition)
+            .is_ok());
         Ok(())
     }
 
