@@ -153,9 +153,27 @@ def main() -> None:
     paths = enumerate_paths(program, nr, arch)
     native = z3.BitVecVal(AUDIT_ARCH[arguments.architecture], 32)
     is_allowed = z3.Or([nr == z3.BitVecVal(value, 32) for value in sorted(allowed)])
-    expected_native = z3.If(
+    native_rule_result = z3.If(
         is_allowed, z3.BitVecVal(ALLOW, 32), z3.BitVecVal(ERRNO_4094, 32)
     )
+    if arguments.architecture == "x86_64":
+        x32_kill_domain = z3.And(
+            z3.UGE(nr, z3.BitVecVal(0x40000000, 32)),
+            nr != z3.BitVecVal(0xFFFFFFFF, 32),
+        )
+        expected_native = z3.If(
+            x32_kill_domain, z3.BitVecVal(KILL, 32), native_rule_result
+        )
+        native_domain_proof = {
+            "below_x32_bit": "numeric interface allow set; every other number ERRNO|4094",
+            "x32_kill_range": "0x40000000..0xfffffffe => SCMP_ACT_KILL",
+            "tracer_skip_sentinel": "0xffffffff => ERRNO|4094",
+        }
+    else:
+        expected_native = native_rule_result
+        native_domain_proof = {
+            "all_unsigned_numbers": "numeric interface allow set; every other number ERRNO|4094"
+        }
     solver = z3.Solver()
     for condition, result in paths:
         solver.push()
@@ -181,9 +199,10 @@ def main() -> None:
         "byte_length": len(raw),
         "instruction_count": len(program),
         "numeric_allow_count": len(allowed),
+        "native_domain_proof": native_domain_proof,
         "path_count": len(paths),
         "pnr_no_rule": pnr,
-        "proof": "all unsigned-32-bit native syscall numbers exact; every foreign architecture killed",
+        "proof": "all unsigned-32-bit native syscall numbers exact; every foreign audit architecture killed",
     }
     arguments.report.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"

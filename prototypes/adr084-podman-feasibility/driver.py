@@ -20,18 +20,21 @@ def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]
     return subprocess.run(arguments, check=check, text=True, capture_output=True)
 
 
-def wait_for_file(path: pathlib.Path, process: subprocess.Popen[bytes]) -> str:
+def wait_for_container(name: str, process: subprocess.Popen[bytes]) -> str:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        if path.exists():
-            value = path.read_text(encoding="utf-8").strip()
-            if value:
-                return value
+        inspected = run("/usr/bin/podman", "inspect", name, check=False)
+        if inspected.returncode == 0:
+            value = json.loads(inspected.stdout)
+            if len(value) == 1 and value[0].get("Id"):
+                return str(value[0]["Id"])
         if process.poll() is not None:
             stderr = process.stderr.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"podman exited before cidfile: {process.returncode}: {stderr}")
+            raise RuntimeError(
+                f"podman exited before identity acquisition: {process.returncode}: {stderr}"
+            )
         time.sleep(0.05)
-    raise TimeoutError("cidfile was not published")
+    raise TimeoutError("container identity was not acquired through provider-owned name")
 
 
 def read_text(path: pathlib.Path) -> str:
@@ -139,7 +142,7 @@ def launch(
     artifact_dir: pathlib.Path,
     input_bytes: bytes,
     scenario: str,
-) -> tuple[subprocess.Popen[bytes], socket.socket, str, pathlib.Path]:
+) -> tuple[subprocess.Popen[bytes], socket.socket, str]:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     if parent_control.fileno() == 3:
         relocated_parent = socket.socket(fileno=os.dup(parent_control.fileno()))
@@ -147,7 +150,6 @@ def launch(
         parent_control = relocated_parent
     child_fd = child_control.fileno()
     child_control.set_inheritable(True)
-    cidfile = artifact_dir / f"{scenario}.cid"
     name = f"pigloros-adr084-{scenario}-{uuid.uuid4().hex[:12]}"
     command = [
         "/usr/bin/podman",
@@ -155,7 +157,6 @@ def launch(
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
-        f"--cidfile={cidfile}",
         "--preserve-fds=1",
         "--network=none",
         "--no-hosts",
@@ -204,7 +205,7 @@ def launch(
                 os.dup2(saved_fd3, 3)
                 os.close(saved_fd3)
     child_control.close()
-    container_id = wait_for_file(cidfile, process)
+    container_id = wait_for_container(name, process)
     ready = parent_control.recv(64)
     if ready != b"READY\n":
         return_code = process.wait(timeout=10)
@@ -247,7 +248,7 @@ def launch(
     assert process.stdin is not None
     process.stdin.write(input_bytes)
     process.stdin.flush()
-    return process, parent_control, container_id, cidfile
+    return process, parent_control, container_id
 
 
 def normal_scenario(
@@ -256,7 +257,7 @@ def normal_scenario(
     seccomp_bpf_base64: str,
     artifact_dir: pathlib.Path,
 ) -> None:
-    process, control, container_id, _ = launch(
+    process, control, container_id = launch(
         image, seccomp, seccomp_bpf_base64, artifact_dir, b"hello\n", "normal"
     )
     assert process.stdin is not None
@@ -282,7 +283,7 @@ def cancellation_scenario(
     seccomp_bpf_base64: str,
     artifact_dir: pathlib.Path,
 ) -> None:
-    process, control, container_id, _ = launch(
+    process, control, container_id = launch(
         image, seccomp, seccomp_bpf_base64, artifact_dir, b"HOLD\n", "cancel"
     )
     assert process.stdout is not None
