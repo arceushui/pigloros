@@ -349,7 +349,7 @@ def main() -> None:
         "RLS2", 2, identifier(1), digest(1),
         bytes.fromhex(ready_vector["self_digest_hex"]), digest(3), digest(4),
         digest(5), 6, 7, 8, rbs_digest, rbs_digest, launch_anchor,
-        launch_anchor + watchdog_ms * 1_000_000, key_id(2),
+        launch_anchor + watchdog_ms * 1_000_000, key_id(1),
     ]
     vectors.extend(
         [
