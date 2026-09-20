@@ -294,7 +294,9 @@ mod coverage_paths {
         let mut store = gated_store();
         assert!(matches!(
             registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
-            Err(RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource))
+            Err(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            ))
         ));
     }
 
@@ -327,7 +329,9 @@ mod coverage_paths {
         let mut store = gated_store();
         assert!(matches!(
             registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
-            Err(RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource))
+            Err(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            ))
         ));
     }
 
