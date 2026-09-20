@@ -1340,22 +1340,19 @@ def memory_limit_scenario(
     cgroup_path = pathlib.Path(snapshot["cgroup_path"])
     baseline_text = snapshot["cgroup_values"]["memory.events.local"]
     baseline = parse_cgroup_events(baseline_text)
+    events_fd = os.open(cgroup_path / "memory.events.local", os.O_RDONLY)
     process.stdin.close()
     final = baseline
     observation_deadline = time.monotonic() + 20
     while time.monotonic() < observation_deadline:
-        current_text = read_text(cgroup_path / "memory.events.local").strip()
-        if not current_text.startswith("UNAVAILABLE:"):
-            final = parse_cgroup_events(current_text)
-            if final.get("oom_kill", 0) > baseline.get("oom_kill", 0):
-                break
-        if process.poll() is not None and not cgroup_path.exists():
+        current_text = os.pread(events_fd, 4096, 0).decode("ascii").strip()
+        final = parse_cgroup_events(current_text)
+        if final.get("oom_kill", 0) > baseline.get("oom_kill", 0):
             break
         time.sleep(0.01)
     return_code = process.wait(timeout=20)
-    final_text = read_text(cgroup_path / "memory.events.local").strip()
-    if not final_text.startswith("UNAVAILABLE:"):
-        final = parse_cgroup_events(final_text)
+    final = parse_cgroup_events(os.pread(events_fd, 4096, 0).decode("ascii").strip())
+    os.close(events_fd)
     output = process.stdout.read()
     errors = process.stderr.read()
     control.close()
