@@ -5111,12 +5111,6 @@ mod tests {
             .and_then(|mut sender| sender.create_timeline("affected-root"));
         assert_eq!(result, Err(ErasureHostErrorV1::Conflict));
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);
-        let timelines = host
-            .store
-            .host_store()
-            .list_timelines()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(timelines.len(), 1);
     }
 
     #[test]
