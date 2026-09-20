@@ -8256,6 +8256,26 @@ mod backtest_tests {
             result.train_result.timeline_id,
             result.eval_result.timeline_id
         );
+        assert!(result
+            .train_result
+            .manifest
+            .output_policy_digests
+            .contains_key("bt-plugin"));
+        assert!(result
+            .train_result
+            .manifest
+            .replay_policy_identities
+            .contains_key("bt-plugin"));
+        assert!(result
+            .eval_result
+            .manifest
+            .output_policy_digests
+            .contains_key("bt-plugin"));
+        assert!(result
+            .eval_result
+            .manifest
+            .replay_policy_identities
+            .contains_key("bt-plugin"));
         // Lift metrics should be populated
         assert!(result.train_avg_events_per_tick > 0.0);
         assert!(result.eval_avg_events_per_tick > 0.0);
