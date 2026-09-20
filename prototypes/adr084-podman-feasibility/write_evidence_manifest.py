@@ -40,11 +40,13 @@ def main() -> None:
             arguments.prototype_dir / foreign_source_name,
         ),
         ("prototype/prepare_seccomp.py", arguments.prototype_dir / "prepare_seccomp.py"),
+        ("prototype/prefilter_exec.c", arguments.prototype_dir / "prefilter_exec.c"),
         ("prototype/trace_seccomp.c", arguments.prototype_dir / "trace_seccomp.c"),
         ("prototype/verify_seccomp_bpf.py", arguments.prototype_dir / "verify_seccomp_bpf.py"),
         ("prototype/Containerfile", arguments.prototype_dir / "Containerfile"),
         ("build/compile-seccomp", arguments.build_dir / "compile-seccomp"),
         ("build/trace-seccomp", arguments.build_dir / "trace-seccomp"),
+        ("build/prefilter-exec", arguments.build_dir / "prefilter-exec"),
         (
             "build/libseccomp-2.6.1.tar.gz",
             arguments.build_dir / "libseccomp-2.6.1.tar.gz",
@@ -98,6 +100,12 @@ def main() -> None:
         "probe.seccomp-install.json",
         "probe.stderr",
         "probe.stdout",
+        "provider-seccomp-baseline.txt",
+        "stacked.installed-seccomp.bpf",
+        "stacked.seccomp-install.json",
+        "stacked-rejection.json",
+        "stacked.stderr",
+        "stacked.stdout",
         *(
             f"cache-{state}.{suffix}"
             for state in ("empty", "valid", "stale", "corrupt", "adversarial")

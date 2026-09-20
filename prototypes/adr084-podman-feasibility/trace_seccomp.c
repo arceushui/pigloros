@@ -272,6 +272,7 @@ int main(int argc, char **argv) {
     unsigned int other_install_attempts = 0;
     unsigned int unreadable_install_attempts = 0;
     bool install_succeeded = false;
+    bool installer_exec_observed = false;
     pid_t installer = -1;
     int child_status = 0;
     bool child_reaped = false;
@@ -306,6 +307,9 @@ int main(int argc, char **argv) {
                 fail("fork-event");
             }
             add_traced((pid_t)new_pid);
+        }
+        if (event == PTRACE_EVENT_EXEC && pid == installer && install_succeeded) {
+            installer_exec_observed = true;
         }
 
         struct traced_process *process = find_traced(pid);
@@ -385,7 +389,11 @@ int main(int argc, char **argv) {
             signal != SIGTRAP) {
             deliver = signal;
         }
-        if (ptrace(PTRACE_SYSCALL, pid, 0, deliver) == -1 && errno != ESRCH) {
+        int request =
+            install_succeeded && (pid != installer || installer_exec_observed)
+                ? PTRACE_CONT
+                : PTRACE_SYSCALL;
+        if (ptrace(request, pid, 0, deliver) == -1 && errno != ESRCH) {
             fail("continue");
         }
     }

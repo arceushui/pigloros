@@ -65,6 +65,8 @@ case "${evidence_architecture}" in
 esac
 cc -O2 -Wall -Wextra -Werror -o "${build_dir}/trace-seccomp" \
   "${prototype_dir}/trace_seccomp.c"
+cc -O2 -Wall -Wextra -Werror -o "${build_dir}/prefilter-exec" \
+  "${prototype_dir}/prefilter_exec.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 
 libseccomp_archive="${build_dir}/libseccomp-2.6.1.tar.gz"
@@ -153,6 +155,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
   --seccomp-bpf "${seccomp_dir}/exported-seccomp.bpf" \
   --seccomp-tracer "${build_dir}/trace-seccomp" \
+  --prefilter "${build_dir}/prefilter-exec" \
   --artifact-dir "${artifact_dir}"
 
 python3 "${prototype_dir}/write_evidence_manifest.py" \

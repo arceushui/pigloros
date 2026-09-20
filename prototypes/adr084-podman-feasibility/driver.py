@@ -111,12 +111,14 @@ def process_snapshot(pid: int) -> dict[str, object]:
     }
 
 
-def assert_launcher_snapshot(snapshot: dict[str, object]) -> None:
+def assert_launcher_snapshot(
+    snapshot: dict[str, object], expected_filter_count: int = 1
+) -> None:
     status = str(snapshot["status"])
     required_status = (
         "NoNewPrivs:\t1",
         "Seccomp:\t2",
-        "Seccomp_filters:\t1",
+        f"Seccomp_filters:\t{expected_filter_count}",
         "CapEff:\t0000000000000000",
     )
     for expected in required_status:
@@ -152,6 +154,9 @@ def launch(
     artifact_dir: pathlib.Path,
     input_bytes: bytes,
     scenario: str,
+    prefilter: pathlib.Path | None = None,
+    expected_filter_count: int = 1,
+    release: bool = True,
 ) -> tuple[subprocess.Popen[bytes], socket.socket, str]:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     if parent_control.fileno() == 3:
@@ -193,13 +198,16 @@ def launch(
     ]
     installed_bpf = artifact_dir / f"{scenario}.installed-seccomp.bpf"
     install_report = artifact_dir / f"{scenario}.seccomp-install.json"
+    traced_command = (
+        [str(prefilter), *podman_command] if prefilter is not None else podman_command
+    )
     command = [
         str(seccomp_tracer),
         str(seccomp_bpf),
         str(installed_bpf),
         str(install_report),
         "--",
-        *podman_command,
+        *traced_command,
     ]
 
     saved_fd3: int | None = None
@@ -260,14 +268,15 @@ def launch(
         )
     pid = int(inspected["State"]["Pid"])
     snapshot = process_snapshot(pid)
-    assert_launcher_snapshot(snapshot)
+    assert_launcher_snapshot(snapshot, expected_filter_count)
     (artifact_dir / f"{scenario}.launcher.json").write_text(
         json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    parent_control.sendall(b"RELEASE\n")
-    assert process.stdin is not None
-    process.stdin.write(input_bytes)
-    process.stdin.flush()
+    if release:
+        parent_control.sendall(b"RELEASE\n")
+        assert process.stdin is not None
+        process.stdin.write(input_bytes)
+        process.stdin.flush()
     return process, parent_control, container_id
 
 
@@ -349,6 +358,62 @@ def cancellation_scenario(
     if residual:
         raise AssertionError(f"descendants survived cancellation: {residual}")
     run("/usr/bin/podman", "rm", "--force", container_id)
+
+
+def stacked_filter_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    prefilter: pathlib.Path,
+    artifact_dir: pathlib.Path,
+) -> None:
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        b"",
+        "stacked",
+        prefilter=prefilter,
+        expected_filter_count=2,
+        release=False,
+    )
+    assert process.stdin is not None
+    process.stdin.close()
+    run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
+    return_code = process.wait(timeout=20)
+    control.close()
+    assert process.stdout is not None
+    assert process.stderr is not None
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    (artifact_dir / "stacked.stdout").write_bytes(output)
+    (artifact_dir / "stacked.stderr").write_bytes(errors)
+    if output or return_code == 0:
+        raise AssertionError(
+            f"stacked filter was not denied before release: code={return_code} "
+            f"output={output!r} stderr={errors!r}"
+        )
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    (artifact_dir / "stacked-rejection.json").write_text(
+        json.dumps(
+            {
+                "adapter_output_bytes": 0,
+                "observed_filter_count": 2,
+                "release_sent": False,
+                "return_code": return_code,
+                "verdict": "denied before release",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def seccomp_probe_scenario(
@@ -594,9 +659,22 @@ def main() -> None:
     parser.add_argument("--seccomp-bpf-base64", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-bpf", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-tracer", required=True, type=pathlib.Path)
+    parser.add_argument("--prefilter", required=True, type=pathlib.Path)
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
+    provider_status = read_text(pathlib.Path("/proc/self/status"))
+    if "Seccomp:\t0" not in provider_status or "Seccomp_filters:\t0" not in provider_status:
+        raise AssertionError("provider process did not begin with a clean seccomp baseline")
+    (arguments.artifact_dir / "provider-seccomp-baseline.txt").write_text(
+        "\n".join(
+            line
+            for line in provider_status.splitlines()
+            if line.startswith(("NoNewPrivs:", "Seccomp:", "Seccomp_filters:"))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     seccomp_bpf_base64 = arguments.seccomp_bpf_base64.read_text(
         encoding="ascii"
     )
@@ -618,6 +696,15 @@ def main() -> None:
         seccomp_bpf_base64,
         arguments.seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+    )
+    stacked_filter_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.prefilter.resolve(),
         arguments.artifact_dir,
     )
     seccomp_probe_scenario(
