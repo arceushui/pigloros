@@ -496,8 +496,8 @@ fn generated_registration_rejects_invalid_owned_event_declaration() {
 #[test]
 fn explicit_registration_rejects_policy_budget_identity_mismatch() -> TestResult {
     let plugin_id = PluginId::new();
-    let budget = budget(plugin_id)?;
-    let policy = policy(plugin_id, &budget)?;
+    let executable_budget = budget(plugin_id)?;
+    let policy = policy(plugin_id, &executable_budget)?;
     let other_budget = budget(PluginId::new())?;
     let mut registry = PluginRegistry::new();
     assert!(matches!(
