@@ -149,7 +149,7 @@ mod coverage_paths {
         let timeline = TimelineId::new();
         let observed = Arc::new(Mutex::new(Vec::new()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RecoveryVisibilityDriver {
+        registry.register_test_driver(Box::new(RecoveryVisibilityDriver {
             observed: Arc::clone(&observed),
         }));
         let event = Event {
@@ -227,7 +227,7 @@ mod coverage_paths {
         let timeline = TimelineId::new();
         let committed = Arc::new(Mutex::new(false));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RestoreDriver {
+        registry.register_test_driver(Box::new(RestoreDriver {
             committed: Arc::clone(&committed),
         }));
         assert!(registry.step_all(timeline).is_ok());
@@ -288,10 +288,10 @@ mod coverage_paths {
         let timeline = TimelineId::new();
         let aborts = Arc::new(Mutex::new(0));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RestoreDriver {
+        registry.register_test_driver(Box::new(RestoreDriver {
             committed: Arc::new(Mutex::new(false)),
         }));
-        registry.register_driver(Box::new(RestoreFailureDriver {
+        registry.register_test_driver(Box::new(RestoreFailureDriver {
             aborts: Arc::clone(&aborts),
         }));
 
@@ -377,7 +377,7 @@ mod coverage_entrypoints {
     #[test]
     fn restore_and_cadence_entrypoints_update_driver_state() {
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(NoopDriver));
+        registry.register_test_driver(Box::new(NoopDriver));
         let timeline = TimelineId::new();
         let restore_event = event("coverage.restore", 1);
         assert!(registry
@@ -395,7 +395,7 @@ mod coverage_entrypoints {
     fn restore_commit_and_cursor_paths_are_exercised_at_a_public_seam() {
         let committed = std::sync::Arc::new(std::sync::Mutex::new(false));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(CommitTrackingDriver {
+        registry.register_test_driver(Box::new(CommitTrackingDriver {
             committed: std::sync::Arc::clone(&committed),
         }));
         let timeline = TimelineId::new();
@@ -548,7 +548,7 @@ mod coverage_entrypoints {
         let timeline = TimelineId::new();
         let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(marker_driver::DriverImpl {
+        registry.register_test_driver(Box::new(marker_driver::DriverImpl {
             observed: std::sync::Arc::clone(&observed),
         }));
         let events = vec![
@@ -667,6 +667,11 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     if drafts.is_empty() {
         return Ok(());
     }
+    // The direct-driver seam is deliberately test-only. Production Plugin
+    // registration always carries an explicit or generated admission policy.
+    if entry.test_only_driver {
+        return Ok(());
+    }
     let Some(admission) = entry.output_admission.as_ref() else {
         return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
             event_type: "<unregistered-output-policy>".to_owned(),
@@ -699,6 +704,7 @@ struct PluginEntry {
     event_cursor: Seq,
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
+    test_only_driver: bool,
 }
 
 struct RegistrationOptions {
@@ -2528,6 +2534,7 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: options.registration,
                 output_admission: options.output_admission,
+                test_only_driver: false,
             },
         );
         Ok(())
@@ -2561,8 +2568,9 @@ impl PluginRegistry {
         self.plugins.values().map(plugin_name_and_version)
     }
 
-    /// Register a driver directly (for tests and late-bound agent registration).
-    pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
+    /// Register a direct driver in a test-only harness.
+    #[doc(hidden)]
+    pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {
         let name = driver.name().to_owned();
         self.plugins.insert(
             pos_core::ids::PluginId::new(),
@@ -2576,6 +2584,7 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                test_only_driver: true,
             },
         );
     }
@@ -3276,7 +3285,7 @@ mod tests {
 
         let aborted = Arc::new(Mutex::new(false));
         let mut registry = gated_registry().with_resource_limit(1);
-        registry.register_driver(Box::new(BudgetDriver {
+        registry.register_test_driver(Box::new(BudgetDriver {
             aborted: Arc::clone(&aborted),
         }));
         let error = registry
@@ -3292,7 +3301,7 @@ mod tests {
         let timeline = TimelineId::new();
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "transactional",
             state: Arc::clone(&state),
             interval: Duration::from_nanos(100),
@@ -3354,7 +3363,7 @@ mod tests {
         let mut registry = gated_registry();
         let driverless = simple_plugin("restore-driverless", &[]);
         registry.register(&driverless, None, None).test_ok();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "restoring",
             state: Arc::clone(&state),
             interval: Duration::from_nanos(1),
@@ -3420,7 +3429,7 @@ mod tests {
 
         let timeline = TimelineId::new();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RestoreCommitPanickingDriver));
+        registry.register_test_driver(Box::new(RestoreCommitPanickingDriver));
         let error = registry
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
             .test_err();
@@ -3450,7 +3459,7 @@ mod tests {
         }
 
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(StepCommitPanickingDriver));
+        registry.register_test_driver(Box::new(StepCommitPanickingDriver));
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
@@ -3523,11 +3532,11 @@ mod tests {
         let mut registry = gated_registry();
         let driverless = simple_plugin("failed-restore-driverless", &[]);
         registry.register(&driverless, None, None).test_ok();
-        registry.register_driver(Box::new(RestoreDriver {
+        registry.register_test_driver(Box::new(RestoreDriver {
             state: Arc::clone(&first),
             rejects: false,
         }));
-        registry.register_driver(Box::new(RestoreDriver {
+        registry.register_test_driver(Box::new(RestoreDriver {
             state: Arc::clone(&second),
             rejects: true,
         }));
@@ -3557,13 +3566,13 @@ mod tests {
         let first = Arc::new(Mutex::new(TransactionState::default()));
         let failed = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "first",
             state: Arc::clone(&first),
             interval: Duration::from_nanos(1),
             fail: false,
         }));
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "failed",
             state: Arc::clone(&failed),
             interval: Duration::from_nanos(1),
@@ -3585,7 +3594,7 @@ mod tests {
         let timeline = TimelineId::new();
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "cadenced-provider",
             state: Arc::clone(&state),
             interval: Duration::from_nanos(100),
@@ -4164,7 +4173,7 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("t").test_ok();
         let mut reg = gated_registry();
-        reg.register_driver(Box::new(FailingDriver));
+        reg.register_test_driver(Box::new(FailingDriver));
 
         let error = reg.step_all(timeline.id()).test_err();
         assert!(error.to_string().contains("failing"));
@@ -4198,7 +4207,7 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("driver-geo").test_ok();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(GeographicDriver));
+        registry.register_test_driver(Box::new(GeographicDriver));
         assert!(matches!(
             registry.step_all(timeline.id()),
             Err(RuntimeError::GeographicDraft { .. })
@@ -4253,7 +4262,7 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("driver-consent").test_ok();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(ConsentDriver));
+        registry.register_test_driver(Box::new(ConsentDriver));
         assert!(matches!(
             registry.step_all(timeline.id()),
             Err(RuntimeError::ConsentDraft { .. })
@@ -4264,7 +4273,7 @@ mod tests {
         ));
 
         let mut allowed = gated_registry();
-        allowed.register_driver(Box::new(AllowedDriver));
+        allowed.register_test_driver(Box::new(AllowedDriver));
         assert_eq!(allowed.tick_cadenced(timeline.id(), 0).test_ok().len(), 1);
     }
 
@@ -4346,7 +4355,7 @@ mod tests {
         };
         let token = authority.record_grant_on_timeline(timeline.id(), &grant);
         reg = reg.with_consent_authority(authority);
-        reg.register_driver(Box::new(ObservingDriver {
+        reg.register_test_driver(Box::new(ObservingDriver {
             target: ProjectionKey::new(observed_entity),
             entity: EntityId::new(),
         }));
@@ -4547,7 +4556,7 @@ mod tests {
         )];
 
         let mut missing_gate = gated_registry().with_consent_authority(authority.clone());
-        missing_gate.register_driver(Box::new(EmptyDriver));
+        missing_gate.register_test_driver(Box::new(EmptyDriver));
         missing_gate
             .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
@@ -4566,7 +4575,7 @@ mod tests {
         ));
 
         let mut store_error = gated_registry().with_consent_authority(authority.clone());
-        store_error.register_driver(Box::new(EmptyDriver));
+        store_error.register_test_driver(Box::new(EmptyDriver));
         store_error
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .test_ok();
@@ -4579,7 +4588,7 @@ mod tests {
         ));
 
         let mut public_fence = gated_registry().with_consent_authority(authority);
-        public_fence.register_driver(Box::new(EmptyDriver));
+        public_fence.register_test_driver(Box::new(EmptyDriver));
         let drafts = public_fence
             .step_all_anchored(timeline, Seq::ZERO)
             .test_ok();
@@ -4593,7 +4602,7 @@ mod tests {
         ));
 
         let mut public_replacement = gated_registry();
-        public_replacement.register_driver(Box::new(EmptyDriver));
+        public_replacement.register_test_driver(Box::new(EmptyDriver));
         public_replacement
             .step_all_anchored(timeline, Seq::ZERO)
             .test_ok();
@@ -4768,7 +4777,7 @@ mod tests {
         };
         let _token = authority.record_grant_on_timeline(timeline, &grant);
         let mut registry = gated_registry().with_consent_authority(authority);
-        registry.register_driver(Box::new(SensitiveDriver { subject }));
+        registry.register_test_driver(Box::new(SensitiveDriver { subject }));
         assert!(matches!(
             registry.tick_cadenced(timeline, 0).test_err(),
             RuntimeError::Consent(ConsentError::NoConsent)
@@ -4814,12 +4823,12 @@ mod tests {
         let overflow_steps = Arc::new(AtomicUsize::new(0));
         let untouched_steps = Arc::new(AtomicUsize::new(0));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(CadenceDriver {
+        registry.register_test_driver(Box::new(CadenceDriver {
             name: "overflow-driver",
             interval: Duration::from_nanos(2),
             steps: Arc::clone(&overflow_steps),
         }));
-        registry.register_driver(Box::new(CadenceDriver {
+        registry.register_test_driver(Box::new(CadenceDriver {
             name: "must-not-step",
             interval: Duration::from_nanos(1),
             steps: Arc::clone(&untouched_steps),
@@ -4841,7 +4850,7 @@ mod tests {
         assert_eq!(untouched_steps.load(Ordering::SeqCst), 1);
 
         let mut anchored = gated_registry();
-        anchored.register_driver(Box::new(CadenceDriver {
+        anchored.register_test_driver(Box::new(CadenceDriver {
             name: "anchored-overflow",
             interval: Duration::from_nanos(2),
             steps: Arc::new(AtomicUsize::new(0)),
@@ -4901,7 +4910,7 @@ mod tests {
             ("cadence.middle", Duration::from_nanos(2)),
             ("cadence.third", Duration::from_nanos(1)),
         ] {
-            registry.register_driver(Box::new(OrderedDriver { name, interval }));
+            registry.register_test_driver(Box::new(OrderedDriver { name, interval }));
         }
 
         let timeline = TimelineId::new();
@@ -5013,11 +5022,11 @@ mod tests {
         let token = authority.record_grant_on_timeline(timeline.id(), &grant);
         let mut reg = gated_registry().with_consent_authority(authority);
 
-        reg.register_driver(Box::new(SnapshotDriver {
+        reg.register_test_driver(Box::new(SnapshotDriver {
             key: shared_key.clone(),
             observed: observed.clone(),
         }));
-        reg.register_driver(Box::new(SnapshotDriver {
+        reg.register_test_driver(Box::new(SnapshotDriver {
             key: shared_key,
             observed: observed.clone(),
         }));
@@ -5630,7 +5639,7 @@ mod coverage_public_error_paths {
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut mismatch = gated_registry().with_consent_authority(authority);
-        mismatch.register_driver(Box::new(MismatchedSensitiveDriver {
+        mismatch.register_test_driver(Box::new(MismatchedSensitiveDriver {
             entity: EntityId::new(),
         }));
         assert!(mismatch
@@ -5646,7 +5655,7 @@ mod coverage_public_error_paths {
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut commit = gated_registry().with_consent_authority(authority.clone());
-        commit.register_driver(Box::new(EmptyDriver));
+        commit.register_test_driver(Box::new(EmptyDriver));
         assert!(commit
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());
@@ -5662,7 +5671,7 @@ mod coverage_public_error_paths {
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut fenced_append = gated_registry().with_consent_authority(authority.clone());
-        fenced_append.register_driver(Box::new(EmptyDriver));
+        fenced_append.register_test_driver(Box::new(EmptyDriver));
         assert!(fenced_append
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());
@@ -5679,7 +5688,7 @@ mod coverage_public_error_paths {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(timeline, &grant(EntityId::new()));
         let mut protected_append = gated_registry().with_consent_authority(authority);
-        protected_append.register_driver(Box::new(EmptyDriver));
+        protected_append.register_test_driver(Box::new(EmptyDriver));
         assert!(protected_append
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());
@@ -5694,7 +5703,7 @@ mod coverage_public_error_paths {
     fn missing_gate_rejects_staged_public_append() {
         let timeline = TimelineId::new();
         let mut public_append = gated_registry();
-        public_append.register_driver(Box::new(EmptyDriver));
+        public_append.register_test_driver(Box::new(EmptyDriver));
         assert!(public_append.step_all_anchored(timeline, Seq::ZERO).is_ok());
         public_append = public_append.without_consent_gate();
         let mut store = memory_store();

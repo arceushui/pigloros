@@ -147,8 +147,8 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(1))));
-        reg.register_driver(Box::new(FastDriver::new()));
+        reg.register_test_driver(Box::new(SlowDriver::new(Duration::from_secs(1))));
+        reg.register_test_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         let drafts = sched.tick(tl.id(), 0).test_ok();
         assert_eq!(drafts.len(), 2);
@@ -160,8 +160,8 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(10))));
-        reg.register_driver(Box::new(FastDriver::new()));
+        reg.register_test_driver(Box::new(SlowDriver::new(Duration::from_secs(10))));
+        reg.register_test_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         sched.tick(tl.id(), 0).test_ok();
         let drafts = sched.tick(tl.id(), 1).test_ok();
@@ -174,8 +174,8 @@ mod tests {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
         let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver::new(Duration::from_millis(100))));
-        reg.register_driver(Box::new(FastDriver::new()));
+        reg.register_test_driver(Box::new(SlowDriver::new(Duration::from_millis(100))));
+        reg.register_test_driver(Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         sched.tick(tl.id(), 0).test_ok();
         let d = sched.tick(tl.id(), 50_000_000).test_ok();

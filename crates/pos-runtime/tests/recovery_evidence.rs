@@ -195,8 +195,8 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
     let observed = Arc::new(Mutex::new(None));
 
     let mut registry = gated_registry();
-    registry.register_driver(Box::new(DefaultRecoveryDriver));
-    registry.register_driver(Box::new(InspectingRecoveryDriver {
+    registry.register_test_driver(Box::new(DefaultRecoveryDriver));
+    registry.register_test_driver(Box::new(InspectingRecoveryDriver {
         selected_entity: selected,
         observed: Arc::clone(&observed),
     }));
@@ -209,8 +209,8 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
     assert_eq!(payloads, vec![Some(vec![1]), None]);
 
     let mut rejected = gated_registry();
-    rejected.register_driver(Box::new(DefaultRecoveryDriver));
-    rejected.register_driver(Box::new(RejectingRecoveryDriver));
+    rejected.register_test_driver(Box::new(DefaultRecoveryDriver));
+    rejected.register_test_driver(Box::new(RejectingRecoveryDriver));
     assert!(rejected.restore_driver_state(&segments, &events).is_err());
 }
 
@@ -218,7 +218,7 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
 fn replay_rejects_driver_recovery_before_invocation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut replay = PluginRegistry::new_replay();
-    replay.register_driver(Box::new(CountingRecoveryDriver(Arc::clone(&calls))));
+    replay.register_test_driver(Box::new(CountingRecoveryDriver(Arc::clone(&calls))));
 
     assert_eq!(
         replay
@@ -238,7 +238,7 @@ fn registry_rejects_incomplete_recovery_before_any_driver_is_staged() {
     let timeline = TimelineId::new();
     let observed = Arc::new(Mutex::new(None));
     let mut registry = gated_registry();
-    registry.register_driver(Box::new(InspectingRecoveryDriver {
+    registry.register_test_driver(Box::new(InspectingRecoveryDriver {
         selected_entity: EntityId::new(),
         observed: Arc::clone(&observed),
     }));
@@ -297,7 +297,7 @@ fn registry_recovery_boundary_rejects_each_invalid_source_shape() {
 
     for (segments, events) in cases {
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(DefaultRecoveryDriver));
+        registry.register_test_driver(Box::new(DefaultRecoveryDriver));
         assert!(matches!(
             registry.restore_driver_state(&segments, &events),
             Err(RuntimeError::InvalidRecoveryEvidence { .. })
@@ -317,7 +317,7 @@ fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
     driverless.restore_driver_state(&segments, &[]).test_ok();
 
     let mut pending = gated_registry();
-    pending.register_driver(Box::new(DefaultRecoveryDriver));
+    pending.register_test_driver(Box::new(DefaultRecoveryDriver));
     pending.step_all_anchored(timeline, Seq::ZERO).test_ok();
     assert!(matches!(
         pending.restore_driver_state(&segments, &[]),
@@ -334,7 +334,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
         id: PluginId::new(),
     };
     registry.register(&plugin, None, None).test_ok();
-    registry.register_driver(Box::new(DefaultRecoveryDriver));
+    registry.register_test_driver(Box::new(DefaultRecoveryDriver));
     registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
     registry.commit_step_at(Seq::ZERO, 0).test_ok();
     registry.commit_step_at(Seq::ZERO, 0).test_ok();
@@ -356,7 +356,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     };
     let token = authority.record_grant_on_timeline(timeline, &grant);
     cadenced = cadenced.with_consent_authority(authority);
-    cadenced.register_driver(Box::new(CadencedDriver {
+    cadenced.register_test_driver(Box::new(CadencedDriver {
         subscriptions: vec![key],
     }));
     cadenced

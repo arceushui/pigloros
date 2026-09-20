@@ -517,7 +517,7 @@ mod tests {
             ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
         registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-        registry.register_driver(Box::new(driver));
+        registry.register_test_driver(Box::new(driver));
         DriverFixture {
             registry,
             calls,
@@ -1272,7 +1272,7 @@ mod tests {
         );
         driver.staged_restore_tick = Some(5);
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(driver));
+        registry.register_test_driver(Box::new(driver));
         let timeline = TimelineId::new();
         let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
         let err = registry.restore_driver_state(&segments, &[]).test_err();

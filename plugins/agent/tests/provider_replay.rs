@@ -437,7 +437,7 @@ fn registry_passes_recovery_evidence_to_the_driver_verifier() {
     )
     .test_ok();
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(AncestryCheckingDriver { verifier }));
+    registry.register_test_driver(Box::new(AncestryCheckingDriver { verifier }));
 
     assert!(matches!(
         registry.restore_driver_state(
@@ -1008,7 +1008,7 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
         Box::new(provider),
     );
     let mut registry = gated_registry();
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
     registry.restore_driver_state(&segments, &events).test_ok();
@@ -1036,7 +1036,7 @@ fn provider_driver_recovery_rejects_unordered_evidence_before_provider_use() {
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
     let wrong_timeline = TimelineId::new();
     let wrong_segments = [
@@ -1128,7 +1128,7 @@ fn provider_driver_recovery_rejects_invalid_target_evidence_without_provider_use
             Box::new(provider),
         );
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(driver));
+        registry.register_test_driver(Box::new(driver));
         let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
         assert!(
@@ -1161,7 +1161,7 @@ fn provider_driver_recovery_accepts_no_action_and_unrelated_evidence_without_pro
             Box::new(provider),
         );
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(driver));
+        registry.register_test_driver(Box::new(driver));
         let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(1))];
 
         registry
@@ -1184,10 +1184,10 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
         Box::new(provider),
     );
     let mut registry = gated_registry();
-    registry.register_driver(Box::new(PrecedingDriver {
+    registry.register_test_driver(Box::new(PrecedingDriver {
         entity: host.other_agent,
     }));
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)
         .test_ok();
@@ -1260,7 +1260,7 @@ fn restore_driver_state_rejects_empty_timeline_ancestry() {
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     assert!(registry.restore_driver_state(&[], &[]).is_err());
 }
 
@@ -1276,7 +1276,7 @@ fn restore_driver_state_accepts_empty_history_when_bound_is_zero() {
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::ZERO)];
     assert!(registry.restore_driver_state(&segments, &[]).is_ok());
 }
