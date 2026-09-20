@@ -42,9 +42,9 @@ fn generated_identity_hash(
     plugin_version: &str,
 ) -> pos_core::Hash {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(label);
-    hasher.update(plugin.name().as_bytes());
-    hasher.update(plugin_version.as_bytes());
+    hash_framed(&mut hasher, label);
+    hash_framed(&mut hasher, plugin.name().as_bytes());
+    hash_framed(&mut hasher, plugin_version.as_bytes());
     let mut owned_event_types = plugin
         .capability()
         .owned_event_types
@@ -53,8 +53,7 @@ fn generated_identity_hash(
         .collect::<Vec<_>>();
     owned_event_types.sort_unstable();
     for event_type in owned_event_types {
-        hasher.update(event_type.as_bytes());
-        hasher.update(&[0]);
+        hash_framed(&mut hasher, event_type.as_bytes());
     }
     pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
@@ -2252,7 +2251,7 @@ impl PluginRegistry {
                 execution_profile_hash: generated_identity_hash(
                     b"pigloros/generated-execution-profile/v1",
                     plugin,
-                    plugin_version,
+                    &plugin_version,
                 ),
                 max_pass_wall_duration_us: 1_000,
             },
