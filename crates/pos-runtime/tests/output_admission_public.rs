@@ -28,9 +28,29 @@ fn budget_with(
     max_cpu_us: u32,
     cpu_reservations_us: [u32; 3],
 ) -> Result<ExecutableBudgetPolicyV1, Box<dyn Error>> {
+    budget_with_profile(
+        plugin_id,
+        WorkloadProfileV1::Interactive,
+        max_event_bytes,
+        max_events,
+        max_bytes,
+        max_cpu_us,
+        cpu_reservations_us,
+    )
+}
+
+fn budget_with_profile(
+    plugin_id: PluginId,
+    workload_profile: WorkloadProfileV1,
+    max_event_bytes: u32,
+    max_events: u32,
+    max_bytes: u64,
+    max_cpu_us: u32,
+    cpu_reservations_us: [u32; 3],
+) -> Result<ExecutableBudgetPolicyV1, Box<dyn Error>> {
     ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
+        workload_profile,
         cut_budget_family: 0,
         max_event_bytes,
         fidelity_budgets: [
@@ -218,6 +238,32 @@ fn output_admission_accounts_for_each_fidelity_level() -> TestResult {
 }
 
 #[test]
+fn registry_replay_identity_covers_policy_and_budget_variants() -> TestResult {
+    for workload_profile in [
+        WorkloadProfileV1::Interactive,
+        WorkloadProfileV1::Fork,
+        WorkloadProfileV1::Research,
+    ] {
+        let plugin_id = PluginId::new();
+        let budget =
+            budget_with_profile(plugin_id, workload_profile, 16, 2, 32, 100, [10, 10, 10])?;
+        let policy = multi_fidelity_policy(plugin_id, &budget)?;
+        let mut registry = PluginRegistry::new();
+        registry.register_with_output_policy(
+            &FixturePlugin { id: plugin_id },
+            policy,
+            budget,
+            None,
+            None,
+        )?;
+        assert!(registry
+            .replay_policy_identities()
+            .any(|(_, digest)| digest != Hash::zero()));
+    }
+    Ok(())
+}
+
+#[test]
 fn output_admission_rejects_plugin_version_mismatch() -> TestResult {
     let plugin_id = PluginId::new();
     let budget = budget(plugin_id)?;
@@ -305,7 +351,12 @@ impl Plugin for FixturePlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: vec![Kind::new("plugin.output")],
+            owned_event_types: vec![
+                Kind::new("plugin.output"),
+                Kind::new("plugin.l0"),
+                Kind::new("plugin.l1"),
+                Kind::new("plugin.l2"),
+            ],
             has_driver: true,
             ..Capability::default()
         }
