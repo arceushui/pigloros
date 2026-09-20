@@ -5101,17 +5101,20 @@ mod tests {
         let result = host
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("affected-root"));
-        let durable_timeline_count = host
-            .store
-            .host_store()
-            .list_timelines()
-            .map(|timelines| timelines.len());
-        let authority_timeline_count = authority.timelines.lock().map(|timelines| timelines.len());
-        eprintln!(
-            "active root transition result={result:?} status={:?} durable_timelines={durable_timeline_count:?} authority_timelines={authority_timeline_count:?}",
+        let durable_timeline_count = host.store.host_store().list_timelines().map_or_else(
+            |error| format!("error: {error:?}"),
+            |timelines| timelines.len().to_string(),
+        );
+        let authority_timeline_count = authority.timelines.lock().map_or_else(
+            |_| "poisoned".to_owned(),
+            |timelines| timelines.len().to_string(),
+        );
+        assert_eq!(
+            result,
+            Err(ErasureHostErrorV1::Conflict),
+            "active root transition status={:?} durable_timelines={durable_timeline_count} authority_timelines={authority_timeline_count}",
             host.status(),
         );
-        assert_eq!(result, Err(ErasureHostErrorV1::Conflict));
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
