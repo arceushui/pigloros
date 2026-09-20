@@ -201,17 +201,21 @@ selection and cannot retroactively relabel the outcome.
 The ADR-079 slice is likewise throwaway evidence, not coverage of production
 provider code. Two Rust 1.97.1 static-musl objects are built once per native
 architecture under pinned cargo-llvm-cov 0.9.0 instrumentation and LLVM counter
-relocation. Compile-time `%m%c` profile names avoid a profile environment
-variable. The instrumented launcher clears its environment, verifies its
-closed descriptor set and mapped profile, executes the held adapter descriptor,
-and is replaced. The adapter verifies empty environment, stdio-only
-descriptors, and its separately mapped profile. One attempt exits normally and
-one is forcibly SIGKILLed after a known counter. Matching bundled LLVM tools
-merge the four raw profiles and emit per-component and combined JSON/LCOV;
-cargo-llvm-cov independently emits the composed JSON/LCOV. Validation requires
-both known-covered and deliberately uncovered regions to remain visible, and a
-truncated raw profile to be rejected. These instrumented mappings and files are
-recorded differences and never stand in for exact release conformance.
+relocation. Compile-time `%m%c` profile names avoid `LLVM_PROFILE_FILE`. The
+instrumented launcher clears its environment, verifies its closed descriptor
+set and mapped profile, and executes the held adapter descriptor with an
+explicit empty `envp`.
+
+The candidate is nevertheless incompatible on both hosted architectures. The
+LLVM continuous-profile runtime recreates
+`__LLVM_PROFILE_RT_INIT_ONCE=__LLVM_PROFILE_RT_INIT_ONCE` before adapter `main`,
+so the adapter cannot satisfy the normative empty-environment scan. The failed
+clean attempt retains distinct launcher and adapter raw profiles and a
+machine-readable incompatibility report. In accordance with ADR-079's stop
+rule, the fixture does not continue to forced-kill or report-composition claims
+after that mandatory criterion fails. Clearing the runtime entry inside the
+adapter would be an instrumentation-specific bypass, not evidence that the
+accepted production boundary is preserved.
 
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported

@@ -78,9 +78,38 @@ for scenario in clean kill; do
   chmod 0777 "${evidence_dir}/${scenario}"
 done
 
+set +e
 /usr/bin/podman run --rm "${podman_arguments[@]}" \
   --volume="${evidence_dir}/clean:/work:rw" "${image}" clean \
   >"${evidence_dir}/clean.stdout" 2>"${evidence_dir}/clean.stderr"
+clean_status=$?
+set -e
+printf '%s\n' "${clean_status}" >"${evidence_dir}/clean.return-code"
+
+if [[ ${clean_status} -ne 0 ]]; then
+  grep -q '^LAUNCHER_BEFORE_EXEC mode=clean ' "${evidence_dir}/clean.stderr"
+  grep -Fq 'adapter environment is not empty: [("__LLVM_PROFILE_RT_INIT_ONCE", "__LLVM_PROFILE_RT_INIT_ONCE")]' \
+    "${evidence_dir}/clean.stderr"
+  test "$(find "${evidence_dir}/clean" -maxdepth 1 -name 'launcher-*.profraw' -type f | wc -l)" -eq 1
+  test "$(find "${evidence_dir}/clean" -maxdepth 1 -name 'adapter-*.profraw' -type f | wc -l)" -eq 1
+  printf '%s\n' \
+    '{' \
+    '  "schema": "pigloros.adr079-profile-probe.v1",' \
+    "  \"architecture\": \"${architecture}\"," \
+    '  "compatible": false,' \
+    '  "stopped_after_mandatory_failure": true,' \
+    '  "failed_acceptance_criterion": 3,' \
+    '  "launcher_exec_environment": "explicit-empty-envp",' \
+    '  "adapter_environment": {' \
+    '    "__LLVM_PROFILE_RT_INIT_ONCE": "__LLVM_PROFILE_RT_INIT_ONCE"' \
+    '  },' \
+    '  "forced_kill_test_run": false,' \
+    '  "reason": "LLVM continuous profiling recreates a profile runtime environment entry before adapter main"' \
+    '}' >"${evidence_dir}/profile-evidence.json"
+  printf 'ADR-079 candidate C is incompatible on %s: profile runtime environment injection\n' \
+    "${architecture}"
+  exit 0
+fi
 
 readonly kill_name="pigloros-adr079-kill-${GITHUB_RUN_ID}-${architecture}"
 set +e

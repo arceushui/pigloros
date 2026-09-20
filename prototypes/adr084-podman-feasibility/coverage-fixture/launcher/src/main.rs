@@ -42,7 +42,11 @@ fn live_descriptors() -> Vec<i32> {
 }
 
 fn before_exec(mode: &str) -> u64 {
-    if mode == "kill" { 41 } else { 17 }
+    if mode == "kill" {
+        41
+    } else {
+        17
+    }
 }
 
 #[inline(never)]
@@ -54,7 +58,10 @@ fn main() {
     let mode = env::args().nth(1).expect("clean or kill mode");
     assert!(mode == "clean" || mode == "kill");
     assert_eq!(unsafe { clearenv() }, 0);
-    assert!(env::vars_os().next().is_none(), "launcher environment is not empty");
+    assert!(
+        env::vars_os().next().is_none(),
+        "launcher environment is not empty"
+    );
     let adapter = OpenOptions::new()
         .read(true)
         .open("/adapter")
@@ -81,5 +88,8 @@ fn main() {
             AT_EMPTY_PATH,
         )
     };
-    panic!("execveat failed with result {result}: {}", std::io::Error::last_os_error());
+    panic!(
+        "execveat failed with result {result}: {}",
+        std::io::Error::last_os_error()
+    );
 }

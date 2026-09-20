@@ -29,7 +29,11 @@ fn live_descriptors() -> Vec<i32> {
 }
 
 fn before_termination(mode: &str) -> u64 {
-    if mode == "kill" { 73 } else { 29 }
+    if mode == "kill" {
+        73
+    } else {
+        29
+    }
 }
 
 #[inline(never)]
