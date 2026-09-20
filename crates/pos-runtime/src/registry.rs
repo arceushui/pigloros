@@ -36,12 +36,16 @@ use crate::{
 };
 use std::{collections::HashSet, sync::Arc};
 
-fn generated_identity_hash(label: &[u8], plugin: &dyn Plugin) -> pos_core::Hash {
+fn generated_identity_hash(
+    label: &[u8],
+    plugin: &dyn Plugin,
+    plugin_version: &str,
+) -> pos_core::Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(label);
     hasher.update(&plugin.id().inner().to_bytes());
     hasher.update(plugin.name().as_bytes());
-    hasher.update(plugin.version().as_bytes());
+    hasher.update(plugin_version.as_bytes());
     let mut owned_event_types = plugin
         .capability()
         .owned_event_types
@@ -2124,8 +2128,10 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
+        let plugin_version = plugin.version().to_owned();
         Self::generated_output_binding_with_budget_input(
             plugin,
+            &plugin_version,
             pos_core::ExecutableBudgetPolicyInputV1 {
                 revision: 1,
                 workload_profile: pos_core::WorkloadProfileV1::Interactive,
@@ -2162,6 +2168,7 @@ impl PluginRegistry {
                 execution_profile_hash: generated_identity_hash(
                     b"pigloros/generated-execution-profile/v1",
                     plugin,
+                    &plugin_version,
                 ),
                 max_pass_wall_duration_us: 1_000,
             },
@@ -2170,6 +2177,7 @@ impl PluginRegistry {
 
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
+        plugin_version: &str,
         budget_input: pos_core::ExecutableBudgetPolicyInputV1,
     ) -> Result<
         (
@@ -2207,19 +2215,22 @@ impl PluginRegistry {
         let policy = pos_core::output_policy::OutputPolicyV1::new(
             pos_core::output_policy::OutputPolicyInputV1 {
                 plugin_id: plugin.id(),
-                plugin_version: plugin.version().to_owned(),
+                plugin_version: plugin_version.to_owned(),
                 implementation_hash: generated_identity_hash(
                     b"pigloros/generated-implementation/v1",
                     plugin,
+                    &plugin_version,
                 ),
                 base_configuration_digest: generated_identity_hash(
                     b"pigloros/generated-configuration/v1",
                     plugin,
+                    &plugin_version,
                 ),
                 executable_profile_hash: budget.digest(),
                 retention_policy_hash: generated_identity_hash(
                     b"pigloros/generated-retention/v1",
                     plugin,
+                    &plugin_version,
                 ),
                 policy_revision: 1,
                 output_declarations: declarations,
@@ -5815,6 +5826,7 @@ mod erasure_gate_coverage {
         let plugin = BudgetFixturePlugin;
         let result = PluginRegistry::generated_output_binding_with_budget_input(
             &plugin,
+            plugin.version(),
             pos_core::ExecutableBudgetPolicyInputV1 {
                 revision: 0,
                 workload_profile: pos_core::WorkloadProfileV1::Interactive,

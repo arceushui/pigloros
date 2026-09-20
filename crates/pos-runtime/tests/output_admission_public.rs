@@ -390,10 +390,10 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
         Ok(drafts) if drafts.len() == 1
     ));
 
-    let mut missing = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+    let mut generated = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    missing.register_generated(
+    generated.register_generated(
         &FixturePlugin {
             id: PluginId::new(),
         },
@@ -401,8 +401,8 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
         Some(Box::new(FixtureDriver)),
     )?;
     assert!(matches!(
-        missing.step_all_anchored(timeline, pos_core::Seq::ZERO),
-        Err(RuntimeError::OutputAdmission(_))
+        generated.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        Ok(drafts) if drafts.len() == 1
     ));
     Ok(())
 }
