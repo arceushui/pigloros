@@ -18,6 +18,7 @@ import tarfile
 import tempfile
 
 import cbor2
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from oci_layer import diff_id_bytes
@@ -68,10 +69,14 @@ def validate_vector(value: dict[str, str]) -> list[object]:
         key = Ed25519PublicKey.from_public_bytes(
             bytes.fromhex(value["signer_public_key_hex"])
         )
-        key.verify(
-            bytes.fromhex(value["signature_hex"]),
-            signature_domain.encode("ascii") + b"\0" + observed,
-        )
+        try:
+            key.verify(
+                bytes.fromhex(value["signature_hex"]),
+                signature_domain.encode("ascii") + b"\0" + observed,
+            )
+        except InvalidSignature as error:
+            record = "ReleaseV2" if decoded[0] == "RLS2" else str(decoded[0])
+            raise ValueError(f"{record} signature verification failed") from error
     return decoded
 
 
@@ -345,6 +350,7 @@ def validate_positive(
         for media, digest, encoded in document["fixture_blobs"]  # type: ignore[union-attr]
     }
     validate_ois(ois, ort, ort_digest, blobs)
+    lpv = decoded["LPV"]
     ready = decoded["RDY"]
     release = decoded["RLS"]
     rbs_digest = bytes.fromhex(next(
@@ -352,9 +358,55 @@ def validate_positive(
         for item in document["vectors"]  # type: ignore[union-attr]
         if item["record"] == "RBS"
     ))
-    if ready[5] != ois[9][2] or ready[9] != ois[10][2] or ready[14] != rbs_digest:
+    if len(lpv) != 8 or lpv[0:2] != ["LPV2", 2]:
+        raise ValueError("invalid LPV2 shape")
+    if lpv[4:7] != [
+        bytes.fromhex(next(
+            item["self_digest_hex"]
+            for item in document["vectors"]  # type: ignore[union-attr]
+            if item["record"] == "OciImageSubject"
+        )),
+        ois[10][0],
+        ois[11],
+    ]:
+        raise ValueError("positive LPV2 equality mismatch")
+    if len(ready) != 14 or ready[0:2] != ["RDY2", 2]:
+        raise ValueError("invalid ReadyV2 shape")
+    lpv_digest = bytes.fromhex(next(
+        item["self_digest_hex"]
+        for item in document["vectors"]  # type: ignore[union-attr]
+        if item["record"] == "LPV"
+    ))
+    if (
+        ready[2:4] != lpv[2:4]
+        or ready[5] != ois[9][2]
+        or ready[7] != lpv[4]
+        or ready[8] != ort_digest
+        or ready[9] != ois[10][2]
+        or ready[11] != lpv_digest
+        or ready[12] != lpv[7]
+        or ready[13] != lpv[7]
+    ):
         raise ValueError("positive ReadyV2 equality mismatch")
-    if release[11] != rbs_digest or release[12] != rbs_digest:
+    if len(release) != 16 or release[0:2] != ["RLS2", 2]:
+        raise ValueError("invalid ReleaseV2 shape")
+    ready_digest = bytes.fromhex(next(
+        item["self_digest_hex"]
+        for item in document["vectors"]  # type: ignore[union-attr]
+        if item["record"] == "RDY"
+    ))
+    watchdog_values = [value for limit_id, value in decoded["ELM"][2] if limit_id == 4]
+    if len(watchdog_values) != 1:
+        raise ValueError("ELM2 watchdog limit mismatch")
+    expected_deadline = release[13] + watchdog_values[0] * 1_000_000
+    if (
+        release[2:4] != ready[2:4]
+        or release[4] != ready_digest
+        or release[11] != rbs_digest
+        or release[12] != rbs_digest
+        or release[14] != expected_deadline
+        or release[15] != decoded["RBS"][9]
+    ):
         raise ValueError("positive ReleaseV2 RBS2 equality mismatch")
     return decoded, ort, ois, blobs
 
@@ -379,6 +431,19 @@ def validate_version_closure(lps: list[object], apt: list[object], lps_digest: b
         raise ValueError("version-1 authority record in version-2 closure")
 
 
+def validate_exact_fields(
+    candidate: list[object],
+    positive: list[object],
+    record: str,
+    field_names: tuple[str, ...],
+) -> None:
+    if len(candidate) != len(positive) or candidate[0:2] != positive[0:2]:
+        raise ValueError(f"invalid {record} shape")
+    for index, field_name in enumerate(field_names, start=2):
+        if candidate[index] != positive[index]:
+            raise ValueError(f"{record} {field_name} mismatch")
+
+
 def validate_rejections(
     document: dict[str, object],
     decoded: dict[str, list[object]],
@@ -386,10 +451,16 @@ def validate_rejections(
     ois: list[object],
     blobs: dict[str, tuple[str, bytes]],
 ) -> None:
-    rejections = {
-        item["record"]: (item, validate_vector(item))  # type: ignore[arg-type]
-        for item in document["rejection_vectors"]  # type: ignore[union-attr]
-    }
+    rejections = {}
+    for item in document["rejection_vectors"]:  # type: ignore[union-attr]
+        candidate = (
+            decode_canonical(
+                bytes.fromhex(item["unsigned_cbor_hex"]), item["record"]
+            )
+            if item["record"] == "RLS2-wrong-signature"
+            else validate_vector(item)
+        )
+        rejections[item["record"]] = (item, candidate)
     ort_digest = bytes.fromhex(next(
         item["self_digest_hex"]
         for item in document["vectors"]  # type: ignore[union-attr]
@@ -437,25 +508,66 @@ def validate_rejections(
             mixed_lps, apt, bytes.fromhex(mixed_item["self_digest_hex"])
         ),
     )
-    for name, index, positive, message in (
-        ("RDY2-wrong-launcher-digest", 5, ois[9][2], "launcher executable digest differs from OIS1"),
-        ("RDY2-wrong-adapter-digest", 9, ois[10][2], "adapter executable digest differs from OIS1"),
-    ):
-        _, candidate = rejections[name]
-        expect_rejection(
-            message,
-            lambda candidate=candidate, index=index, positive=positive, message=message: (
-                (_ for _ in ()).throw(ValueError(message))
-                if candidate[index] != positive
-                else None
+    mutation_groups = (
+        (
+            "LPV2",
+            decoded["LPV"],
+            (
+                "LPV2-wrong-attempt", "LPV2-wrong-nonce", "LPV2-wrong-OIS1",
+                "LPV2-wrong-path", "LPV2-wrong-arguments", "LPV2-wrong-FDL1",
             ),
-        )
-    _, wrong_release = rejections["RLS2-wrong-observed-rbs2"]
+            (
+                "attempt ID", "nonce", "OIS1", "adapter path", "arguments",
+                "expected FDL1",
+            ),
+        ),
+        (
+            "ReadyV2",
+            decoded["RDY"],
+            (
+                "RDY2-wrong-attempt", "RDY2-wrong-nonce",
+                "RDY2-wrong-mount-namespace", "RDY2-wrong-launcher-digest",
+                "RDY2-wrong-launcher-FD", "RDY2-wrong-OIS1",
+                "RDY2-wrong-ORT1", "RDY2-wrong-adapter-digest",
+                "RDY2-wrong-adapter-FD", "RDY2-wrong-LPV2",
+                "RDY2-wrong-expected-FDL1", "RDY2-wrong-observed-FDL1",
+            ),
+            (
+                "attempt ID", "nonce", "mount namespace", "launcher digest",
+                "launcher FD", "OIS1", "ORT1", "adapter digest", "adapter FD",
+                "LPV2", "expected FDL1", "observed FDL1",
+            ),
+        ),
+        (
+            "ReleaseV2",
+            decoded["RLS"],
+            (
+                "RLS2-wrong-attempt", "RLS2-wrong-nonce", "RLS2-wrong-ReadyV2",
+                "RLS2-wrong-TRS1", "RLS2-wrong-RVS2", "RLS2-wrong-APT2",
+                "RLS2-wrong-trust-epoch", "RLS2-wrong-revocation-epoch",
+                "RLS2-wrong-policy-epoch", "RLS2-wrong-expected-RBS2",
+                "RLS2-wrong-observed-RBS2", "RLS2-wrong-launch-anchor",
+                "RLS2-wrong-deadline", "RLS2-wrong-runtime-key",
+            ),
+            (
+                "attempt ID", "nonce", "ReadyV2", "TRS1", "RVS2", "APT2",
+                "trust epoch", "revocation epoch", "policy epoch", "expected RBS2",
+                "observed RBS2", "launch anchor", "deadline", "runtime key",
+            ),
+        ),
+    )
+    for record, positive, case_names, fields in mutation_groups:
+        for case_name in case_names:
+            item, candidate = rejections[case_name]
+            expect_rejection(
+                item["expected_rejection"],
+                lambda candidate=candidate, positive=positive, record=record,
+                fields=fields: validate_exact_fields(candidate, positive, record, fields),
+            )
+    signature_item, _ = rejections["RLS2-wrong-signature"]
     expect_rejection(
-        "observed RBS2 digest differs from expected RBS2",
-        lambda: (_ for _ in ()).throw(
-            ValueError("observed RBS2 digest differs from expected RBS2")
-        ) if wrong_release[12] != wrong_release[11] else None,
+        signature_item["expected_rejection"],
+        lambda: validate_vector(signature_item),
     )
 
 

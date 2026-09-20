@@ -331,16 +331,25 @@ def main() -> None:
          digest(7), digest(8), digest(9), host_features, []],
     )
     rbs_digest = bytes.fromhex(rbs_vector["self_digest_hex"])
+    lpv_unsigned = [
+        "LPV2", 2, identifier(1), digest(1), ois_digest, "/adapter",
+        ["--fixture"], digest(9),
+    ]
+    lpv_vector = vector("LPV", lpv_unsigned)
+    lpv_digest = bytes.fromhex(lpv_vector["self_digest_hex"])
     ready_unsigned = [
-        "RDY2", 2, identifier(1), digest(1), identifier(2), executable[2], [1, 2],
+        "RDY2", 2, identifier(1), digest(1), [11, 12], executable[2], [1, 2],
         ois_digest, bytes.fromhex(ort_vector["self_digest_hex"]), adapter[2], [3, 4],
-        digest(8), digest(9), digest(10), rbs_digest,
+        lpv_digest, digest(9), digest(9),
     ]
     ready_vector = vector("RDY", ready_unsigned)
+    launch_anchor = 9
+    watchdog_ms = limits[4][1]
     release_unsigned = [
         "RLS2", 2, identifier(1), digest(1),
         bytes.fromhex(ready_vector["self_digest_hex"]), digest(3), digest(4),
-        digest(5), 6, 7, 8, rbs_digest, rbs_digest, 9, key_id(2),
+        digest(5), 6, 7, 8, rbs_digest, rbs_digest, launch_anchor,
+        launch_anchor + watchdog_ms * 1_000_000, key_id(2),
     ]
     vectors.extend(
         [
@@ -375,11 +384,7 @@ def main() -> None:
                 True,
             ),
             rbs_vector,
-            vector(
-                "LPV",
-                ["LPV2", 2, identifier(1), digest(1), digest(2), "/adapter",
-                 ["--fixture"], digest(3)],
-            ),
+            lpv_vector,
             ready_vector,
             vector("RLS", release_unsigned, True),
             vector(
@@ -417,13 +422,45 @@ def main() -> None:
     wrong_executable = [*ois]
     wrong_executable[10] = [*adapter]
     wrong_executable[10][0] = "/wrong-adapter"
-    wrong_ready_launcher = [*ready_unsigned]
-    wrong_ready_launcher[5] = digest(30)
-    wrong_ready_adapter = [*ready_unsigned]
-    wrong_ready_adapter[9] = digest(30)
-    wrong_release_observed = [*release_unsigned]
-    wrong_release_observed[12] = digest(30)
     mixed_lps = ["LPS1", 1, "pigloros.air-gapped", 0, digest(1), limits, []]
+    ready_mutations = (
+        ("RDY2-wrong-attempt", 2, identifier(30), "ReadyV2 attempt ID mismatch"),
+        ("RDY2-wrong-nonce", 3, digest(30), "ReadyV2 nonce mismatch"),
+        ("RDY2-wrong-mount-namespace", 4, [30, 31], "ReadyV2 mount namespace mismatch"),
+        ("RDY2-wrong-launcher-digest", 5, digest(30), "ReadyV2 launcher digest mismatch"),
+        ("RDY2-wrong-launcher-FD", 6, [30, 31], "ReadyV2 launcher FD mismatch"),
+        ("RDY2-wrong-OIS1", 7, digest(30), "ReadyV2 OIS1 mismatch"),
+        ("RDY2-wrong-ORT1", 8, digest(30), "ReadyV2 ORT1 mismatch"),
+        ("RDY2-wrong-adapter-digest", 9, digest(30), "ReadyV2 adapter digest mismatch"),
+        ("RDY2-wrong-adapter-FD", 10, [30, 31], "ReadyV2 adapter FD mismatch"),
+        ("RDY2-wrong-LPV2", 11, digest(30), "ReadyV2 LPV2 mismatch"),
+        ("RDY2-wrong-expected-FDL1", 12, digest(30), "ReadyV2 expected FDL1 mismatch"),
+        ("RDY2-wrong-observed-FDL1", 13, digest(30), "ReadyV2 observed FDL1 mismatch"),
+    )
+    lpv_mutations = (
+        ("LPV2-wrong-attempt", 2, identifier(30), "LPV2 attempt ID mismatch"),
+        ("LPV2-wrong-nonce", 3, digest(30), "LPV2 nonce mismatch"),
+        ("LPV2-wrong-OIS1", 4, digest(30), "LPV2 OIS1 mismatch"),
+        ("LPV2-wrong-path", 5, "/wrong-adapter", "LPV2 adapter path mismatch"),
+        ("LPV2-wrong-arguments", 6, ["--wrong"], "LPV2 arguments mismatch"),
+        ("LPV2-wrong-FDL1", 7, digest(30), "LPV2 expected FDL1 mismatch"),
+    )
+    release_mutations = (
+        ("RLS2-wrong-attempt", 2, identifier(30), "ReleaseV2 attempt ID mismatch"),
+        ("RLS2-wrong-nonce", 3, digest(30), "ReleaseV2 nonce mismatch"),
+        ("RLS2-wrong-ReadyV2", 4, digest(30), "ReleaseV2 ReadyV2 mismatch"),
+        ("RLS2-wrong-TRS1", 5, digest(30), "ReleaseV2 TRS1 mismatch"),
+        ("RLS2-wrong-RVS2", 6, digest(30), "ReleaseV2 RVS2 mismatch"),
+        ("RLS2-wrong-APT2", 7, digest(30), "ReleaseV2 APT2 mismatch"),
+        ("RLS2-wrong-trust-epoch", 8, 30, "ReleaseV2 trust epoch mismatch"),
+        ("RLS2-wrong-revocation-epoch", 9, 30, "ReleaseV2 revocation epoch mismatch"),
+        ("RLS2-wrong-policy-epoch", 10, 30, "ReleaseV2 policy epoch mismatch"),
+        ("RLS2-wrong-expected-RBS2", 11, digest(30), "ReleaseV2 expected RBS2 mismatch"),
+        ("RLS2-wrong-observed-RBS2", 12, digest(30), "ReleaseV2 observed RBS2 mismatch"),
+        ("RLS2-wrong-launch-anchor", 13, 30, "ReleaseV2 launch anchor mismatch"),
+        ("RLS2-wrong-deadline", 14, 30, "ReleaseV2 deadline mismatch"),
+        ("RLS2-wrong-runtime-key", 15, key_id(30), "ReleaseV2 runtime key mismatch"),
+    )
     rejections = [
         rejection("OIS1-wrong-architecture", wrong_architecture,
                   "unsupported architecture", "OciImageSubject", True),
@@ -451,40 +488,53 @@ def main() -> None:
             "version-1 authority record in version-2 closure",
             "LPS",
         ),
+    ]
+    rejections.extend(
+        rejection(name, [*lpv_unsigned[:index], value, *lpv_unsigned[index + 1:]], message, "LPV")
+        for name, index, value, message in lpv_mutations
+    )
+    rejections.extend(
+        rejection(name, [*ready_unsigned[:index], value, *ready_unsigned[index + 1:]], message, "RDY")
+        for name, index, value, message in ready_mutations
+    )
+    rejections.extend(
         rejection(
-            "RDY2-wrong-launcher-digest",
-            wrong_ready_launcher,
-            "launcher executable digest differs from OIS1",
-            "RDY",
-        ),
-        rejection(
-            "RDY2-wrong-adapter-digest",
-            wrong_ready_adapter,
-            "adapter executable digest differs from OIS1",
-            "RDY",
-        ),
-        rejection(
-            "RLS2-wrong-observed-rbs2",
-            wrong_release_observed,
-            "observed RBS2 digest differs from expected RBS2",
+            name,
+            [*release_unsigned[:index], value, *release_unsigned[index + 1:]],
+            message,
             "RLS",
             True,
-        ),
-    ]
-    mixed_lps_digest = bytes.fromhex(rejections[5]["self_digest_hex"])
+        )
+        for name, index, value, message in release_mutations
+    )
+    wrong_signature = rejection(
+        "RLS2-wrong-signature",
+        release_unsigned,
+        "ReleaseV2 signature verification failed",
+        "RLS",
+        True,
+    )
+    corrupted_signature = bytearray.fromhex(wrong_signature["signature_hex"])
+    corrupted_signature[0] ^= 1
+    wrong_signature["signature_hex"] = corrupted_signature.hex()
+    rejections.append(wrong_signature)
+    mixed_lps_rejection = next(
+        item for item in rejections if item["record"] == "mixed-version-closure"
+    )
+    mixed_lps_digest = bytes.fromhex(mixed_lps_rejection["self_digest_hex"])
     mixed_apt = [
         "APT2", 2, 10, digest(1), digest(2), [mixed_lps_digest],
         [bytes.fromhex(vectors[1]["self_digest_hex"])], digest(5), digest(6),
         digest(7), digest(8), digest(9), 11, 12, digest(10), key_id(2),
     ]
     mixed_apt_vector = vector("APT", mixed_apt, True)
-    rejections[5]["referencing_apt2_unsigned_cbor_hex"] = mixed_apt_vector[
+    mixed_lps_rejection["referencing_apt2_unsigned_cbor_hex"] = mixed_apt_vector[
         "unsigned_cbor_hex"
     ]
-    rejections[5]["referencing_apt2_self_digest_hex"] = mixed_apt_vector[
+    mixed_lps_rejection["referencing_apt2_self_digest_hex"] = mixed_apt_vector[
         "self_digest_hex"
     ]
-    rejections[5]["referencing_apt2_signature_hex"] = mixed_apt_vector[
+    mixed_lps_rejection["referencing_apt2_signature_hex"] = mixed_apt_vector[
         "signature_hex"
     ]
     fixture_blobs = [
