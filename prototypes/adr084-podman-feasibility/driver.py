@@ -1109,7 +1109,7 @@ def release_rejection_scenarios(
         run("/usr/bin/podman", "rm", "--force", container_id)
         (artifact_dir / f"{scenario}.stdout").write_bytes(output)
         (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
-        expected = b"release-packet" if close_control else b"release-timeout"
+        expected = b"release-receive" if close_control else b"release-timeout"
         if return_code == 0 or output or expected not in errors:
             raise AssertionError(
                 f"launcher did not fail closed for {scenario}: "
