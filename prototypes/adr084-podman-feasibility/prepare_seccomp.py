@@ -406,7 +406,12 @@ def mutation_report(
         cases.append(rejected(lambda c=candidate: validate_profile(c, profile), label))
     if len(cases) < (36 if architecture == "aarch64" else 33):
         raise AssertionError("mutation matrix did not exercise the required cases")
-    return {"architecture": architecture, "rejected_count": len(cases), "rejected": cases}
+    return {
+        "architecture": architecture,
+        "rejected_count": len(cases),
+        "rejected": cases,
+        "verdict": "passed",
+    }
 
 
 def main() -> None:

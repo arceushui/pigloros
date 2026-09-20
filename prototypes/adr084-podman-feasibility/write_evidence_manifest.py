@@ -109,6 +109,7 @@ def main() -> None:
         "cancel.installed-seccomp.bpf",
         "cancel.seccomp-install.json",
         "cache-matrix.json",
+        "cache-concurrent-identical.json",
         "probe-filter-binding.json",
         "probe.stderr",
         "probe.stdout",
@@ -121,6 +122,16 @@ def main() -> None:
         *(
             f"cache-{state}.{suffix}"
             for state in ("empty", "valid", "stale", "corrupt", "adversarial")
+            for suffix in (
+                "installed-seccomp.bpf",
+                "seccomp-install.json",
+                "stderr",
+                "stdout",
+            )
+        ),
+        *(
+            f"cache-concurrent-identical-{index}.{suffix}"
+            for index in range(8)
             for suffix in (
                 "installed-seccomp.bpf",
                 "seccomp-install.json",

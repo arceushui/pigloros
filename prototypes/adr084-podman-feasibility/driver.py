@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import concurrent.futures
 import errno
 import hashlib
 import json
@@ -870,6 +871,7 @@ def native_matrix_scenario(
     installed = (artifact_dir / "normal.installed-seccomp.bpf").read_bytes()
     report = {
         "case_count": len(results),
+        "deadline_nanoseconds_per_case": 100_000_000,
         "interface_sha256": hashlib.sha256(seccomp_interface.read_bytes()).hexdigest(),
         "maximum_interface_number": maximum,
         "results": results,
@@ -1030,6 +1032,87 @@ def cache_matrix_scenario(
     )
 
 
+def concurrent_identical_cache_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+) -> None:
+    profile = json.loads(seccomp.read_text(encoding="utf-8"))
+    if not isinstance(profile, dict):
+        raise ValueError("seccomp profile is not an object")
+    candidate_checksum, checksum_inputs = crun_cache_checksum(profile)
+    cache_dir = pathlib.Path(f"/run/user/{os.getuid()}/crun/.cache/seccomp")
+    cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for entry in cache_dir.iterdir():
+        if not entry.is_file() or entry.is_symlink():
+            raise AssertionError(f"refusing to clear unexpected cache entry: {entry}")
+        entry.unlink()
+    adversarial = cache_dir / candidate_checksum
+    adversarial.write_bytes(bytes(seccomp_bpf.stat().st_size))
+    adversarial.chmod(0o700)
+    before = cache_snapshot(cache_dir)
+    scenarios = [f"cache-concurrent-identical-{index}" for index in range(8)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(
+                cache_probe_scenario,
+                image,
+                seccomp,
+                seccomp_bpf_base64,
+                seccomp_bpf,
+                seccomp_tracer,
+                artifact_dir,
+                scenario,
+            )
+            for scenario in scenarios
+        ]
+        for future in futures:
+            future.result()
+    after = cache_snapshot(cache_dir)
+    if after != before:
+        raise AssertionError("crun checksum cache changed under identical concurrency")
+    install_reports = []
+    for scenario in scenarios:
+        report = json.loads(
+            (artifact_dir / f"{scenario}.seccomp-install.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if report.get("checksum_cache_accesses") != 0:
+            raise AssertionError(f"cache access under concurrency: {scenario}")
+        install_reports.append(
+            {
+                "scenario": scenario,
+                "installed_bpf_sha256": hashlib.sha256(
+                    (artifact_dir / f"{scenario}.installed-seccomp.bpf").read_bytes()
+                ).hexdigest(),
+                "install_report": report,
+            }
+        )
+    adversarial.unlink()
+    (artifact_dir / "cache-concurrent-identical.json").write_text(
+        json.dumps(
+            {
+                "attempt_count": len(scenarios),
+                "before": before,
+                "after": after,
+                "candidate_checksum": candidate_checksum,
+                "checksum_inputs": checksum_inputs,
+                "install_reports": install_reports,
+                "input_class": "identical SCS1/profile/BPF",
+                "verdict": "eight concurrent installs bypassed the adversarial cache",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
@@ -1113,6 +1196,14 @@ def main() -> None:
         arguments.artifact_dir,
     )
     cache_matrix_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+    )
+    concurrent_identical_cache_scenario(
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,
