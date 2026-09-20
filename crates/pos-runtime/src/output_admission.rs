@@ -140,12 +140,14 @@ impl OutputAdmissionV1 {
     /// Returns a declaration or resource-limit error when any draft exceeds
     /// the bound policy.
     pub fn validate_batch(&self, drafts: &[EventDraft]) -> Result<(), OutputAdmissionErrorV1> {
-        let previous = *self
+        // Hold the usage lock across validation and commit so concurrent host
+        // invocations cannot validate against the same stale cumulative total.
+        let mut usage = self
             .usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut counts = previous.events;
-        let mut bytes = previous.bytes;
+        let mut counts = usage.events;
+        let mut bytes = usage.bytes;
         for draft in drafts {
             let Some(declaration) = self
                 .policy
@@ -208,10 +210,7 @@ impl OutputAdmissionV1 {
                 });
             }
         }
-        *self
-            .usage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = AdmissionUsage {
+        *usage = AdmissionUsage {
             events: counts,
             bytes,
         };
