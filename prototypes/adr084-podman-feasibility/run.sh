@@ -280,7 +280,7 @@ jq -e '
     .observed_terminal_code != 4
   end
 ' "${artifact_dir}/elm-memory-limit.json" >/dev/null
-printf 'ADR-084 prototype completed on %s; Podman+crun candidate is incompatible with the required SIGXFSZ file-limit evidence\n' \
+printf 'ADR-084 prototype completed on %s; #379 acceptance fails: FileBytes lacks required SIGXFSZ, SwapBytes and distinct MemoryLimit lack distinguishable max events, three split lifecycle boundaries lack durable action-authorizing identity, and ADR-079 continuous profiling injects a non-empty adapter environment\n' \
   "$(uname -m)" | tee "${artifact_dir}/verdict.txt"
 find "${artifact_dir}" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum \
   >"${artifact_dir}/SHA256SUMS"

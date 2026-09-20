@@ -49,8 +49,7 @@ mountinfo size while the image root remains read-only. Forced terminal outcomes
 begin with a canonical MEMORY attempt: only after ReleaseV2, the adapter faults
 memory beyond `memory.max`; the provider retains the before/after
 `memory.events.local` counters and Podman `OOMKilled` state and selects ADR-069
-terminal code 3 `OomKilled`. The other forced outcomes and their precedence
-remain an open evidence slice.
+terminal code 3 `OomKilled`.
 
 The memory attempt keeps a minimal adapter parent alive while its allocating
 child crosses `memory.max`. This prevents rootless Podman from deleting the
@@ -108,16 +107,12 @@ provider accepts only the length prefix, observes the next overflow byte before
 one complete EAO1 frame, discards all adapter output, withholds a Completed
 descriptor, and selects terminal code 7 `FileOrOutputLimit`.
 
-Provider-only control evidence forces a two-slot attempt semaphore before AGR1,
-a two-entry FIFO with ordered dequeue and a fifth-request rejection, and a
-two-token per-peer-credential bucket through two accepts, one rejection, and an
-accept after one deterministic refill interval. Separate real monotonic input
-and output transfer deadlines expire after partial byte counts. Input retains
-pre-admission SPE1 code 17 `PayloadTransferTimeout`; output retains
-post-admission terminal code 10 `ProtocolFailure`. The prototype runtime key
-signs every rate transition, both transfer observations, and the complete
-semaphore/FIFO transition chain, and the driver verifies every signature before
-retention.
+The concurrency, queue, peer-rate, and transfer-deadline artifact is explicitly
+a model-only transition oracle. It signs deterministic semaphore/FIFO,
+token-bucket, and partial-transfer state transitions, but it does not exercise a
+provider admission socket, kernel peer credentials, concurrent clients, or a
+real partial byte stream. It therefore cannot be used as forced provider-control
+evidence; that #379 prerequisite remains open.
 
 A separate closed precedence matrix evaluates all 2,048 subsets of the eleven
 ADR-069 terminal observations plus the empty Completed case. It retains every
@@ -162,17 +157,20 @@ the earliest ReleaseV2 occurs after the latest `Observed` timestamp.
 A separate provider-death matrix uses an inert static lifecycle probe in its own
 explicitly throwaway fixture image, leaving the admitted ADR-085 image and its
 exact mounted-root manifest unchanged. The probe forks one descendant and then
-blocks. The matrix deliberately SIGKILLs the provider process
-immediately before and after split Podman create, start, identity capture, stop,
-kill, remove, and journal-fsync boundaries. Restart recovery trusts labels only
-for discovery: before acting it requires the exact provider, attempt, creation
-nonce, image, container, creation-time, and live PID/start-time identities from
-the hash-chained fsynced journal. Every case terminates descendants, removes the
-exact container, verifies the retained cgroup is empty or absent, verifies the
-merged root is no longer mounted, and replays reconciliation without another
-action. A continuously running lookalike sentinel proves unrelated state is not
-touched. Separate ambiguity and identity-reuse mutations require operator-visible
-refusal and leave every candidate unchanged. Because Podman 4.9.3 does not offer
+blocks. The matrix deliberately SIGKILLs the provider process immediately before
+and after split Podman create, start, identity capture, stop, kill, remove, and
+journal-fsync boundaries. Restart recovery trusts labels only for discovery:
+before acting it requires the exact provider, attempt, creation nonce, image,
+container, creation-time, and live PID/start-time identities from the
+hash-chained fsynced journal. After-create, after-start, and
+before-identity-capture lack that complete durable identity, so recovery refuses
+to touch the candidate; only the separate conformance harness cleans it up. The
+remaining actionable cases terminate descendants, remove the exact container,
+verify the retained cgroup is empty or absent, verify the merged root is no
+longer mounted, and replay reconciliation without another action. A continuously
+running lookalike sentinel proves unrelated state is not touched. Separate
+ambiguity and identity-reuse mutations require operator-visible refusal and leave
+every candidate unchanged. Because Podman 4.9.3 does not offer
 `--preserve-fds` on `create`, this split lifecycle matrix does not claim the
 authenticated launcher barrier; Ready, Observe, and Release crash boundaries
 remain a separate barrier-stage experiment.
@@ -242,5 +240,8 @@ Actions x86_64 and arm64 jobs.
 bash prototypes/adr084-podman-feasibility/run.sh
 ```
 
-The command writes only beneath `artifacts/adr084-podman-feasibility/` and the
-rootless Podman storage owned by the current user. It does not run Cargo.
+In GitHub Actions the command writes beneath
+`artifacts/adr084-podman-feasibility/`, runner-temporary build directories, the
+coverage fixture's Cargo target directory, and rootless Podman storage. Its
+ADR-079 subprobe invokes pinned Cargo/cargo-llvm-cov remotely. Nothing in this
+README authorizes running it in a developer worktree.

@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import pathlib
+import pwd
 import select
 import signal
 import socket
@@ -57,8 +58,31 @@ class BarrierAttempt:
     fdl_digest: bytes
 
 
+def podman_environment(
+    containers_conf: pathlib.Path | None = None,
+) -> dict[str, str]:
+    account = pwd.getpwuid(os.getuid())
+    runtime_dir = f"/run/user/{os.getuid()}"
+    environment = {
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+        "HOME": account.pw_dir,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "LOGNAME": account.pw_name,
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "USER": account.pw_name,
+        "XDG_RUNTIME_DIR": runtime_dir,
+    }
+    if containers_conf is not None:
+        environment["CONTAINERS_CONF"] = str(containers_conf)
+    return environment
+
+
 def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(arguments, check=check, text=True, capture_output=True)
+    environment = podman_environment() if arguments[0] == "/usr/bin/podman" else None
+    return subprocess.run(
+        arguments, check=check, text=True, capture_output=True, env=environment
+    )
 
 
 def blake3(value: bytes) -> bytes:
@@ -490,7 +514,7 @@ def signed_limit_observation(label: str, payload: object) -> dict[str, object]:
     }
 
 
-def provider_control_limit_scenarios(artifact_dir: pathlib.Path) -> None:
+def provider_control_model_scenarios(artifact_dir: pathlib.Path) -> None:
     active: list[str] = []
     queued: list[str] = []
     lifecycle: list[dict[str, object]] = []
@@ -608,6 +632,7 @@ def provider_control_limit_scenarios(artifact_dir: pathlib.Path) -> None:
         },
     )
     report = {
+        "evidence_kind": "model-only",
         "concurrency": {
             "configured_maximum": 2,
             "final_active": active,
@@ -632,7 +657,10 @@ def provider_control_limit_scenarios(artifact_dir: pathlib.Path) -> None:
             ),
         },
         "transfers": transfers,
-        "verdict": "provider controls forced semaphore, FIFO, peer-rate, and transfer-deadline boundaries",
+        "verdict": (
+            "model-only transition oracle; no provider admission, peer-credential, "
+            "concurrent-client, or partial-transfer seam was exercised"
+        ),
     }
     (artifact_dir / "elm-provider-controls.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1130,6 +1158,7 @@ def launch(
     podman_command = [
         "/usr/bin/podman",
         "run",
+        "--http-proxy=false",
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
@@ -1188,16 +1217,13 @@ def launch(
                 raise
         os.dup2(child_fd, 3, inheritable=True)
     try:
-        process_environment = os.environ.copy()
-        if containers_conf is not None:
-            process_environment["CONTAINERS_CONF"] = str(containers_conf)
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             pass_fds=(3,),
-            env=process_environment,
+            env=podman_environment(containers_conf),
         )
     finally:
         if child_fd != 3:
@@ -1881,10 +1907,10 @@ def memory_limit_scenario(
     )
     run("/usr/bin/podman", "rm", "--force", container_id)
     if (
-        return_code == 0
+        return_code != 137
         or output
         or snapshot["cgroup_values"]["memory.max"] != "67108864"
-        or (oom_delta <= 0 and oom_flag is not True)
+        or oom_delta != 1
         or b"MEMORY_OOM_CHILD signal=9\n" not in errors
     ):
         raise AssertionError(f"memory limit did not force OOM evidence: {report!r}")
@@ -2098,7 +2124,8 @@ def task_limit_scenario(
     if (
         output
         or snapshot["cgroup_values"]["pids.max"] != "16"
-        or max_delta <= 0
+        or max_delta != 1
+        or return_code != 137
         or b"TASK_LIMIT" not in errors
     ):
         raise AssertionError(f"task limit did not force pids evidence: {report!r}")
@@ -3201,6 +3228,7 @@ def installed_byte_mutation_scenario(
     podman_command = [
         "/usr/bin/podman",
         "run",
+        "--http-proxy=false",
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
@@ -3252,6 +3280,7 @@ def installed_byte_mutation_scenario(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             pass_fds=(3,),
+            env=podman_environment(),
         )
     finally:
         if child_fd != 3:
@@ -3373,6 +3402,7 @@ def seccomp_probe_scenario(
     podman_command = [
         "/usr/bin/podman",
         "run",
+        "--http-proxy=false",
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
@@ -3405,6 +3435,7 @@ def seccomp_probe_scenario(
         check=False,
         capture_output=True,
         timeout=20,
+        env=podman_environment(),
     )
     (artifact_dir / f"{scenario}.stdout").write_bytes(completed.stdout)
     (artifact_dir / f"{scenario}.stderr").write_bytes(completed.stderr)
@@ -3470,6 +3501,7 @@ def cache_probe_scenario(
     podman_command = [
         "/usr/bin/podman",
         "run",
+        "--http-proxy=false",
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
@@ -3508,6 +3540,7 @@ def cache_probe_scenario(
         check=False,
         capture_output=True,
         timeout=20,
+        env=podman_environment(),
     )
     (artifact_dir / f"{scenario}.stdout").write_bytes(completed.stdout)
     (artifact_dir / f"{scenario}.stderr").write_bytes(completed.stderr)
@@ -3524,6 +3557,22 @@ def cache_probe_scenario(
             "cache bypass probe failed: "
             f"code={completed.returncode} output={completed.stdout!r} "
             f"stderr={completed.stderr!r}"
+        )
+    install_report = json.loads(
+        (artifact_dir / f"{scenario}.seccomp-install.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if (
+        install_report.get("checksum_cache_accesses") != 0
+        or install_report.get("unreadable_path_checks") != 0
+        or install_report.get("equality") is not True
+        or install_report.get("install_attempts") != 1
+        or install_report.get("syscall_return") != 0
+    ):
+        raise AssertionError(
+            f"cache observation was incomplete or mismatched: {scenario}: "
+            f"{install_report!r}"
         )
     run("/usr/bin/podman", "rm", name)
 
@@ -3547,6 +3596,7 @@ def native_matrix_scenario(
     podman_command = [
         "/usr/bin/podman",
         "run",
+        "--http-proxy=false",
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
@@ -3575,7 +3625,10 @@ def native_matrix_scenario(
         image,
     ]
     process = subprocess.Popen(
-        podman_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        podman_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=podman_environment(),
     )
     container_id = wait_for_container(name, process)
     running_inspect: dict[str, object] | None = None
@@ -3883,7 +3936,10 @@ def concurrent_identical_cache_scenario(
                 encoding="utf-8"
             )
         )
-        if report.get("checksum_cache_accesses") != 0:
+        if (
+            report.get("checksum_cache_accesses") != 0
+            or report.get("unreadable_path_checks") != 0
+        ):
             raise AssertionError(f"cache access under concurrency: {scenario}")
         install_reports.append(
             {
@@ -4001,7 +4057,11 @@ def concurrent_distinct_cache_scenario(
             (artifact_dir / f"{scenario}.installed-seccomp.bpf").read_bytes()
         ).hexdigest()
         expected_hash = hashlib.sha256(selected[4].read_bytes()).hexdigest()
-        if install_report.get("checksum_cache_accesses") != 0 or installed_hash != expected_hash:
+        if (
+            install_report.get("checksum_cache_accesses") != 0
+            or install_report.get("unreadable_path_checks") != 0
+            or installed_hash != expected_hash
+        ):
             raise AssertionError(f"distinct cache attempt mismatch: {scenario}")
         observations.append(
             {
@@ -4069,6 +4129,10 @@ def main() -> None:
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
     arguments = parser.parse_args()
     arguments.artifact_dir.mkdir(parents=True, exist_ok=True)
+    (arguments.artifact_dir / "provider-subprocess-environment.json").write_text(
+        json.dumps(podman_environment(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     barrier_fixture = load_barrier_fixture(
         arguments.runtime_subject.resolve(), arguments.architecture
     )
@@ -4149,7 +4213,7 @@ def main() -> None:
         json.dumps(mutation_report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    provider_control_limit_scenarios(arguments.artifact_dir)
+    provider_control_model_scenarios(arguments.artifact_dir)
     terminal_precedence_scenario(arguments.artifact_dir)
     installed_byte_mutation_scenario(
         arguments.image,
@@ -4411,6 +4475,8 @@ if __name__ == "__main__":
     except Exception as error:
         print(f"prototype failed: {error}", file=sys.stderr)
         subprocess.run(
-            ["/usr/bin/podman", "ps", "--all", "--no-trunc"], check=False
+            ["/usr/bin/podman", "ps", "--all", "--no-trunc"],
+            check=False,
+            env=podman_environment(),
         )
         raise

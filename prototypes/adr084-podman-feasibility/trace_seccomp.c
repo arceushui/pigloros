@@ -144,7 +144,8 @@ static bool copy_tracee(pid_t pid, uintptr_t address, void *destination,
     return true;
 }
 
-static bool remote_path_contains_cache(pid_t pid, uintptr_t address) {
+static bool remote_path_contains_cache(pid_t pid, int directory_descriptor,
+                                       uintptr_t address) {
     if (address == 0) {
         return false;
     }
@@ -153,14 +154,46 @@ static bool remote_path_contains_cache(pid_t pid, uintptr_t address) {
         long word = 0;
         if (!copy_tracee(pid, address + offset, &word, sizeof(word))) {
             ++unreadable_path_checks;
-            return false;
+            errno = EFAULT;
+            fail("tracee-path-read");
         }
         size_t remaining = sizeof(path) - offset;
         size_t amount = remaining < sizeof(word) ? remaining : sizeof(word);
         memcpy(path + offset, &word, amount);
         for (size_t index = 0; index < amount; ++index) {
             if (path[offset + index] == '\0') {
-                return strstr(path, ".cache/seccomp") != NULL;
+                if (path[0] == '/') {
+                    return strstr(path, ".cache/seccomp") != NULL;
+                }
+                char descriptor_link[64];
+                int link_length = 0;
+                if (directory_descriptor == AT_FDCWD) {
+                    link_length = snprintf(descriptor_link, sizeof(descriptor_link),
+                                           "/proc/%ld/cwd", (long)pid);
+                } else {
+                    link_length = snprintf(descriptor_link, sizeof(descriptor_link),
+                                           "/proc/%ld/fd/%d", (long)pid,
+                                           directory_descriptor);
+                }
+                if (link_length < 0 || (size_t)link_length >= sizeof(descriptor_link)) {
+                    errno = ENAMETOOLONG;
+                    fail("tracee-dirfd-link");
+                }
+                char base[MAX_REMOTE_PATH];
+                ssize_t base_length = readlink(descriptor_link, base, sizeof(base) - 1);
+                if (base_length < 0) {
+                    fail("tracee-dirfd-read");
+                }
+                base[base_length] = '\0';
+                char resolved[MAX_REMOTE_PATH * 2];
+                int resolved_length = snprintf(resolved, sizeof(resolved), "%s/%s",
+                                               base, path);
+                if (resolved_length < 0 ||
+                    (size_t)resolved_length >= sizeof(resolved)) {
+                    errno = ENAMETOOLONG;
+                    fail("tracee-path-resolve");
+                }
+                return strstr(resolved, ".cache/seccomp") != NULL;
             }
         }
     }
@@ -173,6 +206,8 @@ static bool cache_path_syscall(pid_t pid,
     uint64_t number = info->entry.nr;
     uintptr_t first = 0;
     uintptr_t second = 0;
+    int first_directory = AT_FDCWD;
+    int second_directory = AT_FDCWD;
 #ifdef SYS_open
     if (number == SYS_open) {
         first = (uintptr_t)info->entry.args[0];
@@ -181,29 +216,35 @@ static bool cache_path_syscall(pid_t pid,
     if (number == SYS_openat || number == SYS_mkdirat ||
         number == SYS_unlinkat || number == SYS_newfstatat ||
         number == SYS_readlinkat) {
+        first_directory = (int)info->entry.args[0];
         first = (uintptr_t)info->entry.args[1];
     }
 #ifdef SYS_openat2
     if (number == SYS_openat2) {
+        first_directory = (int)info->entry.args[0];
         first = (uintptr_t)info->entry.args[1];
     }
 #endif
 #ifdef SYS_statx
     if (number == SYS_statx) {
+        first_directory = (int)info->entry.args[0];
         first = (uintptr_t)info->entry.args[1];
     }
 #endif
 #ifdef SYS_faccessat2
     if (number == SYS_faccessat2) {
+        first_directory = (int)info->entry.args[0];
         first = (uintptr_t)info->entry.args[1];
     }
 #endif
     if (number == SYS_linkat || number == SYS_renameat2) {
+        first_directory = (int)info->entry.args[0];
         first = (uintptr_t)info->entry.args[1];
+        second_directory = (int)info->entry.args[2];
         second = (uintptr_t)info->entry.args[3];
     }
-    return remote_path_contains_cache(pid, first) ||
-           remote_path_contains_cache(pid, second);
+    return remote_path_contains_cache(pid, first_directory, first) ||
+           remote_path_contains_cache(pid, second_directory, second);
 }
 
 static void write_exact(const char *path, const unsigned char *bytes,

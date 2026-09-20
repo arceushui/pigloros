@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import pwd
 import signal
 import subprocess
 import time
@@ -26,8 +27,26 @@ CLOSED_STATES = {
 }
 
 
+def podman_environment() -> dict[str, str]:
+    account = pwd.getpwuid(os.getuid())
+    runtime_dir = f"/run/user/{os.getuid()}"
+    return {
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+        "HOME": account.pw_dir,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "LOGNAME": account.pw_name,
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "USER": account.pw_name,
+        "XDG_RUNTIME_DIR": runtime_dir,
+    }
+
+
 def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(arguments, check=check, text=True, capture_output=True)
+    environment = podman_environment() if arguments[0] == "/usr/bin/podman" else None
+    return subprocess.run(
+        arguments, check=check, text=True, capture_output=True, env=environment
+    )
 
 
 def canonical_json(value: object) -> bytes:
@@ -176,6 +195,7 @@ def container_arguments(
     arguments = [
         "/usr/bin/podman",
         "create",
+        "--http-proxy=false",
         "--runtime=/usr/bin/crun",
         "--pull=never",
         f"--name={name}",
@@ -404,14 +424,14 @@ def exact_identity_matches(
     actual: dict[str, object], expected: dict[str, object]
 ) -> bool:
     for field in ("container_id", "created", "image_id"):
-        if expected.get(field) is not None and actual.get(field) != expected.get(field):
+        if expected.get(field) is None or actual.get(field) != expected.get(field):
             return False
     if actual.get("running"):
-        if expected.get("pid") not in (None, 0) and actual.get("pid") != expected.get(
-            "pid"
-        ):
+        if not isinstance(expected.get("pid"), int) or int(expected["pid"]) <= 0:
             return False
-        if expected.get("pid_start_ticks") is not None and actual.get(
+        if actual.get("pid") != expected.get("pid"):
+            return False
+        if expected.get("pid_start_ticks") is None or actual.get(
             "pid_start_ticks"
         ) != expected.get("pid_start_ticks"):
             return False
@@ -497,9 +517,17 @@ def reconcile(
             actual_labels.get(key) != value for key, value in expected_labels.items()
         ):
             raise RuntimeError("discovered candidate label identity mismatch")
-        if previous_identity is not None and not exact_identity_matches(
-            actual_identity, previous_identity
-        ):
+        if previous_identity is None:
+            return {
+                "actions": [],
+                "candidate_running": actual_identity["running"],
+                "candidate_untouched": True,
+                "durable_identity_available": False,
+                "operator_intervention_required": True,
+                "reason": "no complete durable container identity authorizes an action",
+                "scenario": scenario,
+            }
+        if not exact_identity_matches(actual_identity, previous_identity):
             raise RuntimeError("durable container creation/PID identity mismatch")
         prior_running = last_running_identity(records)
         cgroup_path = actual_identity["cgroup_path"] or (
@@ -720,6 +748,11 @@ def main() -> None:
         sentinel_document = inspect_container(sentinel)
         if not sentinel_document["State"]["Running"]:  # type: ignore[index]
             raise AssertionError("reconciliation touched the unrelated sentinel")
+        if first.get("operator_intervention_required") is True:
+            discovered = discover(expected_labels)
+            if len(discovered) != 1 or replay != first:
+                raise AssertionError("identity refusal was not stable and non-destructive")
+            cleanup_container(discovered[0])
         committed = load_committed_journal(journal_dir, scenario)
         results.append(
             {
@@ -746,13 +779,19 @@ def main() -> None:
         "crash_boundary_count": len(results),
         "fixture_image_id": image_id,
         "fixture_scope": "throwaway lifecycle image; not the admitted ADR-085 image",
+        "identity_incompatible_scenarios": [
+            result["scenario"]
+            for result in results
+            if result["reconciliation"].get("operator_intervention_required") is True
+        ],
         "identity_defenses": negative,
         "provider_id": PROVIDER_ID,
         "results": results,
         "unrelated_sentinel_untouched": sentinel_untouched,
         "verdict": (
-            "provider SIGKILL followed by exact identity-authorized, idempotent cleanup "
-            "at every split Podman lifecycle and journal-fsync boundary"
+            "cleanup is exact-identity-authorized when the identity is durable; "
+            "after-create, after-start, and before-identity-capture fail closed and "
+            "require separate harness cleanup"
         ),
     }
     (arguments.artifact_dir / "lifecycle-crash-matrix.json").write_text(

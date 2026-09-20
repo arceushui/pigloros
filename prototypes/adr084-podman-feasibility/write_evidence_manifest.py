@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write self-contained prototype provenance and a minimal SPDX file inventory."""
+"""Write prototype provenance and an SPDX inventory of every executed input."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ def main() -> None:
         "amd64": "foreign_x86.S",
         "arm64": "foreign_arm.S",
     }[arguments.architecture]
+    repository_root = arguments.prototype_dir.parents[1]
 
     files = [
         ("/launcher", arguments.build_dir / "launcher"),
@@ -40,6 +41,58 @@ def main() -> None:
             arguments.build_dir / "libseccomp-interface-v1.txt",
         ),
         ("prototype/launcher.c", arguments.prototype_dir / "launcher.c"),
+        ("prototype/README.md", arguments.prototype_dir / "README.md"),
+        ("prototype/run.sh", arguments.prototype_dir / "run.sh"),
+        (
+            "prototype/run_coverage_probe.sh",
+            arguments.prototype_dir / "run_coverage_probe.sh",
+        ),
+        ("prototype/driver.py", arguments.prototype_dir / "driver.py"),
+        (
+            "prototype/lifecycle_crash_matrix.py",
+            arguments.prototype_dir / "lifecycle_crash_matrix.py",
+        ),
+        (
+            "prototype/build_oci_archive.py",
+            arguments.prototype_dir / "build_oci_archive.py",
+        ),
+        (
+            "prototype/generate_runtime_subject.py",
+            arguments.prototype_dir / "generate_runtime_subject.py",
+        ),
+        (
+            "prototype/generate_vectors.py",
+            arguments.prototype_dir / "generate_vectors.py",
+        ),
+        (
+            "prototype/mount_and_manifest.sh",
+            arguments.prototype_dir / "mount_and_manifest.sh",
+        ),
+        ("prototype/oci_layer.py", arguments.prototype_dir / "oci_layer.py"),
+        (
+            "prototype/rootfs_manifest.py",
+            arguments.prototype_dir / "rootfs_manifest.py",
+        ),
+        (
+            "prototype/validate_oci.py",
+            arguments.prototype_dir / "validate_oci.py",
+        ),
+        (
+            "prototype/validate_oci_archive.py",
+            arguments.prototype_dir / "validate_oci_archive.py",
+        ),
+        (
+            "prototype/validate_runtime_subject.py",
+            arguments.prototype_dir / "validate_runtime_subject.py",
+        ),
+        (
+            "prototype/validate_vectors.py",
+            arguments.prototype_dir / "validate_vectors.py",
+        ),
+        (
+            "prototype/write_evidence_manifest.py",
+            arguments.prototype_dir / "write_evidence_manifest.py",
+        ),
         ("dependency/blake3.c", arguments.build_dir / "blake3-source/c/blake3.c"),
         (
             "dependency/blake3_dispatch.c",
@@ -74,10 +127,6 @@ def main() -> None:
         ),
         ("prototype/native_matrix.c", arguments.prototype_dir / "native_matrix.c"),
         ("prototype/lifecycle_probe.c", arguments.prototype_dir / "lifecycle_probe.c"),
-        (
-            "prototype/lifecycle_crash_matrix.py",
-            arguments.prototype_dir / "lifecycle_crash_matrix.py",
-        ),
         ("prototype/compile_seccomp.c", arguments.prototype_dir / "compile_seccomp.c"),
         ("prototype/seccomp_probe.c", arguments.prototype_dir / "seccomp_probe.c"),
         (
@@ -90,8 +139,36 @@ def main() -> None:
         ("prototype/verify_seccomp_bpf.py", arguments.prototype_dir / "verify_seccomp_bpf.py"),
         ("prototype/Containerfile", arguments.prototype_dir / "Containerfile"),
         (
+            "prototype/Containerfile.coverage",
+            arguments.prototype_dir / "Containerfile.coverage",
+        ),
+        (
             "prototype/Containerfile.lifecycle",
             arguments.prototype_dir / "Containerfile.lifecycle",
+        ),
+        (
+            "prototype/coverage-fixture/Cargo.toml",
+            arguments.prototype_dir / "coverage-fixture/Cargo.toml",
+        ),
+        (
+            "prototype/coverage-fixture/launcher/Cargo.toml",
+            arguments.prototype_dir / "coverage-fixture/launcher/Cargo.toml",
+        ),
+        (
+            "prototype/coverage-fixture/launcher/src/main.rs",
+            arguments.prototype_dir / "coverage-fixture/launcher/src/main.rs",
+        ),
+        (
+            "prototype/coverage-fixture/adapter/Cargo.toml",
+            arguments.prototype_dir / "coverage-fixture/adapter/Cargo.toml",
+        ),
+        (
+            "prototype/coverage-fixture/adapter/src/main.rs",
+            arguments.prototype_dir / "coverage-fixture/adapter/src/main.rs",
+        ),
+        (
+            "workflow/adr084-podman-feasibility.yml",
+            repository_root / ".github/workflows/adr084-podman-feasibility.yml",
         ),
         ("build/compile-seccomp", arguments.build_dir / "compile-seccomp"),
         ("build/trace-seccomp", arguments.build_dir / "trace-seccomp"),
@@ -297,6 +374,7 @@ def main() -> None:
         "probe-filter-binding.json",
         "probe.stderr",
         "probe.stdout",
+        "provider-subprocess-environment.json",
         "provider-seccomp-baseline.txt",
         "stacked.installed-seccomp.bpf",
         "stacked.seccomp-install.json",
@@ -449,10 +527,18 @@ def main() -> None:
             name: sha256(arguments.artifact_dir / name) for name in retained
         },
         "commit": os.environ.get("GITHUB_SHA", "unknown"),
+        "job": os.environ.get("GITHUB_JOB", "unknown"),
+        "ref": os.environ.get("GITHUB_REF", "unknown"),
         "repository": os.environ.get("GITHUB_REPOSITORY", "unknown"),
         "retention_days": 90,
         "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "unknown"),
         "run_id": os.environ.get("GITHUB_RUN_ID", "unknown"),
+        "run_url": (
+            f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+            f"{os.environ.get('GITHUB_REPOSITORY', 'unknown')}/actions/runs/"
+            f"{os.environ.get('GITHUB_RUN_ID', 'unknown')}/attempts/"
+            f"{os.environ.get('GITHUB_RUN_ATTEMPT', 'unknown')}"
+        ),
         "runner_image": os.environ.get("ImageOS", "unknown"),
         "runner_image_version": os.environ.get("ImageVersion", "unknown"),
         "workflow": os.environ.get("GITHUB_WORKFLOW", "unknown"),

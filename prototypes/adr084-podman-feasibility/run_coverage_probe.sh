@@ -59,6 +59,7 @@ cp "${prototype_dir}/Containerfile.coverage" "${build_dir}/Containerfile"
 /usr/bin/podman image inspect "${image}" >"${evidence_dir}/image-inspect.json"
 
 podman_arguments=(
+  --http-proxy=false
   --runtime=/usr/bin/crun
   --pull=never
   --network=none
@@ -73,10 +74,8 @@ podman_arguments=(
   --entrypoint=/launcher
 )
 
-for scenario in clean kill; do
-  mkdir -p "${evidence_dir}/${scenario}"
-  chmod 0777 "${evidence_dir}/${scenario}"
-done
+mkdir -p "${evidence_dir}/clean"
+chmod 0777 "${evidence_dir}/clean"
 
 set +e
 /usr/bin/podman run --rm "${podman_arguments[@]}" \
@@ -111,78 +110,5 @@ if [[ ${clean_status} -ne 0 ]]; then
   exit 0
 fi
 
-readonly kill_name="pigloros-adr079-kill-${GITHUB_RUN_ID}-${architecture}"
-set +e
-/usr/bin/podman run --rm=false --name="${kill_name}" "${podman_arguments[@]}" \
-  --volume="${evidence_dir}/kill:/work:rw" "${image}" kill \
-  >"${evidence_dir}/kill.stdout" 2>"${evidence_dir}/kill.stderr" &
-kill_wait_pid=$!
-set -e
-for _ in $(seq 1 200); do
-  if grep -q '^ADAPTER_READY mode=kill ' "${evidence_dir}/kill.stderr"; then
-    break
-  fi
-  if ! kill -0 "${kill_wait_pid}" 2>/dev/null; then
-    break
-  fi
-  sleep 0.05
-done
-grep -q '^LAUNCHER_BEFORE_EXEC mode=kill ' "${evidence_dir}/kill.stderr"
-grep -q '^ADAPTER_READY mode=kill ' "${evidence_dir}/kill.stderr"
-/usr/bin/podman kill --signal=KILL "${kill_name}" >/dev/null
-set +e
-wait "${kill_wait_pid}"
-kill_status=$?
-set -e
-/usr/bin/podman rm --force "${kill_name}" >/dev/null
-test "${kill_status}" -eq 137
-printf '%s\n' "${kill_status}" >"${evidence_dir}/kill.return-code"
-
-grep -q '^LAUNCHER_BEFORE_EXEC mode=clean ' "${evidence_dir}/clean.stderr"
-grep -q '^ADAPTER_READY mode=clean ' "${evidence_dir}/clean.stderr"
-test "$(find "${evidence_dir}/clean" -maxdepth 1 -name '*.profraw' | wc -l)" -eq 2
-test "$(find "${evidence_dir}/kill" -maxdepth 1 -name '*.profraw' | wc -l)" -eq 2
-test "$(find "${evidence_dir}/clean" -maxdepth 1 -name 'launcher-*.profraw' | wc -l)" -eq 1
-test "$(find "${evidence_dir}/clean" -maxdepth 1 -name 'adapter-*.profraw' | wc -l)" -eq 1
-test "$(find "${evidence_dir}/kill" -maxdepth 1 -name 'launcher-*.profraw' | wc -l)" -eq 1
-test "$(find "${evidence_dir}/kill" -maxdepth 1 -name 'adapter-*.profraw' | wc -l)" -eq 1
-
-mapfile -t raw_profiles < <(find "${evidence_dir}/clean" "${evidence_dir}/kill" \
-  -maxdepth 1 -name '*.profraw' -type f | sort)
-"${llvm_profdata}" merge -sparse "${raw_profiles[@]}" \
-  -o "${evidence_dir}/combined.profdata"
-"${llvm_cov}" export --format=text "${launcher}" --object "${adapter}" \
-  --instr-profile="${evidence_dir}/combined.profdata" \
-  >"${evidence_dir}/official-combined.json"
-"${llvm_cov}" export --format=lcov "${launcher}" --object "${adapter}" \
-  --instr-profile="${evidence_dir}/combined.profdata" \
-  >"${evidence_dir}/official-combined.lcov"
-"${llvm_cov}" export --format=text "${launcher}" \
-  --instr-profile="${evidence_dir}/combined.profdata" \
-  >"${evidence_dir}/launcher-only.json"
-"${llvm_cov}" export --format=text "${adapter}" \
-  --instr-profile="${evidence_dir}/combined.profdata" \
-  >"${evidence_dir}/adapter-only.json"
-
-readonly cargo_profile_dir=$(dirname -- "${LLVM_PROFILE_FILE}")
-mkdir -p "${cargo_profile_dir}"
-for profile in "${raw_profiles[@]}"; do
-  cp "${profile}" "${cargo_profile_dir}/$(basename -- "$(dirname -- "${profile}")")-$(basename -- "${profile}")"
-done
-cargo llvm-cov report --target "${target}" --json \
-  --output-path "${evidence_dir}/cargo-llvm-cov.json"
-cargo llvm-cov report --target "${target}" --lcov \
-  --output-path "${evidence_dir}/cargo-llvm-cov.lcov"
-
-cp "${raw_profiles[0]}" "${build_dir}/corrupt.profraw"
-truncate -s 32 "${build_dir}/corrupt.profraw"
-if "${llvm_profdata}" merge -sparse "${build_dir}/corrupt.profraw" \
-  -o "${build_dir}/corrupt.profdata" \
-  >"${evidence_dir}/corrupt-profile.stdout" \
-  2>"${evidence_dir}/corrupt-profile.stderr"; then
-  printf 'corrupt raw profile was accepted\n' >&2
-  exit 1
-fi
-
-python3 "${prototype_dir}/validate_coverage_evidence.py" \
-  "${evidence_dir}" "${launcher}" "${adapter}" "${architecture}"
+printf 'ADR-079 candidate C unexpectedly preserved an empty adapter environment; update the bounded probe before making further claims\n' >&2
+exit 1
