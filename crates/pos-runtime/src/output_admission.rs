@@ -5,6 +5,7 @@ use pos_core::{
     output_policy::{OutputFidelityV1, OutputPolicyV1},
     ExecutableBudgetPolicyV1, Hash, PluginId,
 };
+use std::cell::Cell;
 
 /// Closed failures returned by the production output gate.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -57,6 +58,22 @@ pub struct OutputAdmissionV1 {
     policy: OutputPolicyV1,
     budget: ExecutableBudgetPolicyV1,
     cpu_reservations_us: [u32; 3],
+    usage: Cell<AdmissionUsage>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AdmissionUsage {
+    events: [u64; 3],
+    bytes: [u64; 3],
+}
+
+impl Default for AdmissionUsage {
+    fn default() -> Self {
+        Self {
+            events: [0; 3],
+            bytes: [0; 3],
+        }
+    }
 }
 
 impl OutputAdmissionV1 {
@@ -95,6 +112,7 @@ impl OutputAdmissionV1 {
             policy,
             budget,
             cpu_reservations_us,
+            usage: Cell::new(AdmissionUsage::default()),
         })
     }
 
@@ -124,8 +142,9 @@ impl OutputAdmissionV1 {
     /// Returns a declaration or resource-limit error when any draft exceeds
     /// the bound policy.
     pub fn validate_batch(&self, drafts: &[EventDraft]) -> Result<(), OutputAdmissionErrorV1> {
-        let mut counts = [0_u64; 3];
-        let mut bytes = [0_u64; 3];
+        let previous = self.usage.get();
+        let mut counts = previous.events;
+        let mut bytes = previous.bytes;
         for draft in drafts {
             let Some(declaration) = self
                 .policy
@@ -188,6 +207,10 @@ impl OutputAdmissionV1 {
                 });
             }
         }
+        self.usage.set(AdmissionUsage {
+            events: counts,
+            bytes,
+        });
         Ok(())
     }
 }

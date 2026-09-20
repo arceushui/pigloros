@@ -179,6 +179,13 @@ fn output_admission_accepts_declared_output_and_exposes_policy_identity() -> Tes
         OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget)?, budget)?;
 
     admission.validate_batch(&[draft("plugin.output", b"accepted")])?;
+    assert!(matches!(
+        admission.validate_batch(&[
+            draft("plugin.output", b"second"),
+            draft("plugin.output", b"third"),
+        ]),
+        Err(OutputAdmissionErrorV1::EventCountExceeded { level: 0, .. })
+    ));
     assert_ne!(admission.policy_digest(), Hash::zero());
     Ok(())
 }
