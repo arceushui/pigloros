@@ -40,7 +40,11 @@ fn deliberately_uncovered_adapter_region() -> u64 {
 fn main() {
     let mode = env::args().nth(1).expect("clean or kill mode");
     assert!(mode == "clean" || mode == "kill");
-    assert!(env::vars_os().next().is_none(), "adapter environment is not empty");
+    let environment = env::vars_os().collect::<Vec<_>>();
+    assert!(
+        environment.is_empty(),
+        "adapter environment is not empty: {environment:?}"
+    );
     assert_eq!(live_descriptors(), vec![0, 1, 2]);
     let mappings = fs::read_to_string("/proc/self/maps").expect("read adapter mappings");
     assert!(mappings.contains("/work/adapter-"));
