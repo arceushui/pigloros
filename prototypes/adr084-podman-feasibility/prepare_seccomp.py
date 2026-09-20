@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize the throwaway ADR-084 revision-24 seccomp inputs."""
+"""Materialize the throwaway ADR-084 revision-27 seccomp inputs."""
 
 from __future__ import annotations
 
@@ -152,8 +152,57 @@ def expected_mapping(
 
 def validate_interface(
     interface: bytes,
-    expected: bytes,
+    requested: list[str],
+    effective: list[str],
+    table: dict[str, dict[str, str]],
+    architecture: str,
 ) -> None:
+    if not interface:
+        raise ValueError("LibseccompInterfaceV1 is empty")
+    try:
+        interface.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ValueError("LibseccompInterfaceV1 is not ASCII") from error
+    if not interface.endswith(b"\n") or interface.endswith(b"\n\n"):
+        raise ValueError("LibseccompInterfaceV1 has a noncanonical final newline")
+    lines = interface.splitlines(keepends=True)
+    if any(not line.endswith(b"\n") or line.count(b":") != 1 for line in lines):
+        raise ValueError("LibseccompInterfaceV1 contains a malformed record")
+    if lines != sorted(lines) or len(lines) != len(set(lines)):
+        raise ValueError("LibseccompInterfaceV1 records are not strictly byte-sorted")
+    column = ARCHITECTURES[architecture][1]
+    names: list[str] = []
+    numbers: list[int] = []
+    for line in lines:
+        encoded_number, encoded_name = line[:-1].split(b":", 1)
+        name = encoded_name.decode("ascii")
+        if NAME.fullmatch(name) is None or name in names:
+            raise ValueError("LibseccompInterfaceV1 has an invalid or duplicate name")
+        names.append(name)
+        if encoded_number == b"PNR":
+            if (
+                architecture != "aarch64"
+                or name != "poll"
+                or table.get(name, {}).get(column) != "PNR"
+            ):
+                raise ValueError("LibseccompInterfaceV1 has an invalid PNR marker")
+            continue
+        if (
+            not encoded_number.isdecimal()
+            or (len(encoded_number) > 1 and encoded_number.startswith(b"0"))
+        ):
+            raise ValueError("LibseccompInterfaceV1 has a noncanonical number")
+        number = int(encoded_number)
+        if number > 2**31 - 1 or number in numbers:
+            raise ValueError("LibseccompInterfaceV1 has an invalid or duplicate number")
+        numbers.append(number)
+        if table.get(name, {}).get(column) != str(number):
+            raise ValueError("LibseccompInterfaceV1 number differs from pinned source")
+    if set(names) != set(requested):
+        raise ValueError("LibseccompInterfaceV1 membership differs from R")
+    if set(names) & (set(effective) - set(requested)):
+        raise ValueError("LibseccompInterfaceV1 contains a readback-only D member")
+    expected, _, _ = expected_mapping(requested, effective, table, architecture)
     if interface != expected:
         raise ValueError("LibseccompInterfaceV1 is not the exact canonical R mapping")
 
@@ -193,32 +242,84 @@ def mutation_report(
     if len(interface.splitlines()) < 2:
         raise ValueError("interface is too small for mutation evidence")
     lines = interface.splitlines(keepends=True)
-    cases.append(rejected(lambda: validate_interface(b"".join(lines[1:]), interface), "missing interface row"))
-    cases.append(rejected(lambda: validate_interface(interface + b"0:extra\n", interface), "extra interface row"))
-    cases.append(rejected(lambda: validate_interface(b"".join(reversed(lines)), interface), "wrong interface order"))
-    cases.append(rejected(lambda: validate_interface(interface[:-1], interface), "missing final newline"))
-    cases.append(rejected(lambda: validate_interface(interface + b"\n", interface), "trailing empty record"))
-    numeric_index = next(index for index, line in enumerate(lines) if not line.startswith(b"PNR:"))
+
+    def reject_interface(candidate: bytes, label: str) -> None:
+        cases.append(
+            rejected(
+                lambda: validate_interface(
+                    candidate, requested, effective, table, architecture
+                ),
+                label,
+            )
+        )
+
+    reject_interface(b"".join(lines[1:]), "missing interface row")
+    reject_interface(interface + b"0:extra\n", "extra interface row")
+    reject_interface(b"".join(reversed(lines)), "wrong interface order")
+    reject_interface(interface[:-1], "missing final newline")
+    reject_interface(interface + b"\n", "final extra newline")
+    reject_interface(b"", "empty interface")
+    reject_interface(interface + b"trailing", "trailing malformed record")
+    numeric_index = next(
+        index for index, line in enumerate(lines) if not line.startswith(b"PNR:")
+    )
     number, name = lines[numeric_index].split(b":", 1)
     changed = lines.copy()
     changed[numeric_index] = str(int(number) + 1).encode() + b":" + name
-    cases.append(rejected(lambda: validate_interface(b"".join(changed), interface), "wrong native number"))
+    reject_interface(b"".join(changed), "wrong native number")
     changed = lines.copy()
     changed[numeric_index] = b"0" + number + b":" + name
-    cases.append(rejected(lambda: validate_interface(b"".join(changed), interface), "noncanonical decimal"))
+    reject_interface(b"".join(changed), "noncanonical decimal")
+    changed = lines.copy()
+    changed[numeric_index] = b"PNR:" + name
+    reject_interface(b"".join(changed), "wrong-classification numeric marker")
+    second_numeric_index = next(
+        index
+        for index, line in enumerate(lines)
+        if index != numeric_index and not line.startswith(b"PNR:")
+    )
+    _, second_name = lines[second_numeric_index].split(b":", 1)
+    changed = lines.copy()
+    changed[second_numeric_index] = number + b":" + second_name
+    reject_interface(b"".join(changed), "duplicate native number")
+    changed = lines.copy()
+    changed[second_numeric_index] = (
+        changed[second_numeric_index].split(b":", 1)[0] + b":" + name
+    )
+    reject_interface(b"".join(changed), "duplicate requested name")
+    other_column = "aarch64" if architecture == "x86_64" else "x86_64"
+    record_name = name[:-1].decode("ascii")
+    foreign_value = table[record_name][other_column]
+    if foreign_value != "PNR" and foreign_value != number.decode("ascii"):
+        changed = lines.copy()
+        changed[numeric_index] = foreign_value.encode("ascii") + b":" + name
+        reject_interface(b"".join(changed), "foreign-architecture number")
+    changed = lines.copy()
+    changed[numeric_index] = str(int(number) + 2).encode() + b":" + name
+    reject_interface(b"".join(changed), "reverse-resolution mismatch")
+    readback_only = sorted(set(effective) - set(requested))
+    reject_interface(
+        interface + f"PNR:{readback_only[0]}\n".encode("ascii"),
+        "interface row for readback-only D",
+    )
     if architecture == "aarch64":
         poll_index = lines.index(b"PNR:poll\n")
         changed = lines.copy()
         del changed[poll_index]
-        cases.append(rejected(lambda: validate_interface(b"".join(changed), interface), "missing poll marker"))
+        reject_interface(b"".join(changed), "missing poll marker")
+        reject_interface(interface + b"PNR:poll\n", "extra poll marker")
         changed = lines.copy()
         changed[poll_index] = b"73:poll\n"
-        cases.append(rejected(lambda: validate_interface(b"".join(changed), interface), "numeric poll alias"))
+        reject_interface(b"".join(changed), "wrong-classification poll marker")
         changed = lines.copy()
         changed[poll_index] = b"PNR:ppoll\n"
-        cases.append(rejected(lambda: validate_interface(b"".join(changed), interface), "poll-to-ppoll alias"))
+        reject_interface(b"".join(changed), "wrong-name poll marker")
+        changed = lines.copy()
+        changed[poll_index] = b"PNR:arch_prctl\n"
+        reject_interface(b"".join(changed), "wrong-architecture PNR marker")
+    else:
+        reject_interface(interface + b"PNR:poll\n", "unexpected x86_64 poll marker")
     mutated_table = {name: row.copy() for name, row in table.items()}
-    readback_only = sorted(set(effective) - set(requested))
     mutated_table[readback_only[0]][ARCHITECTURES[architecture][1]] = "0"
     cases.append(
         rejected(
@@ -226,15 +327,14 @@ def mutation_report(
             "numeric readback-only token",
         )
     )
-    if architecture == "x86_64":
-        pnr_name = readback_only[0]
-        mutated_requested = sorted(requested + [pnr_name])
-        cases.append(
-            rejected(
-                lambda: expected_mapping(mutated_requested, effective, table, architecture),
-                "unapproved requested PNR",
-            )
+    pnr_name = readback_only[0]
+    mutated_requested = sorted(requested + [pnr_name])
+    cases.append(
+        rejected(
+            lambda: expected_mapping(mutated_requested, effective, table, architecture),
+            "unapproved requested PNR",
         )
+    )
     parsed_profile = json.loads(profile)
     names = parsed_profile["syscalls"][0]["names"]
     for label, changed_names in (
@@ -242,6 +342,10 @@ def mutation_report(
         ("audit name substitution", ["zzzz_mutated_name"] + names[1:]),
         ("audit name reordering", list(reversed(names))),
         ("audit name addition", names + ["writev_extra"]),
+        (
+            "readback-only D alias",
+            [requested[0] if name == readback_only[0] else name for name in names],
+        ),
     ):
         changed_profile = {
             **parsed_profile,
@@ -249,7 +353,7 @@ def mutation_report(
         }
         candidate = json.dumps(changed_profile, separators=(",", ":")).encode()
         cases.append(rejected(lambda c=candidate: validate_profile(c, profile), label))
-    if len(cases) < (14 if architecture == "aarch64" else 11):
+    if len(cases) < (26 if architecture == "aarch64" else 23):
         raise AssertionError("mutation matrix did not exercise the required cases")
     return {"architecture": architecture, "rejected_count": len(cases), "rejected": cases}
 
@@ -267,7 +371,7 @@ def main() -> None:
     interface, readback_only, numeric = expected_mapping(
         requested, effective, table, arguments.architecture
     )
-    validate_interface(interface, interface)
+    validate_interface(interface, requested, effective, table, arguments.architecture)
     profile = profile_bytes(effective, arguments.architecture)
     validate_profile(profile, profile)
     report = {
