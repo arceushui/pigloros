@@ -3587,6 +3587,51 @@ impl SqliteStore {
         Ok(hash)
     }
 
+    fn fork_unchecked(
+        &mut self,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, CoreError> {
+        let head = self.logical_head_unchecked(parent)?;
+        if at_seq > head {
+            return Err(CoreError::ForkBeyondHead {
+                fork_seq: at_seq.as_u64(),
+                head: head.as_u64(),
+            });
+        }
+
+        let fork_hash = self.compute_chain_hash_at_unchecked_on(parent, at_seq)?;
+        let meta = self.timeline_owner(parent)?.map_or_else(
+            || TimelineMeta::forked_from(parent, at_seq, name),
+            |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+        );
+        let child = Timeline::new(meta);
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            params![
+                child.id().to_string(),
+                child.meta.name.as_deref(),
+                mode_str(child.mode()),
+                parent.to_string(),
+                i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
+                fork_hash.as_bytes().as_slice(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if let Some(owner) = child.meta.owner {
+            Self::persist_timeline_owner(&tx, child.id(), owner)?;
+        }
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(child)
+    }
+
     fn insert_timeline_with_meta_on(
         conn: &Connection,
         meta: &TimelineMeta,
@@ -3668,10 +3713,33 @@ impl SqliteStore {
             self.save_key_registry_in_transaction(expected_registry)?;
         }
 
-        self.list_timelines()?
-            .into_iter()
-            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+        self.find_timeline_by_name_unchecked(name)?
             .map_or_else(|| self.create_timeline(name), Ok)
+    }
+
+    fn find_timeline_by_name_unchecked(&self, name: &str) -> Result<Option<Timeline>, CoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq
+                 FROM timelines WHERE name = ?1 LIMIT 1",
+                params![name],
+                read_timeline_row,
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        row.map_or(Ok(None), |timeline_row| {
+            let mut timeline = timeline_fields_to_timeline(
+                &timeline_row.id,
+                timeline_row.name,
+                &timeline_row.mode,
+                timeline_row.parent_id,
+                timeline_row.fork_seq,
+                timeline_row.head_seq,
+            )?;
+            timeline.meta.owner = self.timeline_owner(timeline.id())?;
+            Ok(Some(timeline))
+        })
     }
 }
 
@@ -3717,6 +3785,10 @@ impl EventStore for SqliteStore {
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(timeline)
+    }
+
+    fn create_timeline_for_host_transition(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.create_timeline(name)
     }
 
     fn append(
@@ -3771,6 +3843,14 @@ impl EventStore for SqliteStore {
         let result =
             self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
         finish_immediate_transaction(&self.conn, result)
+    }
+
+    fn initialize_timeline_with_key_registry_for_host_transition(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        self.initialize_timeline_with_key_registry(name, expected_registry)
     }
 
     fn append_signed_authorized(
@@ -4202,56 +4282,18 @@ impl EventStore for SqliteStore {
         self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
             store
                 .ensure_generic_timeline_visibility(parent)
-                .and_then(|()| {
-                    let head = store.logical_head(parent)?;
-                    if at_seq > head {
-                        return Err(CoreError::ForkBeyondHead {
-                            fork_seq: at_seq.as_u64(),
-                            head: head.as_u64(),
-                        });
-                    }
-
-                    // Compute chain hash at the fork point
-                    let fork_hash = store.compute_chain_hash_at(parent, at_seq)?;
-
-                    let meta = store.timeline_owner(parent)?.map_or_else(
-                        || TimelineMeta::forked_from(parent, at_seq, name),
-                        |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
-                    );
-                    let child = Timeline::new(meta);
-
-                    let tx = match store
-                        .conn
-                        .transaction_with_behavior(TransactionBehavior::Immediate)
-                    {
-                        Ok(tx) => tx,
-                        Err(error) => return Err(CoreError::Storage(error.to_string())),
-                    };
-                    tx.execute(
-            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-            params![
-                child.id().to_string(),
-                child.meta.name.as_deref(),
-                mode_str(child.mode()),
-                parent.to_string(),
-                i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
-                fork_hash.as_bytes().as_slice(),
-            ],
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-                    if let Some(owner) = child.meta.owner {
-                        Self::persist_timeline_owner(&tx, child.id(), owner)?;
-                    }
-
-                    if let Err(error) = tx.commit() {
-                        return Err(CoreError::Storage(error.to_string()));
-                    }
-
-                    Ok(child)
-                })
+                .and_then(|()| store.fork_unchecked(parent, at_seq, name))
         })
+    }
+
+    fn fork_for_host_transition(
+        &mut self,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_generic_timeline_visibility(parent)
+            .and_then(|()| self.fork_unchecked(parent, at_seq, name))
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {

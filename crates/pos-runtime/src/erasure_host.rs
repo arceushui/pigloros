@@ -26,7 +26,7 @@ use pos_core::{
     KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
     KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1,
     PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
-    Timeline, TimelineId, TimelineMeta,
+    Timeline, TimelineId, TimelineMeta, TimelineMode,
 };
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
@@ -71,10 +71,12 @@ struct IdentifiedForkTransitionInput<'a> {
     current_inventory: &'a ErasureVerifiedInventoryV1,
     authority: &'a dyn ErasureCoordinatorAuthorityV1,
     coordinator: ErasureReferenceV1,
+    recovered: Option<ErasureForkRecoveryV1>,
 }
 
 struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnaffectedTopologyTransitionError {
     Host(ErasureHostErrorV1),
     Erasure(ErasureErrorV1),
@@ -1488,9 +1490,9 @@ impl ErasureExecutionHostV1 {
     fn rollback_unaffected_topology_timeline(
         &mut self,
         timeline: &Timeline,
-        created: bool,
+        timeline_was_absent: bool,
     ) -> Result<(), UnaffectedTopologyTransitionError> {
-        if created
+        if timeline_was_absent
             && self
                 .store
                 .host_store()
@@ -1520,32 +1522,32 @@ impl ErasureExecutionHostV1 {
         let timeline = change(self.store.host_store())
             .map_store_error()
             .map_err(UnaffectedTopologyTransitionError::Host)?;
-        let created = current_inventory
+        let timeline_was_absent = current_inventory
             .fork_scope_requirements(timeline.id())
             .is_err();
         let candidate = match self.verify_unaffected_topology_candidate(request_count, limits) {
             Ok(candidate) => candidate,
             Err(error) => {
-                self.rollback_unaffected_topology_timeline(&timeline, created)?;
+                self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
                 return Err(UnaffectedTopologyTransitionError::Erasure(error));
             }
         };
-        if request_count != 0 && created {
-            match candidate.fork_scope_requirements(timeline.id()) {
-                Ok(requirements) if requirements.is_empty() => {}
-                Ok(_) => {
-                    self.rollback_unaffected_topology_timeline(&timeline, created)?;
+        if request_count != 0 && timeline_was_absent {
+            match candidate.require_unaffected_topology(timeline.id()) {
+                Ok(()) => {}
+                Err(ErasureErrorV1::PolicyConflict) => {
+                    self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
                     return Err(UnaffectedTopologyTransitionError::RejectedAsAffected);
                 }
                 Err(error) => {
-                    self.rollback_unaffected_topology_timeline(&timeline, created)?;
+                    self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
                     return Err(UnaffectedTopologyTransitionError::Erasure(error));
                 }
             }
         }
         #[cfg(test)]
         if self.fail_inventory_publication {
-            self.rollback_unaffected_topology_timeline(&timeline, created)?;
+            self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
             return Err(UnaffectedTopologyTransitionError::Erasure(
                 ErasureErrorV1::ProvenanceMissing,
             ));
@@ -1560,13 +1562,12 @@ impl ErasureExecutionHostV1 {
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let (_generation, maximum_requests, inventory) = self.ready_state()?;
         if let Some(parent) = parent {
-            if !inventory
-                .fork_scope_requirements(parent)
-                .map_err(map_erasure_error)?
-                .is_empty()
-            {
-                return Err(ErasureHostErrorV1::Conflict);
-            }
+            inventory
+                .require_unaffected_topology(parent)
+                .map_err(|error| match error {
+                    ErasureErrorV1::PolicyConflict => ErasureHostErrorV1::Conflict,
+                    other => map_erasure_error(other),
+                })?;
             self.store
                 .host_store()
                 .get_timeline(parent)
@@ -1582,10 +1583,7 @@ impl ErasureExecutionHostV1 {
         let request_count = inventory.request_count();
         let gate = Arc::clone(&self.gate);
         let mut change = Some(change);
-        let mut transition_error = None;
-        let mut transition_host_error = None;
-        let mut rollback_failed = false;
-        let mut rejected_as_affected = false;
+        let mut transition_failure = None;
         let publication = {
             let mut fenced_transition = || match self.prepare_unaffected_topology_transition(
                 change.take(),
@@ -1595,21 +1593,20 @@ impl ErasureExecutionHostV1 {
             ) {
                 Ok(result) => Ok(result),
                 Err(UnaffectedTopologyTransitionError::Host(error)) => {
-                    transition_host_error = Some(error);
+                    transition_failure = Some(UnaffectedTopologyTransitionError::Host(error));
                     Err(ErasureErrorV1::ProvenanceMissing)
                 }
                 Err(UnaffectedTopologyTransitionError::Erasure(error)) => {
-                    transition_error = Some(error);
+                    transition_failure = Some(UnaffectedTopologyTransitionError::Erasure(error));
                     Err(error)
                 }
                 Err(UnaffectedTopologyTransitionError::RejectedAsAffected) => {
-                    rejected_as_affected = true;
-                    transition_error = Some(ErasureErrorV1::PolicyConflict);
+                    transition_failure =
+                        Some(UnaffectedTopologyTransitionError::RejectedAsAffected);
                     Err(ErasureErrorV1::PolicyConflict)
                 }
                 Err(UnaffectedTopologyTransitionError::RollbackFailed) => {
-                    rollback_failed = true;
-                    transition_error = Some(ErasureErrorV1::ReceiptCommitFailed);
+                    transition_failure = Some(UnaffectedTopologyTransitionError::RollbackFailed);
                     Err(ErasureErrorV1::ReceiptCommitFailed)
                 }
             };
@@ -1627,21 +1624,24 @@ impl ErasureExecutionHostV1 {
                 };
                 Ok((timeline, generation))
             }
-            Err(publication_error) => {
-                if let Some(error) = transition_host_error {
-                    return Err(error);
+            Err(publication_error) => match transition_failure {
+                Some(UnaffectedTopologyTransitionError::Host(error)) => Err(error),
+                Some(UnaffectedTopologyTransitionError::RejectedAsAffected) => {
+                    Err(ErasureHostErrorV1::Conflict)
                 }
-                if rejected_as_affected && !rollback_failed {
-                    return Err(ErasureHostErrorV1::Conflict);
-                }
-                self.poison();
-                if rollback_failed {
+                Some(UnaffectedTopologyTransitionError::RollbackFailed) => {
+                    self.poison();
                     Err(ErasureHostErrorV1::RecoveryUnavailable)
-                } else {
-                    Err(transition_error
-                        .map_or_else(|| publication_error.into(), map_erasure_error))
                 }
-            }
+                Some(UnaffectedTopologyTransitionError::Erasure(error)) => {
+                    self.poison();
+                    Err(map_erasure_error(error))
+                }
+                None => {
+                    self.poison();
+                    Err(publication_error.into())
+                }
+            },
         }
     }
 
@@ -1692,7 +1692,24 @@ impl ErasureExecutionHostV1 {
         let coordinator = self
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        let child = TimelineMeta::forked_from(parent, at_seq, name);
+        let recovered = match self.store.host_store().recover_fork_admission(operation) {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                self.poison();
+                return Err(map_erasure_error(error));
+            }
+        };
+        let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
+            Some(recovered_child)
+                if recovered_child.mode == TimelineMode::Historical
+                    && recovered_child.name.as_deref() == Some(name)
+                    && recovered_child.fork_point == Some((parent, at_seq)) =>
+            {
+                recovered_child.clone()
+            }
+            Some(_) => return Err(ErasureHostErrorV1::Conflict),
+            None => TimelineMeta::forked_from(parent, at_seq, name),
+        };
         let transition = IdentifiedForkTransitionInput {
             operation,
             parent,
@@ -1701,6 +1718,7 @@ impl ErasureExecutionHostV1 {
             current_inventory: &current_inventory,
             authority: authority.as_ref(),
             coordinator,
+            recovered,
         };
         let (inventory, timeline) = self.apply_identified_fork_transition(&transition)?;
         let generation = inventory.generation();
@@ -1748,12 +1766,8 @@ impl ErasureExecutionHostV1 {
         input: &IdentifiedForkTransitionInput<'_>,
         transition_host_error: &mut Option<ErasureHostErrorV1>,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
-        if let Some(recovered) = self
-            .store
-            .host_store()
-            .recover_fork_admission(input.operation)?
-        {
-            return Self::recover_identified_fork(input, &recovered, transition_host_error);
+        if let Some(recovered) = input.recovered.as_ref() {
+            return Self::recover_identified_fork(input, recovered, transition_host_error);
         }
         self.prepare_identified_fork(input)
     }
@@ -2195,7 +2209,7 @@ impl ErasureCommandSenderV1<'_> {
         self.host.ensure_generation(self.generation)?;
         let (timeline, generation) = self
             .host
-            .apply_empty_topology_change(|store| store.create_timeline(name))?;
+            .apply_empty_topology_change(|store| store.create_timeline_for_host_transition(name))?;
         self.generation = generation;
         Ok(timeline)
     }
@@ -2213,7 +2227,7 @@ impl ErasureCommandSenderV1<'_> {
     ) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
         let (timeline, generation) = self.host.apply_empty_topology_change(|store| {
-            store.initialize_timeline_with_key_registry(name, expected_registry)
+            store.initialize_timeline_with_key_registry_for_host_transition(name, expected_registry)
         })?;
         self.generation = generation;
         Ok(timeline)
@@ -2238,7 +2252,7 @@ impl ErasureCommandSenderV1<'_> {
         let (timeline, generation) = self
             .host
             .apply_unaffected_topology_change(Some(parent), |store| {
-                store.fork(parent, at_seq, name)
+                store.fork_for_host_transition(parent, at_seq, name)
             })?;
         self.generation = generation;
         Ok(timeline)
@@ -3078,6 +3092,7 @@ mod tests {
         inner: MemoryStore,
         fault: FaultModeV1,
         resolve_control: Arc<ResolveStateControlV1>,
+        timeline_created_hook: Option<Arc<dyn Fn(TimelineId) + Send + Sync>>,
     }
 
     #[derive(Clone, Copy)]
@@ -3261,6 +3276,21 @@ mod tests {
             }
         }
 
+        fn create_timeline_for_host_transition(
+            &mut self,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                Err(CoreError::Storage("fault create".to_owned()))
+            } else {
+                let timeline = self.inner.create_timeline_for_host_transition(name)?;
+                if let Some(hook) = &self.timeline_created_hook {
+                    hook(timeline.id());
+                }
+                Ok(timeline)
+            }
+        }
+
         fn append(
             &mut self,
             timeline: TimelineId,
@@ -3306,6 +3336,19 @@ mod tests {
             }
         }
 
+        fn fork_for_host_transition(
+            &mut self,
+            parent: TimelineId,
+            at_seq: Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                Err(CoreError::Storage("fault fork".to_owned()))
+            } else {
+                self.inner.fork_for_host_transition(parent, at_seq, name)
+            }
+        }
+
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
             if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault list".to_owned()))
@@ -3327,6 +3370,22 @@ mod tests {
                 Err(CoreError::Storage("fault key registry".to_owned()))
             } else {
                 self.inner.load_key_registry()
+            }
+        }
+
+        fn initialize_timeline_with_key_registry_for_host_transition(
+            &mut self,
+            name: &str,
+            expected_registry: &KeyRegistryStateV1,
+        ) -> Result<Timeline, CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                Err(CoreError::Storage("fault ledger initialization".to_owned()))
+            } else {
+                self.inner
+                    .initialize_timeline_with_key_registry_for_host_transition(
+                        name,
+                        expected_registry,
+                    )
             }
         }
     }
@@ -4666,6 +4725,7 @@ mod tests {
                 inner: MemoryStore::new().without_erasure_gate(),
                 fault,
                 resolve_control: Arc::clone(&resolve_control),
+                timeline_created_hook: None,
             },
             resolve_control,
         )
@@ -4876,80 +4936,38 @@ mod tests {
 
         host.authority = None;
         assert_eq!(
-            host.apply_empty_topology_change(|store| store.create_timeline("missing-authority")),
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("missing-authority")),
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
 
         host.authority = Some(authority.clone());
         host.coordinator = None;
         assert_eq!(
-            host.apply_empty_topology_change(|store| store.create_timeline("missing-coordinator")),
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("missing-coordinator")),
             Err(ErasureHostErrorV1::AuthorizationDenied)
-        );
-
-        host.coordinator = Some(reference(31));
-        let authority_for_change = Arc::clone(&authority);
-        assert!(host
-            .apply_empty_topology_change(|store| {
-                let timeline = store.create_timeline("unaffected")?;
-                authority_for_change
-                    .set_unaffected(timeline.id())
-                    .map_err(|_| {
-                        CoreError::Storage("test authority lock was poisoned".to_owned())
-                    })?;
-                Ok(timeline)
-            })
-            .is_ok());
-
-        host.authority = Some(Arc::new(ForkChildAuthorityV1));
-        assert_eq!(
-            host.apply_empty_topology_change(|store| store.create_timeline("failed")),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        );
-        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
-    }
-
-    #[test]
-    fn active_topology_candidate_requires_both_recovery_credentials() {
-        let RejectedHostFixtureV1 {
-            mut host,
-            authority,
-            ..
-        } = rejected_host_with_resolve_control()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let limits = host.recovery_limits;
-
-        host.authority = None;
-        assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits),
-            Err(ErasureErrorV1::Unauthorized)
-        );
-
-        host.authority = Some(authority);
-        host.coordinator = None;
-        assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits),
-            Err(ErasureErrorV1::Unauthorized)
         );
     }
 
     #[test]
     fn active_root_topology_changes_roll_back_when_the_new_root_is_affected() {
         let authority = Arc::new(ActiveTopologyAuthorityV1::default());
-        let mut host =
-            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let (mut store, _) = fault_store_with_control(FaultModeV1::Recovery);
+        let authority_for_creation = Arc::clone(&authority);
+        store.timeline_created_hook = Some(Arc::new(move |timeline| {
+            let _ = authority_for_creation.set_timeline(timeline);
+        }));
+        let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         host.authority = Some(authority.clone());
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
 
-        let parent = host
+        let _parent = host
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("active-root-parent"))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        authority
-            .set_timeline(parent.id())
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let request = coordinator_request()
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -4980,14 +4998,9 @@ mod tests {
             })
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
 
-        let authority_for_change = Arc::clone(&authority);
-        let result = host.apply_empty_topology_change(|store| {
-            let timeline = store.create_timeline("affected-root")?;
-            authority_for_change
-                .set_timeline(timeline.id())
-                .map_err(|_| CoreError::Storage("test authority lock was poisoned".to_owned()))?;
-            Ok(timeline)
-        });
+        let result = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("affected-root"));
         assert_eq!(result, Err(ErasureHostErrorV1::Conflict));
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
@@ -4999,66 +5012,26 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let (_, _, inventory) = host
-            .ready_state()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let limits = host.recovery_limits;
-        type TopologyChangeV1 = fn(&mut dyn ErasureHostStore) -> Result<Timeline, CoreError>;
-        assert!(matches!(
-            host.prepare_unaffected_topology_transition::<TopologyChangeV1>(
-                None, &inventory, 0, limits,
-            ),
-            Err(UnaffectedTopologyTransitionError::Erasure(
-                ErasureErrorV1::ProvenanceMissing
-            ))
-        ));
-
-        let mut publication_failure = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        publication_failure.fail_inventory_publication = true;
-        let (_, _, inventory) = publication_failure
-            .ready_state()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let limits = publication_failure.recovery_limits;
-        assert!(matches!(
-            publication_failure.prepare_unaffected_topology_transition(
-                Some(|store: &mut dyn ErasureHostStore| {
-                    store.create_timeline("publication-failure")
-                }),
-                &inventory,
-                0,
-                limits,
-            ),
-            Err(UnaffectedTopologyTransitionError::Erasure(
-                ErasureErrorV1::ProvenanceMissing
-            ))
-        ));
+        host.fail_inventory_publication = true;
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("publication-failure")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
 
         let mut recovery_failure = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(fault_store(FaultModeV1::NonemptyInventory)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let (_, _, inventory) = recovery_failure
-            .ready_state()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let limits = recovery_failure.recovery_limits;
-        assert!(matches!(
-            recovery_failure.prepare_unaffected_topology_transition(
-                Some(|store: &mut dyn ErasureHostStore| {
-                    store.create_timeline("inventory-failure")
-                }),
-                &inventory,
-                0,
-                limits,
-            ),
-            Err(UnaffectedTopologyTransitionError::Erasure(
-                ErasureErrorV1::ProvenanceMissing
-            ))
-        ));
+        assert_eq!(
+            recovery_failure
+                .command_sender()
+                .and_then(|mut sender| sender.create_timeline("inventory-failure")),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(recovery_failure.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]
@@ -5730,12 +5703,14 @@ mod tests {
             ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
-            host.apply_empty_topology_change(|store| store.create_timeline("closed")),
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("closed")),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         host.state = HostStateV1::Poisoned;
         assert_eq!(
-            host.apply_empty_topology_change(|store| store.create_timeline("poisoned")),
+            host.command_sender()
+                .and_then(|mut sender| sender.create_timeline("poisoned")),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
     }

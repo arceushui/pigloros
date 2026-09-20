@@ -365,6 +365,20 @@ pub trait EventStore: Send {
     /// Returns a [`CoreError::Storage`] error on I/O failure.
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError>;
 
+    /// Create a root Timeline while the host owns the topology-transition
+    /// fence. The adapter must not reacquire the public erasure gate here;
+    /// the host performs the complete inventory check and publishes the
+    /// successor generation after this operation returns.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter has no host-transition
+    /// topology implementation or cannot persist the Timeline.
+    fn create_timeline_for_host_transition(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+        Err(CoreError::Storage(
+            "host topology transitions are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// Append one or more draft events to a timeline, returning the committed events.
     ///
     /// Batching is required for performance: single-row commit is too slow for `SQLite` WAL.
@@ -650,6 +664,26 @@ pub trait EventStore: Send {
     /// [`CoreError::ForkBeyondHead`] if `at_seq` exceeds the parent's head.
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError>;
 
+    /// Create a Fork while the host owns the topology-transition fence. This
+    /// is an adapter-internal operation: the host has already proved the
+    /// parent is positively unaffected and will publish the successor
+    /// inventory before returning the child to its caller.
+    ///
+    /// # Errors
+    /// Returns the same topology errors as [`Self::fork`], or a closed
+    /// unsupported-operation error when the adapter cannot provide this
+    /// host-owned seam.
+    fn fork_for_host_transition(
+        &mut self,
+        _parent: TimelineId,
+        _at_seq: Seq,
+        _name: &str,
+    ) -> Result<Timeline, CoreError> {
+        Err(CoreError::Storage(
+            "host topology transitions are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// List all known timelines.
     ///
     /// # Errors
@@ -853,6 +887,24 @@ pub trait EventStore: Send {
             self.save_key_registry(expected_registry)?;
         }
         Ok(timeline)
+    }
+
+    /// Initialize a ledger Timeline while the host owns the topology-
+    /// transition fence. Durable adapters must keep registry and Timeline
+    /// persistence atomic and must not reacquire the public erasure gate.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::initialize_timeline_with_key_registry`]
+    /// or a closed unsupported-operation error.
+    #[cfg_attr(test, inline(never))]
+    fn initialize_timeline_with_key_registry_for_host_transition(
+        &mut self,
+        _name: &str,
+        _expected_registry: &crate::KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        Err(CoreError::Storage(
+            "host topology transitions are unsupported by this EventStore".to_owned(),
+        ))
     }
     /// Atomically recheck a registry snapshot, create, and append one
     /// authorized event.

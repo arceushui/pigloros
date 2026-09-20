@@ -4,7 +4,6 @@
 //! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
-    cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -409,20 +408,6 @@ struct ErasureGateStateV1 {
     states: BTreeMap<ErasureReferenceV1, ErasureVerifiedStateV1>,
     blocked_timelines: BTreeSet<TimelineId>,
     frozen_timelines: BTreeSet<TimelineId>,
-}
-
-thread_local! {
-    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-}
-
-struct ActiveContainmentFence;
-
-impl Drop for ActiveContainmentFence {
-    fn drop(&mut self) {
-        ACTIVE_CONTAINMENT_FENCES.with(|active| {
-            let _ = active.borrow_mut().pop();
-        });
-    }
 }
 
 impl Default for ErasureContainmentGateV1 {
@@ -839,9 +824,6 @@ impl ErasureContainmentGateV1 {
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
-        let identity = std::ptr::from_ref(self) as usize;
-        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
-        let _active = ActiveContainmentFence;
         let (candidate, result) = transition().map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(Arc::new(candidate.clone())),
@@ -1010,18 +992,6 @@ impl ErasureGate for ErasureContainmentGateV1 {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(),
     ) -> Result<(), ErasureContainmentErrorV1> {
-        let identity = std::ptr::from_ref(self) as usize;
-        if ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity)) {
-            self.ensure_available()?;
-            let authority = self
-                .authority
-                .read()
-                .map_err(containment_recovery_failure)?
-                .clone();
-            self.authorize_state(timeline, operation, &authority)?;
-            effect();
-            return self.ensure_available();
-        }
         let _fence = self
             .fence_lock
             .lock()
@@ -1033,8 +1003,6 @@ impl ErasureGate for ErasureContainmentGateV1 {
             .map_err(containment_recovery_failure)?
             .clone();
         self.authorize_state(timeline, operation, &authority)?;
-        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
-        let _active = ActiveContainmentFence;
         effect();
         self.ensure_available()
     }
@@ -4597,6 +4565,39 @@ impl ErasureVerifiedInventoryV1 {
             .collect()
     }
 
+    /// Require positive exclusion of a Timeline/Fork from every recovered
+    /// request scope.
+    ///
+    /// This is deliberately stricter than [`Self::fork_scope_requirements`]:
+    /// an included scope without a future-Fork lineage rule is still affected
+    /// and cannot be treated as unaffected merely because no ERSE1 mutation is
+    /// required.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] when any request includes
+    /// the Timeline/Fork, or [`ErasureErrorV1::ProvenanceMissing`] when the
+    /// complete classification is absent or inconsistent.
+    pub fn require_unaffected_topology(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
+        let classifications = self
+            .classification_for(timeline)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if classifications.len() != self.request_heads.len()
+            || classifications
+                .iter()
+                .map(|classification| classification.request)
+                .ne(self.request_heads.iter().map(|(request, _)| *request))
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if classifications
+            .iter()
+            .any(|classification| classification.membership.included_scope().is_some())
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(())
+    }
+
     /// Return the committed ERSE1 admissions for a child already present in
     /// this successor inventory.
     ///
@@ -7311,6 +7312,10 @@ mod coverage_paths {
             included.fork_scope_requirements(TimelineId::new()),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        assert_eq!(
+            included.require_unaffected_topology(parent),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
         let mut missing_scope = included;
         missing_scope.members[0].0.scope = None;
         assert_eq!(
@@ -7328,6 +7333,11 @@ mod coverage_paths {
             4,
         )?;
         assert!(inventory.fork_scope_requirements(parent)?.is_empty());
+        assert_eq!(inventory.require_unaffected_topology(parent), Ok(()));
+        assert_eq!(
+            inventory.require_unaffected_topology(TimelineId::new()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         let input = ErasureForkAdmissionInputV1 {
             operation: reference(64),
             expected_inventory_generation: inventory.generation(),

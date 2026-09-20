@@ -1252,7 +1252,7 @@ impl MemoryStore {
         at_seq: Seq,
         name: &str,
     ) -> Result<Timeline, CoreError> {
-        let parent_head = self.logical_head(parent)?;
+        let parent_head = self.logical_head_unchecked(parent)?;
         if at_seq > parent_head {
             return Err(CoreError::ForkBeyondHead {
                 fork_seq: at_seq.as_u64(),
@@ -1269,7 +1269,7 @@ impl MemoryStore {
                 |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
             );
         let child = Timeline::new(meta);
-        let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
+        let fork_hash = self.compute_chain_hash_at_unchecked(parent, at_seq)?;
         self.timelines
             .insert(child.id(), TimelineState::new(child.clone(), fork_hash));
         Ok(child)
@@ -2616,6 +2616,65 @@ impl MemoryStore {
             None => create(self),
         }
     }
+
+    fn initialize_timeline_with_key_registry_for_host_transition(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        let persisted = self.load_key_registry()?;
+        if persisted
+            .as_ref()
+            .is_some_and(|current| current != expected_registry)
+        {
+            return Err(CoreError::Storage(
+                "durable key registry changed during ledger initialization".to_owned(),
+            ));
+        }
+
+        if let Some(timeline) = self
+            .timelines
+            .values()
+            .map(|state| &state.timeline)
+            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+            .cloned()
+        {
+            if persisted.is_none() {
+                self.save_key_registry_unchecked(expected_registry)?;
+            }
+            return Ok(timeline);
+        }
+
+        let timeline = self.create_timeline(name)?;
+        if persisted.is_some() {
+            return Ok(timeline);
+        }
+        if let Err(error) = self.save_key_registry_unchecked(expected_registry) {
+            return match delete_visible_timeline(self, timeline.id()) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(CoreError::Storage(format!(
+                    "ledger initialization failed ({error}); Timeline rollback also failed ({rollback_error})"
+                ))),
+            };
+        }
+        Ok(timeline)
+    }
+
+    fn save_key_registry_unchecked(
+        &mut self,
+        registry: &KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        registry
+            .validate()
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        if let Some(previous) = &self.key_registry {
+            previous
+                .validate_replacement(registry)
+                .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        }
+        self.key_registry = Some(registry.clone());
+        Ok(())
+    }
 }
 
 impl EventStore for MemoryStore {
@@ -2653,6 +2712,10 @@ impl EventStore for MemoryStore {
         Ok(timeline)
     }
 
+    fn create_timeline_for_host_transition(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.create_timeline(name)
+    }
+
     fn append(
         &mut self,
         timeline: TimelineId,
@@ -2678,16 +2741,19 @@ impl EventStore for MemoryStore {
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
-        registry
-            .validate()
-            .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        if let Some(previous) = &self.key_registry {
-            previous
-                .validate_replacement(registry)
-                .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        }
-        self.key_registry = Some(registry.clone());
-        Ok(())
+        self.save_key_registry_unchecked(registry)
+    }
+
+    fn initialize_timeline_with_key_registry_for_host_transition(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        Self::initialize_timeline_with_key_registry_for_host_transition(
+            self,
+            name,
+            expected_registry,
+        )
     }
 
     fn append_bounded(
@@ -2913,6 +2979,16 @@ impl EventStore for MemoryStore {
                 .ensure_generic_timeline_visibility(parent)
                 .and_then(|()| store.fork_visible_timeline(parent, at_seq, name))
         })
+    }
+
+    fn fork_for_host_transition(
+        &mut self,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_generic_timeline_visibility(parent)
+            .and_then(|()| self.fork_visible_timeline(parent, at_seq, name))
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
