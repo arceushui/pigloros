@@ -141,8 +141,10 @@ int main(void) {
                           memcmp(input, eai1_cpu, length) == 0;
         bool file_prefix = length <= eai1_file_len &&
                            memcmp(input, eai1_file, length) == 0;
+        bool watchdog_prefix = length <= eai1_watchdog_len &&
+                               memcmp(input, eai1_watchdog, length) == 0;
         if (!hello_prefix && !hold_prefix && !memory_prefix && !tasks_prefix &&
-            !cpu_prefix && !file_prefix) {
+            !cpu_prefix && !file_prefix && !watchdog_prefix) {
             errno = EPROTO;
             fail("input-authentication");
         }
@@ -214,6 +216,12 @@ int main(void) {
             if (written != (ssize_t)sizeof(block)) {
                 fail("file-limit-write-without-sigxfsz");
             }
+        }
+    }
+    if (length == eai1_watchdog_len &&
+        memcmp(input, eai1_watchdog, length) == 0) {
+        for (;;) {
+            pause();
         }
     }
     if (length != eai1_hello_len || memcmp(input, eai1_hello, length) != 0) {

@@ -67,6 +67,11 @@ the limit but return `EFBIG` and exit 71 without SIGXFSZ. ADR-069 therefore
 selects fallback code 8 `ProcessCrash`, not code 7 `FileOrOutputLimit`; this is
 a manifest-bound incompatibility finding, not a successful prerequisite.
 
+A canonical WATCHDOG attempt remains alive until the provider's exact one-second
+monotonic deadline, then receives the provider-owned TERM/kill lifecycle. The
+retained release/start/deadline/termination/finish times, process result, and
+empty post-exit cgroup select terminal code 6 `Watchdog`.
+
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
 the driver durably records an attempt-bound monotonic launch anchor and passes a

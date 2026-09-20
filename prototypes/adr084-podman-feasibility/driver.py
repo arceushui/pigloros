@@ -1048,6 +1048,7 @@ def launch(
         )
         if parent_control.send(sent_packet) != len(sent_packet):
             raise RuntimeError("ReleaseV2 was not sent atomically")
+        release_sent_monotonic_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
         (artifact_dir / f"{scenario}.release2.cbor").write_bytes(sent_packet)
         (artifact_dir / f"{scenario}.release-barrier.json").write_text(
             json.dumps(
@@ -1069,6 +1070,7 @@ def launch(
                     "base_release_signature_verified_before_conformance_injection": True,
                     "release_signature_verified_before_send": release_mutation is None,
                     "runtime_key_id": release_unsigned[15],
+                    "release_sent_monotonic_ns": release_sent_monotonic_ns,
                     "sent_packet_sha256": hashlib.sha256(sent_packet).hexdigest(),
                     "verdict": (
                         "canonical signed ReleaseV2 sent only after ReadyV2 and observations"
@@ -1576,6 +1578,96 @@ def file_limit_scenario(
         != b"adapter-error:file-limit-write-without-sigxfsz:File too large\n"
     ):
         raise AssertionError(f"file limit negative result changed: {report!r}")
+
+
+def watchdog_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_watchdog: bytes,
+) -> None:
+    scenario = "elm-watchdog"
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_watchdog,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    snapshot = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    release_report = json.loads(
+        (artifact_dir / f"{scenario}.release-barrier.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    start_ns = int(release_report["release_sent_monotonic_ns"])
+    deadline_ns = start_ns + 1_000_000_000
+    process.stdin.close()
+    while True:
+        now_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        if now_ns >= deadline_ns:
+            break
+        if process.poll() is not None:
+            raise AssertionError("watchdog workload exited before its deadline")
+        time.sleep(min((deadline_ns - now_ns) / 1_000_000_000, 0.005))
+    termination_requested_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    run("/usr/bin/podman", "kill", "--signal=TERM", container_id)
+    return_code = process.wait(timeout=2)
+    finish_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    control.close()
+    cgroup_path = pathlib.Path(snapshot["cgroup_path"])
+    cgroup_procs = cgroup_path / "cgroup.procs"
+    final_cgroup_procs = (
+        read_text(cgroup_procs).strip() if cgroup_procs.exists() else ""
+    )
+    inspected = json.loads(run("/usr/bin/podman", "inspect", container_id).stdout)[0]
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "container_id": container_id,
+        "deadline_ns": deadline_ns,
+        "effective_watchdog_ms": 1000,
+        "final_cgroup_procs": final_cgroup_procs,
+        "finish_ns": finish_ns,
+        "kill_escalated": False,
+        "podman_exit_code": inspected["State"]["ExitCode"],
+        "release_sent_start_ns": start_ns,
+        "return_code": return_code,
+        "terminal_code": 6,
+        "terminal_name": "Watchdog",
+        "termination_lateness_ns": termination_requested_ns - deadline_ns,
+        "termination_requested_ns": termination_requested_ns,
+        "termination_signal": "SIGTERM",
+        "verdict": "provider monotonic deadline selected Watchdog",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    if (
+        termination_requested_ns < deadline_ns
+        or return_code != 143
+        or inspected["State"]["ExitCode"] != 143
+        or final_cgroup_procs != ""
+        or output
+        or errors
+    ):
+        raise AssertionError(f"watchdog evidence did not match: {report!r}")
 
 
 def concurrent_lifecycle_worker(
@@ -2711,6 +2803,7 @@ def main() -> None:
     parser.add_argument("--eai1-tasks", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-cpu", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-file", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-watchdog", required=True, type=pathlib.Path)
     parser.add_argument("--eao1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--runtime-subject", required=True, type=pathlib.Path)
     parser.add_argument("--configured-defaults", required=True, type=pathlib.Path)
@@ -2741,6 +2834,7 @@ def main() -> None:
     eai1_tasks = arguments.eai1_tasks.read_bytes()
     eai1_cpu = arguments.eai1_cpu.read_bytes()
     eai1_file = arguments.eai1_file.read_bytes()
+    eai1_watchdog = arguments.eai1_watchdog.read_bytes()
     eao1_hello = arguments.eao1_hello.read_bytes()
     (arguments.artifact_dir / "normal.eai1").write_bytes(eai1_hello)
     (arguments.artifact_dir / "cancel.eai1").write_bytes(eai1_hold)
@@ -2748,6 +2842,7 @@ def main() -> None:
     (arguments.artifact_dir / "elm-tasks.eai1").write_bytes(eai1_tasks)
     (arguments.artifact_dir / "elm-cpu-throttling.eai1").write_bytes(eai1_cpu)
     (arguments.artifact_dir / "elm-file.eai1").write_bytes(eai1_file)
+    (arguments.artifact_dir / "elm-watchdog.eai1").write_bytes(eai1_watchdog)
     (arguments.artifact_dir / "expected.eao1").write_bytes(eao1_hello)
     transport_report = {
         "eai1_hello": validate_eai1(eai1_hello, b"hello\n"),
@@ -2756,6 +2851,7 @@ def main() -> None:
         "eai1_tasks": validate_eai1(eai1_tasks, b"TASKS\n"),
         "eai1_cpu": validate_eai1(eai1_cpu, b"CPU\n"),
         "eai1_file": validate_eai1(eai1_file, b"FILE\n"),
+        "eai1_watchdog": validate_eai1(eai1_watchdog, b"WATCHDOG\n"),
         "eao1_hello": validate_eao1(eao1_hello, b"hello\n"),
         "verdict": "canonical framed streams independently validated before launch",
     }
@@ -2866,6 +2962,16 @@ def main() -> None:
         arguments.artifact_dir,
         barrier_fixture,
         eai1_file,
+    )
+    watchdog_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_watchdog,
     )
     concurrent_lifecycle_scenario(
         arguments.image,

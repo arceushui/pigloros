@@ -89,6 +89,7 @@ def main() -> None:
         "eai1_tasks": attempt(b"TASKS\n"),
         "eai1_cpu": attempt(b"CPU\n"),
         "eai1_file": attempt(b"FILE\n"),
+        "eai1_watchdog": attempt(b"WATCHDOG\n"),
         "eao1_hello": observation(b"hello\n"),
     }
     if any(
