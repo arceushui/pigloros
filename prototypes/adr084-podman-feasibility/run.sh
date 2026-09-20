@@ -48,7 +48,7 @@ jq -e '.host.ociRuntime.name == "crun" or .host.ociRuntime.path == "/usr/bin/cru
 
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/launcher" "${prototype_dir}/launcher.c"
 musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/adapter" "${prototype_dir}/adapter.c"
-musl-gcc -static -Os -Wall -Wextra -Werror -o "${build_dir}/trace-seccomp" \
+cc -O2 -Wall -Wextra -Werror -o "${build_dir}/trace-seccomp" \
   "${prototype_dir}/trace_seccomp.c"
 cp "${prototype_dir}/Containerfile" "${build_dir}/Containerfile"
 

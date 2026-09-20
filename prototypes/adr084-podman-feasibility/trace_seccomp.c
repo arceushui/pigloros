@@ -4,7 +4,6 @@
 #include <fcntl.h>
 #include <linux/filter.h>
 #include <sys/ptrace.h>
-#include <linux/ptrace.h>
 #include <linux/seccomp.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -228,7 +227,7 @@ int main(int argc, char **argv) {
 
         struct traced_process *process = find_traced(pid);
         if (signal == (SIGTRAP | 0x80)) {
-            struct ptrace_syscall_info information;
+            struct __ptrace_syscall_info information;
             memset(&information, 0, sizeof(information));
             long available = ptrace(PTRACE_GET_SYSCALL_INFO, pid,
                                     sizeof(information), &information);
