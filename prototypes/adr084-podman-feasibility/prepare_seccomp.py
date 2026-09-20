@@ -63,9 +63,10 @@ def load_table(archive_path: Path) -> tuple[dict[str, dict[str, str]], bytes]:
     if sha256_bytes(table_bytes) != LIBSECCOMP_SYSCALLS_SHA256:
         raise ValueError("pinned libseccomp syscall table digest mismatch")
     lines = table_bytes.decode("utf-8").splitlines()
-    if not lines or not lines[0].startswith("#syscall,"):
+    if not lines or not lines[0].startswith("#syscall"):
         raise ValueError("pinned libseccomp syscall table header mismatch")
     header = lines[0][1:].split(",")
+    header[0] = "syscall"
     rows: dict[str, dict[str, str]] = {}
     for values in csv.reader(lines[1:]):
         if len(values) != len(header):
