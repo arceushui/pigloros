@@ -25,7 +25,9 @@ also includes four signed-rootfs evidence helpers that are deliberately absent
 from OIS1's admitted launcher and adapter executable fields. Two observe the
 foreign-ABI and x86_64 boundary outcomes from a bounded parent; one is a
 minimal, deadline-free cache-bypass witness; and one executes the closed native
-syscall-number matrix. The prototype intentionally lives only on the throwaway
+syscall-number matrix, with `sync` closed to successful return or the unchanged
+100 ms bound because completion depends on hosted filesystem state. The
+prototype intentionally lives only on the throwaway
 evidence branch.
 
 The normal attempt and cancellation attempt now cross stdin as canonical,

@@ -1123,6 +1123,7 @@ def native_matrix_scenario(
     results = documents[:-1]
     summary = documents[-1]
     blocking = {"pause", "select", "pselect6", "ppoll"}
+    variable_blocking = {"sync"}
     terminating = {"exit", "exit_group"}
     for number, observed in enumerate(results):
         expected_name = interface.get(number, "")
@@ -1138,6 +1139,11 @@ def native_matrix_scenario(
         elif expected_name in blocking:
             if outcome != "timeout":
                 raise AssertionError(f"blocking syscall outcome mismatch: {observed}")
+        elif expected_name in variable_blocking:
+            if outcome not in {"return", "timeout"} or observed.get("raw") == -4094:
+                raise AssertionError(
+                    f"variable blocking syscall outcome mismatch: {observed}"
+                )
         elif expected_name in terminating:
             if outcome != "exit" or observed.get("status") != 0:
                 raise AssertionError(f"terminating syscall outcome mismatch: {observed}")
