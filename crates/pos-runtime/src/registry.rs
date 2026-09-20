@@ -85,7 +85,9 @@ fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
             hasher.update(hash.as_bytes());
         }
         hasher.update(&policy.policy_revision.to_le_bytes());
-        for declaration in &policy.output_declarations {
+        let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
+        declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
+        for declaration in declarations {
             hash_framed(&mut hasher, declaration.event_type().as_bytes());
             hasher.update(&[match declaration.authority() {
                 pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
@@ -122,10 +124,16 @@ fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
             hasher.update(&fidelity.max_cpu_us.to_le_bytes());
             hasher.update(&fidelity.shared_host_cpu_reservation_us.to_le_bytes());
         }
-        for reservation in &budget.plugin_cpu_reservations {
-            hasher.update(&reservation.cpu_reservations_us[0].to_le_bytes());
-            hasher.update(&reservation.cpu_reservations_us[1].to_le_bytes());
-            hasher.update(&reservation.cpu_reservations_us[2].to_le_bytes());
+        let mut reservations = budget
+            .plugin_cpu_reservations
+            .iter()
+            .map(|reservation| reservation.cpu_reservations_us)
+            .collect::<Vec<_>>();
+        reservations.sort_unstable();
+        for reservation in reservations {
+            hasher.update(&reservation[0].to_le_bytes());
+            hasher.update(&reservation[1].to_le_bytes());
+            hasher.update(&reservation[2].to_le_bytes());
         }
         hasher.update(&[budget.accounting_semantics]);
         hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
