@@ -61,6 +61,16 @@ The same still-live cgroup retains the before/after `memory.swap.events`
 counters under `memory.swap.max=0`; a missing `max` delta is reported as a
 separate SwapBytes candidate incompatibility rather than inferred from OOM.
 
+A separate canonical MEMORY_LIMIT attempt tests whether the provider can select
+code 4 `MemoryLimit` without relabelling an OOM. The adapter first faults a
+48 MiB anonymous arena, marks it `MADV_FREE`, then faults a second 48 MiB arena
+under the same 64 MiB `memory.max`. The provider selects code 4 only if the
+local `max` counter advances, both `oom` and `oom_kill` remain unchanged, and
+the adapter emits its survival marker while it is still running. The signed
+observation and cleanup proof are retained. If the hosted kernel or admitted
+seccomp policy cannot produce all of those facts, the report records a
+candidate incompatibility and no code 4 outcome.
+
 A canonical TASKS attempt forces `pids.max=16`; its retained local `max` event
 selects terminal code 5 `TaskLimit`. A separate canonical CPU attempt crosses
 the 0.5-CPU quota and retains an `nr_throttled` delta without selecting a

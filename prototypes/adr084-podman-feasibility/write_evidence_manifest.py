@@ -246,6 +246,7 @@ def main() -> None:
         *(
             f"{scenario}.{suffix}"
             for scenario in (
+                "elm-memory-limit",
                 "elm-tasks",
                 "elm-cpu-throttling",
                 "elm-input",

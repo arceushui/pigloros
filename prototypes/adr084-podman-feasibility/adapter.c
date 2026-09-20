@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -135,6 +136,8 @@ int main(void) {
                            memcmp(input, eai1_hold, length) == 0;
         bool memory_prefix = length <= eai1_memory_len &&
                              memcmp(input, eai1_memory, length) == 0;
+        bool memory_limit_prefix = length <= eai1_memory_limit_len &&
+                                   memcmp(input, eai1_memory_limit, length) == 0;
         bool tasks_prefix = length <= eai1_tasks_len &&
                             memcmp(input, eai1_tasks, length) == 0;
         bool cpu_prefix = length <= eai1_cpu_len &&
@@ -145,8 +148,9 @@ int main(void) {
                            memcmp(input, eai1_work, length) == 0;
         bool watchdog_prefix = length <= eai1_watchdog_len &&
                                memcmp(input, eai1_watchdog, length) == 0;
-        if (!hello_prefix && !hold_prefix && !memory_prefix && !tasks_prefix &&
-            !cpu_prefix && !file_prefix && !work_prefix && !watchdog_prefix) {
+        if (!hello_prefix && !hold_prefix && !memory_prefix &&
+            !memory_limit_prefix && !tasks_prefix && !cpu_prefix &&
+            !file_prefix && !work_prefix && !watchdog_prefix) {
             errno = EPROTO;
             fail("input-authentication");
         }
@@ -193,6 +197,35 @@ int main(void) {
             fail("memory-child-result");
         }
         dprintf(STDERR_FILENO, "MEMORY_OOM_CHILD signal=%d\n", SIGKILL);
+        for (;;) {
+            pause();
+        }
+    }
+    if (length == eai1_memory_limit_len &&
+        memcmp(input, eai1_memory_limit, length) == 0) {
+        const size_t arena_size = 48U * 1024U * 1024U;
+        volatile unsigned char *reclaimable = mmap(
+            NULL, arena_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+            -1, 0);
+        if (reclaimable == MAP_FAILED) {
+            fail("memory-limit-first-map");
+        }
+        for (size_t offset = 0; offset < arena_size; offset += 4096U) {
+            reclaimable[offset] = (unsigned char)(offset >> 12);
+        }
+        if (madvise((void *)reclaimable, arena_size, MADV_FREE) == -1) {
+            fail("memory-limit-madvise");
+        }
+        volatile unsigned char *retained = mmap(
+            NULL, arena_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+            -1, 0);
+        if (retained == MAP_FAILED) {
+            fail("memory-limit-second-map");
+        }
+        for (size_t offset = 0; offset < arena_size; offset += 4096U) {
+            retained[offset] = (unsigned char)(offset >> 12);
+        }
+        dprintf(STDERR_FILENO, "MEMORY_LIMIT_SURVIVED\n");
         for (;;) {
             pause();
         }

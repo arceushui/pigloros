@@ -243,6 +243,7 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --eai1-hello "${build_dir}/eai1_hello.bin" \
   --eai1-hold "${build_dir}/eai1_hold.bin" \
   --eai1-memory "${build_dir}/eai1_memory.bin" \
+  --eai1-memory-limit "${build_dir}/eai1_memory_limit.bin" \
   --eai1-tasks "${build_dir}/eai1_tasks.bin" \
   --eai1-cpu "${build_dir}/eai1_cpu.bin" \
   --eai1-file "${build_dir}/eai1_file.bin" \
@@ -267,6 +268,14 @@ python3 "${prototype_dir}/write_evidence_manifest.py" \
 
 jq -e '.adr069_compatible == false and .observed_terminal_code == 8 and .required_terminal_code == 7' \
   "${artifact_dir}/elm-file.json" >/dev/null
+jq -e '
+  if .adr084_compatible then
+    .observed_terminal_code == 4 and .max_delta > 0 and .oom_delta == 0 and
+    .oom_kill_delta == 0 and .adapter_alive_at_selection == true
+  else
+    .observed_terminal_code != 4
+  end
+' "${artifact_dir}/elm-memory-limit.json" >/dev/null
 printf 'ADR-084 prototype completed on %s; Podman+crun candidate is incompatible with the required SIGXFSZ file-limit evidence\n' \
   "$(uname -m)" | tee "${artifact_dir}/verdict.txt"
 find "${artifact_dir}" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum \

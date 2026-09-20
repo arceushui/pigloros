@@ -1890,6 +1890,147 @@ def memory_limit_scenario(
         raise AssertionError(f"memory limit did not force OOM evidence: {report!r}")
 
 
+def distinct_memory_limit_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_memory_limit: bytes,
+) -> None:
+    scenario = "elm-memory-limit"
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_memory_limit,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    snapshot = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    cgroup_path = pathlib.Path(snapshot["cgroup_path"])
+    baseline = parse_cgroup_events(snapshot["cgroup_values"]["memory.events.local"])
+    events_fd = os.open(cgroup_path / "memory.events.local", os.O_RDONLY)
+    process.stdin.close()
+    final = baseline
+    errors = bytearray()
+    marker = b"MEMORY_LIMIT_SURVIVED\n"
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            final = parse_cgroup_events(
+                os.pread(events_fd, 4096, 0).decode("ascii").strip()
+            )
+        except OSError as error:
+            if error.errno != errno.ENODEV:
+                raise
+            break
+        readable, _, _ = select.select([process.stderr], [], [], 0.01)
+        if readable:
+            chunk = process.stderr.read1(4096)
+            if not chunk:
+                break
+            errors.extend(chunk)
+        max_delta = final.get("max", 0) - baseline.get("max", 0)
+        oom_delta = final.get("oom", 0) - baseline.get("oom", 0)
+        oom_kill_delta = final.get("oom_kill", 0) - baseline.get("oom_kill", 0)
+        if marker in errors and max_delta > 0:
+            break
+        if oom_delta > 0 or oom_kill_delta > 0 or process.poll() is not None:
+            break
+    os.close(events_fd)
+    inspected = json.loads(run("/usr/bin/podman", "inspect", container_id).stdout)[0]
+    alive_at_selection = bool(inspected["State"]["Running"])
+    max_delta = final.get("max", 0) - baseline.get("max", 0)
+    oom_delta = final.get("oom", 0) - baseline.get("oom", 0)
+    oom_kill_delta = final.get("oom_kill", 0) - baseline.get("oom_kill", 0)
+    marker_observed = marker in errors
+    compatible = (
+        marker_observed
+        and alive_at_selection
+        and max_delta > 0
+        and oom_delta == 0
+        and oom_kill_delta == 0
+        and inspected["State"]["OOMKilled"] is False
+    )
+    observed_terminal_code = 4 if compatible else (3 if oom_kill_delta > 0 else None)
+    observed_terminal_name = (
+        "MemoryLimit"
+        if compatible
+        else ("OomKilled" if oom_kill_delta > 0 else None)
+    )
+    signed_observation = signed_limit_observation(
+        "memory-limit-distinction",
+        {
+            "adapter_alive_at_selection": alive_at_selection,
+            "max_delta": max_delta,
+            "oom_delta": oom_delta,
+            "oom_kill_delta": oom_kill_delta,
+            "observed_terminal_code": observed_terminal_code,
+            "observed_terminal_name": observed_terminal_name,
+            "required_terminal_code": 4,
+            "required_terminal_name": "MemoryLimit",
+        },
+    )
+    if alive_at_selection:
+        run("/usr/bin/podman", "kill", "--signal=KILL", container_id)
+    return_code = process.wait(timeout=20)
+    output = process.stdout.read()
+    errors.extend(process.stderr.read())
+    control.close()
+    run("/usr/bin/podman", "rm", "--force", container_id)
+    cgroup_empty = not cgroup_path.exists() or not read_text(
+        cgroup_path / "cgroup.procs"
+    ).strip()
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(bytes(errors))
+    report = {
+        "adapter_alive_at_selection": alive_at_selection,
+        "adr084_compatible": compatible,
+        "baseline_memory_events_local": baseline,
+        "cgroup_empty_or_absent_after_cleanup": cgroup_empty,
+        "container_id": container_id,
+        "final_memory_events_local": final,
+        "max_delta": max_delta,
+        "memory_max": snapshot["cgroup_values"]["memory.max"],
+        "memory_limit_marker_observed": marker_observed,
+        "observed_terminal_code": observed_terminal_code,
+        "observed_terminal_name": observed_terminal_name,
+        "oom_delta": oom_delta,
+        "oom_kill_delta": oom_kill_delta,
+        "podman_oom_killed": inspected["State"]["OOMKilled"],
+        "required_terminal_code": 4,
+        "required_terminal_name": "MemoryLimit",
+        "return_code_after_cleanup": return_code,
+        "signed_observation": signed_observation,
+        "verdict": (
+            "reclaim crossed memory.max while the adapter survived without OOM"
+            if compatible
+            else "hosted runtime did not produce a distinct non-OOM memory-limit event"
+        ),
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if (
+        output
+        or snapshot["cgroup_values"]["memory.max"] != "67108864"
+        or not cgroup_empty
+        or not signed_observation["signature_verified"]
+    ):
+        raise AssertionError(f"memory-limit distinction evidence failed: {report!r}")
+
+
 def task_limit_scenario(
     image: str,
     seccomp: pathlib.Path,
@@ -3913,6 +4054,7 @@ def main() -> None:
     parser.add_argument("--eai1-hello", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-hold", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-memory", required=True, type=pathlib.Path)
+    parser.add_argument("--eai1-memory-limit", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-tasks", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-cpu", required=True, type=pathlib.Path)
     parser.add_argument("--eai1-file", required=True, type=pathlib.Path)
@@ -3945,6 +4087,7 @@ def main() -> None:
     eai1_hello = arguments.eai1_hello.read_bytes()
     eai1_hold = arguments.eai1_hold.read_bytes()
     eai1_memory = arguments.eai1_memory.read_bytes()
+    eai1_memory_limit = arguments.eai1_memory_limit.read_bytes()
     eai1_tasks = arguments.eai1_tasks.read_bytes()
     eai1_cpu = arguments.eai1_cpu.read_bytes()
     eai1_file = arguments.eai1_file.read_bytes()
@@ -3956,6 +4099,9 @@ def main() -> None:
     (arguments.artifact_dir / "elm-output.eai1").write_bytes(eai1_hello)
     (arguments.artifact_dir / "cancel.eai1").write_bytes(eai1_hold)
     (arguments.artifact_dir / "elm-memory.eai1").write_bytes(eai1_memory)
+    (arguments.artifact_dir / "elm-memory-limit.eai1").write_bytes(
+        eai1_memory_limit
+    )
     (arguments.artifact_dir / "elm-tasks.eai1").write_bytes(eai1_tasks)
     (arguments.artifact_dir / "elm-cpu-throttling.eai1").write_bytes(eai1_cpu)
     (arguments.artifact_dir / "elm-file.eai1").write_bytes(eai1_file)
@@ -3966,6 +4112,9 @@ def main() -> None:
         "eai1_hello": validate_eai1(eai1_hello, b"hello\n"),
         "eai1_hold": validate_eai1(eai1_hold, b"HOLD\n"),
         "eai1_memory": validate_eai1(eai1_memory, b"MEMORY\n"),
+        "eai1_memory_limit": validate_eai1(
+            eai1_memory_limit, b"MEMORY_LIMIT\n"
+        ),
         "eai1_tasks": validate_eai1(eai1_tasks, b"TASKS\n"),
         "eai1_cpu": validate_eai1(eai1_cpu, b"CPU\n"),
         "eai1_file": validate_eai1(eai1_file, b"FILE\n"),
@@ -4075,6 +4224,16 @@ def main() -> None:
         arguments.artifact_dir,
         barrier_fixture,
         eai1_memory,
+    )
+    distinct_memory_limit_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_memory_limit,
     )
     task_limit_scenario(
         arguments.image,
