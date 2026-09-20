@@ -1113,6 +1113,125 @@ def concurrent_identical_cache_scenario(
     )
 
 
+def concurrent_distinct_cache_scenario(
+    image: str,
+    primary_scs1: pathlib.Path,
+    primary_seccomp: pathlib.Path,
+    primary_base64: str,
+    primary_bpf: pathlib.Path,
+    distinct_scs1: pathlib.Path,
+    distinct_seccomp: pathlib.Path,
+    distinct_base64: str,
+    distinct_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+) -> None:
+    tuples = (
+        ("primary", primary_scs1, primary_seccomp, primary_base64, primary_bpf),
+        ("derived-cachestat", distinct_scs1, distinct_seccomp, distinct_base64, distinct_bpf),
+    )
+    if primary_scs1.read_bytes() == distinct_scs1.read_bytes():
+        raise AssertionError("distinct concurrency SCS1 inputs are identical")
+    if primary_bpf.read_bytes() == distinct_bpf.read_bytes():
+        raise AssertionError("distinct concurrency BPF inputs are identical")
+    cache_dir = pathlib.Path(f"/run/user/{os.getuid()}/crun/.cache/seccomp")
+    cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for entry in cache_dir.iterdir():
+        if not entry.is_file() or entry.is_symlink():
+            raise AssertionError(f"refusing to clear unexpected cache entry: {entry}")
+        entry.unlink()
+    identities = []
+    for label, scs1, profile_path, _, bpf_path in tuples:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        if not isinstance(profile, dict):
+            raise ValueError("distinct seccomp profile is not an object")
+        checksum, checksum_inputs = crun_cache_checksum(profile)
+        cache_file = cache_dir / checksum
+        if cache_file.exists():
+            raise AssertionError("distinct profiles produced the same crun checksum")
+        cache_file.write_bytes(bytes(bpf_path.stat().st_size))
+        cache_file.chmod(0o700)
+        identities.append(
+            {
+                "label": label,
+                "scs1_sha256": hashlib.sha256(scs1.read_bytes()).hexdigest(),
+                "profile_sha256": hashlib.sha256(profile_path.read_bytes()).hexdigest(),
+                "bpf_sha256": hashlib.sha256(bpf_path.read_bytes()).hexdigest(),
+                "candidate_checksum": checksum,
+                "checksum_inputs": checksum_inputs,
+            }
+        )
+    before = cache_snapshot(cache_dir)
+    attempts = [
+        (
+            f"cache-concurrent-distinct-{index}",
+            tuples[index % len(tuples)],
+        )
+        for index in range(8)
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(
+                cache_probe_scenario,
+                image,
+                selected[2],
+                selected[3],
+                selected[4],
+                seccomp_tracer,
+                artifact_dir,
+                scenario,
+            )
+            for scenario, selected in attempts
+        ]
+        for future in futures:
+            future.result()
+    after = cache_snapshot(cache_dir)
+    if after != before:
+        raise AssertionError("crun checksum cache changed under distinct concurrency")
+    observations = []
+    for scenario, selected in attempts:
+        install_report = json.loads(
+            (artifact_dir / f"{scenario}.seccomp-install.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        installed_hash = hashlib.sha256(
+            (artifact_dir / f"{scenario}.installed-seccomp.bpf").read_bytes()
+        ).hexdigest()
+        expected_hash = hashlib.sha256(selected[4].read_bytes()).hexdigest()
+        if install_report.get("checksum_cache_accesses") != 0 or installed_hash != expected_hash:
+            raise AssertionError(f"distinct cache attempt mismatch: {scenario}")
+        observations.append(
+            {
+                "scenario": scenario,
+                "input": selected[0],
+                "installed_bpf_sha256": installed_hash,
+                "install_report": install_report,
+            }
+        )
+    for entry in cache_dir.iterdir():
+        entry.unlink()
+    (artifact_dir / "cache-concurrent-distinct.json").write_text(
+        json.dumps(
+            {
+                "attempt_count": len(attempts),
+                "before": before,
+                "after": after,
+                "input_identities": identities,
+                "observations": observations,
+                "verdict": (
+                    "eight concurrent installs used two distinct SCS1/filter "
+                    "tuples without cache access"
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
@@ -1121,6 +1240,13 @@ def main() -> None:
     parser.add_argument("--seccomp-bpf-base64", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-bpf", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-interface", required=True, type=pathlib.Path)
+    parser.add_argument("--scs1", required=True, type=pathlib.Path)
+    parser.add_argument("--distinct-seccomp", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--distinct-seccomp-bpf-base64", required=True, type=pathlib.Path
+    )
+    parser.add_argument("--distinct-seccomp-bpf", required=True, type=pathlib.Path)
+    parser.add_argument("--distinct-scs1", required=True, type=pathlib.Path)
     parser.add_argument("--seccomp-tracer", required=True, type=pathlib.Path)
     parser.add_argument("--prefilter", required=True, type=pathlib.Path)
     parser.add_argument("--artifact-dir", required=True, type=pathlib.Path)
@@ -1143,6 +1269,13 @@ def main() -> None:
     )
     validate_bpf_annotation(
         seccomp_bpf_base64, arguments.seccomp_bpf.resolve().read_bytes()
+    )
+    distinct_seccomp_bpf_base64 = arguments.distinct_seccomp_bpf_base64.read_text(
+        encoding="ascii"
+    )
+    validate_bpf_annotation(
+        distinct_seccomp_bpf_base64,
+        arguments.distinct_seccomp_bpf.resolve().read_bytes(),
     )
     mutation_report = annotation_mutation_report(
         arguments.seccomp.resolve(),
@@ -1208,6 +1341,19 @@ def main() -> None:
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,
         arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+    )
+    concurrent_distinct_cache_scenario(
+        arguments.image,
+        arguments.scs1.resolve(),
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.distinct_scs1.resolve(),
+        arguments.distinct_seccomp.resolve(),
+        distinct_seccomp_bpf_base64,
+        arguments.distinct_seccomp_bpf.resolve(),
         arguments.seccomp_tracer.resolve(),
         arguments.artifact_dir,
     )

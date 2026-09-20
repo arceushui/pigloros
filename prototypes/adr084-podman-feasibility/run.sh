@@ -90,11 +90,19 @@ libseccomp_prefix="${build_dir}/libseccomp-install"
 ) 2>&1 | tee "${artifact_dir}/libseccomp-build.log"
 
 seccomp_dir="${artifact_dir}/seccomp"
-mkdir -p "${seccomp_dir}"
+distinct_seccomp_dir="${artifact_dir}/seccomp-distinct"
+mkdir -p "${seccomp_dir}" "${distinct_seccomp_dir}"
 scs1="${workspace_dir}/crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-${evidence_architecture}.scs1.cbor"
+distinct_scs1="${distinct_seccomp_dir}/derived-cachestat.scs1.cbor"
+python3 "${prototype_dir}/derive_distinct_scs1.py" \
+  "${scs1}" "${distinct_scs1}"
 python3 "${prototype_dir}/prepare_seccomp.py" \
   --architecture "${evidence_architecture}" --scs1 "${scs1}" \
   --libseccomp-archive "${libseccomp_archive}" --output-dir "${seccomp_dir}"
+python3 "${prototype_dir}/prepare_seccomp.py" \
+  --architecture "${evidence_architecture}" --scs1 "${distinct_scs1}" \
+  --libseccomp-archive "${libseccomp_archive}" \
+  --output-dir "${distinct_seccomp_dir}"
 cc -O2 -Wall -Wextra -Werror \
   -I"${libseccomp_prefix}/include" "${prototype_dir}/compile_seccomp.c" \
   "${libseccomp_prefix}/lib/libseccomp.a" -o "${build_dir}/compile-seccomp"
@@ -109,6 +117,17 @@ python3 "${prototype_dir}/verify_seccomp_bpf.py" \
   --interface "${seccomp_dir}/libseccomp-interface-v1.txt" \
   --report "${seccomp_dir}/bpf-verification.json" \
   --base64 "${seccomp_dir}/exported-seccomp.base64"
+"${build_dir}/compile-seccomp" "${evidence_architecture}" \
+  "${distinct_seccomp_dir}/libseccomp-interface-v1.txt" \
+  "${distinct_seccomp_dir}/readback-only-pnr.txt" \
+  "${distinct_seccomp_dir}/exported-seccomp.bpf" \
+  "${distinct_seccomp_dir}/compiler-metadata.json"
+python3 "${prototype_dir}/verify_seccomp_bpf.py" \
+  --architecture "${evidence_architecture}" \
+  --bpf "${distinct_seccomp_dir}/exported-seccomp.bpf" \
+  --interface "${distinct_seccomp_dir}/libseccomp-interface-v1.txt" \
+  --report "${distinct_seccomp_dir}/bpf-verification.json" \
+  --base64 "${distinct_seccomp_dir}/exported-seccomp.base64"
 cp "${seccomp_dir}/libseccomp-interface-v1.txt" \
   "${build_dir}/libseccomp-interface-v1.txt"
 
@@ -161,6 +180,11 @@ python3 "${prototype_dir}/driver.py" --architecture "${evidence_architecture}" \
   --seccomp-bpf-base64 "${seccomp_dir}/exported-seccomp.base64" \
   --seccomp-bpf "${seccomp_dir}/exported-seccomp.bpf" \
   --seccomp-interface "${seccomp_dir}/libseccomp-interface-v1.txt" \
+  --scs1 "${scs1}" \
+  --distinct-seccomp "${distinct_seccomp_dir}/oci-seccomp-profile.json" \
+  --distinct-seccomp-bpf-base64 "${distinct_seccomp_dir}/exported-seccomp.base64" \
+  --distinct-seccomp-bpf "${distinct_seccomp_dir}/exported-seccomp.bpf" \
+  --distinct-scs1 "${distinct_scs1}" \
   --seccomp-tracer "${build_dir}/trace-seccomp" \
   --prefilter "${build_dir}/prefilter-exec" \
   --artifact-dir "${artifact_dir}"

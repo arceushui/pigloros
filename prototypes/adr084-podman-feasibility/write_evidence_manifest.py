@@ -40,6 +40,10 @@ def main() -> None:
         ("prototype/launcher.c", arguments.prototype_dir / "launcher.c"),
         ("prototype/adapter.c", arguments.prototype_dir / "adapter.c"),
         ("prototype/cache_probe.c", arguments.prototype_dir / "cache_probe.c"),
+        (
+            "prototype/derive_distinct_scs1.py",
+            arguments.prototype_dir / "derive_distinct_scs1.py",
+        ),
         ("prototype/native_matrix.c", arguments.prototype_dir / "native_matrix.c"),
         ("prototype/compile_seccomp.c", arguments.prototype_dir / "compile_seccomp.c"),
         ("prototype/seccomp_probe.c", arguments.prototype_dir / "seccomp_probe.c"),
@@ -110,6 +114,7 @@ def main() -> None:
         "cancel.seccomp-install.json",
         "cache-matrix.json",
         "cache-concurrent-identical.json",
+        "cache-concurrent-distinct.json",
         "probe-filter-binding.json",
         "probe.stderr",
         "probe.stdout",
@@ -139,6 +144,16 @@ def main() -> None:
                 "stdout",
             )
         ),
+        *(
+            f"cache-concurrent-distinct-{index}.{suffix}"
+            for index in range(8)
+            for suffix in (
+                "installed-seccomp.bpf",
+                "seccomp-install.json",
+                "stderr",
+                "stdout",
+            )
+        ),
         "oci-archive-validation.json",
         "oci-validation.json",
         "rootfs-manifest.json",
@@ -153,6 +168,16 @@ def main() -> None:
         "seccomp/readback-only-pnr.txt",
         "seccomp/seccomp-mapping-report.json",
         "seccomp/seccomp-mutation-report.json",
+        "seccomp-distinct/bpf-verification.json",
+        "seccomp-distinct/compiler-metadata.json",
+        "seccomp-distinct/derived-cachestat.scs1.cbor",
+        "seccomp-distinct/exported-seccomp.base64",
+        "seccomp-distinct/exported-seccomp.bpf",
+        "seccomp-distinct/libseccomp-interface-v1.txt",
+        "seccomp-distinct/oci-seccomp-profile.json",
+        "seccomp-distinct/readback-only-pnr.txt",
+        "seccomp-distinct/seccomp-mapping-report.json",
+        "seccomp-distinct/seccomp-mutation-report.json",
     )
     provenance = {
         "architecture": arguments.architecture,
