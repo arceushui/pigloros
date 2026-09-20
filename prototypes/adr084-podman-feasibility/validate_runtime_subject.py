@@ -69,7 +69,9 @@ def main() -> None:
     if {item["path"] for item in mounted["entries"]} != {
         "/",
         "/adapter",
+        "/foreign-probe",
         "/launcher",
+        "/seccomp-probe",
     }:
         raise ValueError("mounted fixture contains an unexpected path")
     expected_entries = []
