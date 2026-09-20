@@ -84,8 +84,13 @@ def main() -> None:
     )
     rejected(
         "prototypes/adr084-podman-feasibility/run.sh",
-        'find "${artifact_dir}" -type f ! -name SHA256SUMS',
-        'find "${artifact_dir}" -type f',
+        'python3 "${workspace_dir}/scripts/check_spdx_sbom.py"',
+        'true # SPDX validation removed',
+    )
+    rejected(
+        "prototypes/adr084-podman-feasibility/run.sh",
+        "find . -type f ! -name SHA256SUMS -printf '%P\\0'",
+        "find . -type f -print0",
     )
     rejected(
         "prototypes/adr084-podman-feasibility/run_coverage_probe.sh",

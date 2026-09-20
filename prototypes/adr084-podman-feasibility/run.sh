@@ -6,6 +6,8 @@ workspace_dir="$(cd -- "${prototype_dir}/../.." && pwd)"
 artifact_dir="${workspace_dir}/artifacts/adr084-podman-feasibility"
 build_dir="${RUNNER_TEMP:-/tmp}/pigloros-adr084-build-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}"
 image_tag="localhost/pigloros-adr084-probe:${GITHUB_SHA:-prototype}"
+export SOURCE_DATE_EPOCH
+SOURCE_DATE_EPOCH="$(git -C "${workspace_dir}" show -s --format=%ct "${GITHUB_SHA:-HEAD}")"
 
 mkdir -p "${artifact_dir}" "${build_dir}"
 
@@ -139,6 +141,9 @@ distinct_seccomp_dir="${artifact_dir}/seccomp-distinct"
 mkdir -p "${seccomp_dir}" "${distinct_seccomp_dir}"
 scs1="${workspace_dir}/crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-${evidence_architecture}.scs1.cbor"
 distinct_scs1="${distinct_seccomp_dir}/derived-cachestat.scs1.cbor"
+production_scs1_copy="${seccomp_dir}/production.scs1.cbor"
+cp "${scs1}" "${production_scs1_copy}"
+cmp --silent "${scs1}" "${production_scs1_copy}"
 python3 "${prototype_dir}/derive_distinct_scs1.py" \
   "${scs1}" "${distinct_scs1}"
 python3 "${prototype_dir}/prepare_seccomp.py" \
@@ -269,6 +274,8 @@ bash "${prototype_dir}/run_coverage_probe.sh" \
 python3 "${prototype_dir}/write_evidence_manifest.py" \
   "${artifact_dir}" "${build_dir}" "${prototype_dir}" \
   --architecture "${oci_architecture}"
+python3 "${workspace_dir}/scripts/check_spdx_sbom.py" \
+  "${artifact_dir}/fixture-sbom.spdx.json"
 
 jq -e '.adr069_compatible == false and .observed_terminal_code == 8 and .required_terminal_code == 7' \
   "${artifact_dir}/elm-file.json" >/dev/null
@@ -282,5 +289,7 @@ jq -e '
 ' "${artifact_dir}/elm-memory-limit.json" >/dev/null
 printf 'ADR-084 prototype completed on %s; #379 acceptance fails: FileBytes lacks required SIGXFSZ, SwapBytes and distinct MemoryLimit lack distinguishable max events, three split lifecycle boundaries lack durable action-authorizing identity, and ADR-079 continuous profiling injects a non-empty adapter environment\n' \
   "$(uname -m)" | tee "${artifact_dir}/verdict.txt"
-find "${artifact_dir}" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum \
-  >"${artifact_dir}/SHA256SUMS"
+(
+  cd "${artifact_dir}"
+  find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum
+) >"${artifact_dir}/SHA256SUMS"

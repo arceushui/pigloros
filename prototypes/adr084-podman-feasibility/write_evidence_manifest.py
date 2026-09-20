@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -26,6 +27,22 @@ def main() -> None:
         "arm64": "foreign_arm.S",
     }[arguments.architecture]
     repository_root = arguments.prototype_dir.parents[1]
+    evidence_architecture = {
+        "amd64": "x86_64",
+        "arm64": "aarch64",
+    }[arguments.architecture]
+    production_scs1 = (
+        repository_root
+        / "crates/pos-conformance/vectors/systemd-provider-v260.2"
+        / f"systemd-v260.2-{evidence_architecture}.scs1.cbor"
+    )
+    retained_production_scs1 = arguments.artifact_dir / "seccomp/production.scs1.cbor"
+    if production_scs1.read_bytes() != retained_production_scs1.read_bytes():
+        raise ValueError("retained production SCS1 differs from the executed input")
+    source_date_epoch = int(os.environ["SOURCE_DATE_EPOCH"])
+    created = datetime.datetime.fromtimestamp(
+        source_date_epoch, datetime.UTC
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     files = [
         ("/launcher", arguments.build_dir / "launcher"),
@@ -170,6 +187,15 @@ def main() -> None:
             "workflow/adr084-podman-feasibility.yml",
             repository_root / ".github/workflows/adr084-podman-feasibility.yml",
         ),
+        ("input/production-scs1.cbor", production_scs1),
+        (
+            "input/derived-scs1.cbor",
+            arguments.artifact_dir / "seccomp-distinct/derived-cachestat.scs1.cbor",
+        ),
+        (
+            "policy/check_spdx_sbom.py",
+            repository_root / "scripts/check_spdx_sbom.py",
+        ),
         ("build/compile-seccomp", arguments.build_dir / "compile-seccomp"),
         ("build/trace-seccomp", arguments.build_dir / "trace-seccomp"),
         ("build/prefilter-exec", arguments.build_dir / "prefilter-exec"),
@@ -188,9 +214,23 @@ def main() -> None:
         ("runtime/crun", pathlib.Path("/usr/bin/crun")),
         ("runtime/podman", pathlib.Path("/usr/bin/podman")),
     ]
+    file_names = [name for name, _ in files]
+    required_inputs = {
+        "input/derived-scs1.cbor",
+        "input/production-scs1.cbor",
+        "prototype/driver.py",
+        "prototype/lifecycle_crash_matrix.py",
+        "prototype/run.sh",
+        "workflow/adr084-podman-feasibility.yml",
+    }
+    if len(file_names) != len(set(file_names)) or not required_inputs.issubset(
+        file_names
+    ):
+        raise ValueError("executed-input inventory is incomplete or duplicated")
     sbom = {
         "SPDXID": "SPDXRef-DOCUMENT",
         "creationInfo": {
+            "created": created,
             "creators": ["Tool: PiglorOS ADR-084 throwaway evidence workflow"],
         },
         "dataLicense": "CC0-1.0",
@@ -502,6 +542,7 @@ def main() -> None:
         "seccomp/exported-seccomp.bpf",
         "seccomp/libseccomp-interface-v1.txt",
         "seccomp/oci-seccomp-profile.json",
+        "seccomp/production.scs1.cbor",
         "seccomp/readback-only-pnr.txt",
         "seccomp/seccomp-mapping-report.json",
         "seccomp/seccomp-mutation-report.json",

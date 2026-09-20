@@ -167,7 +167,9 @@ before-identity-capture lack that complete durable identity, so recovery refuses
 to touch the candidate; only the separate conformance harness cleans it up. The
 remaining actionable cases terminate descendants, remove the exact container,
 verify the retained cgroup is empty or absent, verify the merged root is no
-longer mounted, and replay reconciliation without another action. A continuously
+longer mounted, and replay reconciliation without another action. Live cleanup
+fails closed unless durable cgroup and merged-root identities are available;
+never-created and durably-never-started cases are labelled separately. A continuously
 running lookalike sentinel proves unrelated state is not touched. Separate
 ambiguity and identity-reuse mutations require operator-visible refusal and leave
 every candidate unchanged. Because Podman 4.9.3 does not offer
@@ -244,4 +246,6 @@ In GitHub Actions the command writes beneath
 `artifacts/adr084-podman-feasibility/`, runner-temporary build directories, the
 coverage fixture's Cargo target directory, and rootless Podman storage. Its
 ADR-079 subprobe invokes pinned Cargo/cargo-llvm-cov remotely. Nothing in this
-README authorizes running it in a developer worktree.
+README authorizes running it in a developer worktree. The uploaded bundle
+retains the exact production and derived SCS1 inputs, validates its SPDX 2.3
+inventory, and uses extraction-portable relative paths in `SHA256SUMS`.

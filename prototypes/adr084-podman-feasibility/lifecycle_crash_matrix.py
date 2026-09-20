@@ -466,12 +466,12 @@ def last_running_identity(records: list[dict[str, object]]) -> dict[str, object]
 
 def cgroup_empty_or_absent(path: str | None) -> bool:
     if path is None:
-        return True
+        return False
     cgroup = pathlib.Path(path)
     if not cgroup.exists():
         return True
     procs = cgroup / "cgroup.procs"
-    return not procs.exists() or not procs.read_text(encoding="ascii").strip()
+    return procs.exists() and not procs.read_text(encoding="ascii").strip()
 
 
 def reconcile(
@@ -498,22 +498,29 @@ def reconcile(
         prior_running = last_running_identity(records)
         prior_cgroup = prior_running.get("cgroup_path") if prior_running else None
         prior_merged = prior_running.get("merged_dir") if prior_running else None
+        if scenario == "before-create":
+            cgroup_verified = True
+            descendants_verified = True
+            merged_verified = True
+            cleanup_proof = "candidate-never-created"
+        else:
+            if not prior_cgroup or not prior_merged:
+                raise RuntimeError("durable cleanup identity is unavailable")
+            cgroup_verified = cgroup_empty_or_absent(str(prior_cgroup))
+            descendants_verified = cgroup_verified
+            merged_verified = str(prior_merged) not in pathlib.Path(
+                "/proc/self/mountinfo"
+            ).read_text(encoding="utf-8")
+            cleanup_proof = "durable-live-identity"
         result = {
             "actions": [],
-            "cgroup_empty_or_absent": cgroup_empty_or_absent(
-                str(prior_cgroup) if prior_cgroup else None
-            ),
+            "cgroup_empty_or_absent": cgroup_verified,
+            "cleanup_proof": cleanup_proof,
             "container_absent": True,
-            "descendants_terminated": cgroup_empty_or_absent(
-                str(prior_cgroup) if prior_cgroup else None
-            ),
+            "descendants_terminated": descendants_verified,
             "discarded_uncommitted_records": discarded_uncommitted_records,
             "idempotent_absence": True,
-            "merged_root_not_mounted": (
-                not prior_merged
-                or str(prior_merged)
-                not in pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8")
-            ),
+            "merged_root_not_mounted": merged_verified,
             "scenario": scenario,
         }
     else:
@@ -550,6 +557,9 @@ def reconcile(
             prior_running.get("cgroup_path") if prior_running else None
         )
         merged_dir = actual_identity["merged_dir"]
+        was_ever_running = actual_identity["running"] or prior_running is not None
+        if was_ever_running and (merged_dir is None or cgroup_path is None):
+            raise RuntimeError("durable cleanup identity is unavailable")
         actions: list[str] = []
         if actual_identity["running"]:
             run("/usr/bin/podman", "stop", "--time=1", container_id, check=False)
@@ -567,25 +577,30 @@ def reconcile(
         )
         run("/usr/bin/podman", "rm", "--force", container_id)
         actions.append("remove")
+        if was_ever_running:
+            cgroup_verified = cgroup_empty_or_absent(str(cgroup_path))
+            cleanup_proof = "durable-live-identity"
+        else:
+            cgroup_verified = True
+            cleanup_proof = "durably-never-started"
+        merged_verified = (
+            str(merged_dir)
+            not in pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+            if was_ever_running
+            else True
+        )
         result = {
             "actions": actions,
-            "cgroup_empty_or_absent": cgroup_empty_or_absent(
-                str(cgroup_path) if cgroup_path else None
-            ),
+            "cgroup_empty_or_absent": cgroup_verified,
+            "cleanup_proof": cleanup_proof,
             "container_absent": run(
                 "/usr/bin/podman", "inspect", container_id, check=False
             ).returncode
             != 0,
-            "descendants_terminated": cgroup_empty_or_absent(
-                str(cgroup_path) if cgroup_path else None
-            ),
+            "descendants_terminated": cgroup_verified,
             "discarded_uncommitted_records": discarded_uncommitted_records,
             "idempotent_absence": not discover(expected_labels),
-            "merged_root_not_mounted": (
-                not merged_dir
-                or str(merged_dir)
-                not in pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8")
-            ),
+            "merged_root_not_mounted": merged_verified,
             "network_mode": document["HostConfig"]["NetworkMode"],  # type: ignore[index]
             "scenario": scenario,
         }

@@ -1050,6 +1050,8 @@ jobs:
         run: python scripts/check_adr084_prototype_ci_policy.py
       - name: Test ADR-084 prototype CI policy checker
         run: python scripts/test_adr084_prototype_ci_policy.py
+      - name: Test SPDX inventory checker
+        run: python scripts/test_check_spdx_sbom.py
       - name: Test Rust scope filter policy
         run: python scripts/test_rust_scope_policy.py
       - name: Check ASan CI policy

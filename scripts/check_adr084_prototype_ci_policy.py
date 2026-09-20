@@ -94,8 +94,9 @@ def check(root: pathlib.Path) -> None:
             'python3 "${prototype_dir}/lifecycle_crash_matrix.py"',
             'bash "${prototype_dir}/run_coverage_probe.sh"',
             'python3 "${prototype_dir}/write_evidence_manifest.py"',
+            'python3 "${workspace_dir}/scripts/check_spdx_sbom.py"',
             'printf \'ADR-084 prototype completed',
-            'find "${artifact_dir}" -type f ! -name SHA256SUMS',
+            "find . -type f ! -name SHA256SUMS -printf '%P\\0'",
         ),
         "run.sh evidence stages",
     )
