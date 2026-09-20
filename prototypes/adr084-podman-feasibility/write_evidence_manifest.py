@@ -172,6 +172,24 @@ def main() -> None:
         "elm-memory.seccomp-install.json",
         "elm-memory.stderr",
         "elm-memory.stdout",
+        *(
+            f"{scenario}.{suffix}"
+            for scenario in ("elm-tasks", "elm-cpu-throttling")
+            for suffix in (
+                "eai1",
+                "installed-seccomp.bpf",
+                "json",
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "launcher.json",
+                "ready2.cbor",
+                "release2.cbor",
+                "release-barrier.json",
+                "seccomp-install.json",
+                "stderr",
+                "stdout",
+            )
+        ),
         "cache-matrix.json",
         "cache-concurrent-identical.json",
         "cache-concurrent-distinct.json",
