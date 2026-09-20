@@ -136,6 +136,8 @@ def main() -> None:
         "adapter-transport-validation.json",
         "adapter-transport-runtime-rejections.json",
         "release-barrier-runtime-rejections.json",
+        "lifecycle-concurrent.json",
+        "lifecycle-concurrent.release",
         "blake3-LICENSE_A2.txt",
         "blake3-source-identity.txt",
         "fixture-sbom.spdx.json",
@@ -224,6 +226,23 @@ def main() -> None:
                 "launch-context.cbor",
                 "launcher-starting.json",
                 "ready2.cbor",
+                "stderr",
+                "stdout",
+            )
+        ),
+        *(
+            f"lifecycle-concurrent-{index}.{suffix}"
+            for index in range(8)
+            for suffix in (
+                "installed-seccomp.bpf",
+                "launch-context.cbor",
+                "launcher-starting.json",
+                "launcher.json",
+                "observed.json",
+                "ready2.cbor",
+                "release2.cbor",
+                "release-barrier.json",
+                "seccomp-install.json",
                 "stderr",
                 "stdout",
             )

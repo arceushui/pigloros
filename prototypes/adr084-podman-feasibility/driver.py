@@ -744,6 +744,7 @@ def launch(
     containers_conf: pathlib.Path | None = None,
     expect_annotation_rejection: str | None = None,
     release_mutation: str | None = None,
+    release_gate: tuple[pathlib.Path, pathlib.Path] | None = None,
 ) -> tuple[subprocess.Popen[bytes], socket.socket, str] | None:
     parent_control, child_control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     if parent_control.fileno() == 3:
@@ -968,6 +969,27 @@ def launch(
     (artifact_dir / f"{scenario}.launcher.json").write_text(
         json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    if release_gate is not None:
+        observed_path, release_path = release_gate
+        observed_path.write_text(
+            json.dumps(
+                {
+                    "container_id": container_id,
+                    "launcher_pid": pid,
+                    "monotonic_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC),
+                    "scenario": scenario,
+                    "state": "Observed",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        gate_deadline = time.monotonic() + 60
+        while not release_path.exists() and time.monotonic() < gate_deadline:
+            time.sleep(0.005)
+        if not release_path.exists():
+            raise TimeoutError(f"release gate did not open for {scenario}")
     if release:
         release_packet, release_unsigned, release_digest = build_and_verify_release(
             ready_digest, barrier_attempt, barrier_fixture
@@ -1215,6 +1237,141 @@ def normal_scenario(
             f"normal adapter failed: code={return_code} output={output!r} stderr={errors!r}"
         )
     run("/usr/bin/podman", "rm", container_id)
+
+
+def concurrent_lifecycle_worker(
+    index: int,
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_hello: bytes,
+    eao1_hello: bytes,
+    release_path: pathlib.Path,
+) -> dict[str, object]:
+    scenario = f"lifecycle-concurrent-{index}"
+    observed_path = artifact_dir / f"{scenario}.observed.json"
+    started_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_hello,
+        scenario,
+        release_gate=(observed_path, release_path),
+    )
+    released_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    process.stdin.close()
+    return_code = process.wait(timeout=20)
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    control.close()
+    run("/usr/bin/podman", "rm", container_id)
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    validation = validate_eao1(output, b"hello\n")
+    if return_code != 0 or output != eao1_hello or errors:
+        raise AssertionError(
+            f"concurrent lifecycle attempt failed: {scenario} code={return_code} "
+            f"output={output!r} stderr={errors!r}"
+        )
+    starting = json.loads(
+        (artifact_dir / f"{scenario}.launcher-starting.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    launcher = json.loads(
+        (artifact_dir / f"{scenario}.launcher.json").read_text(encoding="utf-8")
+    )
+    observed = json.loads(observed_path.read_text(encoding="utf-8"))
+    return {
+        "attempt_id": starting["attempt_id"],
+        "cgroup_path": launcher["cgroup_path"],
+        "container_id": container_id,
+        "launcher_pid": launcher["pid"],
+        "observed_monotonic_ns": observed["monotonic_ns"],
+        "released_monotonic_ns": released_ns,
+        "scenario": scenario,
+        "started_monotonic_ns": started_ns,
+        "transport_validation": validation,
+    }
+
+
+def concurrent_lifecycle_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_hello: bytes,
+    eao1_hello: bytes,
+) -> None:
+    release_path = artifact_dir / "lifecycle-concurrent.release"
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(
+                concurrent_lifecycle_worker,
+                index,
+                image,
+                seccomp,
+                seccomp_bpf_base64,
+                seccomp_bpf,
+                seccomp_tracer,
+                artifact_dir,
+                barrier_fixture,
+                eai1_hello,
+                eao1_hello,
+                release_path,
+            )
+            for index in range(8)
+        ]
+        observed_paths = [
+            artifact_dir / f"lifecycle-concurrent-{index}.observed.json"
+            for index in range(8)
+        ]
+        observed_deadline = time.monotonic() + 60
+        while (
+            not all(path.exists() for path in observed_paths)
+            and time.monotonic() < observed_deadline
+        ):
+            time.sleep(0.01)
+        if not all(path.exists() for path in observed_paths):
+            raise TimeoutError("eight lifecycle attempts did not all reach Observed")
+        release_path.write_text("release all observed attempts\n", encoding="ascii")
+        results = [future.result(timeout=60) for future in futures]
+
+    identity_fields = ("attempt_id", "cgroup_path", "container_id", "launcher_pid")
+    for field in identity_fields:
+        values = [result[field] for result in results]
+        if len(set(values)) != 8:
+            raise AssertionError(f"concurrent lifecycle {field} is not unique")
+    latest_observed = max(int(result["observed_monotonic_ns"]) for result in results)
+    earliest_release = min(int(result["released_monotonic_ns"]) for result in results)
+    if latest_observed >= earliest_release:
+        raise AssertionError("a concurrent lifecycle attempt released before all observed")
+    report = {
+        "attempt_count": len(results),
+        "attempts": sorted(results, key=lambda result: str(result["scenario"])),
+        "earliest_release_monotonic_ns": earliest_release,
+        "identity_fields_unique": list(identity_fields),
+        "latest_observed_monotonic_ns": latest_observed,
+        "verdict": "eight unique attempts were simultaneously Observed before release",
+    }
+    (artifact_dir / "lifecycle-concurrent.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def cancellation_scenario(
@@ -2301,6 +2458,17 @@ def main() -> None:
         "org.systemd.property.DeviceAllow=injected",
     )
     normal_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_hello,
+        eao1_hello,
+    )
+    concurrent_lifecycle_scenario(
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,

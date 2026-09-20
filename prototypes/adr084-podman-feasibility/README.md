@@ -69,6 +69,13 @@ connected socket and the unchanged 30-second missing-release timeout. These
 injections deliberately bypass the provider's successful base-record
 verification and are labelled as such in retained evidence.
 
+An eight-process lifecycle case uses distinct provider processes and containers.
+Each attempt reaches its own identity-bound `Observed` state and writes a gate
+record while its launcher remains blocked. Only after all eight records exist
+does the coordinator open the release gate. The retained report requires eight
+unique attempt IDs, container IDs, launcher PIDs, and cgroup paths, and proves
+the earliest ReleaseV2 occurs after the latest `Observed` timestamp.
+
 The seccomp supervisor also stops the admitted-flags syscall before kernel
 continuation when the mapped install buffer differs from the provider-exported
 BPF. A valid-base64, one-byte mutation is exercised through real crun and must
