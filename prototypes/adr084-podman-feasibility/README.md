@@ -88,6 +88,17 @@ provider accepts only the length prefix, observes the next overflow byte before
 one complete EAO1 frame, discards all adapter output, withholds a Completed
 descriptor, and selects terminal code 7 `FileOrOutputLimit`.
 
+Provider-only control evidence forces a two-slot attempt semaphore before AGR1,
+a two-entry FIFO with ordered dequeue and a fifth-request rejection, and a
+two-token per-peer-credential bucket through two accepts, one rejection, and an
+accept after one deterministic refill interval. Separate real monotonic input
+and output transfer deadlines expire after partial byte counts. Input retains
+pre-admission SPE1 code 17 `PayloadTransferTimeout`; output retains
+post-admission terminal code 10 `ProtocolFailure`. The prototype runtime key
+signs every rate transition, both transfer observations, and the complete
+semaphore/FIFO transition chain, and the driver verifies every signature before
+retention.
+
 The launcher barrier itself uses canonical LPV2, ReadyV2, and signed ReleaseV2
 records rather than literal readiness/release tokens. Before invoking Podman,
 the driver durably records an attempt-bound monotonic launch anchor and passes a

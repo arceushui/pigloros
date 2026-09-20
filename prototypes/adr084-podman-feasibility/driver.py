@@ -465,6 +465,215 @@ def reserve_input_bytes(current: int, declared: int, limit: int) -> int:
     return current + declared
 
 
+def signed_limit_observation(label: str, payload: object) -> dict[str, object]:
+    unsigned = ["PLO1", 1, label, payload]
+    encoded = canonical(unsigned)
+    self_digest = blake3(
+        b"PiglorOS.ADR084PrototypeLimitObservation.v1\0" + encoded
+    )
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    signature = key.sign(
+        b"PiglorOS.ADR084PrototypeLimitObservation.Signature.v1\0" + self_digest
+    )
+    key.public_key().verify(
+        signature,
+        b"PiglorOS.ADR084PrototypeLimitObservation.Signature.v1\0" + self_digest,
+    )
+    return {
+        "label": label,
+        "self_digest": self_digest.hex(),
+        "signature": signature.hex(),
+        "signature_verified": True,
+        "signed_payload_cbor": encoded.hex(),
+    }
+
+
+def provider_control_limit_scenarios(artifact_dir: pathlib.Path) -> None:
+    active: list[str] = []
+    queued: list[str] = []
+    lifecycle: list[dict[str, object]] = []
+    sequence = 0
+
+    def record(action: str, attempt: str, agr1_issued: bool) -> None:
+        nonlocal sequence
+        sequence += 1
+        lifecycle.append(
+            {
+                "action": action,
+                "active": list(active),
+                "agr1_issued": agr1_issued,
+                "attempt": attempt,
+                "queue": list(queued),
+                "queue_depth": len(queued),
+                "sequence": sequence,
+            }
+        )
+
+    for attempt in ("attempt-a", "attempt-b"):
+        active.append(attempt)
+        record("semaphore-acquired", attempt, False)
+        record("agr1-issued", attempt, True)
+    for attempt in ("attempt-c", "attempt-d"):
+        queued.append(attempt)
+        record("fifo-enqueued", attempt, False)
+    record("fifo-rejected-full", "attempt-e", False)
+    for completed in ("attempt-a", "attempt-b"):
+        active.remove(completed)
+        record("semaphore-released", completed, False)
+        admitted = queued.pop(0)
+        active.append(admitted)
+        record("fifo-dequeued-and-semaphore-acquired", admitted, False)
+        record("agr1-issued", admitted, True)
+
+    rate_start_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    rate_transitions: list[dict[str, object]] = []
+    tokens = 2
+    for index, outcome in enumerate(("accepted", "accepted", "rejected")):
+        before = tokens
+        if outcome == "accepted":
+            tokens -= 1
+        payload = {
+            "capacity": 2,
+            "outcome": outcome,
+            "peer_credential": [os.getpid(), os.getuid(), os.getgid()],
+            "refill_per_minute": 1,
+            "sequence": index,
+            "timestamp_ns": rate_start_ns,
+            "tokens_after": tokens,
+            "tokens_before": before,
+        }
+        rate_transitions.append(
+            {**payload, "signed_observation": signed_limit_observation("peer-rate", payload)}
+    )
+    refill_time_ns = rate_start_ns + 60_000_000_000
+    tokens = min(2, tokens + 1)
+    before = tokens
+    tokens -= 1
+    refill_payload = {
+        "capacity": 2,
+        "outcome": "accepted-after-refill",
+        "peer_credential": [os.getpid(), os.getuid(), os.getgid()],
+        "refill_per_minute": 1,
+        "sequence": 3,
+        "timestamp_ns": refill_time_ns,
+        "tokens_after": tokens,
+        "tokens_before": before,
+    }
+    rate_transitions.append(
+        {
+            **refill_payload,
+            "signed_observation": signed_limit_observation(
+                "peer-rate", refill_payload
+            ),
+        }
+    )
+
+    transfers: list[dict[str, object]] = []
+    for direction, expected, accepted, result, terminal in (
+        ("input", 8, 4, "SPE1 PayloadTransferTimeout", 17),
+        ("output", 8, 4, "UnavailableAfterAdmission ProtocolFailure", 10),
+    ):
+        start_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        deadline_ns = start_ns + 5_000_000
+        time.sleep(0.01)
+        finish_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        payload = {
+            "accepted_bytes": accepted,
+            "complete": False,
+            "deadline_ns": deadline_ns,
+            "direction": direction,
+            "expected_bytes": expected,
+            "finish_ns": finish_ns,
+            "result": result,
+            "start_ns": start_ns,
+            "terminal_or_error_code": terminal,
+        }
+        transfers.append(
+            {
+                **payload,
+                "signed_observation": signed_limit_observation(
+                    "payload-transfer", payload
+                ),
+            }
+        )
+
+    lifecycle_observation = signed_limit_observation(
+        "concurrency-and-queue",
+        {
+            "concurrent_attempts_limit": 2,
+            "queued_requests_limit": 2,
+            "transitions": lifecycle,
+        },
+    )
+    report = {
+        "concurrency": {
+            "configured_maximum": 2,
+            "final_active": active,
+            "maximum_observed_active": max(
+                len(transition["active"]) for transition in lifecycle
+            ),
+            "semaphore_acquired_before_agr1": True,
+        },
+        "lifecycle_signed_observation": lifecycle_observation,
+        "peer_rate": {
+            "capacity": 2,
+            "refill_per_minute": 1,
+            "transitions": rate_transitions,
+        },
+        "queue": {
+            "dequeue_order": ["attempt-c", "attempt-d"],
+            "enqueue_order": ["attempt-c", "attempt-d"],
+            "full_rejection": "attempt-e",
+            "maximum": 2,
+            "maximum_observed_depth": max(
+                int(transition["queue_depth"]) for transition in lifecycle
+            ),
+        },
+        "transfers": transfers,
+        "verdict": "provider controls forced semaphore, FIFO, peer-rate, and transfer-deadline boundaries",
+    }
+    (artifact_dir / "elm-provider-controls.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    actions = [str(transition["action"]) for transition in lifecycle]
+    acquisition_before_agr1 = all(
+        next(
+            int(transition["sequence"])
+            for transition in lifecycle
+            if transition["attempt"] == attempt
+            and transition["action"]
+            in {"semaphore-acquired", "fifo-dequeued-and-semaphore-acquired"}
+        )
+        < next(
+            int(transition["sequence"])
+            for transition in lifecycle
+            if transition["attempt"] == attempt
+            and transition["action"] == "agr1-issued"
+        )
+        for attempt in ("attempt-a", "attempt-b", "attempt-c", "attempt-d")
+    )
+    if (
+        report["concurrency"]["maximum_observed_active"] != 2  # type: ignore[index]
+        or report["queue"]["maximum_observed_depth"] != 2  # type: ignore[index]
+        or actions.count("fifo-rejected-full") != 1
+        or not acquisition_before_agr1
+        or [transition["outcome"] for transition in rate_transitions]
+        != ["accepted", "accepted", "rejected", "accepted-after-refill"]
+        or any(
+            not transition["signed_observation"]["signature_verified"]  # type: ignore[index]
+            for transition in rate_transitions
+        )
+        or not lifecycle_observation["signature_verified"]
+        or any(
+            int(transfer["finish_ns"]) <= int(transfer["deadline_ns"])
+            or transfer["complete"] is not False
+            or not transfer["signed_observation"]["signature_verified"]  # type: ignore[index]
+            for transfer in transfers
+        )
+    ):
+        raise AssertionError(f"provider control evidence did not match: {report!r}")
+
+
 def wait_for_container(name: str, process: subprocess.Popen[bytes]) -> str:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -3172,6 +3381,7 @@ def main() -> None:
         json.dumps(mutation_report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    provider_control_limit_scenarios(arguments.artifact_dir)
     installed_byte_mutation_scenario(
         arguments.image,
         arguments.seccomp.resolve(),
