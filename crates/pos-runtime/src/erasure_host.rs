@@ -5127,17 +5127,25 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        let parent = TimelineId::new();
+        let mut store = MemoryStore::new().without_erasure_gate();
+        let parent = store
+            .create_timeline("missing-parent")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+            .id();
         let snapshot = ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let inventory = verified_empty_inventory(snapshot, 4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut missing =
-            ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut missing = ErasureExecutionHostV1::new_closed(Box::new(store))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let mut query = OneShotInventoryV1(Some(inventory));
         missing
             .install_inventory(&mut query, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        missing
+            .store
+            .host_store()
+            .delete_timeline(parent)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             missing.apply_unaffected_topology_change(Some(parent), |_permit, _store| {
