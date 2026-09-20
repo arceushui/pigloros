@@ -13,6 +13,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define CHILD_SCHEDULING_DEADLINE_NANOSECONDS UINT64_C(1000000000)
+
 static void fail(const char *message) {
     dprintf(STDERR_FILENO, "seccomp-probe-error:%s:%s\n", message,
             strerror(errno));
@@ -50,7 +52,8 @@ static void child_wait_for_start(int ready_write, int start_read) {
 static uint64_t parent_start_child(int ready_read, int start_write) {
     transfer_byte(ready_read, false, "parent-ready");
     close(ready_read);
-    uint64_t deadline = monotonic_nanoseconds() + 100000000ULL;
+    uint64_t deadline =
+        monotonic_nanoseconds() + CHILD_SCHEDULING_DEADLINE_NANOSECONDS;
     transfer_byte(start_write, true, "parent-start");
     close(start_write);
     return deadline;

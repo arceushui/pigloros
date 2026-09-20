@@ -30,9 +30,12 @@ syscall-number matrix, with `sync` closed to successful return or the unchanged
 `rt_sigreturn` and x86_64 `uretprobe` are likewise closed to their documented
 signal or that unchanged bound: neither has a normal zero-argument userspace
 call contract, and a timeout is terminated and retained rather than relaxed.
-The
-prototype intentionally lives only on the throwaway
-evidence branch.
+The separate seccomp boundary helper gives each synchronized child one second
+to be scheduled after the parent releases it. A timeout still fails the probe;
+the allowance does not replace or relax the required SIGSYS and sentinel errno
+outcomes. This avoids treating ordinary hosted-runner scheduling jitter as a
+seccomp result.
+The prototype intentionally lives only on the throwaway evidence branch.
 
 The normal attempt and cancellation attempt now cross stdin as canonical,
 length-prefixed CBOR EAI1 streams with authenticated BLAKE3 transcripts. The
