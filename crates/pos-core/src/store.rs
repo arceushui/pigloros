@@ -4302,6 +4302,21 @@ mod key_registry_coverage {
             ),
             Err(CoreError::Storage(_))
         ));
+        assert!(matches!(
+            store.create_timeline_for_host_transition("minimal-host-transition"),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            store.fork_for_host_transition(TimelineId::new(), Seq::ZERO, "minimal-host-fork"),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            store.initialize_timeline_with_key_registry_for_host_transition(
+                "minimal-host-ledger",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::Storage(_))
+        ));
         Ok(())
     }
 

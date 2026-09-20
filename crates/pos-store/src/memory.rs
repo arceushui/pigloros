@@ -2617,7 +2617,7 @@ impl MemoryStore {
         }
     }
 
-    fn initialize_timeline_with_key_registry_for_host_transition(
+    fn initialize_timeline_with_key_registry_for_host_transition_unchecked(
         &mut self,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
@@ -2749,7 +2749,7 @@ impl EventStore for MemoryStore {
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
-        Self::initialize_timeline_with_key_registry_for_host_transition(
+        Self::initialize_timeline_with_key_registry_for_host_transition_unchecked(
             self,
             name,
             expected_registry,
