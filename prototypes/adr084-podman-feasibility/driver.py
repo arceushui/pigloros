@@ -456,6 +456,15 @@ def validate_eao1(stream: bytes, expected_output: bytes) -> dict[str, object]:
     }
 
 
+def reserve_input_bytes(current: int, declared: int, limit: int) -> int:
+    maximum = (1 << 64) - 1
+    if any(value < 0 or value > maximum for value in (current, declared, limit)):
+        raise ValueError("input reservation is outside the unsigned 64-bit domain")
+    if current > limit or declared > limit - current:
+        raise ValueError("input reservation exceeds ELM1 InputBytes")
+    return current + declared
+
+
 def wait_for_container(name: str, process: subprocess.Popen[bytes]) -> str:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -1307,6 +1316,156 @@ def normal_scenario(
             f"normal adapter failed: code={return_code} output={output!r} stderr={errors!r}"
         )
     run("/usr/bin/podman", "rm", container_id)
+
+
+def input_limit_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_hello: bytes,
+    eao1_hello: bytes,
+) -> None:
+    scenario = "elm-input"
+    limit = len(eai1_hello)
+    snapshot_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    accepted = reserve_input_bytes(0, len(eai1_hello), limit)
+    over_limit_rejected = False
+    try:
+        reserve_input_bytes(0, len(eai1_hello) + 1, limit)
+    except ValueError:
+        over_limit_rejected = True
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_hello,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    process.stdin.close()
+    output = process.stdout.read()
+    errors = process.stderr.read()
+    return_code = process.wait(timeout=20)
+    control.close()
+    release = json.loads(
+        (artifact_dir / f"{scenario}.release-barrier.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    release_ns = int(release["release_sent_monotonic_ns"])
+    validation = validate_eao1(output, b"hello\n")
+    (artifact_dir / f"{scenario}.stdout").write_bytes(output)
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "accepted_descriptor": {
+            "byte_length": len(eai1_hello),
+            "digest": blake3(
+                b"PiglorOS.SandboxInputBytes.v1\0" + eai1_hello
+            ).hex(),
+        },
+        "adapter_return_code": return_code,
+        "counter_snapshot_monotonic_ns": snapshot_ns,
+        "input_bytes_limit": limit,
+        "output_validation": validation,
+        "over_limit_declared_bytes": len(eai1_hello) + 1,
+        "over_limit_rejected_before_launch": over_limit_rejected,
+        "release_sent_monotonic_ns": release_ns,
+        "reservation_transition": [0, accepted],
+        "terminal_counter_snapshot": accepted,
+        "verdict": "exact input reservation completed before launch and ReleaseV2",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    run("/usr/bin/podman", "rm", container_id)
+    if (
+        accepted != limit
+        or not over_limit_rejected
+        or snapshot_ns >= release_ns
+        or output != eao1_hello
+        or errors
+        or return_code != 0
+    ):
+        raise AssertionError(f"input byte limit evidence did not match: {report!r}")
+
+
+def output_limit_scenario(
+    image: str,
+    seccomp: pathlib.Path,
+    seccomp_bpf_base64: str,
+    seccomp_bpf: pathlib.Path,
+    seccomp_tracer: pathlib.Path,
+    artifact_dir: pathlib.Path,
+    barrier_fixture: BarrierFixture,
+    eai1_hello: bytes,
+    eao1_hello: bytes,
+) -> None:
+    scenario = "elm-output"
+    limit = 4
+    process, control, container_id = launch(
+        image,
+        seccomp,
+        seccomp_bpf_base64,
+        seccomp_bpf,
+        seccomp_tracer,
+        artifact_dir,
+        barrier_fixture,
+        eai1_hello,
+        scenario,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    process.stdin.close()
+    observed = process.stdout.read(limit + 1)
+    remainder = process.stdout.read()
+    errors = process.stderr.read()
+    return_code = process.wait(timeout=20)
+    control.close()
+    complete_output = observed + remainder
+    first_frame_length = int.from_bytes(observed[:4], "big")
+    accepted = observed[:limit]
+    complete_frame = len(accepted) >= 4 + first_frame_length
+    (artifact_dir / f"{scenario}.stdout").write_bytes(b"")
+    (artifact_dir / f"{scenario}.stderr").write_bytes(errors)
+    report = {
+        "accepted_bytes": len(accepted),
+        "adapter_return_code": return_code,
+        "complete_eao1_frame": complete_frame,
+        "completed_spy1_output_descriptor": None,
+        "first_frame_declared_bytes": first_frame_length,
+        "observed_overflow_byte": len(observed) == limit + 1,
+        "output_bytes_limit": limit,
+        "output_discarded": True,
+        "raw_adapter_output_bytes": len(complete_output),
+        "raw_adapter_output_sha256": hashlib.sha256(complete_output).hexdigest(),
+        "terminal_code": 7,
+        "terminal_name": "FileOrOutputLimit",
+        "verdict": "provider counter reached OutputBytes before one complete EAO1 frame",
+    }
+    (artifact_dir / f"{scenario}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    run("/usr/bin/podman", "rm", container_id)
+    if (
+        observed[:limit] != eao1_hello[:limit]
+        or len(observed) != limit + 1
+        or complete_output != eao1_hello
+        or complete_frame
+        or errors
+        or return_code != 0
+    ):
+        raise AssertionError(f"output byte limit evidence did not match: {report!r}")
 
 
 def memory_limit_scenario(
@@ -2965,6 +3124,8 @@ def main() -> None:
     eai1_watchdog = arguments.eai1_watchdog.read_bytes()
     eao1_hello = arguments.eao1_hello.read_bytes()
     (arguments.artifact_dir / "normal.eai1").write_bytes(eai1_hello)
+    (arguments.artifact_dir / "elm-input.eai1").write_bytes(eai1_hello)
+    (arguments.artifact_dir / "elm-output.eai1").write_bytes(eai1_hello)
     (arguments.artifact_dir / "cancel.eai1").write_bytes(eai1_hold)
     (arguments.artifact_dir / "elm-memory.eai1").write_bytes(eai1_memory)
     (arguments.artifact_dir / "elm-tasks.eai1").write_bytes(eai1_tasks)
@@ -3043,6 +3204,28 @@ def main() -> None:
         "org.systemd.property.DeviceAllow=injected",
     )
     normal_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_hello,
+        eao1_hello,
+    )
+    input_limit_scenario(
+        arguments.image,
+        arguments.seccomp.resolve(),
+        seccomp_bpf_base64,
+        arguments.seccomp_bpf.resolve(),
+        arguments.seccomp_tracer.resolve(),
+        arguments.artifact_dir,
+        barrier_fixture,
+        eai1_hello,
+        eao1_hello,
+    )
+    output_limit_scenario(
         arguments.image,
         arguments.seccomp.resolve(),
         seccomp_bpf_base64,

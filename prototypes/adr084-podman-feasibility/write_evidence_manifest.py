@@ -177,6 +177,8 @@ def main() -> None:
             for scenario in (
                 "elm-tasks",
                 "elm-cpu-throttling",
+                "elm-input",
+                "elm-output",
                 "elm-work",
                 "elm-watchdog",
             )
