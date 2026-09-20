@@ -54,6 +54,11 @@ fn driver_visible_event(event: &Event) -> bool {
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
 }
 
+fn validate_driver_output(entry: &PluginEntry, output: &StepOutput) -> Result<(), RuntimeError> {
+    reject_host_owned_drafts(output)?;
+    validate_plugin_output(entry, &output.drafts)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_paths {
@@ -2735,8 +2740,7 @@ impl PluginRegistry {
             if due_driver_ids.remove(id) {
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                reject_host_owned_drafts(&output)?;
-                validate_plugin_output(entry, &output.drafts)?;
+                validate_driver_output(entry, &output)?;
                 entry.last_tick = Some(now_ns);
                 all_drafts.extend(output.drafts);
             }
@@ -2853,8 +2857,7 @@ impl PluginRegistry {
             if let Some(driver) = entry.driver.as_mut() {
                 let observations = snapshot.view_for(driver.subscriptions());
                 let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                reject_host_owned_drafts(&output)?;
-                validate_plugin_output(entry, &output.drafts)?;
+                validate_driver_output(entry, &output)?;
                 all_drafts.extend(output.drafts);
             }
         }
