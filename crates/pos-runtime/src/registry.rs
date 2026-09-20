@@ -51,7 +51,7 @@ fn extend_unique_subscriptions(
 fn driver_visible_event(event: &Event) -> bool {
     !pos_core::is_consent_event_type(&event.event_type)
         && !pos_core::is_geographic_event_type(&event.event_type)
-        && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+        && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE;
 }
 
 #[cfg(test)]
@@ -5737,6 +5737,15 @@ mod erasure_gate_coverage {
         assert!(rejecting
             .append_and_commit_step_at(&mut rejecting_store, pos_core::clock::Seq::ZERO, 0, &[],)
             .is_ok());
+    }
+
+    #[test]
+    fn validate_registered_output_reports_missing_plugin() {
+        let registry = PluginRegistry::new();
+        let error = registry
+            .validate_registered_output(PluginId::new(), &[])
+            .test_err();
+        assert!(matches!(error, RuntimeError::NoDriver { .. }));
     }
 }
 

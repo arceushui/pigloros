@@ -12,6 +12,7 @@ use pos_runtime::{
     RuntimeError, StepOutput,
 };
 use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -419,6 +420,97 @@ fn public_tick_and_step_validate_generated_driver_output() -> TestResult {
 
 struct DuplicateFixturePlugin {
     id: PluginId,
+}
+
+struct InvalidDeclarationPlugin;
+
+impl Plugin for InvalidDeclarationPlugin {
+    fn id(&self) -> PluginId {
+        PluginId::new()
+    }
+
+    fn name(&self) -> &'static str {
+        "invalid-declaration-output-admission-fixture"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("")],
+            ..Capability::default()
+        }
+    }
+}
+
+struct FlippingVersionPlugin {
+    id: PluginId,
+    calls: AtomicUsize,
+}
+
+impl Plugin for FlippingVersionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "flipping-version-output-admission-fixture"
+    }
+
+    fn version(&self) -> &'static str {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            "1.0.0"
+        } else {
+            "2.0.0"
+        }
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("plugin.output")],
+            ..Capability::default()
+        }
+    }
+}
+
+#[test]
+fn generated_approver_registration_rejects_changed_plugin_version() {
+    let plugin = FlippingVersionPlugin {
+        id: PluginId::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let mut registry = PluginRegistry::new();
+    assert!(matches!(
+        registry.register_generated_with_approver(&plugin, None, None, None, std::iter::empty(),),
+        Err(RuntimeError::OutputAdmission(_))
+    ));
+}
+
+#[test]
+fn generated_registration_rejects_invalid_owned_event_declaration() {
+    let mut registry = PluginRegistry::new();
+    assert!(matches!(
+        registry.register_generated(&InvalidDeclarationPlugin, None, None),
+        Err(RuntimeError::CapabilityMismatch { .. })
+    ));
+}
+
+#[test]
+fn explicit_registration_rejects_policy_budget_identity_mismatch() -> TestResult {
+    let plugin_id = PluginId::new();
+    let budget = budget(plugin_id)?;
+    let policy = policy(plugin_id, &budget)?;
+    let other_budget = budget(PluginId::new())?;
+    let mut registry = PluginRegistry::new();
+    assert!(matches!(
+        registry.register_with_output_policy(
+            &FixturePlugin { id: plugin_id },
+            policy,
+            other_budget,
+            None,
+            None,
+        ),
+        Err(RuntimeError::OutputAdmission(_))
+    ));
+    Ok(())
 }
 
 impl Plugin for DuplicateFixturePlugin {
