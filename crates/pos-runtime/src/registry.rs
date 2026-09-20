@@ -174,7 +174,7 @@ mod coverage_paths {
         crypto::Hash,
         event::{CanonicalBytes, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
-        Event,
+        ConsentGrantedV1, Event,
     };
     use std::sync::{Arc, Mutex};
 
@@ -247,6 +247,88 @@ mod coverage_paths {
                 }));
             Ok(())
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_rejects_a_forged_protected_draft_after_fences() {
+        struct EmptyDriver;
+        impl Driver for EmptyDriver {
+            fn name(&self) -> &'static str {
+                "empty"
+            }
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "append-boundary".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let forged = vec![EventDraft::new(
+            subject,
+            Kind::new("world.test"),
+            CanonicalBytes::from_static(b"forged"),
+        )];
+        let mut registry = gated_registry().with_consent_authority(authority);
+        registry.register_test_driver(Box::new(EmptyDriver));
+        registry
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .test_ok();
+        let mut store = gated_store();
+        assert!(matches!(
+            registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
+            Err(RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_rejects_a_forged_public_draft_after_fences() {
+        struct EmptyDriver;
+        impl Driver for EmptyDriver {
+            fn name(&self) -> &'static str {
+                "empty"
+            }
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let forged = vec![EventDraft::new(
+            subject,
+            Kind::new("world.test"),
+            CanonicalBytes::from_static(b"forged"),
+        )];
+        let mut registry = gated_registry();
+        registry.register_test_driver(Box::new(EmptyDriver));
+        registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
+        let mut store = gated_store();
+        assert!(matches!(
+            registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
+            Err(RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource))
+        ));
     }
 
     #[test]
@@ -4642,7 +4724,6 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    #[allow(clippy::too_many_lines)]
     fn protected_append_fences_cover_missing_gate_and_store_errors() {
         struct EmptyDriver;
 
@@ -4712,42 +4793,6 @@ mod tests {
                 .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[],)
                 .test_err(),
             RuntimeError::Store(CoreError::Storage(_))
-        ));
-
-        let mut protected_mismatch = gated_registry().with_consent_authority(authority.clone());
-        protected_mismatch.register_test_driver(Box::new(EmptyDriver));
-        protected_mismatch
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
-            .test_ok();
-        let mut protected_mismatch_store = gated_store();
-        assert!(matches!(
-            protected_mismatch
-                .append_and_commit_step_at(
-                    protected_mismatch_store.as_mut(),
-                    Seq::ZERO,
-                    0,
-                    &append_drafts,
-                )
-                .test_err(),
-            RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource)
-        ));
-
-        let mut public_mismatch = gated_registry();
-        public_mismatch.register_test_driver(Box::new(EmptyDriver));
-        public_mismatch
-            .step_all_anchored(timeline, Seq::ZERO)
-            .test_ok();
-        let mut public_mismatch_store = gated_store();
-        assert!(matches!(
-            public_mismatch
-                .append_and_commit_step_at(
-                    public_mismatch_store.as_mut(),
-                    Seq::ZERO,
-                    0,
-                    &append_drafts,
-                )
-                .test_err(),
-            RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource)
         ));
 
         let mut public_fence = gated_registry().with_consent_authority(authority);
