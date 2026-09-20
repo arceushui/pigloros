@@ -204,7 +204,15 @@ def launch(
     container_id = wait_for_file(cidfile, process)
     ready = parent_control.recv(64)
     if ready != b"READY\n":
-        raise AssertionError(f"unexpected launcher readiness: {ready!r}")
+        return_code = process.wait(timeout=10)
+        stderr = process.stderr.read().decode("utf-8", errors="replace")
+        (artifact_dir / f"{scenario}.pre-ready.stderr").write_text(
+            stderr, encoding="utf-8"
+        )
+        raise AssertionError(
+            f"unexpected launcher readiness: {ready!r}; "
+            f"exit={return_code}; stderr={stderr!r}"
+        )
     readable, _, _ = select.select([process.stdout], [], [], 0.2)
     if readable:
         premature = process.stdout.read1(64)
