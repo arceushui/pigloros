@@ -265,10 +265,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
                 .timelines
                 .lock()
                 .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-            if !timelines
-                .iter()
-                .any(|(timeline, _)| *timeline == candidate)
-            {
+            if !timelines.iter().any(|(timeline, _)| *timeline == candidate) {
                 timelines.push((candidate, reference(9)));
             }
         }
@@ -844,14 +841,14 @@ fn assert_active_unaffected_topology_parity(
 }
 
 #[test]
-fn memory_host_admits_active_unaffected_roots_and_forks(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn memory_host_admits_active_unaffected_roots_and_forks() -> Result<(), Box<dyn std::error::Error>>
+{
     assert_active_unaffected_topology_parity(StoreConfig::Memory)
 }
 
 #[test]
-fn sqlite_host_admits_active_unaffected_roots_and_forks(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_host_admits_active_unaffected_roots_and_forks() -> Result<(), Box<dyn std::error::Error>>
+{
     assert_active_unaffected_topology_parity(StoreConfig::SqliteInMemory)
 }
 

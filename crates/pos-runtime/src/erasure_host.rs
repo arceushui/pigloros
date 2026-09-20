@@ -1495,7 +1495,7 @@ impl ErasureExecutionHostV1 {
         Ok(generation)
     }
 
-    fn apply_empty_topology_change(
+    fn apply_root_topology_change(
         &mut self,
         change: impl FnOnce(
             &ErasureTopologyTransitionPermitV1,
@@ -2268,7 +2268,7 @@ impl ErasureCommandSenderV1<'_> {
     /// publication fails, the host is poisoned and no further sender is issued.
     pub fn create_timeline(&mut self, name: &str) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (timeline, generation) = self.host.apply_empty_topology_change(|permit, store| {
+        let (timeline, generation) = self.host.apply_root_topology_change(|permit, store| {
             store.create_timeline_for_host_transition(permit, name)
         })?;
         self.generation = generation;
@@ -2287,7 +2287,7 @@ impl ErasureCommandSenderV1<'_> {
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (timeline, generation) = self.host.apply_empty_topology_change(|permit, store| {
+        let (timeline, generation) = self.host.apply_root_topology_change(|permit, store| {
             store.initialize_timeline_with_key_registry_for_host_transition(
                 permit,
                 name,
