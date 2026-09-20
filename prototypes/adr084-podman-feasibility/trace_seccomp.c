@@ -28,6 +28,8 @@ struct traced_process {
 
 static struct traced_process traced[MAX_TRACED];
 static size_t traced_count;
+static pid_t exited[MAX_TRACED];
+static size_t exited_count;
 static unsigned int unreadable_path_checks;
 
 static void fail(const char *message) __attribute__((noreturn));
@@ -39,6 +41,11 @@ static void fail(const char *message) {
 }
 
 static void add_traced(pid_t pid) {
+    for (size_t index = 0; index < exited_count; ++index) {
+        if (exited[index] == pid) {
+            return;
+        }
+    }
     for (size_t index = 0; index < traced_count; ++index) {
         if (traced[index].pid == pid) {
             return;
@@ -62,16 +69,29 @@ static struct traced_process *find_traced(pid_t pid) {
     return &traced[traced_count - 1];
 }
 
+static void record_exited(pid_t pid) {
+    for (size_t index = 0; index < exited_count; ++index) {
+        if (exited[index] == pid) {
+            return;
+        }
+    }
+    if (exited_count == MAX_TRACED) {
+        errno = E2BIG;
+        fail("exited-process-bound");
+    }
+    exited[exited_count++] = pid;
+}
+
 static void remove_traced(pid_t pid) {
     for (size_t index = 0; index < traced_count; ++index) {
         if (traced[index].pid == pid) {
             traced[index] = traced[traced_count - 1];
             --traced_count;
+            record_exited(pid);
             return;
         }
     }
-    errno = ESRCH;
-    fail("remove-unknown-tracee");
+    record_exited(pid);
 }
 
 static unsigned char *read_file(const char *path, size_t *length) {
@@ -276,7 +296,7 @@ int main(int argc, char **argv) {
     pid_t installer = -1;
     int child_status = 0;
     bool child_reaped = false;
-    while (traced_count != 0) {
+    for (;;) {
         pid_t pid = waitpid(-1, &status, __WALL);
         if (pid == -1) {
             if (errno == ECHILD && child_reaped && install_succeeded) {
