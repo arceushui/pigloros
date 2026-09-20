@@ -2274,6 +2274,9 @@ impl ExperimentSession {
                 for (name, version) in &plugin_versions {
                     manifest = manifest.with_plugin_version(name, version.clone());
                 }
+                for (name, digest) in self.registry.output_policy_digests() {
+                    manifest = manifest.with_output_policy_digest(name, digest);
+                }
                 manifest
                     .adapter_records
                     .push(pos_core::manifest::AdapterRecord {

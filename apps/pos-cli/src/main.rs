@@ -118,6 +118,8 @@ struct StrictReproManifest {
     head_hash: Hash,
     created_at: WallTime,
     plugin_versions: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    output_policy_digests: std::collections::HashMap<String, Hash>,
     adapter_records: Vec<StrictAdapterRecord>,
     label: Option<String>,
 }
@@ -151,6 +153,7 @@ impl From<StrictReproManifest> for pos_core::ReproManifest {
             head_hash: manifest.head_hash,
             created_at: manifest.created_at,
             plugin_versions: manifest.plugin_versions,
+            output_policy_digests: manifest.output_policy_digests,
             adapter_records: manifest
                 .adapter_records
                 .into_iter()

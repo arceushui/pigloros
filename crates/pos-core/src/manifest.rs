@@ -25,6 +25,9 @@ pub struct ReproManifest {
     pub head_hash: Hash,
     pub created_at: WallTime,
     pub plugin_versions: HashMap<String, String>,
+    /// Output-admission policy digests bound to each registered Plugin.
+    #[serde(default)]
+    pub output_policy_digests: HashMap<String, Hash>,
     pub adapter_records: Vec<AdapterRecord>,
     /// Human-readable label for this experiment run.
     pub label: Option<String>,
@@ -38,6 +41,7 @@ impl ReproManifest {
             head_hash,
             created_at,
             plugin_versions: HashMap::new(),
+            output_policy_digests: HashMap::new(),
             adapter_records: Vec::new(),
             label: None,
         }
@@ -50,6 +54,12 @@ impl ReproManifest {
         version: impl Into<String>,
     ) -> Self {
         self.plugin_versions.insert(plugin.into(), version.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_output_policy_digest(mut self, plugin: impl Into<String>, digest: Hash) -> Self {
+        self.output_policy_digests.insert(plugin.into(), digest);
         self
     }
 
