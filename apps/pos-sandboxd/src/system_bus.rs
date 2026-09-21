@@ -81,7 +81,7 @@ impl SystemdTransientUnitTransport {
     pub async fn connect_system() -> Result<Self, SystemdTransientUnitTransportError> {
         Connection::system()
             .await
-            .map(|connection| Self { connection })
+            .map(Self::from_connection)
             .map_err(SystemdTransientUnitTransportError::Connect)
     }
 
@@ -200,45 +200,34 @@ mod tests {
     }
 
     #[test]
-    fn owned_value_failure_is_classified() -> Result<(), &'static str> {
+    fn owned_value_failure_is_classified() {
         let error = encode_property_with("TestProperty", value(), |_| {
             Err(zvariant::Error::IncorrectType)
         });
-        let Err(error) = error else {
-            return Err("owned-value conversion failure was accepted");
-        };
         assert!(matches!(
             error,
-            SystemdTransientUnitTransportError::Property(_)
+            Err(SystemdTransientUnitTransportError::Property(_))
         ));
-        Ok(())
     }
 
     #[tokio::test]
-    async fn pre_submission_failures_are_classified() -> Result<(), &'static str> {
+    async fn pre_submission_failures_are_classified() {
         let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
         let property_error =
             SystemdTransientUnitTransportError::Property(zvariant::Error::IncorrectType);
         let name = TransientServiceUnitName::from_attempt_id([0; 16]);
         let error = submit(Err(proxy_error), Err(property_error), name).await;
-        let Err(error) = error else {
-            return Err("property failure was accepted");
-        };
         assert!(matches!(
             error,
-            SystemdTransientUnitTransportError::Property(_)
+            Err(SystemdTransientUnitTransportError::Property(_))
         ));
 
         let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
         let name = TransientServiceUnitName::from_attempt_id([0; 16]);
         let error = submit(Err(proxy_error), Ok(Vec::new()), name).await;
-        let Err(error) = error else {
-            return Err("proxy failure was accepted");
-        };
         assert!(matches!(
             error,
-            SystemdTransientUnitTransportError::Proxy(_)
+            Err(SystemdTransientUnitTransportError::Proxy(_))
         ));
-        Ok(())
     }
 }
