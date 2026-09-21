@@ -163,13 +163,15 @@ fn multi_fidelity_policy(
     })?)
 }
 
-fn verified_closure(plugin: &FixturePlugin) -> Result<OutputPolicyClosureV1, Box<dyn Error>> {
+fn verified_closure(
+    plugin: &FixturePlugin,
+) -> Result<(OutputPolicyClosureV1, pos_runtime::OutputPolicyBindingV1), Box<dyn Error>> {
     let profile_artifact =
         pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
     let implementation_artifact = b"output-admission-fixture-implementation";
     let configuration_details = b"fixture-configuration";
     let configuration_artifact =
-        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
+        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details)?;
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -227,7 +229,7 @@ fn verified_closure(plugin: &FixturePlugin) -> Result<OutputPolicyClosureV1, Box
         policy_revision: 1,
         output_declarations: vec![declaration],
     })?;
-    Ok(OutputPolicyClosureV1::from_plugin_artifacts(
+    let closure = OutputPolicyClosureV1::from_plugin_artifacts(
         plugin,
         &policy,
         &budget,
@@ -235,7 +237,18 @@ fn verified_closure(plugin: &FixturePlugin) -> Result<OutputPolicyClosureV1, Box
         configuration_details,
         &profile_artifact,
         pos_runtime::reviewed_retention_policy_bytes_v1(),
-    )?)
+    )?;
+    let authority = pos_runtime::InstalledOutputPolicyAuthorityV1::try_new(
+        plugin,
+        implementation_artifact,
+        configuration_details,
+        &profile_artifact,
+        pos_runtime::reviewed_retention_policy_bytes_v1(),
+    )?;
+    Ok((
+        closure,
+        pos_runtime::OutputPolicyBindingV1::new(policy, budget, Box::new(authority)),
+    ))
 }
 
 #[test]
@@ -243,7 +256,7 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
-    let closure = verified_closure(&plugin)?;
+    let (closure, binding) = verified_closure(&plugin)?;
     assert_eq!(
         closure.output_policy_bytes(),
         closure.output_policy().to_canonical_cbor().as_slice()
@@ -258,6 +271,18 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     assert!(!closure.retention_policy_artifact().is_empty());
     assert_ne!(closure.digest(), Hash::zero());
     assert!(closure.to_canonical_bytes().starts_with(b"OPC1"));
+    let fresh_plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let (fresh_closure, _) = verified_closure(&fresh_plugin)?;
+    assert_ne!(
+        closure.to_canonical_bytes(),
+        fresh_closure.to_canonical_bytes()
+    );
+    assert_eq!(
+        closure.replay_identity_digest(),
+        fresh_closure.replay_identity_digest()
+    );
 
     let admission =
         OutputAdmissionV1::try_new_verified(plugin.id(), plugin.version(), closure.clone())?;
@@ -269,7 +294,7 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     ));
     registry.register_with_verified_output_policy(
         &plugin,
-        closure.clone(),
+        binding,
         None,
         Some(Box::new(FixtureDriver)),
     )?;
@@ -335,6 +360,85 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
             closure.configuration_artifact(),
             closure.execution_profile_artifact(),
             b"invalid",
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
+    ));
+
+    let oversized_policy = vec![0; pos_core::MAX_OUTPUT_POLICY_BYTES_V1 + 1];
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            &oversized_policy,
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EOP1" })
+    ));
+    let oversized_budget = vec![0; pos_core::MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1 + 1];
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            &oversized_budget,
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EBP1" })
+    ));
+    let oversized_implementation =
+        vec![0; pos_runtime::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1 + 1];
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            &oversized_implementation,
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "implementation"
+        })
+    ));
+    let oversized_configuration =
+        vec![0; pos_runtime::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 + 1];
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            &oversized_configuration,
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration"
+        })
+    ));
+    let oversized_profile = vec![0; pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1 + 1];
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            &oversized_profile,
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    ));
+    let oversized_retention = vec![0; pos_core::retention::MAX_WORLD_RETENTION_RECORD_BYTES_V1 + 1];
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            &oversized_retention,
         ),
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
     ));

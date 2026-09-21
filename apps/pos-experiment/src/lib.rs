@@ -1215,29 +1215,29 @@ impl Experiment {
         )
     }
 
-    /// Register a Plugin with a complete host-verified output artifact closure.
+    /// Register a Plugin with a complete host-authorized output binding.
     ///
     /// # Errors
     /// Returns the runtime registration or artifact-admission error.
     pub fn register_with_verified_output_policy(
         &mut self,
         plugin: &dyn pos_core::Plugin,
-        closure: pos_runtime::OutputPolicyClosureV1,
+        binding: pos_runtime::OutputPolicyBindingV1,
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
     ) -> Result<(), pos_runtime::RuntimeError> {
         self.registry
-            .register_with_verified_output_policy(plugin, closure, reducer, driver)
+            .register_with_verified_output_policy(plugin, binding, reducer, driver)
     }
 
-    /// Register a Plugin with a verified closure and optional action approver.
+    /// Register a Plugin with an authorized binding and optional action approver.
     ///
     /// # Errors
     /// Returns the runtime registration or artifact-admission error.
     pub fn register_with_verified_output_policy_and_approver(
         &mut self,
         plugin: &dyn pos_core::Plugin,
-        closure: pos_runtime::OutputPolicyClosureV1,
+        binding: pos_runtime::OutputPolicyBindingV1,
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
         approver: Option<Box<dyn pos_core::ActionApprover>>,
@@ -1246,7 +1246,7 @@ impl Experiment {
         self.registry
             .register_with_verified_output_policy_and_approver(
                 plugin,
-                closure,
+                binding,
                 reducer,
                 driver,
                 approver,
@@ -2332,6 +2332,11 @@ impl ExperimentSession {
             .replay_policy_closures()
             .map(|(name, closure)| (name.to_owned(), closure))
             .collect();
+        let replay_policy_closure_identities: Vec<(String, Hash)> = self
+            .registry
+            .replay_policy_closure_identities()
+            .map(|(name, identity)| (name.to_owned(), identity))
+            .collect();
         let consent_gate = self
             .operation_token
             .as_ref()
@@ -2367,6 +2372,9 @@ impl ExperimentSession {
                 }
                 for (name, closure) in &replay_policy_closures {
                     manifest = manifest.with_replay_policy_closure(name, closure.clone());
+                }
+                for (name, identity) in &replay_policy_closure_identities {
+                    manifest = manifest.with_replay_policy_closure_identity(name, *identity);
                 }
                 manifest
                     .adapter_records
@@ -2586,6 +2594,9 @@ fn manifest_for_registry(
     }
     for (name, closure) in registry.replay_policy_closures() {
         manifest = manifest.with_replay_policy_closure(name, closure);
+    }
+    for (name, identity) in registry.replay_policy_closure_identities() {
+        manifest = manifest.with_replay_policy_closure_identity(name, identity);
     }
     manifest
 }

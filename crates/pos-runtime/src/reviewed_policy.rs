@@ -8,6 +8,34 @@
 
 use pos_core::{Hash, Plugin};
 
+/// Maximum bytes accepted for an installed implementation artifact.
+///
+/// Implementation artifacts are retained as opaque host-owned leaves in this
+/// bounded admission slice.  They are deliberately capped before any copy is
+/// made; the bound is large enough for the installed source artifacts used by
+/// the composition roots while preventing an unbounded blob from entering a
+/// replay closure.
+pub const MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1: usize = 1_048_576;
+
+/// Maximum bytes accepted for one canonical CFG1 configuration artifact.
+pub const MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1: usize = 1_048_576;
+
+/// Maximum bytes accepted for the caller-provided configuration details
+/// before CFG1 framing allocates its output buffer.
+pub const MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1: usize =
+    MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1;
+
+/// Closed errors for host-owned reviewed policy artifacts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReviewedPolicyArtifactErrorV1 {
+    #[error("implementation artifact exceeds its V1 bound")]
+    ImplementationArtifactTooLarge,
+    #[error("configuration details exceed their V1 bound")]
+    ConfigurationDetailsTooLarge,
+    #[error("configuration artifact exceeds its V1 bound")]
+    ConfigurationArtifactTooLarge,
+}
+
 /// Canonical RTP1 policy artifact for the accepted initial World Replay
 /// purpose.  The audience-policy leaf is the accepted ADR-076 Revision 2
 /// identity, and the temporal values are the accepted 90/30/120-day policy.
@@ -69,7 +97,13 @@ pub fn reviewed_retention_policy_hash_v1() -> Hash {
 /// configuration bytes identify the implementation configuration without
 /// making replay identity depend on a fresh ULID.
 #[must_use]
-pub fn canonical_plugin_configuration_v1(plugin: &dyn Plugin, details: &[u8]) -> Vec<u8> {
+pub fn canonical_plugin_configuration_v1(
+    plugin: &dyn Plugin,
+    details: &[u8],
+) -> Result<Vec<u8>, ReviewedPolicyArtifactErrorV1> {
+    if details.len() > MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 {
+        return Err(ReviewedPolicyArtifactErrorV1::ConfigurationDetailsTooLarge);
+    }
     let mut artifact = Vec::new();
     artifact.extend_from_slice(b"CFG1");
     frame(&mut artifact, plugin.name().as_bytes());
@@ -85,7 +119,10 @@ pub fn canonical_plugin_configuration_v1(plugin: &dyn Plugin, details: &[u8]) ->
         frame(&mut artifact, event_type.as_bytes());
     }
     frame(&mut artifact, details);
-    artifact
+    if artifact.len() > MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 {
+        return Err(ReviewedPolicyArtifactErrorV1::ConfigurationArtifactTooLarge);
+    }
+    Ok(artifact)
 }
 
 fn frame(output: &mut Vec<u8>, bytes: &[u8]) {

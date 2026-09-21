@@ -31,6 +31,8 @@ pub struct ReproManifest {
     pub replay_policy_identities: HashMap<String, Hash>,
     /// Exact length-framed output-policy closures retained for Replay.
     pub replay_policy_closures: HashMap<String, Vec<u8>>,
+    /// Stable identities for comparing retained closures across fresh Plugin IDs.
+    pub replay_policy_closure_identities: HashMap<String, Hash>,
     pub adapter_records: Vec<AdapterRecord>,
     /// Human-readable label for this experiment run.
     pub label: Option<String>,
@@ -47,6 +49,7 @@ impl ReproManifest {
             output_policy_digests: HashMap::new(),
             replay_policy_identities: HashMap::new(),
             replay_policy_closures: HashMap::new(),
+            replay_policy_closure_identities: HashMap::new(),
             adapter_records: Vec::new(),
             label: None,
         }
@@ -87,6 +90,18 @@ impl ReproManifest {
         closure: Vec<u8>,
     ) -> Self {
         self.replay_policy_closures.insert(plugin.into(), closure);
+        self
+    }
+
+    /// Record the fresh-ID-independent identity of one retained closure.
+    #[must_use]
+    pub fn with_replay_policy_closure_identity(
+        mut self,
+        plugin: impl Into<String>,
+        identity: Hash,
+    ) -> Self {
+        self.replay_policy_closure_identities
+            .insert(plugin.into(), identity);
         self
     }
 

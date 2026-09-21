@@ -70,7 +70,7 @@ fn gateway_output_binding_with_inputs(
     profile_id: &str,
     event_type: &str,
     max_event_bytes: u32,
-) -> Result<pos_runtime::OutputPolicyClosureV1, pos_runtime::RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
     let plugin_name = plugin.name().to_owned();
     let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
         .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
@@ -78,7 +78,12 @@ fn gateway_output_binding_with_inputs(
             reason: error.to_string(),
         })?;
     let configuration_artifact =
-        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
+        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details).map_err(
+            |error| pos_runtime::RuntimeError::CapabilityMismatch {
+                name: plugin_name.clone(),
+                reason: error.to_string(),
+            },
+        )?;
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -145,19 +150,21 @@ fn gateway_output_binding_with_inputs(
         output_declarations: vec![declaration],
     })
     .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: plugin_name,
+        name: plugin_name.clone(),
         reason: error.to_string(),
     })?;
-    pos_runtime::OutputPolicyClosureV1::from_plugin_artifacts(
+    let authority = pos_runtime::InstalledOutputPolicyAuthorityV1::try_new(
         plugin,
-        &policy,
-        &budget,
         include_bytes!("lib.rs"),
         configuration_details,
         &profile_artifact,
         pos_runtime::reviewed_retention_policy_bytes_v1(),
-    )
-    .map_err(Into::into)
+    )?;
+    Ok(pos_runtime::OutputPolicyBindingV1::new(
+        policy,
+        budget,
+        Box::new(authority),
+    ))
 }
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).

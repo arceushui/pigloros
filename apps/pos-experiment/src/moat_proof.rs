@@ -80,7 +80,7 @@ fn reviewed_output_binding(
     cpu_reservations_us: [u32; 3],
     implementation_artifact: &[u8],
     configuration_details: &[u8],
-) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
     reviewed_output_binding_with_limits(
         plugin,
         event_types,
@@ -100,14 +100,18 @@ fn reviewed_output_binding_with_limits(
     implementation_artifact: &[u8],
     configuration_details: &[u8],
     max_event_bytes: u32,
-) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
     let name = plugin.name();
     let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
         .map_err(|error| RuntimeError::CapabilityMismatch {
             name: name.to_owned(),
             reason: error.to_string(),
         })?;
-    let configuration_artifact = canonical_plugin_configuration_v1(plugin, configuration_details);
+    let configuration_artifact = canonical_plugin_configuration_v1(plugin, configuration_details)
+        .map_err(|error| RuntimeError::CapabilityMismatch {
+        name: name.to_owned(),
+        reason: error.to_string(),
+    })?;
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Fork,
@@ -182,16 +186,18 @@ fn reviewed_output_binding_with_limits(
         name: name.to_owned(),
         reason: error.to_string(),
     })?;
-    pos_runtime::OutputPolicyClosureV1::from_plugin_artifacts(
+    let authority = pos_runtime::InstalledOutputPolicyAuthorityV1::try_new(
         plugin,
-        &policy,
-        &budget,
         implementation_artifact,
         configuration_details,
         &profile_artifact,
         pos_runtime::reviewed_retention_policy_bytes_v1(),
-    )
-    .map_err(Into::into)
+    )?;
+    Ok(pos_runtime::OutputPolicyBindingV1::new(
+        policy,
+        budget,
+        Box::new(authority),
+    ))
 }
 
 fn world_output_binding(
@@ -199,7 +205,7 @@ fn world_output_binding(
     input: &MoatProofInputV1,
     body: EntityId,
     profile_id: &str,
-) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
     let config = world_config(input);
     let configuration_details =
         config
@@ -230,7 +236,7 @@ fn proof_agent_output_binding(
     plugin: &ProofAgentPlugin,
     threshold: f64,
     profile_id: &str,
-) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
     let configuration_details = threshold.to_bits().to_be_bytes();
     reviewed_output_binding(
         plugin,
@@ -245,7 +251,7 @@ fn proof_agent_output_binding(
 fn proof_society_output_binding(
     plugin: &ProofSocietyPlugin,
     profile_id: &str,
-) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
     let configuration_details = SocietyDimension::all()
         .iter()
         .flat_map(|dimension| dimension.as_str().as_bytes().iter().copied().chain([0]))

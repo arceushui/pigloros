@@ -30,7 +30,7 @@ use crate::{
         StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::{OutputAdmissionV1, OutputPolicyClosureV1},
+    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -140,9 +140,6 @@ fn replay_policy_identity_digest(
     hasher.update(&[budget.accounting_semantics]);
     hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
     hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
-    if let Some(closure) = admission.closure() {
-        hasher.update(closure.digest().as_bytes());
-    }
     pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -2752,11 +2749,12 @@ impl PluginRegistry {
         )
     }
 
-    /// Register a Plugin with a complete host-verified artifact closure.
+    /// Register a Plugin with a complete host-authorized output binding.
     ///
     /// Release registration has no policy-only or generated fallback.  The
-    /// closure carries canonical EOP1/EBP1/EPF1/RTP1 bytes plus the exact
-    /// implementation and configuration artifacts they reference.
+    /// installed authority resolves the exact implementation, configuration,
+    /// execution-profile, and retention artifacts; the runtime validates and
+    /// mints the retained closure before mutating the registry.
     ///
     /// # Errors
     /// Returns a registration, identity, artifact, or capability error before
@@ -2764,13 +2762,13 @@ impl PluginRegistry {
     pub fn register_with_verified_output_policy(
         &mut self,
         plugin: &dyn Plugin,
-        closure: OutputPolicyClosureV1,
+        binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
         self.register_with_verified_output_policy_and_approver(
             plugin,
-            closure,
+            binding,
             reducer,
             driver,
             None,
@@ -2782,17 +2780,27 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns the runtime registration or output-admission error when the
-    /// closure, ownership, or approver route is invalid.
+    /// authority, ownership, or approver route is invalid.
     pub fn register_with_verified_output_policy_and_approver(
         &mut self,
         plugin: &dyn Plugin,
-        closure: OutputPolicyClosureV1,
+        binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
+        let (output_policy, executable_budget, authority) = binding.into_parts();
+        let artifacts = authority.resolve(plugin, &output_policy, &executable_budget)?;
+        let closure = OutputPolicyClosureV1::from_artifacts(
+            &output_policy.to_canonical_cbor(),
+            &executable_budget.to_canonical_cbor(),
+            artifacts.implementation_artifact(),
+            artifacts.configuration_artifact(),
+            artifacts.execution_profile_artifact(),
+            artifacts.retention_policy_artifact(),
+        )?;
         let output_policy = closure.output_policy().clone();
         let owned_event_types = &context.2.owned_event_types;
         if let Some(declaration) =
@@ -3038,6 +3046,21 @@ impl PluginRegistry {
                 admission
                     .closure()
                     .map(|closure| (entry.name.as_str(), closure.to_canonical_bytes()))
+            })
+        })
+    }
+
+    /// Iterate over stable identities for retained policy closures.
+    ///
+    /// The exact closure envelope is still retained separately.  This
+    /// identity excludes fresh runtime Plugin IDs while preserving the typed
+    /// policy/budget and all non-address artifact identities.
+    pub fn replay_policy_closure_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
+        self.plugins.values().filter_map(|entry| {
+            entry.output_admission.as_ref().and_then(|admission| {
+                admission
+                    .closure()
+                    .map(|closure| (entry.name.as_str(), closure.replay_identity_digest()))
             })
         })
     }
