@@ -157,9 +157,10 @@ impl InstalledOutputPolicySourceV1 {
         if matches!(self, Self::Generated) {
             return true;
         }
+        let owner = plugin.installed_owner_token();
         self.native_plugin_type_names()
             .iter()
-            .any(|expected| *expected == std::any::type_name::<P>())
+            .any(|expected| owner.verifies_instance(plugin, expected))
     }
 
     fn native_plugin_type_names(self) -> &'static [&'static str] {
