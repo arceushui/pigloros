@@ -6566,12 +6566,10 @@ mod tests {
     #[test]
     fn host_transition_store_seams_cover_success_and_rejection_paths() {
         let mut store = new_store();
-        let gate = Arc::clone(
-            store
-                .erasure_gate
-                .as_ref()
-                .unwrap_or_else(|| std::panic::resume_unwind("missing sqlite test gate")),
-        );
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing sqlite test gate"))
+            }));
         let snapshot =
             ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
         let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
@@ -6701,7 +6699,7 @@ mod tests {
             duplicate
                 .erasure_gate
                 .as_ref()
-                .unwrap_or_else(|| std::panic::resume_unwind("missing duplicate gate")),
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing duplicate gate"))),
         );
         let mut duplicate_transition = |permit: &ErasureTopologyTransitionPermitV1| {
             let root = duplicate

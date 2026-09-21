@@ -725,8 +725,10 @@ fn assert_fork_admission_rejects_a_foreign_transition_permit<S>(
     store: S,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
-    S: ErasureForkPersistencePortV1,
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
 {
     let (shared, _, _, _, prepared) = prepared_fork(store)?;
     let foreign_gate = ErasureContainmentGateV1::new_test_open();

@@ -3432,12 +3432,10 @@ mod tests {
     #[test]
     fn host_transition_store_seams_cover_success_and_rejection_paths() {
         let mut store = new_store();
-        let gate = Arc::clone(
-            store
-                .erasure_gate
-                .as_ref()
-                .unwrap_or_else(|| std::panic::resume_unwind("missing memory test gate")),
-        );
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing memory test gate"))
+            }));
         let snapshot =
             ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
         let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
@@ -3574,7 +3572,7 @@ mod tests {
             mismatch
                 .erasure_gate
                 .as_ref()
-                .unwrap_or_else(|| std::panic::resume_unwind("missing mismatch gate")),
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing mismatch gate"))),
         );
         let mut mismatch_transition = |permit: &ErasureTopologyTransitionPermitV1| {
             assert!(mismatch
@@ -3592,12 +3590,10 @@ mod tests {
 
         let mut invalid_loaded = new_store();
         invalid_loaded.key_registry = Some(super::coverage_entrypoints::invalid_registry());
-        let invalid_loaded_gate = Arc::clone(
-            invalid_loaded
-                .erasure_gate
-                .as_ref()
-                .unwrap_or_else(|| std::panic::resume_unwind("missing invalid registry gate")),
-        );
+        let invalid_loaded_gate =
+            Arc::clone(invalid_loaded.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing invalid registry gate"))
+            }));
         let mut invalid_loaded_transition = |permit: &ErasureTopologyTransitionPermitV1| {
             assert!(invalid_loaded
                 .initialize_timeline_with_key_registry_for_host_transition(
@@ -3617,7 +3613,7 @@ mod tests {
             rollback
                 .erasure_gate
                 .as_ref()
-                .unwrap_or_else(|| std::panic::resume_unwind("missing rollback gate")),
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing rollback gate"))),
         );
         let mut rollback_transition = |permit: &ErasureTopologyTransitionPermitV1| {
             fail_next_visible_delete_for_test();
