@@ -72,7 +72,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn open_exact_host() -> ErasureExecutionHostV1 {
+    pub fn open_exact_host() -> ErasureExecutionHostV1 {
         let composition = ErasureCoordinatorCompositionV1::closed()
             .with_world_replay_verifier(Arc::new(ExactWorldReplayVerifier));
         test_ok(ErasureExecutionHostV1::open_with_authority(
@@ -82,7 +82,7 @@ pub(crate) mod test_support {
         ))
     }
 
-    pub(crate) fn closure_for_host(host: &ErasureExecutionHostV1) -> WorldReplayClosureV1 {
+    pub fn closure_for_host(host: &ErasureExecutionHostV1) -> WorldReplayClosureV1 {
         let generation = test_ok(host.containment_gate().inventory_generation());
         test_ok(
             WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
@@ -91,7 +91,7 @@ pub(crate) mod test_support {
         )
     }
 
-    pub(crate) fn test_ok<T, E: Debug>(value: Result<T, E>) -> T {
+    pub fn test_ok<T, E: Debug>(value: Result<T, E>) -> T {
         value.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!(
                 "unexpected test fixture error: {error:?}"
