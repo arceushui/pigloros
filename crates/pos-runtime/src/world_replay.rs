@@ -85,6 +85,7 @@ impl VerifiedWorldReplayV1 {
 /// This helper is unavailable from the normal dependency graph. Production
 /// code receives [`VerifiedWorldReplayV1`] only from an installed verifier.
 #[cfg(any(test, feature = "test-support"))]
+#[must_use]
 pub fn test_verified_world_replay(
     closure: &WorldReplayClosureV1,
     inventory_generation: ErasureReferenceV1,
@@ -104,7 +105,8 @@ pub fn test_verified_world_replay(
 /// The function is available only to the crate's tests or to a dependency
 /// that explicitly enables the `test-support` feature.
 #[cfg(any(test, feature = "test-support"))]
-pub fn test_verified_world_replay_with_fields(
+#[must_use]
+pub const fn test_verified_world_replay_with_fields(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
