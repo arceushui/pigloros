@@ -453,13 +453,16 @@ impl ErasureTopologyTransitionPermitV1 {
             return false;
         }
         let mut claimed_store_identity = self.claimed_store_identity.borrow_mut();
-        claimed_store_identity.as_ref().map_or_else(
-            || {
-                *claimed_store_identity = Some(Arc::clone(&binding.store_identity));
-                true
-            },
-            |claimed_store_identity| Arc::ptr_eq(claimed_store_identity, &binding.store_identity),
-        )
+        let store_matches = claimed_store_identity
+            .as_ref()
+            .is_none_or(|claimed| Arc::ptr_eq(claimed, &binding.store_identity));
+        if !store_matches {
+            return false;
+        }
+        if claimed_store_identity.is_none() {
+            *claimed_store_identity = Some(Arc::clone(&binding.store_identity));
+        }
+        true
     }
 }
 
