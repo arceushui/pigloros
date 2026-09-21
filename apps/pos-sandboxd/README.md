@@ -11,7 +11,12 @@ The selected digest and architecture must come from authenticated admission;
 this component neither grants admission nor establishes kernel enforcement.
 
 Public integration tests use both checked-in production architecture records
-and the selected zbus closure's zvariant 5.14.0 serializer. Workspace GitHub
+and the selected zbus closure's zvariant 5.15.0 serializer. Workspace GitHub
 test, coverage and mutation gates execute those tests; lint checks their code.
 No daemon, test launcher, host group expansion, direct process fallback or
 runtime admission shortcut is supplied by this slice.
+
+`SystemdTransientUnitTransport` consumes that closed property bundle and calls
+the generated systemd `StartTransientUnit` proxy with the fixed `fail` job mode
+and no auxiliary units. Its returned job path proves submission only; later
+slices own property readback, launcher readiness, release, and lifecycle proof.

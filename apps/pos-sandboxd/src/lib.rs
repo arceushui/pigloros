@@ -5,11 +5,16 @@
 //! and architecture before these requested-state components are used.
 
 mod hardening;
+mod system_bus;
 mod transient_unit;
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
+};
+pub use system_bus::{
+    SystemdStartJob, SystemdTransientUnitTransport, SystemdTransientUnitTransportError,
+    TransientServiceUnitName,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,

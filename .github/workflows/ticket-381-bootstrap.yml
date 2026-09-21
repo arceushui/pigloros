@@ -1,0 +1,34 @@
+name: ticket-381-bootstrap
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  remote-lock-and-compile:
+    if: github.head_ref == 'codex/ticket-381-systemd-start'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+          components: clippy,rustfmt
+      - name: Generate dependency lock remotely
+        run: cargo generate-lockfile
+      - name: Check formatting remotely
+        run: cargo fmt --all -- --check
+      - name: Compile and test the ticket crate remotely
+        run: cargo test -p pos-sandboxd --locked --tests -- --include-ignored
+      - name: Lint the ticket crate remotely
+        run: cargo clippy -p pos-sandboxd --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: Preserve generated lockfile
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ticket-381-cargo-lock
+          path: Cargo.lock
+          if-no-files-found: error
