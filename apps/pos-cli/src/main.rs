@@ -148,7 +148,7 @@ fn builtin_output_binding(
     cpu_reservations_us: [u32; 3],
     implementation_artifact: &[u8],
     configuration_details: &[u8],
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+) -> Result<pos_runtime::OutputPolicyClosureV1, Box<dyn std::error::Error>> {
     builtin_output_binding_with_inputs(
         plugin,
         event_type,
@@ -168,8 +168,8 @@ fn builtin_output_binding_with_inputs(
     configuration_details: &[u8],
     profile_id: &str,
     max_event_bytes: u32,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
-    let profile_artifact = pos_conformance::draft_execution_profile_bytes_v1(profile_id)?;
+) -> Result<pos_runtime::OutputPolicyClosureV1, Box<dyn std::error::Error>> {
+    let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)?;
     let execution_profile_hash = pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact);
     let configuration_artifact =
         pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
@@ -230,7 +230,15 @@ fn builtin_output_binding_with_inputs(
         policy_revision: 1,
         output_declarations: vec![declaration],
     })?;
-    Ok((policy, budget))
+    Ok(pos_runtime::OutputPolicyClosureV1::from_plugin_artifacts(
+        plugin,
+        &policy,
+        &budget,
+        implementation_artifact,
+        configuration_details,
+        &profile_artifact,
+        pos_runtime::reviewed_retention_policy_bytes_v1(),
+    )?)
 }
 
 struct OpenedCliStore {
@@ -293,6 +301,7 @@ struct StrictReproManifest {
     plugin_versions: std::collections::HashMap<String, String>,
     output_policy_digests: std::collections::HashMap<String, Hash>,
     replay_policy_identities: std::collections::HashMap<String, Hash>,
+    replay_policy_closures: std::collections::HashMap<String, Vec<u8>>,
     adapter_records: Vec<StrictAdapterRecord>,
     label: Option<String>,
 }
@@ -328,6 +337,7 @@ impl From<StrictReproManifest> for pos_core::ReproManifest {
             plugin_versions: manifest.plugin_versions,
             output_policy_digests: manifest.output_policy_digests,
             replay_policy_identities: manifest.replay_policy_identities,
+            replay_policy_closures: manifest.replay_policy_closures,
             adapter_records: manifest
                 .adapter_records
                 .into_iter()
@@ -902,11 +912,10 @@ fn run_builtin_reference_experiment(
             [300_000, 150_000, 30_000],
             include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
             &agent_configuration,
-        ) => |(agent_policy, agent_budget)|;
-        exp.register_with_output_policy(
+        ) => |agent_closure|;
+        exp.register_with_verified_output_policy(
             &agent_plugin,
-            agent_policy,
-            agent_budget,
+            agent_closure,
             Some(Box::new(RuleAgentReducer)),
             Some(Box::new(RuleAgentDriver::new(
                 agent_entity,
@@ -919,11 +928,10 @@ fn run_builtin_reference_experiment(
             [200_000, 100_000, 20_000],
             include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
             &obs_configuration,
-        ) => |(obs_policy, obs_budget)|;
-        exp.register_with_output_policy(
+        ) => |obs_closure|;
+        exp.register_with_verified_output_policy(
             &obs_plugin,
-            obs_policy,
-            obs_budget,
+            obs_closure,
             Some(Box::new(SyntheticReducer)),
             Some(Box::new(SyntheticDriver::new(obs_entity))),
         ).map_err(Into::into) => |()|;
@@ -986,6 +994,8 @@ fn reproduce_manifest(
             let head_matches = reproduced.manifest.head_hash == reproduction.manifest.head_hash;
             let replay_identities_match = reproduced.manifest.replay_policy_identities
                 == reproduction.manifest.replay_policy_identities;
+            let replay_closures_match = reproduced.manifest.replay_policy_closures
+                == reproduction.manifest.replay_policy_closures;
             let policy_keys_match = reproduced
                 .manifest
                 .output_policy_digests
@@ -996,12 +1006,12 @@ fn reproduce_manifest(
                     .output_policy_digests
                     .keys()
                     .collect::<std::collections::BTreeSet<_>>();
-            if head_matches && replay_identities_match && policy_keys_match {
+            if head_matches && replay_identities_match && replay_closures_match && policy_keys_match {
                 output_stdout!("OK");
                 Ok(())
             } else {
                 output_stderr!(
-                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, policy_keys={policy_keys_match}; reproduced identities={:?}, expected identities={:?}",
+                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, replay_closures={replay_closures_match}, policy_keys={policy_keys_match}; reproduced identities={:?}, expected identities={:?}",
                     reproduced.manifest.replay_policy_identities,
                     reproduction.manifest.replay_policy_identities
                 );

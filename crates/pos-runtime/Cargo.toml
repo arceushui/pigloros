@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../pos-core" }
+pos-conformance = { path = "../pos-conformance" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
 serde_json = { workspace = true }

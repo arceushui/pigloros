@@ -70,14 +70,12 @@ fn gateway_output_binding_with_inputs(
     profile_id: &str,
     event_type: &str,
     max_event_bytes: u32,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), pos_runtime::RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyClosureV1, pos_runtime::RuntimeError> {
     let plugin_name = plugin.name().to_owned();
-    let profile_artifact =
-        pos_conformance::draft_execution_profile_bytes_v1(profile_id).map_err(|error| {
-            pos_runtime::RuntimeError::CapabilityMismatch {
-                name: plugin_name.clone(),
-                reason: error.to_string(),
-            }
+    let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
+        .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
+            name: plugin_name.clone(),
+            reason: error.to_string(),
         })?;
     let configuration_artifact =
         pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
@@ -150,7 +148,16 @@ fn gateway_output_binding_with_inputs(
         name: plugin_name,
         reason: error.to_string(),
     })?;
-    Ok((policy, budget))
+    pos_runtime::OutputPolicyClosureV1::from_plugin_artifacts(
+        plugin,
+        &policy,
+        &budget,
+        include_bytes!("lib.rs"),
+        configuration_details,
+        &profile_artifact,
+        pos_runtime::reviewed_retention_policy_bytes_v1(),
+    )
+    .map_err(Into::into)
 }
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).
@@ -837,17 +844,16 @@ fn gateway_action_registry_builder_with_inputs(
     bodies.dedup();
     let configuration_details = gateway_configuration_details(&bodies);
     let world_plugin = WorldPlugin::new().with_bodies(bodies);
-    let (policy, budget) = gateway_output_binding_with_inputs(
+    let closure = gateway_output_binding_with_inputs(
         &descriptor,
         &configuration_details,
         profile_id,
         event_type,
         4_096,
     )?;
-    registry.register_with_output_policy_and_approver(
+    registry.register_with_verified_output_policy_and_approver(
         &descriptor,
-        policy,
-        budget,
+        closure,
         None,
         None,
         Some(Box::new(GatewayWorldActionApprover(world_plugin))),

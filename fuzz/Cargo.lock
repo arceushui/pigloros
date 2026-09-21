@@ -925,6 +925,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "indexmap",
+ "pos-conformance",
  "pos-core",
  "pos-state",
  "pos-store",

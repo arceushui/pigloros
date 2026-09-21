@@ -8,8 +8,8 @@ use pos_core::{
     Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
 };
 use pos_runtime::{
-    Driver, ObservationView, OutputAdmissionErrorV1, OutputAdmissionV1, PluginRegistry,
-    RuntimeError, StepOutput,
+    Driver, ObservationView, OutputAdmissionErrorV1, OutputAdmissionV1, OutputPolicyClosureV1,
+    PluginRegistry, RuntimeError, StepOutput,
 };
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -161,6 +161,246 @@ fn multi_fidelity_policy(
         policy_revision: 1,
         output_declarations: declarations,
     })?)
+}
+
+fn verified_closure(plugin: &FixturePlugin) -> Result<OutputPolicyClosureV1, Box<dyn Error>> {
+    let profile_artifact =
+        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
+    let implementation_artifact = b"output-admission-fixture-implementation";
+    let configuration_details = b"fixture-configuration";
+    let configuration_artifact =
+        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
+    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 16,
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 2,
+                max_bytes: 32,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 2,
+                max_bytes: 32,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 2,
+                max_bytes: 32,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id: plugin.id(),
+            cpu_reservations_us: [10, 10, 10],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact),
+        max_pass_wall_duration_us: 1_000,
+    })?;
+    let declaration = OutputDeclarationV1::new(
+        "plugin.output".to_owned(),
+        OutputAuthorityV1::Authoritative,
+        OutputFidelityV1::L0,
+        16,
+        None,
+        None,
+    )?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id: plugin.id(),
+        plugin_version: plugin.version().to_owned(),
+        implementation_hash: pos_runtime::implementation_artifact_hash_v1(implementation_artifact),
+        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        ),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
+        policy_revision: 1,
+        output_declarations: vec![declaration],
+    })?;
+    Ok(OutputPolicyClosureV1::from_plugin_artifacts(
+        plugin,
+        &policy,
+        &budget,
+        implementation_artifact,
+        configuration_details,
+        &profile_artifact,
+        pos_runtime::reviewed_retention_policy_bytes_v1(),
+    )?)
+}
+
+#[test]
+fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let closure = verified_closure(&plugin)?;
+    assert_eq!(
+        closure.output_policy_bytes(),
+        closure.output_policy().to_canonical_cbor()
+    );
+    assert_eq!(
+        closure.executable_budget_bytes(),
+        closure.executable_budget().to_canonical_cbor()
+    );
+    assert!(!closure.implementation_artifact().is_empty());
+    assert!(closure.configuration_artifact().starts_with(b"CFG1"));
+    assert!(!closure.execution_profile_artifact().is_empty());
+    assert!(!closure.retention_policy_artifact().is_empty());
+    assert_ne!(closure.digest(), Hash::zero());
+    assert!(closure.to_canonical_bytes().starts_with(b"OPC1"));
+
+    let admission =
+        OutputAdmissionV1::try_new_verified(plugin.id(), plugin.version(), closure.clone())?;
+    assert_eq!(admission.closure(), Some(&closure));
+    admission.validate_batch(&[draft("plugin.output", b"accepted")])?;
+
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_with_verified_output_policy(
+        &plugin,
+        closure.clone(),
+        None,
+        Some(Box::new(FixtureDriver)),
+    )?;
+    let (_, retained) = registry
+        .replay_policy_closures()
+        .next()
+        .ok_or_else(|| std::io::Error::other("verified closure was not retained"))?;
+    assert_eq!(retained, closure.to_canonical_bytes());
+
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            &[0],
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EOP1" })
+    ));
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            &[],
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "implementation"
+        })
+    ));
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            b"invalid",
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration"
+        })
+    ));
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            b"invalid",
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    ));
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            b"invalid",
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
+    ));
+
+    let mut implementation = closure.implementation_artifact().to_vec();
+    implementation.push(0);
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            &implementation,
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+            kind: "implementation"
+        })
+    ));
+    let mut configuration = closure.configuration_artifact().to_vec();
+    configuration.push(0);
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            &configuration,
+            closure.execution_profile_artifact(),
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+            kind: "configuration"
+        })
+    ));
+    let alternate_profile =
+        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-air-gapped-v1")?;
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            &alternate_profile,
+            closure.retention_policy_artifact(),
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind: "EPF1" })
+    ));
+    let mut retention = closure.retention_policy_artifact().to_vec();
+    let hash_start = retention
+        .windows(2)
+        .position(|window| window == [0x58, 0x20])
+        .ok_or_else(|| std::io::Error::other("RTP1 hash field missing"))?
+        + 2;
+    retention[hash_start] ^= 1;
+    assert!(matches!(
+        OutputPolicyClosureV1::from_artifacts(
+            closure.output_policy_bytes(),
+            closure.executable_budget_bytes(),
+            closure.implementation_artifact(),
+            closure.configuration_artifact(),
+            closure.execution_profile_artifact(),
+            &retention,
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind: "RTP1" })
+    ));
+    Ok(())
 }
 
 fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {

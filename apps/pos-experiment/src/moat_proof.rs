@@ -80,7 +80,7 @@ fn reviewed_output_binding(
     cpu_reservations_us: [u32; 3],
     implementation_artifact: &[u8],
     configuration_details: &[u8],
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
     reviewed_output_binding_with_limits(
         plugin,
         event_types,
@@ -100,14 +100,12 @@ fn reviewed_output_binding_with_limits(
     implementation_artifact: &[u8],
     configuration_details: &[u8],
     max_event_bytes: u32,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
     let name = plugin.name();
-    let profile_artifact =
-        pos_conformance::draft_execution_profile_bytes_v1(profile_id).map_err(|error| {
-            RuntimeError::CapabilityMismatch {
-                name: name.to_owned(),
-                reason: error.to_string(),
-            }
+    let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
+        .map_err(|error| RuntimeError::CapabilityMismatch {
+            name: name.to_owned(),
+            reason: error.to_string(),
         })?;
     let configuration_artifact = canonical_plugin_configuration_v1(plugin, configuration_details);
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
@@ -184,7 +182,16 @@ fn reviewed_output_binding_with_limits(
         name: name.to_owned(),
         reason: error.to_string(),
     })?;
-    Ok((policy, budget))
+    pos_runtime::OutputPolicyClosureV1::from_plugin_artifacts(
+        plugin,
+        &policy,
+        &budget,
+        implementation_artifact,
+        configuration_details,
+        &profile_artifact,
+        pos_runtime::reviewed_retention_policy_bytes_v1(),
+    )
+    .map_err(Into::into)
 }
 
 fn world_output_binding(
@@ -192,7 +199,7 @@ fn world_output_binding(
     input: &MoatProofInputV1,
     body: EntityId,
     profile_id: &str,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
     let config = world_config(input);
     let configuration_details =
         config
@@ -223,7 +230,7 @@ fn proof_agent_output_binding(
     plugin: &ProofAgentPlugin,
     threshold: f64,
     profile_id: &str,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
     let configuration_details = threshold.to_bits().to_be_bytes();
     reviewed_output_binding(
         plugin,
@@ -238,7 +245,7 @@ fn proof_agent_output_binding(
 fn proof_society_output_binding(
     plugin: &ProofSocietyPlugin,
     profile_id: &str,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+) -> Result<pos_runtime::OutputPolicyClosureV1, RuntimeError> {
     let configuration_details = SocietyDimension::all()
         .iter()
         .flat_map(|dimension| dimension.as_str().as_bytes().iter().copied().chain([0]))
@@ -660,18 +667,17 @@ fn register_plugins_for_profile(
             &topology.input,
             topology.body,
             profile_id,
-        ) => |(world_policy, world_budget)|;
+        ) => |world_closure|;
         proof_agent_output_binding(
             &topology.agent_plugin,
             topology.input.agent_response_threshold,
             profile_id,
-        ) => |(agent_policy, agent_budget)|;
+        ) => |agent_closure|;
         proof_society_output_binding(&topology.society_plugin, profile_id)
-            => |(society_policy, society_budget)|;
-        experiment.register_with_output_policy_and_approver(
+            => |society_closure|;
+        experiment.register_with_verified_output_policy_and_approver(
             &topology.world_plugin,
-            world_policy,
-            world_budget,
+            world_closure,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver(
                 &topology.input,
@@ -681,20 +687,18 @@ fn register_plugins_for_profile(
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        experiment.register_with_output_policy(
+        experiment.register_with_verified_output_policy(
             &topology.agent_plugin,
-            agent_policy,
-            agent_budget,
+            agent_closure,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
                 topology.agent,
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        experiment.register_with_output_policy(
+        experiment.register_with_verified_output_policy(
             &topology.society_plugin,
-            society_policy,
-            society_budget,
+            society_closure,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
         )
@@ -721,18 +725,17 @@ fn build_registry_for_profile(
             &topology.input,
             topology.body,
             profile_id,
-        ) => |(world_policy, world_budget)|;
+        ) => |world_closure|;
         proof_agent_output_binding(
             &topology.agent_plugin,
             topology.input.agent_response_threshold,
             profile_id,
-        ) => |(agent_policy, agent_budget)|;
+        ) => |agent_closure|;
         proof_society_output_binding(&topology.society_plugin, profile_id)
-            => |(society_policy, society_budget)|;
-        registry.register_with_output_policy_and_approver(
+            => |society_closure|;
+        registry.register_with_verified_output_policy_and_approver(
             &topology.world_plugin,
-            world_policy,
-            world_budget,
+            world_closure,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver(
                 &topology.input,
@@ -742,20 +745,18 @@ fn build_registry_for_profile(
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        registry.register_with_output_policy(
+        registry.register_with_verified_output_policy(
             &topology.agent_plugin,
-            agent_policy,
-            agent_budget,
+            agent_closure,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
                 topology.agent,
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        registry.register_with_output_policy(
+        registry.register_with_verified_output_policy(
             &topology.society_plugin,
-            society_policy,
-            society_budget,
+            society_closure,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
         ) => |()|;
@@ -1800,7 +1801,7 @@ fn failure_probe(
             [300_000, 150_000, 30_000],
             include_bytes!("moat_proof.rs"),
             b"successful-sibling:v1",
-        ).map_err(MoatProofError::from) => |(sibling_policy, sibling_budget)|;
+        ).map_err(MoatProofError::from) => |sibling_closure|;
         reviewed_output_binding(
             &plugin,
             &["proof.failure.probe"],
@@ -1808,20 +1809,18 @@ fn failure_probe(
             [200_000, 100_000, 20_000],
             include_bytes!("moat_proof.rs"),
             &failure_details,
-        ).map_err(MoatProofError::from) => |(failure_policy, failure_budget)|;
-        experiment.register_with_output_policy(
+        ).map_err(MoatProofError::from) => |failure_closure|;
+        experiment.register_with_verified_output_policy(
             &sibling_plugin,
-            sibling_policy,
-            sibling_budget,
+            sibling_closure,
             None,
             Some(Box::new(SiblingProbeDriver {
                 steps: Arc::clone(&sibling_steps),
             })),
         ).map_err(MoatProofError::from) => |()|;
-        experiment.register_with_output_policy(
+        experiment.register_with_verified_output_policy(
             &plugin,
-            failure_policy,
-            failure_budget,
+            failure_closure,
             None,
             Some(Box::new(FailureProbeDriver {
                 class,

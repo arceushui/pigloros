@@ -30,7 +30,7 @@ use crate::{
         StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::OutputAdmissionV1,
+    output_admission::{OutputAdmissionV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -140,6 +140,9 @@ fn replay_policy_identity_digest(
     hasher.update(&[budget.accounting_semantics]);
     hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
     hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
+    if let Some(closure) = admission.closure() {
+        hasher.update(closure.digest().as_bytes());
+    }
     pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -2668,6 +2671,8 @@ impl PluginRegistry {
     /// # Errors
     /// Returns an identity, registration, or capability error when the policy
     /// cannot be bound to the Plugin.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_with_output_policy(
         &mut self,
         plugin: &dyn Plugin,
@@ -2693,6 +2698,8 @@ impl PluginRegistry {
     /// # Errors
     /// Returns the runtime registration or output-admission error when the
     /// policy, budget, ownership, or approver route is invalid.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_with_output_policy_and_approver(
         &mut self,
         plugin: &dyn Plugin,
@@ -2730,6 +2737,85 @@ impl PluginRegistry {
             output_policy,
             executable_budget,
         )?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        self.register_with_approver_slice(
+            plugin,
+            reducer,
+            driver,
+            approver,
+            &approver_event_types,
+            context,
+            RegistrationOptions {
+                registration: None,
+                output_admission: Some(admission),
+            },
+        )
+    }
+
+    /// Register a Plugin with a complete host-verified artifact closure.
+    ///
+    /// Release registration has no policy-only or generated fallback.  The
+    /// closure carries canonical EOP1/EBP1/EPF1/RTP1 bytes plus the exact
+    /// implementation and configuration artifacts they reference.
+    ///
+    /// # Errors
+    /// Returns a registration, identity, artifact, or capability error before
+    /// mutating the registry.
+    pub fn register_with_verified_output_policy(
+        &mut self,
+        plugin: &dyn Plugin,
+        closure: OutputPolicyClosureV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy_and_approver(
+            plugin,
+            closure,
+            reducer,
+            driver,
+            None,
+            std::iter::empty(),
+        )
+    }
+
+    /// Register a Plugin with a verified closure and optional action approver.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or output-admission error when the
+    /// closure, ownership, or approver route is invalid.
+    pub fn register_with_verified_output_policy_and_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        closure: OutputPolicyClosureV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        let context = self.registration_context(plugin)?;
+        let output_policy = closure.output_policy().clone();
+        let owned_event_types = &context.2.owned_event_types;
+        if let Some(declaration) =
+            output_policy
+                .fields()
+                .output_declarations
+                .iter()
+                .find(|declaration| {
+                    !owned_event_types
+                        .iter()
+                        .any(|kind| kind.as_str() == declaration.event_type())
+                })
+        {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: format!(
+                    "output policy declares event type '{}' outside the Plugin capability",
+                    declaration.event_type()
+                ),
+            });
+        }
+        let admission =
+            OutputAdmissionV1::try_new_verified(plugin.id(), plugin.version(), closure)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
@@ -2941,6 +3027,17 @@ impl PluginRegistry {
                     entry.name.as_str(),
                     replay_policy_identity_digest(entry, admission),
                 )
+            })
+        })
+    }
+
+    /// Iterate over exact retained policy closures for Replay manifests.
+    pub fn replay_policy_closures(&self) -> impl Iterator<Item = (&str, Vec<u8>)> {
+        self.plugins.values().filter_map(|entry| {
+            entry.output_admission.as_ref().and_then(|admission| {
+                admission
+                    .closure()
+                    .map(|closure| (entry.name.as_str(), closure.to_canonical_bytes()))
             })
         })
     }

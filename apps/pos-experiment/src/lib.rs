@@ -1167,6 +1167,8 @@ impl Experiment {
     ///
     /// # Errors
     /// Returns the runtime registration or output-admission error.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_with_output_policy(
         &mut self,
         plugin: &dyn pos_core::Plugin,
@@ -1190,6 +1192,8 @@ impl Experiment {
     /// # Errors
     /// Returns the runtime registration or output-admission error when the
     /// policy, budget, ownership, or approver route is invalid.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_with_output_policy_and_approver(
         &mut self,
         plugin: &dyn pos_core::Plugin,
@@ -1209,6 +1213,45 @@ impl Experiment {
             approver,
             approver_event_types,
         )
+    }
+
+    /// Register a Plugin with a complete host-verified output artifact closure.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or artifact-admission error.
+    pub fn register_with_verified_output_policy(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        closure: pos_runtime::OutputPolicyClosureV1,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry
+            .register_with_verified_output_policy(plugin, closure, reducer, driver)
+    }
+
+    /// Register a Plugin with a verified closure and optional action approver.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or artifact-admission error.
+    pub fn register_with_verified_output_policy_and_approver(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        closure: pos_runtime::OutputPolicyClosureV1,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+        approver: Option<Box<dyn pos_core::ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry
+            .register_with_verified_output_policy_and_approver(
+                plugin,
+                closure,
+                reducer,
+                driver,
+                approver,
+                approver_event_types,
+            )
     }
 
     /// Register a plugin with an optional action approver.
@@ -2284,6 +2327,11 @@ impl ExperimentSession {
             .replay_policy_identities()
             .map(|(name, identity)| (name.to_owned(), identity))
             .collect();
+        let replay_policy_closures: Vec<(String, Vec<u8>)> = self
+            .registry
+            .replay_policy_closures()
+            .map(|(name, closure)| (name.to_owned(), closure))
+            .collect();
         let consent_gate = self
             .operation_token
             .as_ref()
@@ -2316,6 +2364,9 @@ impl ExperimentSession {
                 }
                 for (name, identity) in &replay_policy_identities {
                     manifest = manifest.with_replay_policy_identity(name, *identity);
+                }
+                for (name, closure) in &replay_policy_closures {
+                    manifest = manifest.with_replay_policy_closure(name, closure.clone());
                 }
                 manifest
                     .adapter_records
@@ -2532,6 +2583,9 @@ fn manifest_for_registry(
     }
     for (name, identity) in registry.replay_policy_identities() {
         manifest = manifest.with_replay_policy_identity(name, identity);
+    }
+    for (name, closure) in registry.replay_policy_closures() {
+        manifest = manifest.with_replay_policy_closure(name, closure);
     }
     manifest
 }

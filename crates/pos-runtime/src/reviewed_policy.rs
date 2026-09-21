@@ -19,6 +19,16 @@ const REVIEWED_RETENTION_POLICY_RTP1: &[u8] = &[
     0x00, 0x00,
 ];
 
+/// Return the exact canonical RTP1 bytes used by the host composition root.
+///
+/// The caller must retain these bytes as part of the replay closure.  A digest
+/// alone is not sufficient evidence that the policy artifact can be retrieved
+/// and independently verified during Replay.
+#[must_use]
+pub const fn reviewed_retention_policy_bytes_v1() -> &'static [u8] {
+    REVIEWED_RETENTION_POLICY_RTP1
+}
+
 /// Hash one host-recorded artifact with its explicit identity domain.
 #[must_use]
 pub fn host_artifact_hash_v1(domain: &[u8], bytes: &[u8]) -> Hash {

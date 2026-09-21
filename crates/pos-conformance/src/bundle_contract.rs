@@ -119,6 +119,27 @@ pub fn draft_execution_profile_bytes_v1(
     })
 }
 
+/// Materialize and independently validate the immutable EPF1 authority member.
+///
+/// Callers that activate a profile must use this checked boundary rather than
+/// treating a draft byte builder as sufficient identity evidence.
+///
+/// # Errors
+/// Returns [`BundleContractErrorV1::ProfileInvalid`] when the profile is not
+/// declared, canonical, self-digesting, or named by the requested identity.
+pub fn host_verified_execution_profile_bytes_v1(
+    profile_id: &str,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let bytes = draft_execution_profile_bytes_v1(profile_id)?;
+    let profile = crate::ExecutionProfileV1::from_canonical_cbor(&bytes)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    if profile.profile_id == profile_id {
+        Ok(bytes)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
 fn text_array(values: &[&str]) -> Value {
     Value::Array(
         values
