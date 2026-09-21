@@ -529,12 +529,95 @@ mod coverage_entrypoints {
         crypto::Hash,
         event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
-        ConsentAuthority, ConsentGrantedV1,
+        output_policy::{
+            OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+            OutputPolicyV1,
+        },
+        ConsentAuthority, ConsentGrantedV1, ExecutableBudgetPolicyInputV1,
+        ExecutableBudgetPolicyV1, FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     };
     use std::sync::Arc;
 
     fn gated_registry() -> PluginRegistry {
         PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn register_output_driver(
+        registry: &mut PluginRegistry,
+        event_type: &str,
+        driver: Box<dyn Driver>,
+    ) {
+        let plugin_id = pos_core::PluginId::new();
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid output budget: {error:?}")))
+        });
+        let declaration = OutputDeclarationV1::new(
+            event_type.to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            4_096,
+            None,
+            None,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid output declaration: {error:?}")))
+        });
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "test".to_owned(),
+            implementation_hash: Hash::from_bytes([0x42; 32]),
+            base_configuration_digest: Hash::from_bytes([0x43; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([0x44; 32]),
+            policy_revision: 1,
+            output_declarations: vec![declaration],
+        })
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid output policy: {error:?}")))
+        });
+        registry
+            .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "failed to register output driver: {error:?}"
+                )))
+            });
     }
 
     struct NoopDriver;
@@ -587,7 +670,7 @@ mod coverage_entrypoints {
     #[test]
     fn restore_and_cadence_entrypoints_update_driver_state() {
         let mut registry = gated_registry();
-        registry.register_test_driver(Box::new(NoopDriver));
+        register_output_driver(&mut registry, "coverage.public.tick", Box::new(NoopDriver));
         let timeline = TimelineId::new();
         let restore_event = event("coverage.restore", 1);
         assert!(registry
@@ -3309,8 +3392,13 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
+        output_policy::{
+            OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+            OutputPolicyV1,
+        },
         Capability, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentErrorV1,
-        Event, Plugin, Reducer, State,
+        Event, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Plugin,
+        PluginCpuReservationV1, Reducer, State, WorkloadProfileV1,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -3320,6 +3408,79 @@ mod tests {
 
     fn gated_registry() -> PluginRegistry {
         PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn register_output_driver(
+        registry: &mut PluginRegistry,
+        event_types: &[&str],
+        driver: Box<dyn Driver>,
+    ) {
+        let plugin_id = PluginId::new();
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })
+        .test_ok();
+        let declarations = event_types
+            .iter()
+            .map(|event_type| {
+                OutputDeclarationV1::new(
+                    (*event_type).to_owned(),
+                    OutputAuthorityV1::Authoritative,
+                    OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .test_ok();
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "test".to_owned(),
+            implementation_hash: Hash::from_bytes([0x42; 32]),
+            base_configuration_digest: Hash::from_bytes([0x43; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([0x44; 32]),
+            policy_revision: 1,
+            output_declarations: declarations,
+        })
+        .test_ok();
+        registry
+            .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
+            .test_ok();
     }
 
     fn gated_store() -> Box<dyn pos_core::store::EventStore> {
@@ -3621,9 +3782,13 @@ mod tests {
 
         let aborted = Arc::new(Mutex::new(false));
         let mut registry = gated_registry().with_resource_limit(1);
-        registry.register_test_driver(Box::new(BudgetDriver {
-            aborted: Arc::clone(&aborted),
-        }));
+        register_output_driver(
+            &mut registry,
+            &["budget.event"][..],
+            Box::new(BudgetDriver {
+                aborted: Arc::clone(&aborted),
+            }),
+        );
         let error = registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_err();
@@ -4604,7 +4769,11 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("driver-consent").test_ok();
         let mut registry = gated_registry();
-        registry.register_test_driver(Box::new(ConsentDriver));
+        register_output_driver(
+            &mut registry,
+            &[pos_core::EVENT_TYPE_CONSENT_GRANTED_V1],
+            Box::new(ConsentDriver),
+        );
         assert!(matches!(
             registry.step_all(timeline.id()),
             Err(RuntimeError::ConsentDraft { .. })
@@ -4615,7 +4784,11 @@ mod tests {
         ));
 
         let mut allowed = gated_registry();
-        allowed.register_test_driver(Box::new(AllowedDriver));
+        register_output_driver(
+            &mut allowed,
+            &["driver.allowed.v1"],
+            Box::new(AllowedDriver),
+        );
         assert_eq!(allowed.tick_cadenced(timeline.id(), 0).test_ok().len(), 1);
     }
 
@@ -4697,10 +4870,14 @@ mod tests {
         };
         let token = authority.record_grant_on_timeline(timeline.id(), &grant);
         reg = reg.with_consent_authority(authority);
-        reg.register_test_driver(Box::new(ObservingDriver {
-            target: ProjectionKey::new(observed_entity),
-            entity: EntityId::new(),
-        }));
+        register_output_driver(
+            &mut reg,
+            &["driver.observed"],
+            Box::new(ObservingDriver {
+                target: ProjectionKey::new(observed_entity),
+                entity: EntityId::new(),
+            }),
+        );
 
         let drafts = reg
             .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token.clone(), 0, &[])
@@ -5119,7 +5296,11 @@ mod tests {
         };
         let _token = authority.record_grant_on_timeline(timeline, &grant);
         let mut registry = gated_registry().with_consent_authority(authority);
-        registry.register_test_driver(Box::new(SensitiveDriver { subject }));
+        register_output_driver(
+            &mut registry,
+            &["geo.position.v1"],
+            Box::new(SensitiveDriver { subject }),
+        );
         assert!(matches!(
             registry.tick_cadenced(timeline, 0).test_err(),
             RuntimeError::Consent(ConsentError::NoConsent)
@@ -5252,7 +5433,11 @@ mod tests {
             ("cadence.middle", Duration::from_nanos(2)),
             ("cadence.third", Duration::from_nanos(1)),
         ] {
-            registry.register_test_driver(Box::new(OrderedDriver { name, interval }));
+            register_output_driver(
+                &mut registry,
+                &[name],
+                Box::new(OrderedDriver { name, interval }),
+            );
         }
 
         let timeline = TimelineId::new();
@@ -5295,7 +5480,7 @@ mod tests {
         let plugin = plugin_with_caps("interval-plugin", &[], true, false);
         let mut reg = gated_registry();
         let _ = plugin;
-        reg.register_test_driver(Box::new(IntervalDriver));
+        register_output_driver(&mut reg, &["interval.tick"], Box::new(IntervalDriver));
 
         let first = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert_eq!(first.len(), 1);
