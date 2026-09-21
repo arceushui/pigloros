@@ -1487,31 +1487,38 @@ fn fork_recovery_receipt_digest_with_generation(
 }
 
 #[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_corrupt_sql_field(
+    field: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            &format!(
+                "UPDATE erasure_fork_admissions SET {field}={value} WHERE operation_digest=?1"
+            ),
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::error::Error>> {
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET binding_digest=?1 WHERE operation_digest=?2",
-            rusqlite::params![
-                [0_u8; 32].as_slice(),
-                prepared.operation().digest().as_slice()
-            ],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET expected_generation=zeroblob(32)
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET child_scope=zeroblob(32)
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
+    for (field, value) in [
+        ("binding_digest", "zeroblob(32)"),
+        ("expected_generation", "zeroblob(32)"),
+        ("child_scope", "zeroblob(32)"),
+        ("child_id", "'corrupted'"),
+        ("child_name", "'corrupted'"),
+        ("child_mode", "'live'"),
+        ("parent_id", "'corrupted'"),
+        ("fork_seq", "2"),
+        ("owner_id", "'corrupted'"),
+        ("successor_generation", "zeroblob(32)"),
+        ("receipt_digest", "zeroblob(32)"),
+    ] {
+        assert_sqlite_fork_retry_corrupt_sql_field(field, value)?;
+    }
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         let expected_generation = ErasureReferenceV1::from_digest([201; 32]);
         let receipt = fork_recovery_receipt_digest_with_generation(
@@ -1528,59 +1535,6 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
                 receipt.digest().as_slice(),
                 prepared.operation().digest().as_slice(),
             ],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET child_id='corrupted' WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET child_name='corrupted'
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET child_mode='live' WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET parent_id='corrupted'
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET fork_seq=2 WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET owner_id='corrupted'
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET successor_generation=zeroblob(32)
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET receipt_digest=zeroblob(32)
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
         )
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
