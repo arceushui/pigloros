@@ -441,8 +441,14 @@ mod tests {
     };
     use pos_core::{
         clock::Seq,
+        crypto::Hash,
         ids::{EntityId, PluginId, TimelineId},
-        ErasureContainmentGateV1,
+        output_policy::{
+            OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+            OutputPolicyV1,
+        },
+        ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+        FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     };
     use pos_runtime::recorder::RECORDER_EVENT_TYPE;
     use pos_runtime::{
@@ -453,6 +459,66 @@ mod tests {
 
     const PLUGIN_HASH: [u8; 32] = [3; 32];
     const PROVIDER_HASH: [u8; 32] = [4; 32];
+
+    fn provider_output_binding(
+        plugin_id: PluginId,
+        plugin_version: &str,
+    ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })?;
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: plugin_version.to_owned(),
+            implementation_hash: Hash::from_bytes([42; 32]),
+            base_configuration_digest: Hash::from_bytes([43; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([44; 32]),
+            policy_revision: 1,
+            output_declarations: vec![OutputDeclarationV1::new(
+                EVENT_TYPE_ACTION.to_owned(),
+                OutputAuthorityV1::Authoritative,
+                OutputFidelityV1::L0,
+                4_096,
+                None,
+                None,
+            )?],
+        })?;
+        Ok((policy, budget))
+    }
 
     struct HostConfigurationFixture {
         action_ids: [&'static str; 2],
@@ -517,7 +583,17 @@ mod tests {
             ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
         registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-        registry.register_test_driver(Box::new(driver));
+        let (policy, budget) =
+            provider_output_binding(host.plugin_id, host.plugin_version).test_ok();
+        registry
+            .register_test_driver_with_output_policy(
+                host.plugin_id,
+                host.plugin_version,
+                policy,
+                budget,
+                Box::new(driver),
+            )
+            .test_ok();
         DriverFixture {
             registry,
             calls,

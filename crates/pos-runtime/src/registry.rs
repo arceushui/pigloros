@@ -2879,6 +2879,52 @@ impl PluginRegistry {
         );
     }
 
+    /// Register a direct fixture driver with an explicit output policy.
+    ///
+    /// This debug-only helper is for integration fixtures that exercise the
+    /// production admission path without defining a full Plugin descriptor.
+    /// It never creates a policy or budget; both are supplied by the fixture.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn register_test_driver_with_output_policy(
+        &mut self,
+        plugin_id: PluginId,
+        plugin_version: &str,
+        policy: pos_core::output_policy::OutputPolicyV1,
+        budget: pos_core::ExecutableBudgetPolicyV1,
+        driver: Box<dyn Driver>,
+    ) -> Result<(), RuntimeError> {
+        if self.plugins.contains_key(&plugin_id) {
+            return Err(RuntimeError::DuplicatePlugin {
+                id: plugin_id,
+                name: driver.name().to_owned(),
+            });
+        }
+        let admission = OutputAdmissionV1::try_new(plugin_id, plugin_version, policy, budget)?;
+        let name = driver.name().to_owned();
+        self.plugins.insert(
+            plugin_id,
+            PluginEntry {
+                name,
+                version: plugin_version.to_owned(),
+                owned_event_types: admission
+                    .policy()
+                    .fields()
+                    .output_declarations
+                    .iter()
+                    .map(|declaration| Kind::new(declaration.event_type()))
+                    .collect(),
+                driver: Some(driver),
+                approver: None,
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: Some(admission),
+            },
+        );
+        Ok(())
+    }
+
     /// Submit a proposed action through the capability-checked envelope (ADR-057).
     ///
     /// The complete capability, payload, and approver invocation runs inside
