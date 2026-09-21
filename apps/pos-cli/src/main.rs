@@ -1412,52 +1412,31 @@ mod tests {
     }
 
     #[test]
-    fn handle_timeline_replay_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-
-        // Add some events to replay
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id();
-        let entity = EntityId::new();
-        let drafts = vec![EventDraft::new(
-            entity,
-            Kind::new("test.event"),
-            CanonicalBytes::from_vec(vec![]),
-        )];
-        store.append(tl_id, &drafts).test_ok();
-        drop(store);
-
-        let tl_id_str = tl_id.to_string();
-        let a = args(&["replay", &path, &tl_id_str]);
-        assert!(handle_timeline(&a).is_err());
+    fn handle_timeline_replay_is_unavailable_without_verifier() {
+        let error = handle_timeline(&args(&["replay", "unused", "unused"])).test_err();
+        assert_eq!(
+            error.to_string(),
+            "World Replay is unavailable until an installed native closure verifier is configured"
+        );
     }
 
     #[test]
-    fn handle_timeline_snapshot_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id().to_string();
-        let a = args(&["snapshot", &path, &tl_id]);
-        assert!(handle_timeline(&a).is_err());
+    fn handle_timeline_snapshot_is_unavailable_without_verifier() {
+        let error = handle_timeline(&args(&["snapshot", "unused", "unused"])).test_err();
+        assert_eq!(
+            error.to_string(),
+            "World Snapshot is unavailable until an installed native closure verifier is configured"
+        );
     }
 
     #[test]
-    fn handle_timeline_compare_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id().to_string();
-        let forked = store
-            .fork(timelines[0].id(), timelines[0].head, "fork-b")
-            .test_ok();
-        let fork_id = forked.id().to_string();
-        let a = args(&["compare", &path, &tl_id, &fork_id, "0"]);
-        assert!(handle_timeline(&a).is_err());
+    fn handle_timeline_compare_is_unavailable_without_verifier() {
+        let error =
+            handle_timeline(&args(&["compare", "unused", "unused", "unused", "unused"])).test_err();
+        assert_eq!(
+            error.to_string(),
+            "World comparison is unavailable until an installed native closure verifier is configured"
+        );
     }
 
     #[test]
@@ -2194,118 +2173,6 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_bad_timeline_id_returns_err() {
-        let (_dir, path, _) = seeded_db();
-        assert!(cmd_timeline_replay(&path, "not-a-ulid").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("replay.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_replay(&path, &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_bad_timeline_id_returns_err() {
-        let (_dir, path, _) = seeded_db();
-        assert!(cmd_timeline_snapshot(&path, "not-a-ulid").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("snapshot.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_snapshot(&path, &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_counts_entities_from_projection_state() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("snapshot.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        assert!(cmd_timeline_snapshot(&path, &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_bad_timeline_id_returns_err() {
-        let (_dir, path, tl_id) = seeded_db();
-        assert!(cmd_timeline_compare(&path, "not-a-ulid", &tl_id, "0").is_err());
-        assert!(cmd_timeline_compare(&path, &tl_id, "not-a-ulid", "0").is_err());
-        assert!(cmd_timeline_compare(&path, &tl_id, &tl_id, "not-a-seq").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let base = store.list_timelines().test_ok()[0].clone();
-        let entity = EntityId::new();
-        store
-            .append(
-                base.id(),
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("cmp.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        let forked = store.fork(base.id(), base.head, "cmp-fork").test_ok();
-        let fork_id = forked.id().to_string();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_compare(&path, &tl_id, &fork_id, "0").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn handle_timeline_merge_invalid_strategy_returns_err() {
         let (_dir, path, tl_id) = seeded_db();
         let missing_b = TimelineId::new().to_string();
@@ -2511,31 +2378,6 @@ mod fault_injection_tests {
         let dir = tempfile::tempdir().test_ok();
         let tl_id = TimelineId::new().to_string();
         assert!(cmd_timeline_fork(dir.path().to_str().test_ok(), &tl_id, "0", "child").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_replay(dir.path().to_str().test_ok(), &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_snapshot(dir.path().to_str().test_ok(), &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_a = TimelineId::new().to_string();
-        let tl_b = TimelineId::new().to_string();
-        assert!(cmd_timeline_compare(dir.path().to_str().test_ok(), &tl_a, &tl_b, "0").is_err());
     }
 
     #[test]
