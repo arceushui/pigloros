@@ -17,13 +17,13 @@ use pos_core::{
     ErasureForkRecoveryV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureGate,
     ErasureHostErrorV1, ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1,
-    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
-    ErasureStateTransitionV1, ErasureStateV1, ErasureTopologyTransitionPermitV1,
-    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
-    ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
-    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
+    ErasureReceiptInputV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1,
+    ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureTopologyTransitionPermitV1, ErasureVerifiedEmptyInventoryQueryV1,
+    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
+    ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
     KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
     KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1,
     PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
@@ -1585,14 +1585,21 @@ impl ErasureExecutionHostV1 {
         candidate: TimelineId,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         if request_count == 0 {
-            return self
+            let snapshot = self
                 .store
                 .host_store()
-                .complete_erasure_inventory_snapshot_with_limits(limits)
-                .and_then(|snapshot| {
-                    ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
-                        .verified_inventory_with_limits(limits)
-                });
+                .complete_erasure_inventory_snapshot_with_limits(limits)?;
+            let mut topology = snapshot.topology().to_vec();
+            if let Err(index) = topology.binary_search(&candidate) {
+                topology.insert(index, candidate);
+            }
+            let candidate_snapshot = ErasurePersistenceInventorySnapshotV1::new_with_limits(
+                snapshot.request_heads().to_vec(),
+                topology,
+                limits,
+            )?;
+            return ErasureVerifiedEmptyInventoryQueryV1::new(candidate_snapshot)
+                .verified_inventory_with_limits(limits);
         }
         let authority = self.authority.clone().ok_or(ErasureErrorV1::Unauthorized)?;
         let coordinator = self.coordinator.ok_or(ErasureErrorV1::Unauthorized)?;

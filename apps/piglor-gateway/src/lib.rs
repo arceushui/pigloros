@@ -6987,10 +6987,11 @@ mod coverage_entrypoints {
         drop(gateway);
 
         let owner_key = OwnTracksOwnerKey([7; 32]);
+        let owntracks_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
             pos_store::sqlite::SqliteStore::open_in_memory()?,
             &owner_key,
-            gate,
+            owntracks_gate,
         )?;
         drop(owntracks);
         Ok(())
