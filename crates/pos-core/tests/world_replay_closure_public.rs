@@ -99,7 +99,7 @@ fn leaf(
     }))
 }
 
-fn artifact_specs(
+const fn artifact_specs(
     policy_digest: Hash,
     lease_digest: Hash,
 ) -> [(
@@ -253,7 +253,7 @@ struct Authority {
 }
 
 impl Authority {
-    fn new(now: WallTime) -> Self {
+    const fn new(now: WallTime) -> Self {
         Self {
             now,
             missing: None,
@@ -261,12 +261,12 @@ impl Authority {
         }
     }
 
-    fn with_missing(mut self, kind: WorldArtifactKindV1) -> Self {
+    const fn with_missing(mut self, kind: WorldArtifactKindV1) -> Self {
         self.missing = Some(kind);
         self
     }
 
-    fn with_mode(mut self, mode: AuthorityMode) -> Self {
+    const fn with_mode(mut self, mode: AuthorityMode) -> Self {
         self.mode = mode;
         self
     }
