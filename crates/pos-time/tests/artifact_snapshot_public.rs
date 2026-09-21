@@ -1,6 +1,4 @@
-use pos_core::{
-    Event, Reducer, State, TimelineId,
-};
+use pos_core::{Event, Reducer, State, TimelineId};
 use pos_runtime::ErasureExecutionHostV1;
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
@@ -53,13 +51,11 @@ fn snapshot_verification_requires_installed_world_verifier() {
     let mut reads = host.read_sender().test_ok();
     let mut capture_registry = registry(&gate);
     let closure = pos_core::WorldReplayClosureV1::test_fixture();
-    let result = snapshot(
-        &mut reads,
-        timeline.id(),
-        &mut capture_registry,
-        &closure,
-    );
-    assert!(matches!(result, Err(pos_core::CoreError::ArtifactUnavailable)));
+    let result = snapshot(&mut reads, timeline.id(), &mut capture_registry, &closure);
+    assert!(matches!(
+        result,
+        Err(pos_core::CoreError::ArtifactUnavailable)
+    ));
 
     let mut rejected_registry = registry(&gate);
     let empty_snapshot = pos_time::Snapshot {
@@ -73,7 +69,10 @@ fn snapshot_verification_requires_installed_world_verifier() {
         &mut rejected_registry,
         &closure,
     );
-    assert!(matches!(result, Err(pos_time::SnapshotError::ArtifactUnavailable)));
+    assert!(matches!(
+        result,
+        Err(pos_time::SnapshotError::ArtifactUnavailable)
+    ));
 }
 
 #[test]

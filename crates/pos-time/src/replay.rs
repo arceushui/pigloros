@@ -41,8 +41,14 @@ pub fn replay_at(
     registry: &mut ProjectionRegistry,
     closure: &WorldReplayClosureV1,
 ) -> Result<(), CoreError> {
-    replay_range(sender, timeline, SeqRange::bounded(Seq::ZERO, at_seq), registry, closure)
-        .map(|_| ())
+    replay_range(
+        sender,
+        timeline,
+        SeqRange::bounded(Seq::ZERO, at_seq),
+        registry,
+        closure,
+    )
+    .map(|_| ())
 }
 
 fn replay_range(
@@ -258,7 +264,10 @@ mod tests {
             let timeline = commands.create_timeline("hosted-replay").test_ok();
             let entity = EntityId::new();
             commands
-                .append(timeline.id(), &[draft(entity), draft(entity), draft(entity)])
+                .append(
+                    timeline.id(),
+                    &[draft(entity), draft(entity), draft(entity)],
+                )
                 .test_ok();
             timeline.id()
         };

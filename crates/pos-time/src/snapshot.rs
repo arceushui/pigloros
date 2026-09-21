@@ -503,12 +503,7 @@ mod tests {
         projected.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
         let closure = pos_core::WorldReplayClosureV1::test_fixture();
-        let result = super::snapshot(
-            &mut reads,
-            timeline,
-            &mut projected,
-            &closure,
-        );
+        let result = super::snapshot(&mut reads, timeline, &mut projected, &closure);
         assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
     }
 
