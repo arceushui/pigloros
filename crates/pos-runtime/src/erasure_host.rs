@@ -2539,6 +2539,9 @@ impl ErasureReadSenderV1<'_> {
         closure: &WorldReplayClosureV1,
     ) -> Result<VerifiedWorldReplayV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
+        if closure.inventory_generation() != Hash::from_bytes(self.generation.digest()) {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
         let verifier = self
             .host
             .world_replay_verifier
@@ -2547,8 +2550,7 @@ impl ErasureReadSenderV1<'_> {
         let verified = verifier
             .verify(closure, self.generation)
             .map_err(map_world_replay_verification_error)?;
-        if closure.inventory_generation() != Hash::from_bytes(self.generation.digest())
-            || verified.closure_digest() != closure.digest()
+        if verified.closure_digest() != closure.digest()
             || verified.timeline_id() != closure.timeline_id()
             || verified.inventory_generation() != self.generation
         {
