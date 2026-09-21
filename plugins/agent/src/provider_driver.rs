@@ -441,7 +441,6 @@ mod tests {
     };
     use pos_core::{
         clock::Seq,
-        crypto::Hash,
         ids::{EntityId, PluginId, TimelineId},
         ErasureContainmentGateV1,
     };
