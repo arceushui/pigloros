@@ -133,11 +133,6 @@ fn builtin_output_binding<P: Plugin + ?Sized>(
     .map_err(Into::into)
 }
 
-struct OpenedCliStore {
-    store: HostedCliStore,
-    erasure_gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
-}
-
 /// Open a store through the CLI composition seam.
 ///
 /// The concrete adapter remains exclusively owned by the recovered erasure
@@ -145,19 +140,8 @@ struct OpenedCliStore {
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    open_store_with_gate(config)
-        .map(|opened| Box::new(opened.store) as Box<dyn pos_core::store::EventStore>)
-}
-
-fn open_store_with_gate(config: StoreConfig) -> Result<OpenedCliStore, pos_core::CoreError> {
     HostedCliStore::open(config)
-        .map(|store| {
-            let erasure_gate = store.containment_gate();
-            OpenedCliStore {
-                store,
-                erasure_gate,
-            }
-        })
+        .map(|store| Box::new(store) as Box<dyn pos_core::store::EventStore>)
         .map_err(hosted_cli_store_error)
 }
 
@@ -451,67 +435,14 @@ fn cmd_timeline_fork(
     Ok(())
 }
 
-fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let tl_id = parse_timeline_id(tl_id_str)?;
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let events = replay_retained_timeline(&store, tl_id, &mut registry)?;
-    let entity_count = events
-        .iter()
-        .map(|e| e.entity)
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-
-    output_stdout!("events: {}", events.len());
-    output_stdout!("entity_count: {entity_count}");
-    Ok(())
-}
-
-fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let tl_id = parse_timeline_id(tl_id_str)?;
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let snapshot = snapshot_retained_timeline(&store, tl_id, &mut registry)?;
-
-    let entity_count = count_snapshot_entities(&snapshot);
-
-    output_stdout!("at_seq: {}", snapshot.at_seq.as_u64());
-    output_stdout!("entity_count: {entity_count}");
-
-    Ok(())
-}
-
-fn replay_retained_timeline(
-    _store: &HostedCliStore,
-    _timeline: TimelineId,
-    _registry: &mut pos_state::ProjectionRegistry,
-) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
+fn cmd_timeline_replay(_path: &str, _tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     Err(
         "World Replay is unavailable until an installed native closure verifier is configured"
             .into(),
     )
 }
 
-fn snapshot_retained_timeline(
-    _store: &HostedCliStore,
-    _timeline: TimelineId,
-    _registry: &mut pos_state::ProjectionRegistry,
-) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
+fn cmd_timeline_snapshot(_path: &str, _tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     Err(
         "World Snapshot is unavailable until an installed native closure verifier is configured"
             .into(),
@@ -519,31 +450,11 @@ fn snapshot_retained_timeline(
 }
 
 fn cmd_timeline_compare(
-    path: &str,
-    first_timeline_str: &str,
-    second_timeline_str: &str,
-    fork_seq_str: &str,
+    _path: &str,
+    _first_timeline_str: &str,
+    _second_timeline_str: &str,
+    _fork_seq_str: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let diff = run_timeline_compare(path, first_timeline_str, second_timeline_str, fork_seq_str)?;
-
-    output_stdout!("only_in_a: {}", diff.only_in_a.len());
-    output_stdout!("only_in_b: {}", diff.only_in_b.len());
-    output_stdout!("diverged_entities: {}", diff.diverged_entities.len());
-
-    Ok(())
-}
-
-fn run_timeline_compare(
-    path: &str,
-    first_timeline_str: &str,
-    second_timeline_str: &str,
-    fork_seq_str: &str,
-) -> Result<pos_time::ForkDiff, Box<dyn std::error::Error>> {
-    let timeline_a = parse_timeline_id(first_timeline_str)?;
-    let timeline_b = parse_timeline_id(second_timeline_str)?;
-    let fork_seq = parse_seq(fork_seq_str)?;
-
-    let _ = (path, timeline_a, timeline_b, fork_seq);
     Err(
         "World comparison is unavailable until an installed native closure verifier is configured"
             .into(),
