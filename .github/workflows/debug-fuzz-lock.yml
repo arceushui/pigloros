@@ -1,6 +1,9 @@
 name: debug-fuzz-lock
 
 on:
+  push:
+    paths:
+      - .github/workflows/debug-fuzz-lock.yml
   workflow_dispatch:
 
 permissions:
