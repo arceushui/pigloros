@@ -2542,22 +2542,23 @@ impl ErasureReadSenderV1<'_> {
         if closure.inventory_generation() != Hash::from_bytes(self.generation.digest()) {
             return Err(ErasureHostErrorV1::Conflict);
         }
-        let verifier = self
+        let verification_owner = self
             .host
             .world_replay_verifier
             .clone()
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        let verified = verifier
+        let capability = verification_owner
             .verify(closure, self.generation)
             .map_err(map_world_replay_verification_error)?;
-        if verified.closure_digest() != closure.digest()
-            || verified.timeline_id() != closure.timeline_id()
-            || verified.inventory_generation() != self.generation
+        let closure_digest = closure.digest();
+        if capability.closure_digest() != closure_digest
+            || capability.timeline_id() != closure.timeline_id()
+            || capability.inventory_generation() != self.generation
         {
             return Err(ErasureHostErrorV1::Conflict);
         }
         self.host.ensure_generation(self.generation)?;
-        Ok(verified)
+        Ok(capability)
     }
 
     /// Recover one authoritative, payload-free ERS1 state through the
