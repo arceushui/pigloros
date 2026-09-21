@@ -827,6 +827,14 @@ fn gateway_action_registry_with_authority(
     Arc::new(gateway_action_registry_builder(bodies, authority))
 }
 
+fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
+    let mut configuration_details = Vec::with_capacity(bodies.len() * 16);
+    for body in bodies {
+        configuration_details.extend_from_slice(&body.inner().to_bytes());
+    }
+    configuration_details
+}
+
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -838,10 +846,7 @@ fn gateway_action_registry_builder(
     let mut bodies = bodies.into_iter().collect::<Vec<_>>();
     bodies.sort_unstable();
     bodies.dedup();
-    let mut configuration_details = Vec::with_capacity(bodies.len() * 16);
-    for body in &bodies {
-        configuration_details.extend_from_slice(&body.inner().to_bytes());
-    }
+    let configuration_details = gateway_configuration_details(&bodies);
     let world_plugin = WorldPlugin::new().with_bodies(bodies);
     drop(
         gateway_output_binding(&descriptor, &configuration_details).and_then(|(policy, budget)| {
