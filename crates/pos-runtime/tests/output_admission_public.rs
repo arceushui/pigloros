@@ -246,11 +246,11 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     let closure = verified_closure(&plugin)?;
     assert_eq!(
         closure.output_policy_bytes(),
-        closure.output_policy().to_canonical_cbor()
+        closure.output_policy().to_canonical_cbor().as_slice()
     );
     assert_eq!(
         closure.executable_budget_bytes(),
-        closure.executable_budget().to_canonical_cbor()
+        closure.executable_budget().to_canonical_cbor().as_slice()
     );
     assert!(!closure.implementation_artifact().is_empty());
     assert!(closure.configuration_artifact().starts_with(b"CFG1"));
