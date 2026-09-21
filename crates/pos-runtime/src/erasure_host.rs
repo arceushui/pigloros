@@ -1709,11 +1709,13 @@ impl ErasureExecutionHostV1 {
                     ErasureErrorV1::PolicyConflict => ErasureHostErrorV1::Conflict,
                     other => map_erasure_error(other),
                 })?;
-            self.store
-                .host_store()
-                .get_timeline(parent)
-                .map_store_error()?
-                .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+            if inventory.request_count() == 0 {
+                self.store
+                    .host_store()
+                    .get_timeline(parent)
+                    .map_store_error()?
+                    .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+            }
         }
         let limits = self.recovery_limits;
         if inventory.request_count() != 0
@@ -2509,20 +2511,18 @@ impl ErasureCommandSenderV1<'_> {
         name: &str,
     ) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let parent_timeline = self
-            .host
-            .store
-            .host_store()
-            .get_timeline(parent)
-            .map_store_error()?
-            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
-        let candidate = Timeline::new(parent_timeline.meta.owner.map_or_else(
-            || TimelineMeta::forked_from(parent, at_seq, name),
-            |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
-        ));
         let (timeline, generation) = self.host.apply_unaffected_topology_change(
             Some(parent),
-            move |_permit, _store| Ok(candidate.clone()),
+            move |permit, store| {
+                let parent_timeline = store
+                    .get_timeline_for_host_transition(permit, parent)
+                    .map_store_error()?
+                    .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+                Ok(Timeline::new(parent_timeline.meta.owner.map_or_else(
+                    || TimelineMeta::forked_from(parent, at_seq, name),
+                    |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+                )))
+            },
             |permit, store, candidate| {
                 store
                     .fork_for_host_transition_with_meta(
