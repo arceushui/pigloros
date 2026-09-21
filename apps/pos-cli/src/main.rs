@@ -136,8 +136,8 @@ const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
-fn builtin_output_binding(
-    plugin: &dyn Plugin,
+fn builtin_output_binding<P: Plugin + ?Sized>(
+    plugin: &P,
     event_type: &str,
     cpu_reservations_us: [u32; 3],
     implementation_artifact: &[u8],
@@ -154,8 +154,8 @@ fn builtin_output_binding(
     )
 }
 
-fn builtin_output_binding_with_inputs(
-    plugin: &dyn Plugin,
+fn builtin_output_binding_with_inputs<P: Plugin + ?Sized>(
+    plugin: &P,
     event_type: &str,
     cpu_reservations_us: [u32; 3],
     _implementation_artifact: &[u8],

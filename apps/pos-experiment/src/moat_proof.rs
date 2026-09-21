@@ -65,8 +65,8 @@ const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.determinist
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
-fn reviewed_output_binding(
-    plugin: &dyn Plugin,
+fn reviewed_output_binding<P: Plugin + ?Sized>(
+    plugin: &P,
     event_types: &[&str],
     profile_id: &str,
     cpu_reservations_us: [u32; 3],
@@ -84,8 +84,8 @@ fn reviewed_output_binding(
     )
 }
 
-fn reviewed_output_binding_with_limits(
-    plugin: &dyn Plugin,
+fn reviewed_output_binding_with_limits<P: Plugin + ?Sized>(
+    plugin: &P,
     event_types: &[&str],
     profile_id: &str,
     cpu_reservations_us: [u32; 3],

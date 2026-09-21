@@ -59,8 +59,8 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
-fn gateway_output_binding_with_inputs(
-    plugin: &dyn Plugin,
+fn gateway_output_binding_with_inputs<P: Plugin + ?Sized>(
+    plugin: &P,
     configuration_details: &[u8],
     profile_id: &str,
     event_type: &str,
