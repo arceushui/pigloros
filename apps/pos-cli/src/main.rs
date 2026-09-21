@@ -44,7 +44,14 @@ use pos_core::{
     crypto::Hash,
     ids::{PluginId, TimelineId},
     manifest::AdapterRecord,
+    output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    },
+    plugin::Plugin,
     store::SeqRange,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
+    PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_experiment::{
     Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
@@ -59,6 +66,72 @@ const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
+
+fn builtin_output_binding(
+    plugin_id: PluginId,
+    plugin_version: &str,
+    event_type: &str,
+    implementation_hash: Hash,
+    configuration_hash: Hash,
+    retention_hash: Hash,
+    execution_profile_hash: Hash,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 4_096,
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 500_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 250_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 1_000,
+                max_bytes: 16 * 1024 * 1024,
+                max_cpu_us: 50_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id,
+            cpu_reservations_us: [10; 3],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash,
+        max_pass_wall_duration_us: 1_000,
+    })?;
+    let declaration = OutputDeclarationV1::new(
+        event_type.to_owned(),
+        OutputAuthorityV1::Authoritative,
+        OutputFidelityV1::L0,
+        4_096,
+        None,
+        None,
+    )?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: plugin_version.to_owned(),
+        implementation_hash,
+        base_configuration_digest: configuration_hash,
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: retention_hash,
+        policy_revision: 1,
+        output_declarations: vec![declaration],
+    })?;
+    Ok((policy, budget))
+}
 
 struct OpenedCliStore {
     store: HostedCliStore,
@@ -718,8 +791,19 @@ fn run_builtin_reference_experiment(
     // Register reference plugins
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
-    exp.register_generated(
+    let (agent_policy, agent_budget) = builtin_output_binding(
+        agent_plugin.id(),
+        agent_plugin.version(),
+        pos_plugin_rule_agent::EVENT_TYPE_DECISION,
+        Hash::from_bytes([0x51; 32]),
+        Hash::from_bytes([0x52; 32]),
+        Hash::from_bytes([0x53; 32]),
+        Hash::from_bytes([0x54; 32]),
+    )?;
+    exp.register_with_output_policy(
         &agent_plugin,
+        agent_policy,
+        agent_budget,
         Some(Box::new(RuleAgentReducer)),
         Some(Box::new(RuleAgentDriver::new(
             agent_entity,
@@ -729,8 +813,19 @@ fn run_builtin_reference_experiment(
 
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
-    exp.register_generated(
+    let (obs_policy, obs_budget) = builtin_output_binding(
+        obs_plugin.id(),
+        obs_plugin.version(),
+        pos_plugin_synthetic_obs::EVENT_TYPE,
+        Hash::from_bytes([0x61; 32]),
+        Hash::from_bytes([0x62; 32]),
+        Hash::from_bytes([0x63; 32]),
+        Hash::from_bytes([0x64; 32]),
+    )?;
+    exp.register_with_output_policy(
         &obs_plugin,
+        obs_policy,
+        obs_budget,
         Some(Box::new(SyntheticReducer)),
         Some(Box::new(SyntheticDriver::new(obs_entity))),
     )?;

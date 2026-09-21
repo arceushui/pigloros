@@ -1153,6 +1153,7 @@ impl Experiment {
     ///
     /// # Errors
     /// Returns registration, generated-policy, or output-admission errors.
+    #[cfg(test)]
     pub fn register_generated(
         &mut self,
         plugin: &dyn pos_core::Plugin,
@@ -1183,10 +1184,38 @@ impl Experiment {
         )
     }
 
+    /// Register a Plugin with its host-verified output policy, executable
+    /// budget, and optional action approver.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or output-admission error when the
+    /// policy, budget, ownership, or approver route is invalid.
+    pub fn register_with_output_policy_and_approver(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        output_policy: pos_core::output_policy::OutputPolicyV1,
+        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+        approver: Option<Box<dyn pos_core::ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry.register_with_output_policy_and_approver(
+            plugin,
+            output_policy,
+            executable_budget,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+        )
+    }
+
     /// Register a plugin with an optional action approver.
     ///
     /// # Errors
     /// Returns registration, generated-policy, or output-admission errors.
+    #[cfg(test)]
     pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn pos_core::Plugin,

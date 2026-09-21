@@ -20,10 +20,17 @@ use pos_conformance::{
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
 };
 use pos_core::{
+    crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
+    output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    },
     plugin::{Capability, Plugin},
     state::{Reducer, State},
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
+    PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
 use pos_plugin_world::{
@@ -64,6 +71,141 @@ const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1
 const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
+
+fn reviewed_output_binding(
+    name: &str,
+    plugin_id: PluginId,
+    plugin_version: &str,
+    event_types: &[&str],
+    implementation_hash: Hash,
+    configuration_hash: Hash,
+    retention_hash: Hash,
+    execution_profile_hash: Hash,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 4_096,
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 500_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 250_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 1_000,
+                max_bytes: 16 * 1024 * 1024,
+                max_cpu_us: 50_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id,
+            cpu_reservations_us: [10; 3],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash,
+        max_pass_wall_duration_us: 1_000,
+    })
+    .map_err(|error| RuntimeError::CapabilityMismatch {
+        name: name.to_owned(),
+        reason: error.to_string(),
+    })?;
+    let declarations = event_types
+        .iter()
+        .map(|event_type| {
+            OutputDeclarationV1::new(
+                (*event_type).to_owned(),
+                OutputAuthorityV1::Authoritative,
+                OutputFidelityV1::L0,
+                4_096,
+                None,
+                None,
+            )
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: name.to_owned(),
+                reason: error.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: plugin_version.to_owned(),
+        implementation_hash,
+        base_configuration_digest: configuration_hash,
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: retention_hash,
+        policy_revision: 1,
+        output_declarations: declarations,
+    })
+    .map_err(|error| RuntimeError::CapabilityMismatch {
+        name: name.to_owned(),
+        reason: error.to_string(),
+    })?;
+    Ok((policy, budget))
+}
+
+fn world_output_binding(
+    plugin: &WorldPlugin,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    reviewed_output_binding(
+        plugin.name(),
+        plugin.id(),
+        plugin.version(),
+        &[
+            "world.action",
+            EVENT_TYPE_ACTION_V1,
+            "world.config.v1",
+            "world.observation",
+            EVENT_TYPE_OBSERVATION_V1,
+        ],
+        Hash::from_bytes([0x11; 32]),
+        Hash::from_bytes([0x12; 32]),
+        Hash::from_bytes([0x13; 32]),
+        Hash::from_bytes([0x14; 32]),
+    )
+}
+
+fn proof_agent_output_binding(
+    plugin: &ProofAgentPlugin,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    reviewed_output_binding(
+        plugin.name(),
+        plugin.id(),
+        plugin.version(),
+        &[AGENT_EVENT_TYPE],
+        Hash::from_bytes([0x21; 32]),
+        Hash::from_bytes([0x22; 32]),
+        Hash::from_bytes([0x23; 32]),
+        Hash::from_bytes([0x24; 32]),
+    )
+}
+
+fn proof_society_output_binding(
+    plugin: &ProofSocietyPlugin,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    reviewed_output_binding(
+        plugin.name(),
+        plugin.id(),
+        plugin.version(),
+        &[pos_plugin_society::EVENT_TYPE_SIGNAL],
+        Hash::from_bytes([0x31; 32]),
+        Hash::from_bytes([0x32; 32]),
+        Hash::from_bytes([0x33; 32]),
+        Hash::from_bytes([0x34; 32]),
+    )
+}
 
 /// Result of one Local or Air-Gapped proof execution.
 #[derive(Debug)]
@@ -464,9 +606,14 @@ fn register_plugins(
     experiment: &mut Experiment,
     topology: &ProofTopology,
 ) -> Result<(), RuntimeError> {
+    let (world_policy, world_budget) = world_output_binding(&topology.world_plugin)?;
+    let (agent_policy, agent_budget) = proof_agent_output_binding(&topology.agent_plugin)?;
+    let (society_policy, society_budget) = proof_society_output_binding(&topology.society_plugin)?;
     result_pipeline! {
-        experiment.register_generated_with_approver(
+        experiment.register_with_output_policy_and_approver(
             &topology.world_plugin,
+            world_policy,
+            world_budget,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver(
                 &topology.input,
@@ -476,16 +623,20 @@ fn register_plugins(
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        experiment.register_generated(
+        experiment.register_with_output_policy(
             &topology.agent_plugin,
+            agent_policy,
+            agent_budget,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
                 topology.agent,
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        experiment.register_generated(
+        experiment.register_with_output_policy(
             &topology.society_plugin,
+            society_policy,
+            society_budget,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
         )
@@ -495,9 +646,14 @@ fn register_plugins(
 fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
+    let (world_policy, world_budget) = world_output_binding(&topology.world_plugin)?;
+    let (agent_policy, agent_budget) = proof_agent_output_binding(&topology.agent_plugin)?;
+    let (society_policy, society_budget) = proof_society_output_binding(&topology.society_plugin)?;
     result_pipeline! {
-        registry.register_generated_with_approver(
+        registry.register_with_output_policy_and_approver(
             &topology.world_plugin,
+            world_policy,
+            world_budget,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver(
                 &topology.input,
@@ -507,16 +663,20 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        registry.register_generated(
+        registry.register_with_output_policy(
             &topology.agent_plugin,
+            agent_policy,
+            agent_budget,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
                 topology.agent,
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        registry.register_generated(
+        registry.register_with_output_policy(
             &topology.society_plugin,
+            society_policy,
+            society_budget,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
         ) => |()|;
@@ -1525,16 +1685,42 @@ fn failure_probe(
         store_config: pos_store::StoreConfig::Memory,
     })
     .with_resource_limit(resource_limit);
+    let (sibling_policy, sibling_budget) = reviewed_output_binding(
+        sibling_plugin.name(),
+        sibling_plugin.id(),
+        sibling_plugin.version(),
+        &["proof.failure.sibling"],
+        Hash::from_bytes([0x41; 32]),
+        Hash::from_bytes([0x42; 32]),
+        Hash::from_bytes([0x43; 32]),
+        Hash::from_bytes([0x44; 32]),
+    )
+    .map_err(MoatProofError::from)?;
+    let (failure_policy, failure_budget) = reviewed_output_binding(
+        plugin.name(),
+        plugin.id(),
+        plugin.version(),
+        &["proof.failure.probe"],
+        Hash::from_bytes([0x45; 32]),
+        Hash::from_bytes([0x46; 32]),
+        Hash::from_bytes([0x47; 32]),
+        Hash::from_bytes([0x48; 32]),
+    )
+    .map_err(MoatProofError::from)?;
     result_pipeline! {
-        experiment.register_generated(
+        experiment.register_with_output_policy(
             &sibling_plugin,
+            sibling_policy,
+            sibling_budget,
             None,
             Some(Box::new(SiblingProbeDriver {
                 steps: Arc::clone(&sibling_steps),
             })),
         ).map_err(MoatProofError::from) => |()|;
-        experiment.register_generated(
+        experiment.register_with_output_policy(
             &plugin,
+            failure_policy,
+            failure_budget,
             None,
             Some(Box::new(FailureProbeDriver {
                 class,

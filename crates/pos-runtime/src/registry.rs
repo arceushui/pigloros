@@ -2340,6 +2340,8 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns policy-construction or registration errors.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_generated(
         &mut self,
         plugin: &dyn Plugin,
@@ -2478,6 +2480,8 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_pinned_generated(
         &mut self,
         plugin: &dyn Plugin,
@@ -2499,6 +2503,8 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_pinned_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
@@ -2535,6 +2541,8 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns policy-construction, capability, or registration errors.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
@@ -2581,6 +2589,33 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
+        self.register_with_output_policy_and_approver(
+            plugin,
+            output_policy,
+            executable_budget,
+            reducer,
+            driver,
+            None,
+            std::iter::empty(),
+        )
+    }
+
+    /// Register a Plugin with its host-verified output policy, executable
+    /// budget, and optional action approver.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or output-admission error when the
+    /// policy, budget, ownership, or approver route is invalid.
+    pub fn register_with_output_policy_and_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        output_policy: pos_core::output_policy::OutputPolicyV1,
+        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
         let owned_event_types = &context.2.owned_event_types;
         if let Some(declaration) =
@@ -2608,12 +2643,13 @@ impl PluginRegistry {
             output_policy,
             executable_budget,
         )?;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
             reducer,
             driver,
-            None,
-            &[],
+            approver,
+            &approver_event_types,
             context,
             RegistrationOptions {
                 registration: None,

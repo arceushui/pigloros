@@ -163,6 +163,59 @@ fn agent_output_binding(
     Ok((policy, budget))
 }
 
+fn empty_output_binding(
+    plugin_id: PluginId,
+    plugin_version: &str,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error + Send + Sync>> {
+    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 4096,
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 1,
+                max_bytes: 4096,
+                max_cpu_us: 100,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id,
+            cpu_reservations_us: [10; 3],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash: Hash::from_bytes([21; 32]),
+        max_pass_wall_duration_us: 1_000,
+    })?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: plugin_version.to_owned(),
+        implementation_hash: Hash::from_bytes([22; 32]),
+        base_configuration_digest: Hash::from_bytes([23; 32]),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: Hash::from_bytes([24; 32]),
+        policy_revision: 1,
+        output_declarations: Vec::new(),
+    })?;
+    Ok((policy, budget))
+}
+
 impl Driver for ObservationProbeDriver {
     fn name(&self) -> &'static str {
         "observation-probe"
@@ -595,6 +648,10 @@ fn register_experiment(
     let slow = AgentPlugin::new();
     let (fast_policy, fast_budget) = agent_output_binding(fast.id())?;
     let (slow_policy, slow_budget) = agent_output_binding(slow.id())?;
+    let (observation_policy, observation_budget) =
+        empty_output_binding(observation.id(), observation.version())?;
+    let (society_policy, society_budget) = empty_output_binding(society.id(), society.version())?;
+    let (probe_policy, probe_budget) = empty_output_binding(probe.id(), probe.version())?;
     let mut experiment = Experiment::new(ExperimentConfig {
         name: "multi-rate-host".to_owned(),
         stop: StopCondition::MaxTicks(10),
@@ -603,10 +660,22 @@ fn register_experiment(
         },
     });
     experiment
-        .register_generated(&observation, Some(Box::new(EntityStateProjection)), None)
+        .register_with_output_policy(
+            &observation,
+            observation_policy,
+            observation_budget,
+            Some(Box::new(EntityStateProjection)),
+            None,
+        )
         .test_ok()?;
     experiment
-        .register_generated(&society, Some(Box::new(SocietyReducer)), None)
+        .register_with_output_policy(
+            &society,
+            society_policy,
+            society_budget,
+            Some(Box::new(SocietyReducer)),
+            None,
+        )
         .test_ok()?;
     experiment
         .register_with_output_policy(
@@ -627,8 +696,10 @@ fn register_experiment(
         )
         .test_ok()?;
     experiment
-        .register_generated(
+        .register_with_output_policy(
             &probe,
+            probe_policy,
+            probe_budget,
             None,
             Some(Box::new(ObservationProbeDriver {
                 subscriptions: vec![ProjectionKey::new(scenario.human_entity)],

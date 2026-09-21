@@ -27,16 +27,22 @@ pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
 use pos_core::{
     clock::{Seq, WallTime},
+    crypto::Hash as CoreHash,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EntityId, EventId, PluginId, TimelineId},
+    output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    },
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError,
-    ErasureContainmentGateV1, Plugin, ProposedAction,
+    ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, Plugin, PluginCpuReservationV1, ProposedAction, WorkloadProfileV1,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -58,6 +64,79 @@ use std::{
 use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
+
+fn gateway_output_binding(
+    plugin_id: PluginId,
+    plugin_version: &str,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), pos_runtime::RuntimeError> {
+    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 4_096,
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 500_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 250_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 1_000,
+                max_bytes: 16 * 1024 * 1024,
+                max_cpu_us: 50_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id,
+            cpu_reservations_us: [10; 3],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash: CoreHash::from_bytes([0x74; 32]),
+        max_pass_wall_duration_us: 1_000,
+    })
+    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
+        name: "gateway-world-actions".to_owned(),
+        reason: error.to_string(),
+    })?;
+    let declaration = OutputDeclarationV1::new(
+        EVENT_TYPE_ACTION.to_owned(),
+        OutputAuthorityV1::Authoritative,
+        OutputFidelityV1::L0,
+        4_096,
+        None,
+        None,
+    )
+    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
+        name: "gateway-world-actions".to_owned(),
+        reason: error.to_string(),
+    })?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: plugin_version.to_owned(),
+        implementation_hash: CoreHash::from_bytes([0x71; 32]),
+        base_configuration_digest: CoreHash::from_bytes([0x72; 32]),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: CoreHash::from_bytes([0x73; 32]),
+        policy_revision: 1,
+        output_declarations: vec![declaration],
+    })
+    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
+        name: "gateway-world-actions".to_owned(),
+        reason: error.to_string(),
+    })?;
+    Ok((policy, budget))
+}
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -666,15 +745,23 @@ fn gateway_action_registry_builder(
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    drop(registry.register_generated_with_approver(
-        &descriptor,
-        None,
-        None,
-        Some(Box::new(GatewayWorldActionApprover(
-            WorldPlugin::new().with_bodies(bodies),
-        ))),
-        [Kind::new(EVENT_TYPE_ACTION)],
-    ));
+    drop(
+        gateway_output_binding(descriptor.id(), descriptor.version()).and_then(
+            |(policy, budget)| {
+                registry.register_with_output_policy_and_approver(
+                    &descriptor,
+                    policy,
+                    budget,
+                    None,
+                    None,
+                    Some(Box::new(GatewayWorldActionApprover(
+                        WorldPlugin::new().with_bodies(bodies),
+                    ))),
+                    [Kind::new(EVENT_TYPE_ACTION)],
+                )
+            },
+        ),
+    );
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
