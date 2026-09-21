@@ -3240,8 +3240,9 @@ const fn map_transition_failure(
 ) -> ErasureHostErrorV1 {
     match transition_failure {
         Some(TransitionFailureV1::Host(error)) => error,
-        Some(TransitionFailureV1::Erasure(error))
-        | Some(TransitionFailureV1::ErasureBeforeCommit(error)) => map_erasure_error(error),
+        Some(
+            TransitionFailureV1::Erasure(error) | TransitionFailureV1::ErasureBeforeCommit(error),
+        ) => map_erasure_error(error),
         None => publication_error,
     }
 }
