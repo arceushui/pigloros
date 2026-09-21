@@ -893,7 +893,7 @@ where
         shared.borrow_mut().commit_fork_admission(batch.clone())?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
-    assert_eq!(shared.borrow().scope_index_count(request.reference())?, 0);
+    assert_eq!(shared.borrow().scope_index_count(request)?, 0);
     assert!(shared
         .borrow_mut()
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
