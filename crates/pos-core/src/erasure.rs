@@ -396,6 +396,7 @@ pub trait ErasureGate: Send + Sync {
 /// authoritative topology resolver; no selector is re-evaluated by this gate.
 pub struct ErasureContainmentGateV1 {
     topology_binding_id: Arc<()>,
+    topology_store_binding_issued: AtomicBool,
     authority: RwLock<Arc<ErasureGateStateV1>>,
     fence_lock: std::sync::Mutex<()>,
     fail_closed_unbound: bool,
@@ -452,15 +453,13 @@ impl ErasureTopologyTransitionPermitV1 {
             return false;
         }
         let mut claimed_store_identity = self.claimed_store_identity.borrow_mut();
-        match claimed_store_identity.as_ref() {
-            Some(claimed_store_identity) => {
-                Arc::ptr_eq(claimed_store_identity, &binding.store_identity)
-            }
-            None => {
+        claimed_store_identity.as_ref().map_or_else(
+            || {
                 *claimed_store_identity = Some(Arc::clone(&binding.store_identity));
                 true
-            }
-        }
+            },
+            |claimed_store_identity| Arc::ptr_eq(claimed_store_identity, &binding.store_identity),
+        )
     }
 }
 
@@ -518,6 +517,7 @@ impl ErasureContainmentGateV1 {
     pub fn new_fail_closed() -> Self {
         Self {
             topology_binding_id: Arc::new(()),
+            topology_store_binding_issued: AtomicBool::new(false),
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
                 timeline_scopes: BTreeMap::new(),
@@ -542,6 +542,7 @@ impl ErasureContainmentGateV1 {
     pub fn new_test_open() -> Self {
         Self {
             topology_binding_id: Arc::new(()),
+            topology_store_binding_issued: AtomicBool::new(false),
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
                 timeline_scopes: BTreeMap::new(),
@@ -556,17 +557,26 @@ impl ErasureContainmentGateV1 {
         }
     }
 
-    /// Issue an opaque binding for one host-owned store adapter.
+    /// Issue an opaque binding for the one host-owned store adapter.
     ///
     /// The trusted composition root calls this while binding the adapter to
-    /// this gate. The resulting value cannot be constructed or retargeted by
-    /// an adapter caller.
+    /// this gate, before sharing the gate through an `Arc`. Binding issuance
+    /// is one-shot: once the adapter has consumed it, a holder of the public
+    /// read-only gate cannot authorize a second store.
     #[must_use]
-    pub fn issue_topology_store_binding(&self) -> ErasureTopologyStoreBindingV1 {
-        ErasureTopologyStoreBindingV1 {
+    pub fn issue_topology_store_binding(
+        &self,
+    ) -> Result<ErasureTopologyStoreBindingV1, ErasureContainmentErrorV1> {
+        if self
+            .topology_store_binding_issued
+            .swap(true, AtomicOrdering::AcqRel)
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        Ok(ErasureTopologyStoreBindingV1 {
             gate_identity: Arc::clone(&self.topology_binding_id),
             store_identity: Arc::new(()),
-        }
+        })
     }
 
     /// Permanently close this gate after its host loses verified authority.
@@ -7250,16 +7260,18 @@ mod coverage_paths {
         let generation = inventory.generation();
         let gate = ErasureContainmentGateV1::new_test_open();
         let foreign_gate = ErasureContainmentGateV1::new_test_open();
-        let store_binding = gate.issue_topology_store_binding();
-        let other_store_binding = gate.issue_topology_store_binding();
-        let foreign_store_binding = foreign_gate.issue_topology_store_binding();
+        let store_binding = gate.issue_topology_store_binding()?;
+        let foreign_store_binding = foreign_gate.issue_topology_store_binding()?;
+        assert_eq!(
+            gate.issue_topology_store_binding(),
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
         let mut claims = None;
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
             claims = Some((
                 permit.claim_for_store(&gate, &store_binding),
                 permit.claim_for_store(&gate, &store_binding),
                 permit.claim_for_store(&foreign_gate, &store_binding),
-                permit.claim_for_store(&gate, &other_store_binding),
                 permit.claim_for_store(&gate, &foreign_store_binding),
             ));
             Ok((inventory.clone(), ()))
@@ -7270,7 +7282,7 @@ mod coverage_paths {
                 .map(|(inventory, ())| inventory.generation()),
             Ok(generation)
         );
-        assert_eq!(claims, Some((true, true, false, false, false)));
+        assert_eq!(claims, Some((true, true, false, false)));
         Ok(())
     }
 

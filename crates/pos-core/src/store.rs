@@ -383,6 +383,23 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Persist a preallocated root Timeline while the host owns the
+    /// topology-transition fence. The caller supplies the candidate identity
+    /// so successor proof can complete before durable mutation.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter cannot provide this
+    /// preallocated host-transition seam.
+    fn create_timeline_for_host_transition_with_meta(
+        &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        _meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        Err(CoreError::Storage(
+            "preallocated host topology transitions are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// Append one or more draft events to a timeline, returning the committed events.
     ///
     /// Batching is required for performance: single-row commit is too slow for `SQLite` WAL.
@@ -689,6 +706,25 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Persist a preallocated Fork while the host owns the topology-transition
+    /// fence. The caller supplies the child identity so successor proof can
+    /// complete before durable mutation.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter cannot provide this
+    /// preallocated host-transition seam.
+    fn fork_for_host_transition_with_meta(
+        &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        _parent: TimelineId,
+        _at_seq: Seq,
+        _meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        Err(CoreError::Storage(
+            "preallocated host topology transitions are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// List all known timelines.
     ///
     /// # Errors
@@ -949,6 +985,26 @@ pub trait EventStore: Send {
     ) -> Result<(Timeline, bool), CoreError> {
         Err(CoreError::Storage(
             "host topology transitions are unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Atomically persist a preallocated ledger Timeline and its signing
+    /// registry while the host owns the topology-transition fence. The
+    /// preallocated identity lets the host verify the successor inventory
+    /// before this durable mutation.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter cannot provide this
+    /// preallocated host-transition seam.
+    #[cfg_attr(test, inline(never))]
+    fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
+        &mut self,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        _meta: &TimelineMeta,
+        _expected_registry: &crate::KeyRegistryStateV1,
+    ) -> Result<(Timeline, bool), CoreError> {
+        Err(CoreError::Storage(
+            "preallocated host topology transitions are unsupported by this EventStore".to_owned(),
         ))
     }
     /// Atomically recheck a registry snapshot, create, and append one

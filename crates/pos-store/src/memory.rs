@@ -2636,55 +2636,57 @@ impl MemoryStore {
         Ok(hash)
     }
 
+    fn create_timeline_with_meta_unchecked(
+        &mut self,
+        meta: &TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        // Resolve fork parent before duplicate-id check (parity with SqliteStore).
+        let chain = if let Some((parent, at_seq)) = meta.fork_point {
+            self.ensure_generic_timeline_visibility(parent)
+                .and_then(|()| {
+                    let parent_head = self.logical_head_unchecked(parent)?;
+                    if at_seq > parent_head {
+                        Err(CoreError::ForkBeyondHead {
+                            fork_seq: at_seq.as_u64(),
+                            head: parent_head.as_u64(),
+                        })
+                    } else {
+                        self.compute_chain_hash_at_unchecked(parent, at_seq)
+                    }
+                })
+        } else {
+            Ok(self.hasher.genesis_hash())
+        }?;
+        if self.timelines.contains_key(&meta.id) {
+            return Err(CoreError::Storage(format!(
+                "timeline already exists: {}",
+                meta.id
+            )));
+        }
+        let id = meta.id;
+        let timeline = Timeline::new(meta.clone());
+        self.timelines
+            .insert(id, TimelineState::new(timeline.clone(), chain));
+        Ok(timeline)
+    }
+
     fn create_timeline_with_meta_with_erasure_fence(
         &mut self,
         meta: &TimelineMeta,
     ) -> Result<Timeline, CoreError> {
-        let mut create = |store: &mut Self| {
-            // Resolve fork parent before duplicate-id check (parity with SqliteStore).
-            let chain = if let Some((parent, at_seq)) = meta.fork_point {
-                store
-                    .ensure_generic_timeline_visibility(parent)
-                    .and_then(|()| {
-                        let parent_head = store.logical_head(parent)?;
-                        if at_seq > parent_head {
-                            Err(CoreError::ForkBeyondHead {
-                                fork_seq: at_seq.as_u64(),
-                                head: parent_head.as_u64(),
-                            })
-                        } else {
-                            store.compute_chain_hash_at(parent, at_seq)
-                        }
-                    })
-            } else {
-                Ok(store.hasher.genesis_hash())
-            };
-            chain.and_then(|chain| {
-                if store.timelines.contains_key(&meta.id) {
-                    return Err(CoreError::Storage(format!(
-                        "timeline already exists: {}",
-                        meta.id
-                    )));
-                }
-                let id = meta.id;
-                let timeline = Timeline::new(meta.clone());
-                store
-                    .timelines
-                    .insert(id, TimelineState::new(timeline.clone(), chain));
-                Ok(timeline)
-            })
-        };
         match meta.fork_point {
             Some((parent, _)) => {
-                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
+                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
+                    store.create_timeline_with_meta_unchecked(meta)
+                })
             }
-            None => create(self),
+            None => self.create_timeline_with_meta_unchecked(meta),
         }
     }
 
     fn initialize_timeline_with_key_registry_for_host_transition_unchecked(
         &mut self,
-        name: &str,
+        meta: &TimelineMeta,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<(Timeline, bool), CoreError> {
         let persisted = self.load_key_registry()?;
@@ -2701,7 +2703,7 @@ impl MemoryStore {
             .timelines
             .values()
             .map(|state| &state.timeline)
-            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+            .find(|timeline| timeline.meta.name == meta.name)
             .cloned()
         {
             if persisted.is_none() {
@@ -2710,7 +2712,7 @@ impl MemoryStore {
             return Ok((timeline, false));
         }
 
-        let timeline = self.create_timeline(name)?;
+        let timeline = self.create_timeline_with_meta_unchecked(meta)?;
         if persisted.is_some() {
             return Ok((timeline, true));
         }
@@ -2749,7 +2751,9 @@ impl EventStore for MemoryStore {
                 "erasure containment gate is already bound".to_owned(),
             ));
         }
-        let binding = gate.issue_topology_store_binding();
+        let binding = gate
+            .issue_topology_store_binding()
+            .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
         self.erasure_gate = Some(gate);
         self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
@@ -2786,6 +2790,15 @@ impl EventStore for MemoryStore {
     ) -> Result<Timeline, CoreError> {
         self.ensure_host_transition_permit(permit)?;
         self.create_timeline(name)
+    }
+
+    fn create_timeline_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.create_timeline_with_meta_unchecked(&meta)
     }
 
     fn append(
@@ -2825,7 +2838,21 @@ impl EventStore for MemoryStore {
         self.ensure_host_transition_permit(permit)?;
         Self::initialize_timeline_with_key_registry_for_host_transition_unchecked(
             self,
-            name,
+            &TimelineMeta::root(name),
+            expected_registry,
+        )
+    }
+
+    fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<(Timeline, bool), CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        Self::initialize_timeline_with_key_registry_for_host_transition_unchecked(
+            self,
+            meta,
             expected_registry,
         )
     }
@@ -3065,6 +3092,18 @@ impl EventStore for MemoryStore {
         self.ensure_host_transition_permit(permit)?;
         self.ensure_generic_timeline_visibility(parent)
             .and_then(|()| self.fork_timeline_unchecked(parent, at_seq, name))
+    }
+
+    fn fork_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        parent: TimelineId,
+        _at_seq: Seq,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.ensure_generic_timeline_visibility(parent)
+            .and_then(|()| self.create_timeline_with_meta_unchecked(&meta))
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {

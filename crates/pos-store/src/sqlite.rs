@@ -3688,6 +3688,57 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn create_timeline_with_meta_for_host_transition_unchecked(
+        &mut self,
+        meta: &TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        let chain_head = match meta.fork_point {
+            Some((parent, at_seq)) => {
+                let parent_head = Self::logical_head_unchecked_on(&self.conn, parent)?;
+                if at_seq > parent_head {
+                    return Err(CoreError::ForkBeyondHead {
+                        fork_seq: at_seq.as_u64(),
+                        head: parent_head.as_u64(),
+                    });
+                }
+                Self::compute_chain_hash_at_unchecked_on(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    parent,
+                    at_seq,
+                )?
+            }
+            None => self.hasher.genesis_hash(),
+        };
+        if self
+            .get_timeline_for_host_transition_unchecked(meta.id)?
+            .is_some()
+        {
+            return Err(CoreError::Storage(format!(
+                "timeline already exists: {}",
+                meta.id
+            )));
+        }
+        let timeline = Timeline::new(meta.clone());
+        let insert = |connection: &Connection| {
+            Self::insert_timeline_with_meta_on(connection, meta, chain_head)
+                .map_err(|_| CoreError::Storage("timeline insert failed".to_owned()))
+        };
+        if self.conn.is_autocommit() {
+            let transaction = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            insert(&transaction)?;
+            transaction
+                .commit()
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+        } else {
+            insert(&self.conn)?;
+        }
+        Ok(timeline)
+    }
+
     fn save_key_registry_in_transaction(
         &self,
         registry: &KeyRegistryStateV1,
@@ -3725,6 +3776,17 @@ impl SqliteStore {
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<(Timeline, bool), CoreError> {
+        self.initialize_timeline_with_key_registry_in_transaction_with_meta(
+            &TimelineMeta::root(name),
+            expected_registry,
+        )
+    }
+
+    fn initialize_timeline_with_key_registry_in_transaction_with_meta(
+        &mut self,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<(Timeline, bool), CoreError> {
         let persisted = self.load_key_registry()?;
         if persisted
             .as_ref()
@@ -3738,8 +3800,15 @@ impl SqliteStore {
             self.save_key_registry_in_transaction(expected_registry)?;
         }
 
+        let name = meta
+            .name
+            .as_deref()
+            .ok_or_else(|| CoreError::Storage("ledger Timeline name is missing".to_owned()))?;
         self.find_timeline_by_name_unchecked(name)?.map_or_else(
-            || self.create_timeline(name).map(|timeline| (timeline, true)),
+            || {
+                self.create_timeline_with_meta_for_host_transition_unchecked(meta)
+                    .map(|timeline| (timeline, true))
+            },
             |timeline| Ok((timeline, false)),
         )
     }
@@ -3805,7 +3874,9 @@ impl EventStore for SqliteStore {
                 "erasure containment gate is already bound".to_owned(),
             ));
         }
-        let binding = gate.issue_topology_store_binding();
+        let binding = gate
+            .issue_topology_store_binding()
+            .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
         self.erasure_gate = Some(gate);
         self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
@@ -3851,6 +3922,15 @@ impl EventStore for SqliteStore {
     ) -> Result<Timeline, CoreError> {
         self.ensure_host_transition_permit(permit)?;
         self.create_timeline(name)
+    }
+
+    fn create_timeline_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.create_timeline_with_meta_for_host_transition_unchecked(&meta)
     }
 
     fn append(
@@ -3919,6 +3999,23 @@ impl EventStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let result =
             self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
+        finish_immediate_transaction(&self.conn, result)
+    }
+
+    fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<(Timeline, bool), CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = self.initialize_timeline_with_key_registry_in_transaction_with_meta(
+            meta,
+            expected_registry,
+        );
         finish_immediate_transaction(&self.conn, result)
     }
 
@@ -4365,6 +4462,18 @@ impl EventStore for SqliteStore {
         self.ensure_host_transition_permit(permit)?;
         self.ensure_generic_timeline_visibility(parent)
             .and_then(|()| self.fork_unchecked(parent, at_seq, name))
+    }
+
+    fn fork_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        parent: TimelineId,
+        _at_seq: Seq,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.ensure_generic_timeline_visibility(parent)
+            .and_then(|()| self.create_timeline_with_meta_for_host_transition_unchecked(&meta))
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
