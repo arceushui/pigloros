@@ -103,6 +103,11 @@ impl WorldReplayClosureV1 {
     ///
     /// This method only validates immutable structure. Current availability and
     /// authorization are deliberately deferred to [`Self::admit`].
+    ///
+    /// # Errors
+    /// Returns a closed error when the closure is empty or oversized, its
+    /// retention identities disagree, a leaf is out of scope or unowned, a
+    /// required kind is absent, or a consumer-set reference is missing.
     pub fn new(input: WorldReplayClosureInputV1) -> Result<Self, WorldReplayClosureErrorV1> {
         if input.artifacts.is_empty() || input.artifacts.len() > MAX_WORLD_REPLAY_ARTIFACTS_V1 {
             return Err(WorldReplayClosureErrorV1::ArtifactCountOutOfBounds);
@@ -123,13 +128,6 @@ impl WorldReplayClosureV1 {
         if artifacts.windows(2).any(|pair| {
             pair[0].as_input().kind == pair[1].as_input().kind
                 && pair[0].as_input().native_digest == pair[1].as_input().native_digest
-        }) {
-            return Err(WorldReplayClosureErrorV1::DuplicateArtifact);
-        }
-        if artifacts.iter().enumerate().any(|(index, leaf)| {
-            artifacts[..index]
-                .iter()
-                .any(|previous| previous.as_input().native_digest == leaf.as_input().native_digest)
         }) {
             return Err(WorldReplayClosureErrorV1::DuplicateArtifact);
         }
@@ -231,6 +229,10 @@ impl WorldReplayClosureV1 {
     /// The authority is the only source of current time and artifact state.
     /// Callers cannot turn structural WAL1 metadata into an Exact claim by
     /// supplying a hand-written state snapshot.
+    ///
+    /// # Errors
+    /// Returns a closed error when the authority cannot provide trusted time
+    /// or artifact state, or when the evaluated closure is not admissible.
     pub fn admit(
         &self,
         authority: &mut dyn WorldReplayClosureAuthorityV1,
@@ -284,9 +286,17 @@ fn has_identity(
 /// Host-owned source of current time and artifact availability.
 pub trait WorldReplayClosureAuthorityV1 {
     /// Return the current trusted clock value.
+    ///
+    /// # Errors
+    /// Returns a payload-free authority or provenance error when the host
+    /// cannot establish the current trusted time.
     fn now(&mut self) -> Result<WallTime, ErasureErrorV1>;
 
     /// Return the current state of one registered native artifact.
+    ///
+    /// # Errors
+    /// Returns a payload-free authority or provenance error when the host
+    /// cannot verify the artifact's current disposition.
     fn artifact_state(
         &mut self,
         artifact: &WorldArtifactLeafV1,
@@ -314,6 +324,10 @@ impl WorldReplayAdmissionV1 {
     }
 
     /// Require the admitted closure to support authoritative Replay.
+    ///
+    /// # Errors
+    /// Returns [`WorldReplayClosureErrorV1::ClaimUnavailable`] when expiry,
+    /// erasure, or another required artifact state weakened the claim.
     pub fn require_authoritative_use(&self) -> Result<(), WorldReplayClosureErrorV1> {
         if matches!(
             self.evaluation.replay_claim(),
