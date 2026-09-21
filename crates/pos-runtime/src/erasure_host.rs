@@ -97,6 +97,11 @@ enum UnaffectedTopologyTransitionError {
     RollbackFailed,
 }
 
+struct TopologyTransitionResultV1 {
+    timeline: Timeline,
+    created: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransitionFailureV1 {
     Host(ErasureHostErrorV1),
@@ -129,14 +134,43 @@ trait ErasureHostStore:
     + ErasureForkPersistencePortV1
     + ErasurePersistencePortV1
 {
+    fn initialize_timeline_with_key_registry_for_host_transition_result(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<TopologyTransitionResultV1, CoreError>;
 }
 
-impl<T> ErasureHostStore for T where
+impl<T> ErasureHostStore for T
+where
     T: pos_core::store::EventStore
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1
-        + ErasurePersistencePortV1
+        + ErasurePersistencePortV1,
 {
+    fn initialize_timeline_with_key_registry_for_host_transition_result(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<TopologyTransitionResultV1, CoreError> {
+        let existed = self
+            .list_timelines()?
+            .iter()
+            .any(|timeline| timeline.meta.name.as_deref() == Some(name));
+        let timeline =
+            pos_core::store::EventStore::initialize_timeline_with_key_registry_for_host_transition(
+                self,
+                permit,
+                name,
+                expected_registry,
+            )?;
+        Ok(TopologyTransitionResultV1 {
+            timeline,
+            created: !existed,
+        })
+    }
 }
 
 /// Replaceable host authority used by the erasure coordinator.
@@ -1520,7 +1554,7 @@ impl ErasureExecutionHostV1 {
         change: impl FnMut(
             &ErasureTopologyTransitionPermitV1,
             &mut dyn ErasureHostStore,
-        ) -> Result<Timeline, CoreError>,
+        ) -> Result<TopologyTransitionResultV1, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         self.apply_unaffected_topology_change(None, change)
     }
@@ -1552,9 +1586,9 @@ impl ErasureExecutionHostV1 {
     fn rollback_unaffected_topology_timeline(
         &mut self,
         timeline: &Timeline,
-        timeline_was_absent: bool,
+        timeline_was_created: bool,
     ) -> Result<(), UnaffectedTopologyTransitionError> {
-        if timeline_was_absent
+        if timeline_was_created
             && self
                 .store
                 .host_store()
@@ -1570,51 +1604,62 @@ impl ErasureExecutionHostV1 {
         &mut self,
         change: &mut F,
         permit: &ErasureTopologyTransitionPermitV1,
-        current_inventory: &ErasureVerifiedInventoryV1,
         request_count: usize,
         limits: ErasureRecoveryLimitsV1,
-    ) -> Result<(ErasureVerifiedInventoryV1, Timeline), UnaffectedTopologyTransitionError>
+    ) -> Result<
+        (ErasureVerifiedInventoryV1, TopologyTransitionResultV1),
+        UnaffectedTopologyTransitionError,
+    >
     where
         F: FnMut(
             &ErasureTopologyTransitionPermitV1,
             &mut dyn ErasureHostStore,
-        ) -> Result<Timeline, CoreError>,
+        ) -> Result<TopologyTransitionResultV1, CoreError>,
     {
-        let timeline = change(permit, self.store.host_store())
+        let transition = change(permit, self.store.host_store())
             .map_store_error()
             .map_err(UnaffectedTopologyTransitionError::Host)?;
-        let timeline_was_absent = current_inventory
-            .fork_scope_requirements(timeline.id())
-            .is_err();
-        let candidate =
-            match self.verify_unaffected_topology_candidate(request_count, limits, timeline.id()) {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
-                    return Err(UnaffectedTopologyTransitionError::Erasure(error));
-                }
-            };
-        if request_count != 0 && timeline_was_absent {
-            match candidate.require_unaffected_topology(timeline.id()) {
+        let candidate = match self.verify_unaffected_topology_candidate(
+            request_count,
+            limits,
+            transition.timeline.id(),
+        ) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.rollback_unaffected_topology_timeline(
+                    &transition.timeline,
+                    transition.created,
+                )?;
+                return Err(UnaffectedTopologyTransitionError::Erasure(error));
+            }
+        };
+        if request_count != 0 {
+            match candidate.require_unaffected_topology(transition.timeline.id()) {
                 Ok(()) => {}
                 Err(ErasureErrorV1::PolicyConflict) => {
-                    self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
+                    self.rollback_unaffected_topology_timeline(
+                        &transition.timeline,
+                        transition.created,
+                    )?;
                     return Err(UnaffectedTopologyTransitionError::RejectedAsAffected);
                 }
                 Err(error) => {
-                    self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
+                    self.rollback_unaffected_topology_timeline(
+                        &transition.timeline,
+                        transition.created,
+                    )?;
                     return Err(UnaffectedTopologyTransitionError::Erasure(error));
                 }
             }
         }
         #[cfg(test)]
         if self.fail_inventory_publication {
-            self.rollback_unaffected_topology_timeline(&timeline, timeline_was_absent)?;
+            self.rollback_unaffected_topology_timeline(&transition.timeline, transition.created)?;
             return Err(UnaffectedTopologyTransitionError::Erasure(
                 ErasureErrorV1::ProvenanceMissing,
             ));
         }
-        Ok((candidate, timeline))
+        Ok((candidate, transition))
     }
 
     fn apply_unaffected_topology_change(
@@ -1623,7 +1668,7 @@ impl ErasureExecutionHostV1 {
         mut change: impl FnMut(
             &ErasureTopologyTransitionPermitV1,
             &mut dyn ErasureHostStore,
-        ) -> Result<Timeline, CoreError>,
+        ) -> Result<TopologyTransitionResultV1, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let (_generation, maximum_requests, inventory) = self.ready_state()?;
         if let Some(parent) = parent {
@@ -1650,13 +1695,8 @@ impl ErasureExecutionHostV1 {
         let mut transition_failure = None;
         let publication = {
             let mut fenced_transition = |permit: &ErasureTopologyTransitionPermitV1| match self
-                .prepare_unaffected_topology_transition(
-                    &mut change,
-                    permit,
-                    &inventory,
-                    request_count,
-                    limits,
-                ) {
+                .prepare_unaffected_topology_transition(&mut change, permit, request_count, limits)
+            {
                 Ok(result) => Ok(result),
                 Err(UnaffectedTopologyTransitionError::Host(error)) => {
                     transition_failure = Some(UnaffectedTopologyTransitionError::Host(error));
@@ -1679,7 +1719,7 @@ impl ErasureExecutionHostV1 {
             gate.install_from_verified_inventory_transition(&mut fenced_transition)
         };
         match publication {
-            Ok((inventory, timeline)) => {
+            Ok((inventory, transition)) => {
                 let generation = inventory.generation();
                 self.inventory = Some(Arc::new(inventory));
                 self.recovery_limits = limits;
@@ -1688,7 +1728,7 @@ impl ErasureExecutionHostV1 {
                     maximum_requests,
                     request_count,
                 };
-                Ok((timeline, generation))
+                Ok((transition.timeline, generation))
             }
             Err(publication_error) => match transition_failure {
                 Some(UnaffectedTopologyTransitionError::Host(error)) => Err(error),
@@ -2319,7 +2359,12 @@ impl ErasureCommandSenderV1<'_> {
     pub fn create_timeline(&mut self, name: &str) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
         let (timeline, generation) = self.host.apply_root_topology_change(|permit, store| {
-            store.create_timeline_for_host_transition(permit, name)
+            store
+                .create_timeline_for_host_transition(permit, name)
+                .map(|timeline| TopologyTransitionResultV1 {
+                    timeline,
+                    created: true,
+                })
         })?;
         self.generation = generation;
         Ok(timeline)
@@ -2337,8 +2382,27 @@ impl ErasureCommandSenderV1<'_> {
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
+        let (_, _, inventory) = self.host.ready_state()?;
+        if inventory.request_count() != 0 {
+            let existing = self
+                .host
+                .store
+                .host_store()
+                .list_timelines()
+                .map_store_error()?
+                .into_iter()
+                .find(|timeline| timeline.meta.name.as_deref() == Some(name));
+            if let Some(existing) = existing {
+                inventory
+                    .require_unaffected_topology(existing.id())
+                    .map_err(|error| match error {
+                        ErasureErrorV1::PolicyConflict => ErasureHostErrorV1::Conflict,
+                        other => map_erasure_error(other),
+                    })?;
+            }
+        }
         let (timeline, generation) = self.host.apply_root_topology_change(|permit, store| {
-            store.initialize_timeline_with_key_registry_for_host_transition(
+            store.initialize_timeline_with_key_registry_for_host_transition_result(
                 permit,
                 name,
                 expected_registry,
@@ -2364,11 +2428,16 @@ impl ErasureCommandSenderV1<'_> {
         name: &str,
     ) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        let (timeline, generation) = self
-            .host
-            .apply_unaffected_topology_change(Some(parent), |permit, store| {
-                store.fork_for_host_transition(permit, parent, at_seq, name)
-            })?;
+        let (timeline, generation) =
+            self.host
+                .apply_unaffected_topology_change(Some(parent), |permit, store| {
+                    store
+                        .fork_for_host_transition(permit, parent, at_seq, name)
+                        .map(|timeline| TopologyTransitionResultV1 {
+                            timeline,
+                            created: true,
+                        })
+                })?;
         self.generation = generation;
         Ok(timeline)
     }

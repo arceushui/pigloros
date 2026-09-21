@@ -839,12 +839,19 @@ where
     Ok(())
 }
 
-fn assert_positively_unaffected_fork<S>(mut store: S) -> Result<(), Box<dyn std::error::Error>>
+fn prepared_positively_unaffected_fork<S>(
+    mut store: S,
+) -> Result<
+    (
+        Rc<RefCell<S>>,
+        ErasureReferenceV1,
+        TimelineId,
+        pos_core::PreparedErasureForkBatchV1,
+    ),
+    Box<dyn std::error::Error>,
+>
 where
-    S: EventStore
-        + ErasurePersistencePortV1
-        + ErasureInventoryPersistencePortV1
-        + ErasureForkPersistencePortV1,
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let first = store.create_timeline("first")?.id();
@@ -868,9 +875,22 @@ where
         },
     };
     let batch = inventory.prepare_fork_batch(input, Vec::new())?;
+    Ok((shared, request.reference(), child, batch))
+}
+
+fn assert_positively_unaffected_fork<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (shared, request, child, batch) = prepared_positively_unaffected_fork(store)?;
+    let operation = batch.operation();
+    let expected_result = batch.recovery_result()?;
     assert!(batch.admissions().is_empty());
     assert_eq!(
-        shared.borrow_mut().commit_fork_admission(batch)?,
+        shared.borrow_mut().commit_fork_admission(batch.clone())?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(shared.borrow().scope_index_count(request.reference())?, 0);
@@ -879,6 +899,22 @@ where
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
         .topology()
         .contains(&child));
+    shared.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.retry"),
+            pos_core::CanonicalBytes::from_vec(vec![2]),
+        )],
+    )?;
+    assert_eq!(
+        shared.borrow_mut().recover_fork_admission(operation)?,
+        Some(expected_result)
+    );
+    assert_eq!(
+        shared.borrow_mut().commit_fork_admission(batch)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
     Ok(())
 }
 
@@ -1253,6 +1289,44 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
         .topology()
         .contains(&child));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, _, child, batch) = prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
+    let operation = batch.operation();
+    let expected_result = batch.recovery_result()?;
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(batch.clone())?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.retry"),
+            pos_core::CanonicalBytes::from_vec(vec![2]),
+        )],
+    )?;
+    drop(store);
+
+    let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.recover_fork_admission(operation)?,
+        Some(expected_result)
+    );
+    assert_eq!(
+        reopened.commit_fork_admission(batch)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
     Ok(())
 }
 

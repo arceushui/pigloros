@@ -1551,14 +1551,26 @@ impl MemoryStore {
     }
 
     fn memory_fork_child_is_exact(&self, child: &TimelineMeta, chain_head: Hash) -> bool {
-        self.timelines.get(&child.id).is_some_and(|state| {
-            (
-                &state.timeline.meta,
-                state.timeline.head,
-                state.events.is_empty(),
-                state.chain_head,
-            ) == (child, Seq::ZERO, true, chain_head)
-        })
+        let Some(state) = self.timelines.get(&child.id) else {
+            return false;
+        };
+        if state.timeline.meta != *child {
+            return false;
+        }
+        let mut expected_head = Seq::ZERO;
+        let mut expected_chain_head = chain_head;
+        for event in &state.events {
+            expected_head = expected_head.next();
+            if event.seq != expected_head {
+                return false;
+            }
+            expected_chain_head = self.hasher.hash_event(
+                &expected_chain_head,
+                event.id.to_string().as_bytes(),
+                &event.payload,
+            );
+        }
+        state.timeline.head == expected_head && state.chain_head == expected_chain_head
     }
 
     fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
@@ -5578,6 +5590,10 @@ mod tests {
         let child = store.fork(parent.id(), Seq::ZERO, "child").test_ok();
         let chain_head = store
             .compute_chain_hash_at_unchecked(parent.id(), Seq::ZERO)
+            .test_ok();
+        assert!(store.memory_fork_child_is_exact(&child.meta, chain_head));
+        store
+            .append(child.id(), &[make_draft(EntityId::new(), b"child-event")])
             .test_ok();
         assert!(store.memory_fork_child_is_exact(&child.meta, chain_head));
 

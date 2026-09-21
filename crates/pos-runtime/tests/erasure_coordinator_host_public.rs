@@ -777,6 +777,14 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         Err(ErasureHostErrorV1::AccessFrozen)
     );
     assert_eq!(
+        commands.initialize_timeline_with_key_registry(
+            "host-coordinator-freeze",
+            &pos_core::KeyRegistryStateV1::new(),
+        ),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(commands.key_registry(), Ok(None));
+    assert_eq!(
         commands.fork_timeline(timeline.id(), pos_core::Seq::ZERO, "affected-ordinary-fork",),
         Err(ErasureHostErrorV1::Conflict)
     );

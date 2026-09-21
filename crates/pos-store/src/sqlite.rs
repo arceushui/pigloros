@@ -4998,7 +4998,11 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             if let Some(receipt) = sqlite_fork_admission_receipt(&self.conn, admission.operation())?
             {
                 return sqlite_fork_admission_is_exact(
-                    &self.conn, &admission, chain_head, &receipt,
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    &admission,
+                    chain_head,
+                    &receipt,
                 )?
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
@@ -5208,7 +5212,7 @@ fn sqlite_verify_recovered_fork_child(
     let (parent, at_seq) = recovered.fork_point();
     let chain_head = SqliteStore::compute_chain_hash_at_unchecked_on(conn, hasher, parent, at_seq)
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-    if !sqlite_timeline_is_exact(conn, recovered.child(), chain_head)? {
+    if !sqlite_timeline_is_exact(conn, hasher, recovered.child(), chain_head)? {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     Ok(())
@@ -5216,6 +5220,7 @@ fn sqlite_verify_recovered_fork_child(
 
 fn sqlite_timeline_is_exact(
     conn: &Connection,
+    hasher: &dyn Hasher,
     child: &TimelineMeta,
     chain_head: Hash,
 ) -> Result<bool, ErasureErrorV1> {
@@ -5223,8 +5228,7 @@ fn sqlite_timeline_is_exact(
         .query_row(
             "SELECT name, mode, parent_id, fork_seq, head_seq, chain_head
              FROM timelines
-             WHERE id=?1
-               AND NOT EXISTS (SELECT 1 FROM events WHERE timeline_id=?1)",
+             WHERE id=?1",
             params![child.id.to_string()],
             |row| {
                 Ok((
@@ -5253,27 +5257,69 @@ fn sqlite_timeline_is_exact(
         .optional()
         .map_err(map_erasure_receipt_failure)?;
     let expected_owner = child.owner.map(|value| value.to_string());
-    Ok((
+    let metadata_matches = (
         name.as_ref(),
         mode.as_str(),
         parent.as_ref(),
         fork_seq,
-        head,
-        stored_chain_head.as_slice(),
         owner.as_ref(),
     ) == (
         child.name.as_ref(),
         mode_str(child.mode),
         expected_parent.as_ref(),
         expected_fork,
-        0,
-        chain_head.as_bytes(),
         expected_owner.as_ref(),
-    ))
+    );
+    if !metadata_matches {
+        return Ok(false);
+    }
+
+    let mut events = conn
+        .prepare(
+            "SELECT seq, event_id, payload
+             FROM events
+             WHERE timeline_id=?1
+             ORDER BY seq",
+        )
+        .map_err(map_erasure_receipt_failure)?
+        .query(params![child.id.to_string()])
+        .map_err(map_erasure_receipt_failure)?;
+    let mut expected_head = 0_u64;
+    let mut expected_chain_head = chain_head;
+    while let Some(row) = events.next().map_err(map_erasure_receipt_failure)? {
+        let seq = row
+            .get::<_, i64>(0)
+            .map_err(map_erasure_receipt_failure)
+            .and_then(|seq| u64::try_from(seq).map_err(|_| ErasureErrorV1::ProvenanceMissing))?;
+        let expected_seq = expected_head
+            .checked_add(1)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if seq != expected_seq {
+            return Ok(false);
+        }
+        let event_id = row
+            .get::<_, String>(1)
+            .map_err(map_erasure_receipt_failure)
+            .and_then(|event_id| {
+                parse_event_id(&event_id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
+            })?;
+        let payload = row
+            .get::<_, Vec<u8>>(2)
+            .map_err(map_erasure_receipt_failure)?;
+        expected_chain_head = hasher.hash_event(
+            &expected_chain_head,
+            event_id.to_string().as_bytes(),
+            &payload,
+        );
+        expected_head = seq;
+    }
+    Ok(u64::try_from(head).ok() == Some(expected_head)
+        && stored_chain_head.as_slice() == expected_chain_head.as_bytes())
 }
 
 fn sqlite_fork_admission_is_exact(
     conn: &Connection,
+    hasher: &dyn Hasher,
     admission: &PreparedErasureForkBatchV1,
     chain_head: Hash,
     receipt: &SqliteForkAdmissionReceiptV1,
@@ -5285,7 +5331,7 @@ fn sqlite_fork_admission_is_exact(
     if recovered != admission.recovery_result()? {
         return Ok(false);
     }
-    if !sqlite_timeline_is_exact(conn, child, chain_head)? {
+    if !sqlite_timeline_is_exact(conn, hasher, child, chain_head)? {
         return Ok(false);
     }
     for prepared in admission.admissions() {
