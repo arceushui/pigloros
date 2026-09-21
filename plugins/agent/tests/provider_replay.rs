@@ -8,8 +8,8 @@ use pos_core::{
         OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
         OutputPolicyV1,
     },
-    ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
-    FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
+    Capability, ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, Plugin, PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -20,8 +20,8 @@ use pos_plugin_agent::{
     ReplayCheckpoint, ReplayVerificationError, EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry,
-    RuntimeError, StepOutput, TimelineHistorySegment,
+    recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView,
+    OutputPolicyBindingV1, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use std::sync::Arc;
 use ulid::Ulid;
@@ -36,11 +36,45 @@ fn gated_registry() -> PluginRegistry {
     PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
 }
 
+struct BindingPlugin {
+    id: PluginId,
+    version: &'static str,
+    event_types: Vec<Kind>,
+}
+
+impl Plugin for BindingPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "agent"
+    }
+
+    fn version(&self) -> &'static str {
+        self.version
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: self.event_types.clone(),
+            ..Capability::default()
+        }
+    }
+}
+
 fn output_binding(
     plugin_id: PluginId,
-    plugin_version: &str,
+    plugin_version: &'static str,
     event_types: &[&str],
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+    let plugin = BindingPlugin {
+        id: plugin_id,
+        version: plugin_version,
+        event_types: event_types.iter().map(|kind| Kind::new(*kind)).collect(),
+    };
+    let profile_artifact =
+        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -73,10 +107,10 @@ fn output_binding(
             plugin_id,
             cpu_reservations_us: [10; 3],
         }],
-        accounting_semantics: 0,
-        execution_profile_hash: Hash::from_bytes([0x41; 32]),
+        execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact),
         max_pass_wall_duration_us: 1_000,
     })?;
+    let configuration_artifact = pos_runtime::canonical_plugin_configuration_v1(&plugin, &[])?;
     let output_declarations = event_types
         .iter()
         .map(|event_type| {
@@ -93,14 +127,25 @@ fn output_binding(
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id,
         plugin_version: plugin_version.to_owned(),
-        implementation_hash: Hash::from_bytes([0x42; 32]),
-        base_configuration_digest: Hash::from_bytes([0x43; 32]),
+        implementation_hash: pos_runtime::InstalledOutputPolicySourceV1::Agent
+            .implementation_artifact_hash(&plugin),
+        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        ),
         executable_profile_hash: budget.digest(),
-        retention_policy_hash: Hash::from_bytes([0x44; 32]),
+        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
         output_declarations,
     })?;
-    Ok((policy, budget))
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        &plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Agent,
+        policy,
+        budget,
+        &[],
+        "deterministic-local-v1",
+    )?)
 }
 
 trait TestValueExt<T> {
@@ -1080,20 +1125,14 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
         Box::new(provider),
     );
     let mut registry = gated_registry();
-    let (policy, budget) = output_binding(
+    let binding = output_binding(
         host.plugin,
         PLUGIN_VERSION,
         &[EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE],
     )
     .test_ok();
     registry
-        .register_test_driver_with_output_policy(
-            host.plugin,
-            PLUGIN_VERSION,
-            policy,
-            budget,
-            Box::new(driver),
-        )
+        .register_test_driver_with_verified_output_policy(host.plugin, binding, Box::new(driver))
         .test_ok();
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
@@ -1271,33 +1310,25 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
     );
     let mut registry = gated_registry();
     let preceding_plugin = PluginId::new();
-    let (preceding_policy, preceding_budget) =
+    let preceding_binding =
         output_binding(preceding_plugin, PLUGIN_VERSION, &["world.observation"]).test_ok();
     registry
-        .register_test_driver_with_output_policy(
+        .register_test_driver_with_verified_output_policy(
             preceding_plugin,
-            PLUGIN_VERSION,
-            preceding_policy,
-            preceding_budget,
+            preceding_binding,
             Box::new(PrecedingDriver {
                 entity: host.other_agent,
             }),
         )
         .test_ok();
-    let (policy, budget) = output_binding(
+    let binding = output_binding(
         host.plugin,
         PLUGIN_VERSION,
         &[EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE],
     )
     .test_ok();
     registry
-        .register_test_driver_with_output_policy(
-            host.plugin,
-            PLUGIN_VERSION,
-            policy,
-            budget,
-            Box::new(driver),
-        )
+        .register_test_driver_with_verified_output_policy(host.plugin, binding, Box::new(driver))
         .test_ok();
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)

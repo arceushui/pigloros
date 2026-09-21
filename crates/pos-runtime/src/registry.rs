@@ -30,34 +30,14 @@ use crate::{
         StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
+    output_admission::{
+        InstalledOutputPolicySourceV1, OutputAdmissionV1, OutputPolicyBindingV1,
+        OutputPolicyClosureV1,
+    },
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
 use std::{collections::HashSet, sync::Arc};
-
-#[cfg(debug_assertions)]
-fn generated_identity_hash(
-    label: &[u8],
-    plugin: &dyn Plugin,
-    plugin_version: &str,
-) -> pos_core::Hash {
-    let mut hasher = blake3::Hasher::new();
-    hash_framed(&mut hasher, label);
-    hash_framed(&mut hasher, plugin.name().as_bytes());
-    hash_framed(&mut hasher, plugin_version.as_bytes());
-    let mut owned_event_types = plugin
-        .capability()
-        .owned_event_types
-        .into_iter()
-        .map(|kind| kind.as_str().to_owned())
-        .collect::<Vec<_>>();
-    owned_event_types.sort_unstable();
-    for event_type in owned_event_types {
-        hash_framed(&mut hasher, event_type.as_bytes());
-    }
-    pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
-}
 
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
@@ -2433,22 +2413,16 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        let (policy, budget) = Self::generated_output_binding(plugin)?;
-        self.register_with_output_policy(plugin, policy, budget, reducer, driver)
+        let binding = Self::generated_output_binding(plugin)?;
+        self.register_with_verified_output_policy(plugin, binding, reducer, driver)
     }
 
     #[cfg(debug_assertions)]
     fn generated_output_binding(
         plugin: &dyn Plugin,
-    ) -> Result<
-        (
-            pos_core::output_policy::OutputPolicyV1,
-            pos_core::ExecutableBudgetPolicyV1,
-        ),
-        RuntimeError,
-    > {
+    ) -> Result<OutputPolicyBindingV1, RuntimeError> {
         let plugin_version = plugin.version().to_owned();
-        Self::generated_output_binding_with_budget_input(
+        let (policy, budget) = Self::generated_output_binding_with_budget_input(
             plugin,
             &plugin_version,
             pos_core::ExecutableBudgetPolicyInputV1 {
@@ -2484,14 +2458,18 @@ impl PluginRegistry {
                     cpu_reservations_us: [10; 3],
                 }],
                 accounting_semantics: 0,
-                execution_profile_hash: generated_identity_hash(
-                    b"pigloros/generated-execution-profile/v1",
-                    plugin,
-                    &plugin_version,
-                ),
+                execution_profile_hash: pos_core::Hash::zero(),
                 max_pass_wall_duration_us: 1_000,
             },
-        )
+        )?;
+        Ok(OutputPolicyBindingV1::from_installed_source(
+            plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )?)
     }
 
     #[cfg(debug_assertions)]
@@ -2506,12 +2484,32 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
+        if plugin.version() != plugin_version {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: "generated policy version does not match the Plugin".to_owned(),
+            });
+        }
+        let profile_artifact =
+            pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")
+                .map_err(|error| RuntimeError::CapabilityMismatch {
+                    name: plugin.name().to_owned(),
+                    reason: error.to_string(),
+                })?;
+        budget_input.execution_profile_hash =
+            crate::execution_profile_artifact_hash_v1(&profile_artifact);
         let budget = pos_core::ExecutableBudgetPolicyV1::new(budget_input).map_err(|error| {
             RuntimeError::CapabilityMismatch {
                 name: plugin.name().to_owned(),
                 reason: error.to_string(),
             }
         })?;
+        let configuration_artifact = crate::canonical_plugin_configuration_v1(plugin, &[])
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+        let source = InstalledOutputPolicySourceV1::Generated;
         let mut declarations = plugin
             .capability()
             .owned_event_types
@@ -2536,22 +2534,13 @@ impl PluginRegistry {
             pos_core::output_policy::OutputPolicyInputV1 {
                 plugin_id: plugin.id(),
                 plugin_version: plugin_version.to_owned(),
-                implementation_hash: generated_identity_hash(
-                    b"pigloros/generated-implementation/v1",
-                    plugin,
-                    plugin_version,
-                ),
-                base_configuration_digest: generated_identity_hash(
-                    b"pigloros/generated-configuration/v1",
-                    plugin,
-                    plugin_version,
+                implementation_hash: source.implementation_artifact_hash(plugin),
+                base_configuration_digest: crate::host_artifact_hash_v1(
+                    b"pigloros.base-configuration.v1",
+                    &configuration_artifact,
                 ),
                 executable_profile_hash: budget.digest(),
-                retention_policy_hash: generated_identity_hash(
-                    b"pigloros/generated-retention/v1",
-                    plugin,
-                    plugin_version,
-                ),
+                retention_policy_hash: crate::reviewed_retention_policy_hash_v1(),
                 policy_revision: 1,
                 output_declarations: declarations,
             },
@@ -2601,27 +2590,17 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
-        let (policy, budget) = Self::generated_output_binding(plugin)?;
-        let context = self.registration_context(plugin)?;
-        self.validate_registration_roles(&registration)?;
+        let binding = Self::generated_output_binding(plugin)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        OutputAdmissionV1::try_new(plugin.id(), plugin.version(), policy, budget)
-            .map_err(RuntimeError::from)
-            .map(Some)
-            .and_then(|output_admission| {
-                self.register_with_approver_slice(
-                    plugin,
-                    reducer,
-                    driver,
-                    approver,
-                    &approver_event_types,
-                    context,
-                    RegistrationOptions {
-                        registration: Some(registration),
-                        output_admission,
-                    },
-                )
-            })
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            Some(registration),
+        )
     }
 
     /// Register a plugin with a generated policy and action approver.
@@ -2638,29 +2617,19 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
-        let (policy, budget) = Self::generated_output_binding(plugin)?;
-        let context = self.registration_context(plugin)?;
+        let binding = Self::generated_output_binding(plugin)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        self.register_with_approver_slice(
+        self.register_with_verified_output_policy_and_approver(
             plugin,
+            binding,
             reducer,
             driver,
             approver,
-            &approver_event_types,
-            context,
-            RegistrationOptions {
-                registration: None,
-                output_admission: Some(OutputAdmissionV1::try_new(
-                    plugin.id(),
-                    plugin.version(),
-                    policy,
-                    budget,
-                )?),
-            },
+            approver_event_types,
         )
     }
 
-    /// Register a Plugin with its complete host-verified output policy and budget.
+    /// Register a Plugin with its complete host-verified output-policy binding.
     ///
     /// A Plugin that emits drafts without this binding is rejected at the
     /// production Driver boundary; there is no implicit allow-all policy.
@@ -2673,24 +2642,15 @@ impl PluginRegistry {
     pub fn register_with_output_policy(
         &mut self,
         plugin: &dyn Plugin,
-        output_policy: pos_core::output_policy::OutputPolicyV1,
-        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        self.register_with_output_policy_and_approver(
-            plugin,
-            output_policy,
-            executable_budget,
-            reducer,
-            driver,
-            None,
-            std::iter::empty(),
-        )
+        self.register_with_verified_output_policy(plugin, binding, reducer, driver)
     }
 
-    /// Register a Plugin with its host-verified output policy, executable
-    /// budget, and optional action approver.
+    /// Register a Plugin with its host-verified output-policy binding and
+    /// optional action approver.
     ///
     /// # Errors
     /// Returns the runtime registration or output-admission error when the
@@ -2700,52 +2660,19 @@ impl PluginRegistry {
     pub fn register_with_output_policy_and_approver(
         &mut self,
         plugin: &dyn Plugin,
-        output_policy: pos_core::output_policy::OutputPolicyV1,
-        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
-        let context = self.registration_context(plugin)?;
-        let owned_event_types = &context.2.owned_event_types;
-        if let Some(declaration) =
-            output_policy
-                .fields()
-                .output_declarations
-                .iter()
-                .find(|declaration| {
-                    !owned_event_types
-                        .iter()
-                        .any(|kind| kind.as_str() == declaration.event_type())
-                })
-        {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: format!(
-                    "output policy declares event type '{}' outside the Plugin capability",
-                    declaration.event_type()
-                ),
-            });
-        }
-        let admission = OutputAdmissionV1::try_new(
-            plugin.id(),
-            plugin.version(),
-            output_policy,
-            executable_budget,
-        )?;
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        self.register_with_approver_slice(
+        self.register_with_verified_output_policy_and_approver(
             plugin,
+            binding,
             reducer,
             driver,
             approver,
-            &approver_event_types,
-            context,
-            RegistrationOptions {
-                registration: None,
-                output_admission: Some(admission),
-            },
+            approver_event_types,
         )
     }
 
@@ -2790,11 +2717,33 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            None,
+        )
+    }
+
+    fn register_with_verified_output_policy_inner(
+        &mut self,
+        plugin: &dyn Plugin,
+        binding: OutputPolicyBindingV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+        registration: Option<PluginRegistrationV1>,
+    ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
-        let authority = binding.into_authority();
-        let output_policy = authority.policy().clone();
-        let executable_budget = authority.budget().clone();
-        let artifacts = authority.resolve(plugin)?;
+        #[cfg(debug_assertions)]
+        if let Some(registration) = registration.as_ref() {
+            self.validate_registration_roles(registration)?;
+        }
+        let (output_policy, executable_budget, artifacts) = binding.into_parts();
         let closure = OutputPolicyClosureV1::from_artifacts(
             &output_policy.to_canonical_cbor(),
             &executable_budget.to_canonical_cbor(),
@@ -2835,7 +2784,7 @@ impl PluginRegistry {
             &approver_event_types,
             context,
             RegistrationOptions {
-                registration: None,
+                registration,
                 output_admission: Some(admission),
             },
         )
@@ -3091,14 +3040,62 @@ impl PluginRegistry {
         );
     }
 
-    /// Register a direct fixture driver with an explicit output policy.
+    /// Register a direct fixture driver with a host-verified output binding.
     ///
     /// This debug-only helper is for integration fixtures that exercise the
     /// production admission path without defining a full Plugin descriptor.
-    /// It never creates a policy or budget; both are supplied by the fixture.
+    /// The binding retains the complete closure before the driver is visible.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
-    pub fn register_test_driver_with_output_policy(
+    pub fn register_test_driver_with_verified_output_policy(
+        &mut self,
+        plugin_id: PluginId,
+        binding: OutputPolicyBindingV1,
+        driver: Box<dyn Driver>,
+    ) -> Result<(), RuntimeError> {
+        if self.plugins.contains_key(&plugin_id) {
+            return Err(RuntimeError::DuplicatePlugin {
+                id: plugin_id,
+                name: driver.name().to_owned(),
+            });
+        }
+        let (policy, budget, artifacts) = binding.into_parts();
+        let closure = OutputPolicyClosureV1::from_artifacts(
+            &policy.to_canonical_cbor(),
+            &budget.to_canonical_cbor(),
+            artifacts.implementation_artifact(),
+            artifacts.configuration_artifact(),
+            artifacts.execution_profile_artifact(),
+            artifacts.retention_policy_artifact(),
+        )?;
+        let plugin_version = closure.output_policy().fields().plugin_version.clone();
+        let admission = OutputAdmissionV1::try_new_verified(plugin_id, &plugin_version, closure)?;
+        let name = driver.name().to_owned();
+        self.plugins.insert(
+            plugin_id,
+            PluginEntry {
+                name,
+                version: plugin_version.to_owned(),
+                owned_event_types: admission
+                    .policy()
+                    .fields()
+                    .output_declarations
+                    .iter()
+                    .map(|declaration| Kind::new(declaration.event_type()))
+                    .collect(),
+                driver: Some(driver),
+                approver: None,
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: Some(admission),
+            },
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_test_driver_with_output_policy(
         &mut self,
         plugin_id: PluginId,
         plugin_version: &str,
@@ -6228,10 +6225,18 @@ mod tests {
             },
         )
         .test_ok();
-        reg.register_with_output_policy_and_approver(
+        let binding = OutputPolicyBindingV1::from_installed_source(
             &plugin,
+            InstalledOutputPolicySourceV1::Generated,
             policy,
             budget,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        reg.register_with_output_policy_and_approver(
+            &plugin,
+            binding,
             None,
             None,
             Some(Box::new(OverPolicyActionApprover)),

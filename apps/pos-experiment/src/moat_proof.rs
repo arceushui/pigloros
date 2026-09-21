@@ -39,8 +39,8 @@ use pos_plugin_world::{
 };
 use pos_runtime::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1,
-    implementation_artifact_hash_v1, reviewed_retention_policy_hash_v1, Driver,
-    DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
+    reviewed_retention_policy_hash_v1, Driver, DriverRecoveryEvidence, ObservationView,
+    RecoveryEventHeader, RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -73,68 +73,6 @@ const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.determinist
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
-/// Composition-root owner for the experiment's installed output artifacts.
-///
-/// The constructor is private so an experiment can only bind the exact
-/// implementation, configuration, execution profile, and retention leaves it
-/// selected before registration.
-struct InstalledExperimentOutputPolicyAuthority {
-    plugin_name: String,
-    plugin_version: String,
-    policy: OutputPolicyV1,
-    budget: ExecutableBudgetPolicyV1,
-    artifacts: pos_runtime::OutputPolicyArtifactInputV1,
-}
-
-impl InstalledExperimentOutputPolicyAuthority {
-    fn new(
-        plugin: &dyn Plugin,
-        policy: OutputPolicyV1,
-        budget: ExecutableBudgetPolicyV1,
-        implementation_artifact: &[u8],
-        configuration_artifact: &[u8],
-        execution_profile_artifact: &[u8],
-        retention_policy_artifact: &[u8],
-    ) -> Result<Self, pos_runtime::OutputAdmissionErrorV1> {
-        let artifacts = pos_runtime::OutputPolicyArtifactInputV1::from_host_owned_artifacts(
-            implementation_artifact,
-            configuration_artifact,
-            execution_profile_artifact,
-            retention_policy_artifact,
-        )?;
-        Ok(Self {
-            plugin_name: plugin.name().to_owned(),
-            plugin_version: plugin.version().to_owned(),
-            policy,
-            budget,
-            artifacts,
-        })
-    }
-}
-
-impl pos_runtime::OutputPolicyAuthorityV1 for InstalledExperimentOutputPolicyAuthority {
-    fn policy(&self) -> &OutputPolicyV1 {
-        &self.policy
-    }
-
-    fn budget(&self) -> &ExecutableBudgetPolicyV1 {
-        &self.budget
-    }
-
-    fn resolve(
-        &self,
-        plugin: &dyn Plugin,
-    ) -> Result<pos_runtime::OutputPolicyArtifactInputV1, pos_runtime::OutputAdmissionErrorV1> {
-        if plugin.name() != self.plugin_name {
-            return Err(pos_runtime::OutputAdmissionErrorV1::PluginMismatch);
-        }
-        if plugin.version() != self.plugin_version {
-            return Err(pos_runtime::OutputAdmissionErrorV1::PluginVersionMismatch);
-        }
-        Ok(self.artifacts.clone())
-    }
-}
-
 fn reviewed_output_binding(
     plugin: &dyn Plugin,
     event_types: &[&str],
@@ -159,7 +97,7 @@ fn reviewed_output_binding_with_limits(
     event_types: &[&str],
     profile_id: &str,
     cpu_reservations_us: [u32; 3],
-    implementation_artifact: &[u8],
+    _implementation_artifact: &[u8],
     configuration_details: &[u8],
     max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
@@ -231,10 +169,15 @@ fn reviewed_output_binding_with_limits(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let source = match plugin.name() {
+        "world" => pos_runtime::InstalledOutputPolicySourceV1::World,
+        "society" => pos_runtime::InstalledOutputPolicySourceV1::Society,
+        _ => pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+    };
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id: plugin.id(),
         plugin_version: plugin.version().to_owned(),
-        implementation_hash: implementation_artifact_hash_v1(implementation_artifact),
+        implementation_hash: source.implementation_artifact_hash(plugin),
         base_configuration_digest: pos_runtime::host_artifact_hash_v1(
             b"pigloros.base-configuration.v1",
             &configuration_artifact,
@@ -248,16 +191,14 @@ fn reviewed_output_binding_with_limits(
         name: name.to_owned(),
         reason: error.to_string(),
     })?;
-    let authority = InstalledExperimentOutputPolicyAuthority::new(
+    Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
+        source,
         policy,
         budget,
-        implementation_artifact,
-        &configuration_artifact,
-        &profile_artifact,
-        pos_runtime::reviewed_retention_policy_bytes_v1(),
-    )?;
-    Ok(pos_runtime::OutputPolicyBindingV1::new(Box::new(authority)))
+        configuration_details,
+        profile_id,
+    )?)
 }
 
 fn world_output_binding(

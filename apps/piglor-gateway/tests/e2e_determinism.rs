@@ -26,7 +26,10 @@ use pos_plugin_society::{
     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 };
 use pos_runtime::{
-    Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
+    canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
+    reviewed_retention_policy_hash_v1, Driver, ErasureExecutionHostV1,
+    InstalledOutputPolicySourceV1, ObservationView, OutputPolicyBindingV1, ProjectionKey,
+    RuntimeError, StepOutput,
 };
 use pos_state::{EntityStateProjection, ProjectionRegistry};
 use pos_store::{open_store, SeqRange, StoreConfig};
@@ -105,8 +108,10 @@ struct ObservationProbeDriver {
 }
 
 fn agent_output_binding(
-    plugin_id: PluginId,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error + Send + Sync>> {
+    plugin: &AgentPlugin,
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
+    let profile_artifact =
+        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -136,20 +141,24 @@ fn agent_output_binding(
             },
         ],
         plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
+            plugin_id: plugin.id(),
             cpu_reservations_us: [10; 3],
         }],
-        accounting_semantics: 0,
-        execution_profile_hash: Hash::from_bytes([11; 32]),
+        execution_profile_hash: execution_profile_artifact_hash_v1(&profile_artifact),
         max_pass_wall_duration_us: 1_000,
     })?;
+    let configuration_artifact = canonical_plugin_configuration_v1(plugin, &[])?;
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id,
-        plugin_version: "0.1.0".to_owned(),
-        implementation_hash: Hash::from_bytes([12; 32]),
-        base_configuration_digest: Hash::from_bytes([13; 32]),
+        plugin_id: plugin.id(),
+        plugin_version: plugin.version().to_owned(),
+        implementation_hash: InstalledOutputPolicySourceV1::Agent
+            .implementation_artifact_hash(plugin),
+        base_configuration_digest: host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        ),
         executable_profile_hash: budget.digest(),
-        retention_policy_hash: Hash::from_bytes([14; 32]),
+        retention_policy_hash: reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
         output_declarations: vec![OutputDeclarationV1::new(
             EVENT_TYPE_ACTION.to_owned(),
@@ -160,13 +169,21 @@ fn agent_output_binding(
             None,
         )?],
     })?;
-    Ok((policy, budget))
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        InstalledOutputPolicySourceV1::Agent,
+        policy,
+        budget,
+        &[],
+        "deterministic-local-v1",
+    )?)
 }
 
 fn empty_output_binding(
-    plugin_id: PluginId,
-    plugin_version: &str,
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error + Send + Sync>> {
+    plugin: &dyn Plugin,
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
+    let profile_artifact =
+        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -196,24 +213,35 @@ fn empty_output_binding(
             },
         ],
         plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
+            plugin_id: plugin.id(),
             cpu_reservations_us: [10; 3],
         }],
-        accounting_semantics: 0,
-        execution_profile_hash: Hash::from_bytes([21; 32]),
+        execution_profile_hash: execution_profile_artifact_hash_v1(&profile_artifact),
         max_pass_wall_duration_us: 1_000,
     })?;
+    let configuration_artifact = canonical_plugin_configuration_v1(plugin, &[])?;
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id,
-        plugin_version: plugin_version.to_owned(),
-        implementation_hash: Hash::from_bytes([22; 32]),
-        base_configuration_digest: Hash::from_bytes([23; 32]),
+        plugin_id: plugin.id(),
+        plugin_version: plugin.version().to_owned(),
+        implementation_hash: InstalledOutputPolicySourceV1::Generated
+            .implementation_artifact_hash(plugin),
+        base_configuration_digest: host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        ),
         executable_profile_hash: budget.digest(),
-        retention_policy_hash: Hash::from_bytes([24; 32]),
+        retention_policy_hash: reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
         output_declarations: Vec::new(),
     })?;
-    Ok((policy, budget))
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        InstalledOutputPolicySourceV1::Generated,
+        policy,
+        budget,
+        &[],
+        "deterministic-local-v1",
+    )?)
 }
 
 impl Driver for ObservationProbeDriver {
@@ -638,15 +666,13 @@ fn register_static_plugins(
     society: &SocietyPlugin,
     probe: &FixturePlugin,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (observation_policy, observation_budget) =
-        empty_output_binding(observation.id(), observation.version())?;
-    let (society_policy, society_budget) = empty_output_binding(society.id(), society.version())?;
-    let (probe_policy, probe_budget) = empty_output_binding(probe.id(), probe.version())?;
+    let observation_binding = empty_output_binding(observation)?;
+    let society_binding = empty_output_binding(society)?;
+    let probe_binding = empty_output_binding(probe)?;
     experiment
         .register_with_output_policy(
             observation,
-            observation_policy,
-            observation_budget,
+            observation_binding,
             Some(Box::new(EntityStateProjection)),
             None,
         )
@@ -654,8 +680,7 @@ fn register_static_plugins(
     experiment
         .register_with_output_policy(
             society,
-            society_policy,
-            society_budget,
+            society_binding,
             Some(Box::new(SocietyReducer)),
             None,
         )
@@ -663,8 +688,7 @@ fn register_static_plugins(
     experiment
         .register_with_output_policy(
             probe,
-            probe_policy,
-            probe_budget,
+            probe_binding,
             None,
             Some(Box::new(ObservationProbeDriver {
                 subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
@@ -690,8 +714,8 @@ fn register_experiment(
     let fast = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
     let slow = AgentPlugin::new();
-    let (fast_policy, fast_budget) = agent_output_binding(fast.id())?;
-    let (slow_policy, slow_budget) = agent_output_binding(slow.id())?;
+    let fast_binding = agent_output_binding(&fast)?;
+    let slow_binding = agent_output_binding(&slow)?;
     let mut experiment = Experiment::new(ExperimentConfig {
         name: "multi-rate-host".to_owned(),
         stop: StopCondition::MaxTicks(10),
@@ -703,8 +727,7 @@ fn register_experiment(
     experiment
         .register_with_output_policy(
             &fast,
-            fast_policy,
-            fast_budget,
+            fast_binding,
             Some(Box::new(AgentReducer)),
             Some(Box::new(AgentDriver::new(
                 scenario.fast_entity,
@@ -721,8 +744,7 @@ fn register_experiment(
     experiment
         .register_with_output_policy(
             &slow,
-            slow_policy,
-            slow_budget,
+            slow_binding,
             Some(Box::new(AgentReducer)),
             Some(Box::new(
                 AgentDriver::new(

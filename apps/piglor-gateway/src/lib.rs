@@ -64,68 +64,6 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
-/// Composition-root owner for the Gateway's installed output artifacts.
-///
-/// This type and its constructor stay private to the Gateway.  The runtime
-/// receives only the host authority trait object after the Gateway has bound
-/// the exact implementation, configuration, profile, and retention leaves.
-struct InstalledGatewayOutputPolicyAuthority {
-    plugin_name: String,
-    plugin_version: String,
-    policy: OutputPolicyV1,
-    budget: ExecutableBudgetPolicyV1,
-    artifacts: pos_runtime::OutputPolicyArtifactInputV1,
-}
-
-impl InstalledGatewayOutputPolicyAuthority {
-    fn new(
-        plugin: &dyn Plugin,
-        policy: OutputPolicyV1,
-        budget: ExecutableBudgetPolicyV1,
-        implementation_artifact: &[u8],
-        configuration_artifact: &[u8],
-        execution_profile_artifact: &[u8],
-        retention_policy_artifact: &[u8],
-    ) -> Result<Self, pos_runtime::OutputAdmissionErrorV1> {
-        let artifacts = pos_runtime::OutputPolicyArtifactInputV1::from_host_owned_artifacts(
-            implementation_artifact,
-            configuration_artifact,
-            execution_profile_artifact,
-            retention_policy_artifact,
-        )?;
-        Ok(Self {
-            plugin_name: plugin.name().to_owned(),
-            plugin_version: plugin.version().to_owned(),
-            policy,
-            budget,
-            artifacts,
-        })
-    }
-}
-
-impl pos_runtime::OutputPolicyAuthorityV1 for InstalledGatewayOutputPolicyAuthority {
-    fn policy(&self) -> &OutputPolicyV1 {
-        &self.policy
-    }
-
-    fn budget(&self) -> &ExecutableBudgetPolicyV1 {
-        &self.budget
-    }
-
-    fn resolve(
-        &self,
-        plugin: &dyn Plugin,
-    ) -> Result<pos_runtime::OutputPolicyArtifactInputV1, pos_runtime::OutputAdmissionErrorV1> {
-        if plugin.name() != self.plugin_name {
-            return Err(pos_runtime::OutputAdmissionErrorV1::PluginMismatch);
-        }
-        if plugin.version() != self.plugin_version {
-            return Err(pos_runtime::OutputAdmissionErrorV1::PluginVersionMismatch);
-        }
-        Ok(self.artifacts.clone())
-    }
-}
-
 fn gateway_output_binding_with_inputs(
     plugin: &dyn Plugin,
     configuration_details: &[u8],
@@ -201,7 +139,8 @@ fn gateway_output_binding_with_inputs(
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id: plugin.id(),
         plugin_version: plugin.version().to_owned(),
-        implementation_hash: pos_runtime::implementation_artifact_hash_v1(include_bytes!("lib.rs")),
+        implementation_hash: pos_runtime::InstalledOutputPolicySourceV1::Gateway
+            .implementation_artifact_hash(plugin),
         base_configuration_digest: pos_runtime::host_artifact_hash_v1(
             b"pigloros.base-configuration.v1",
             &configuration_artifact,
@@ -215,16 +154,14 @@ fn gateway_output_binding_with_inputs(
         name: plugin_name.clone(),
         reason: error.to_string(),
     })?;
-    let authority = InstalledGatewayOutputPolicyAuthority::new(
+    Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Gateway,
         policy,
         budget,
-        include_bytes!("lib.rs"),
-        &configuration_artifact,
-        &profile_artifact,
-        pos_runtime::reviewed_retention_policy_bytes_v1(),
-    )?;
-    Ok(pos_runtime::OutputPolicyBindingV1::new(Box::new(authority)))
+        configuration_details,
+        profile_id,
+    )?)
 }
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).

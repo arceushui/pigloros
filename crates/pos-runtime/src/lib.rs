@@ -52,9 +52,9 @@ pub use erasure_host::{
 };
 pub use error::{ActionSubmissionError, RuntimeError};
 pub use output_admission::{
-    validate_output_policy_artifacts_v1, OutputAdmissionErrorV1, OutputAdmissionV1,
-    OutputPolicyArtifactInputV1, OutputPolicyAuthorityV1, OutputPolicyBindingV1,
-    OutputPolicyClosureV1, MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
+    validate_output_policy_artifacts_v1, InstalledOutputPolicySourceV1, OutputAdmissionErrorV1,
+    OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1,
+    MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
 };
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};

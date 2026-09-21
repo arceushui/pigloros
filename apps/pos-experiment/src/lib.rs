@@ -1172,18 +1172,12 @@ impl Experiment {
     pub fn register_with_output_policy(
         &mut self,
         plugin: &dyn pos_core::Plugin,
-        output_policy: pos_core::output_policy::OutputPolicyV1,
-        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        binding: pos_runtime::OutputPolicyBindingV1,
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_with_output_policy(
-            plugin,
-            output_policy,
-            executable_budget,
-            reducer,
-            driver,
-        )
+        self.registry
+            .register_with_output_policy(plugin, binding, reducer, driver)
     }
 
     /// Register a Plugin with its host-verified output policy, executable
@@ -1197,8 +1191,7 @@ impl Experiment {
     pub fn register_with_output_policy_and_approver(
         &mut self,
         plugin: &dyn pos_core::Plugin,
-        output_policy: pos_core::output_policy::OutputPolicyV1,
-        executable_budget: pos_core::ExecutableBudgetPolicyV1,
+        binding: pos_runtime::OutputPolicyBindingV1,
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
         approver: Option<Box<dyn pos_core::ActionApprover>>,
@@ -1206,8 +1199,7 @@ impl Experiment {
     ) -> Result<(), pos_runtime::RuntimeError> {
         self.registry.register_with_output_policy_and_approver(
             plugin,
-            output_policy,
-            executable_budget,
+            binding,
             reducer,
             driver,
             approver,
@@ -6821,6 +6813,10 @@ mod coverage_entrypoints {
 
     fn register_schema_failure_driver(registry: &mut PluginRegistry) {
         let plugin_id = PluginId::new();
+        let binding_plugin = CoveragePlugin { id: plugin_id };
+        let profile_artifact =
+            pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
         let declaration = OutputDeclarationV1::new(
             "coverage.unknown".to_owned(),
             OutputAuthorityV1::Authoritative,
@@ -6863,27 +6859,41 @@ mod coverage_entrypoints {
                 cpu_reservations_us: [10; 3],
             }],
             accounting_semantics: 0,
-            execution_profile_hash: Hash::from_bytes([1; 32]),
+            execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(
+                &profile_artifact,
+            ),
             max_pass_wall_duration_us: 1_000,
         })
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
         let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
             plugin_id,
-            plugin_version: "test".to_owned(),
-            implementation_hash: Hash::from_bytes([2; 32]),
-            base_configuration_digest: Hash::from_bytes([3; 32]),
+            plugin_version: binding_plugin.version().to_owned(),
+            implementation_hash: pos_runtime::InstalledOutputPolicySourceV1::Generated
+                .implementation_artifact_hash(&binding_plugin),
+            base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+                b"pigloros.base-configuration.v1",
+                &pos_runtime::canonical_plugin_configuration_v1(&binding_plugin, &[])
+                    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error))),
+            ),
             executable_profile_hash: budget.digest(),
-            retention_policy_hash: Hash::from_bytes([4; 32]),
+            retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
             policy_revision: 1,
             output_declarations: vec![declaration],
         })
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &binding_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
         registry
-            .register_test_driver_with_output_policy(
+            .register_test_driver_with_verified_output_policy(
                 plugin_id,
-                "test",
-                policy,
-                budget,
+                binding,
                 Box::new(UnknownDraftDriver),
             )
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));

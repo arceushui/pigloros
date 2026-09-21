@@ -60,12 +60,35 @@ pub enum OutputAdmissionErrorV1 {
     ArtifactIdentityMismatch { kind: &'static str },
 }
 
-/// Exact artifacts returned by an installed host owner for one policy.
+/// Installed implementation source selected by a trusted composition root.
 ///
-/// The fields are private so callers can only hand them to the runtime
-/// verifier through an [`OutputPolicyAuthorityV1`].
+/// These variants are the only artifact roots accepted by production output
+/// admission.  The runtime resolves their exact bytes from the repository's
+/// installed source tree; callers cannot inject replacement implementation,
+/// profile, or retention bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstalledOutputPolicySourceV1 {
+    /// The bounded generated source used only by debug registration fixtures.
+    #[cfg(debug_assertions)]
+    Generated,
+    /// The Gateway composition root.
+    Gateway,
+    /// The World plugin composition root.
+    World,
+    /// The Rule Agent plugin composition root.
+    RuleAgent,
+    /// The general Agent plugin composition root.
+    Agent,
+    /// The Synthetic Observation plugin composition root.
+    SyntheticObservation,
+    /// The Society plugin composition root.
+    Society,
+    /// The experiment proof composition root.
+    Experiment,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OutputPolicyArtifactInputV1 {
+struct OutputPolicyArtifactInputV1 {
     implementation_artifact: Vec<u8>,
     configuration_artifact: Vec<u8>,
     execution_profile_artifact: Vec<u8>,
@@ -73,17 +96,7 @@ pub struct OutputPolicyArtifactInputV1 {
 }
 
 impl OutputPolicyArtifactInputV1 {
-    /// Construct the bounded artifact view returned by a host-owned authority.
-    ///
-    /// The runtime still performs native decoding and identity checks when it
-    /// mints a closure.  This boundary only lets an authority copy its exact
-    /// installed leaves without exposing closure construction to callers.
-    ///
-    /// # Errors
-    /// Returns [`OutputAdmissionErrorV1::ArtifactInvalid`] when a leaf exceeds
-    /// its bounded host envelope.
-    #[doc(hidden)]
-    pub fn from_host_owned_artifacts(
+    fn from_slices(
         implementation_artifact: &[u8],
         configuration_artifact: &[u8],
         execution_profile_artifact: &[u8],
@@ -103,57 +116,157 @@ impl OutputPolicyArtifactInputV1 {
         })
     }
 
-    #[must_use]
-    pub fn implementation_artifact(&self) -> &[u8] {
+    pub(crate) fn implementation_artifact(&self) -> &[u8] {
         &self.implementation_artifact
     }
 
-    #[must_use]
-    pub fn configuration_artifact(&self) -> &[u8] {
+    pub(crate) fn configuration_artifact(&self) -> &[u8] {
         &self.configuration_artifact
     }
 
-    #[must_use]
-    pub fn execution_profile_artifact(&self) -> &[u8] {
+    pub(crate) fn execution_profile_artifact(&self) -> &[u8] {
         &self.execution_profile_artifact
     }
 
-    #[must_use]
-    pub fn retention_policy_artifact(&self) -> &[u8] {
+    pub(crate) fn retention_policy_artifact(&self) -> &[u8] {
         &self.retention_policy_artifact
     }
 }
 
-/// Host capability used by the runtime to resolve exact policy artifacts.
-pub trait OutputPolicyAuthorityV1: Send + Sync {
-    /// Return the exact policy selected by the installed host owner.
-    fn policy(&self) -> &OutputPolicyV1;
+impl InstalledOutputPolicySourceV1 {
+    fn accepts_plugin(self, plugin: &dyn Plugin) -> bool {
+        match self {
+            #[cfg(debug_assertions)]
+            Self::Generated => true,
+            Self::Gateway => plugin.name() == "gateway-world-actions",
+            Self::World => plugin.name() == "world",
+            Self::RuleAgent => plugin.name() == "rule-agent",
+            Self::Agent => plugin.name() == "agent",
+            Self::SyntheticObservation => plugin.name() == "synthetic-obs",
+            Self::Society => plugin.name() == "society",
+            Self::Experiment => matches!(
+                plugin.name(),
+                "proof-agent" | "proof-society" | "successful-sibling" | "failure-probe"
+            ),
+        }
+    }
 
-    /// Return the exact executable budget selected by the installed host owner.
-    fn budget(&self) -> &ExecutableBudgetPolicyV1;
+    fn implementation_artifact(self, plugin: &dyn Plugin) -> Vec<u8> {
+        match self {
+            #[cfg(debug_assertions)]
+            Self::Generated => generated_implementation_artifact_v1(plugin),
+            Self::Gateway => include_bytes!("../../../apps/piglor-gateway/src/lib.rs").to_vec(),
+            Self::World => include_bytes!("../../../plugins/world/src/lib.rs").to_vec(),
+            Self::RuleAgent => {
+                include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs").to_vec()
+            }
+            Self::Agent => include_bytes!("../../../plugins/agent/src/lib.rs").to_vec(),
+            Self::SyntheticObservation => {
+                include_bytes!("../../../plugins/observations/synthetic/src/lib.rs").to_vec()
+            }
+            Self::Society => include_bytes!("../../../plugins/society/src/lib.rs").to_vec(),
+            Self::Experiment => {
+                include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs").to_vec()
+            }
+        }
+    }
 
-    /// Resolve artifacts for the registered Plugin.
-    fn resolve(
-        &self,
-        plugin: &dyn Plugin,
-    ) -> Result<OutputPolicyArtifactInputV1, OutputAdmissionErrorV1>;
+    /// Hash the exact implementation source owned by this installed root.
+    #[must_use]
+    pub fn implementation_artifact_hash(self, plugin: &dyn Plugin) -> Hash {
+        crate::reviewed_policy::implementation_artifact_hash_v1(
+            &self.implementation_artifact(plugin),
+        )
+    }
 }
 
-/// A policy and budget bound to an installed host authority.
+/// Deterministic implementation bytes for the debug generated source.
+///
+/// This remains a bounded fixture source; release registration has no generated
+/// fallback and must select one of the installed composition roots above.
+#[cfg(debug_assertions)]
+pub(crate) fn generated_implementation_artifact_v1(plugin: &dyn Plugin) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"pigloros.generated-implementation.v1\0");
+    hash_framed_bytes(&mut bytes, plugin.name().as_bytes());
+    hash_framed_bytes(&mut bytes, plugin.version().as_bytes());
+    let mut event_types = plugin
+        .capability()
+        .owned_event_types
+        .into_iter()
+        .map(|kind| kind.as_str().to_owned())
+        .collect::<Vec<_>>();
+    event_types.sort_unstable();
+    for event_type in event_types {
+        hash_framed_bytes(&mut bytes, event_type.as_bytes());
+    }
+    bytes
+}
+
+#[cfg(debug_assertions)]
+fn hash_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    output.extend_from_slice(bytes);
+}
+
+/// A host-owned output policy binding with no caller-supplied artifact leaves.
 pub struct OutputPolicyBindingV1 {
-    authority: Box<dyn OutputPolicyAuthorityV1>,
+    policy: OutputPolicyV1,
+    budget: ExecutableBudgetPolicyV1,
+    artifacts: OutputPolicyArtifactInputV1,
 }
 
 impl OutputPolicyBindingV1 {
-    /// Bind the exact policy, budget, and source artifacts owned by a host
-    /// authority.
-    #[must_use]
-    pub fn new(authority: Box<dyn OutputPolicyAuthorityV1>) -> Self {
-        Self { authority }
+    /// Resolve the exact installed source leaves and bind them to one policy.
+    ///
+    /// # Errors
+    /// Returns a closed artifact or profile error before registration can
+    /// mutate the registry.
+    pub fn from_installed_source(
+        plugin: &dyn Plugin,
+        source: InstalledOutputPolicySourceV1,
+        policy: OutputPolicyV1,
+        budget: ExecutableBudgetPolicyV1,
+        configuration_details: &[u8],
+        profile_id: &str,
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        if !source.accepts_plugin(plugin) {
+            return Err(OutputAdmissionErrorV1::PluginMismatch);
+        }
+        let configuration_artifact = crate::reviewed_policy::canonical_plugin_configuration_v1(
+            plugin,
+            configuration_details,
+        )
+        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration",
+        })?;
+        let execution_profile_artifact =
+            pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
+                .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
+        let implementation_artifact = source.implementation_artifact(plugin);
+        let retention_policy_artifact =
+            crate::reviewed_policy::reviewed_retention_policy_bytes_v1();
+        let artifacts = OutputPolicyArtifactInputV1::from_slices(
+            &implementation_artifact,
+            &configuration_artifact,
+            &execution_profile_artifact,
+            retention_policy_artifact,
+        )?;
+        Ok(Self {
+            policy,
+            budget,
+            artifacts,
+        })
     }
 
-    pub(crate) fn into_authority(self) -> Box<dyn OutputPolicyAuthorityV1> {
-        self.authority
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        OutputPolicyV1,
+        ExecutableBudgetPolicyV1,
+        OutputPolicyArtifactInputV1,
+    ) {
+        (self.policy, self.budget, self.artifacts)
     }
 }
 

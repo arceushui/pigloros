@@ -460,10 +460,45 @@ mod tests {
     const PLUGIN_HASH: [u8; 32] = [3; 32];
     const PROVIDER_HASH: [u8; 32] = [4; 32];
 
+    struct BindingPlugin {
+        id: PluginId,
+        version: &'static str,
+    }
+
+    impl pos_core::Plugin for BindingPlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "agent"
+        }
+
+        fn version(&self) -> &'static str {
+            self.version
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability {
+                owned_event_types: vec![
+                    pos_core::Kind::new(EVENT_TYPE_ACTION),
+                    pos_core::Kind::new(RECORDER_EVENT_TYPE),
+                ],
+                ..pos_core::Capability::default()
+            }
+        }
+    }
+
     fn provider_output_binding(
         plugin_id: PluginId,
-        plugin_version: &str,
-    ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+        plugin_version: &'static str,
+    ) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+        let plugin = BindingPlugin {
+            id: plugin_id,
+            version: plugin_version,
+        };
+        let profile_artifact =
+            pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
             workload_profile: WorkloadProfileV1::Interactive,
@@ -496,17 +531,23 @@ mod tests {
                 plugin_id,
                 cpu_reservations_us: [10; 3],
             }],
-            accounting_semantics: 0,
-            execution_profile_hash: Hash::from_bytes([41; 32]),
+            execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(
+                &profile_artifact,
+            ),
             max_pass_wall_duration_us: 1_000,
         })?;
+        let configuration_artifact = pos_runtime::canonical_plugin_configuration_v1(&plugin, &[])?;
         let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
             plugin_id,
             plugin_version: plugin_version.to_owned(),
-            implementation_hash: Hash::from_bytes([42; 32]),
-            base_configuration_digest: Hash::from_bytes([43; 32]),
+            implementation_hash: pos_runtime::InstalledOutputPolicySourceV1::Agent
+                .implementation_artifact_hash(&plugin),
+            base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+                b"pigloros.base-configuration.v1",
+                &configuration_artifact,
+            ),
             executable_profile_hash: budget.digest(),
-            retention_policy_hash: Hash::from_bytes([44; 32]),
+            retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
             policy_revision: 1,
             output_declarations: vec![
                 OutputDeclarationV1::new(
@@ -527,7 +568,14 @@ mod tests {
                 )?,
             ],
         })?;
-        Ok((policy, budget))
+        Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Agent,
+            policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )?)
     }
 
     struct HostConfigurationFixture {
@@ -593,14 +641,11 @@ mod tests {
             ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
         registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-        let (policy, budget) =
-            provider_output_binding(host.plugin_id, host.plugin_version).test_ok();
+        let binding = provider_output_binding(host.plugin_id, host.plugin_version).test_ok();
         registry
-            .register_test_driver_with_output_policy(
+            .register_test_driver_with_verified_output_policy(
                 host.plugin_id,
-                host.plugin_version,
-                policy,
-                budget,
+                binding,
                 Box::new(driver),
             )
             .test_ok();

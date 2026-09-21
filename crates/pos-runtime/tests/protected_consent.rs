@@ -15,8 +15,9 @@ use pos_core::{
     PluginCpuReservationV1, PluginId, ProposedAction, Reducer, State, WorkloadProfileV1,
 };
 use pos_runtime::{
-    ActionSubmissionError, Driver, ObservationView, PluginRegistry as RuntimePluginRegistry,
-    RuntimeError, StepOutput, TimelineHistorySegment,
+    ActionSubmissionError, Driver, InstalledOutputPolicySourceV1, ObservationView,
+    OutputPolicyBindingV1, PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput,
+    TimelineHistorySegment,
 };
 use pos_store::{open_store, EventStore, StoreConfig};
 use std::{
@@ -49,6 +50,32 @@ fn gated_store() -> Box<dyn EventStore> {
     store
 }
 
+struct TestBindingPlugin {
+    id: PluginId,
+    event_type: Kind,
+}
+
+impl Plugin for TestBindingPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "agent"
+    }
+
+    fn version(&self) -> &'static str {
+        "test"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![self.event_type.clone()],
+            ..Capability::default()
+        }
+    }
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn register_output_driver(
     registry: &mut RuntimePluginRegistry,
@@ -56,6 +83,13 @@ fn register_output_driver(
     driver: Box<dyn Driver>,
 ) {
     let plugin_id = PluginId::new();
+    let binding_plugin = TestBindingPlugin {
+        id: plugin_id,
+        event_type: Kind::new(event_type),
+    };
+    let profile_artifact = test_ok(pos_conformance::host_verified_execution_profile_bytes_v1(
+        "deterministic-local-v1",
+    ));
     let budget = test_ok(ExecutableBudgetPolicyV1::new(
         ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -90,7 +124,9 @@ fn register_output_driver(
                 cpu_reservations_us: [10; 3],
             }],
             accounting_semantics: 0,
-            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(
+                &profile_artifact,
+            ),
             max_pass_wall_duration_us: 1_000,
         },
     ));
@@ -105,16 +141,29 @@ fn register_output_driver(
     let policy = test_ok(OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id,
         plugin_version: "test".to_owned(),
-        implementation_hash: Hash::from_bytes([0x42; 32]),
-        base_configuration_digest: Hash::from_bytes([0x43; 32]),
+        implementation_hash: InstalledOutputPolicySourceV1::Agent
+            .implementation_artifact_hash(&binding_plugin),
+        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &test_ok(pos_runtime::canonical_plugin_configuration_v1(
+                &binding_plugin,
+                &[],
+            )),
+        ),
         executable_profile_hash: budget.digest(),
-        retention_policy_hash: Hash::from_bytes([0x44; 32]),
+        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
         output_declarations: vec![declaration],
     }));
-    test_ok(
-        registry.register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver),
-    );
+    let binding = test_ok(OutputPolicyBindingV1::from_installed_source(
+        &binding_plugin,
+        InstalledOutputPolicySourceV1::Agent,
+        policy,
+        budget,
+        &[],
+        "deterministic-local-v1",
+    ));
+    test_ok(registry.register_test_driver_with_verified_output_policy(plugin_id, binding, driver));
 }
 
 /// Bind the host-owned erasure gate for all ordinary live-registry fixtures.

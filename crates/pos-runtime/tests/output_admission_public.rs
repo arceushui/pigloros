@@ -8,9 +8,8 @@ use pos_core::{
     Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
 };
 use pos_runtime::{
-    validate_output_policy_artifacts_v1, Driver, ObservationView, OutputAdmissionErrorV1,
-    OutputAdmissionV1, OutputPolicyArtifactInputV1, OutputPolicyAuthorityV1, PluginRegistry,
-    RuntimeError, StepOutput,
+    validate_output_policy_artifacts_v1, Driver, InstalledOutputPolicySourceV1, ObservationView,
+    OutputAdmissionErrorV1, OutputAdmissionV1, PluginRegistry, RuntimeError, StepOutput,
 };
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -164,64 +163,10 @@ fn multi_fidelity_policy(
     })?)
 }
 
-struct FixtureInstalledAuthority {
-    plugin_name: String,
-    plugin_version: String,
-    policy: OutputPolicyV1,
-    budget: ExecutableBudgetPolicyV1,
-    artifacts: OutputPolicyArtifactInputV1,
-}
-
-impl FixtureInstalledAuthority {
-    fn new(
-        plugin: &FixturePlugin,
-        policy: OutputPolicyV1,
-        budget: ExecutableBudgetPolicyV1,
-        implementation_artifact: &[u8],
-        configuration_artifact: &[u8],
-        profile_artifact: &[u8],
-        retention_artifact: &[u8],
-    ) -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            plugin_name: plugin.name().to_owned(),
-            plugin_version: plugin.version().to_owned(),
-            policy,
-            budget,
-            artifacts: OutputPolicyArtifactInputV1::from_host_owned_artifacts(
-                implementation_artifact,
-                configuration_artifact,
-                profile_artifact,
-                retention_artifact,
-            )?,
-        })
-    }
-}
-
-impl OutputPolicyAuthorityV1 for FixtureInstalledAuthority {
-    fn policy(&self) -> &OutputPolicyV1 {
-        &self.policy
-    }
-
-    fn budget(&self) -> &ExecutableBudgetPolicyV1 {
-        &self.budget
-    }
-
-    fn resolve(
-        &self,
-        plugin: &dyn Plugin,
-    ) -> Result<OutputPolicyArtifactInputV1, OutputAdmissionErrorV1> {
-        if plugin.name() != self.plugin_name {
-            return Err(OutputAdmissionErrorV1::PluginMismatch);
-        }
-        if plugin.version() != self.plugin_version {
-            return Err(OutputAdmissionErrorV1::PluginVersionMismatch);
-        }
-        Ok(self.artifacts.clone())
-    }
-}
-
 struct FixtureBinding {
     binding: pos_runtime::OutputPolicyBindingV1,
+    policy: OutputPolicyV1,
+    budget: ExecutableBudgetPolicyV1,
     output_policy_bytes: Vec<u8>,
     executable_budget_bytes: Vec<u8>,
     implementation_artifact: Vec<u8>,
@@ -231,9 +176,16 @@ struct FixtureBinding {
 }
 
 fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Error>> {
+    verified_binding_with_event_types(plugin, &["plugin.output"])
+}
+
+fn verified_binding_with_event_types(
+    plugin: &FixturePlugin,
+    event_types: &[&str],
+) -> Result<FixtureBinding, Box<dyn Error>> {
     let profile_artifact =
         pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
-    let implementation_artifact = b"output-admission-fixture-implementation";
+    let implementation_artifact = include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs");
     let configuration_details = b"fixture-configuration";
     let configuration_artifact =
         pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details)?;
@@ -273,14 +225,19 @@ fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Er
         execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact),
         max_pass_wall_duration_us: 1_000,
     })?;
-    let declaration = OutputDeclarationV1::new(
-        "plugin.output".to_owned(),
-        OutputAuthorityV1::Authoritative,
-        OutputFidelityV1::L0,
-        16,
-        None,
-        None,
-    )?;
+    let declarations = event_types
+        .iter()
+        .map(|event_type| {
+            OutputDeclarationV1::new(
+                (*event_type).to_owned(),
+                OutputAuthorityV1::Authoritative,
+                OutputFidelityV1::L0,
+                16,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id: plugin.id(),
         plugin_version: plugin.version().to_owned(),
@@ -292,20 +249,21 @@ fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Er
         executable_profile_hash: budget.digest(),
         retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
-        output_declarations: vec![declaration],
+        output_declarations: declarations,
     })?;
     let retention_artifact = pos_runtime::reviewed_retention_policy_bytes_v1().to_vec();
-    let authority = FixtureInstalledAuthority::new(
+    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
         policy.clone(),
         budget.clone(),
-        implementation_artifact,
-        &configuration_artifact,
-        &profile_artifact,
-        &retention_artifact,
+        configuration_details,
+        "deterministic-local-v1",
     )?;
     Ok(FixtureBinding {
-        binding: pos_runtime::OutputPolicyBindingV1::new(Box::new(authority)),
+        binding,
+        policy,
+        budget,
         output_policy_bytes: policy.to_canonical_cbor(),
         executable_budget_bytes: budget.to_canonical_cbor(),
         implementation_artifact: implementation_artifact.to_vec(),
@@ -671,20 +629,19 @@ fn output_admission_accounts_for_each_fidelity_level() -> TestResult {
 
 #[test]
 fn registry_replay_identity_covers_policy_and_budget_variants() -> TestResult {
-    for workload_profile in [
+    for _workload_profile in [
         WorkloadProfileV1::Interactive,
         WorkloadProfileV1::Fork,
         WorkloadProfileV1::Research,
     ] {
-        let plugin_id = PluginId::new();
-        let budget =
-            budget_with_profile(plugin_id, workload_profile, 16, 2, 32, 100, [10, 10, 10])?;
-        let policy = multi_fidelity_policy(plugin_id, &budget)?;
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+        };
+        let source = verified_binding(&plugin)?;
         let mut registry = PluginRegistry::new();
         registry.register_with_output_policy(
-            &FixturePlugin { id: plugin_id },
-            policy,
-            budget,
+            &plugin,
+            source.binding,
             None,
             Some(Box::new(FixtureDriver)),
         )?;
@@ -774,7 +731,7 @@ impl Plugin for FixturePlugin {
     }
 
     fn name(&self) -> &'static str {
-        "output-admission-fixture"
+        "rule-agent"
     }
 
     fn version(&self) -> &'static str {
@@ -853,18 +810,18 @@ fn public_tick_and_step_report_output_admission_failures() -> TestResult {
 
 #[test]
 fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult {
-    let plugin_id = PluginId::new();
-    let budget = budget(plugin_id)?;
-    let policy = policy(plugin_id, &budget)?;
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let source = verified_binding(&plugin)?;
     let timeline = pos_core::TimelineId::new();
 
     let mut admitted = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
     admitted.register_with_output_policy(
-        &FixturePlugin { id: plugin_id },
-        policy,
-        budget,
+        &plugin,
+        source.binding,
         None,
         Some(Box::new(FixtureDriver)),
     )?;
@@ -892,35 +849,13 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
 
 #[test]
 fn registry_rejects_policy_declarations_outside_plugin_capability() -> TestResult {
-    let plugin_id = PluginId::new();
-    let budget = budget(plugin_id)?;
-    let declaration = OutputDeclarationV1::new(
-        "plugin.foreign".to_owned(),
-        OutputAuthorityV1::Authoritative,
-        OutputFidelityV1::L0,
-        16,
-        None,
-        None,
-    )?;
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id,
-        plugin_version: "1.0.0".to_owned(),
-        implementation_hash: Hash::from_bytes([1; 32]),
-        base_configuration_digest: Hash::from_bytes([2; 32]),
-        executable_profile_hash: budget.digest(),
-        retention_policy_hash: Hash::from_bytes([3; 32]),
-        policy_revision: 1,
-        output_declarations: vec![declaration],
-    })?;
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let source = verified_binding_with_event_types(&plugin, &["plugin.foreign"])?;
     let mut registry = PluginRegistry::new();
     assert!(matches!(
-        registry.register_with_output_policy(
-            &FixturePlugin { id: plugin_id },
-            policy,
-            budget,
-            None,
-            None,
-        ),
+        registry.register_with_output_policy(&plugin, source.binding, None, None,),
         Err(RuntimeError::CapabilityMismatch { .. })
     ));
     Ok(())
@@ -1069,19 +1004,22 @@ fn generated_registration_rejects_invalid_owned_event_declaration() {
 
 #[test]
 fn explicit_registration_rejects_policy_budget_identity_mismatch() -> TestResult {
-    let plugin_id = PluginId::new();
-    let executable_budget = budget(plugin_id)?;
-    let policy = policy(plugin_id, &executable_budget)?;
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let source = verified_binding(&plugin)?;
     let other_budget = budget(PluginId::new())?;
+    let mismatched_binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        &plugin,
+        InstalledOutputPolicySourceV1::RuleAgent,
+        source.policy,
+        other_budget,
+        b"fixture-configuration",
+        "deterministic-local-v1",
+    )?;
     let mut registry = PluginRegistry::new();
     assert!(matches!(
-        registry.register_with_output_policy(
-            &FixturePlugin { id: plugin_id },
-            policy,
-            other_budget,
-            None,
-            None,
-        ),
+        registry.register_with_output_policy(&plugin, mismatched_binding, None, None,),
         Err(RuntimeError::OutputAdmission(_))
     ));
     Ok(())
