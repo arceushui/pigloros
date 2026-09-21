@@ -877,12 +877,6 @@ fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<
     if drafts.is_empty() {
         return Ok(());
     }
-    // Direct drivers are a debug-only fixture seam, but they still pass
-    // through a bounded admission check. This keeps the fixture seam from
-    // becoming an unrestricted way around host output limits.
-    if cfg!(debug_assertions) && entry.test_only_driver {
-        return validate_test_driver_output(drafts);
-    }
     let Some(admission) = entry.output_admission.as_ref() else {
         return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
             event_type: "<unregistered-output-policy>".to_owned(),
@@ -905,90 +899,6 @@ fn commit_driver_entry(entry: &mut PluginEntry) -> Option<String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.commit_step()))
         .is_err()
         .then_some(name)
-}
-
-fn validate_test_driver_output(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
-    const MAX_TEST_DRIVER_EVENTS: u32 = 1_000;
-    const MAX_TEST_DRIVER_EVENT_BYTES: u32 = 4_096;
-
-    if u32::try_from(drafts.len()).unwrap_or(u32::MAX) > MAX_TEST_DRIVER_EVENTS {
-        return Err(crate::OutputAdmissionErrorV1::EventCountExceeded {
-            level: 0,
-            requested: u64::try_from(drafts.len()).unwrap_or(u64::MAX),
-            limit: MAX_TEST_DRIVER_EVENTS,
-        }
-        .into());
-    }
-    if let Some(draft) = drafts.iter().find(|draft| {
-        u32::try_from(draft.payload.len()).unwrap_or(u32::MAX) > MAX_TEST_DRIVER_EVENT_BYTES
-    }) {
-        return Err(crate::OutputAdmissionErrorV1::EventBytesExceeded {
-            event_type: draft.event_type.as_str().to_owned(),
-            requested: draft.payload.len(),
-            limit: MAX_TEST_DRIVER_EVENT_BYTES,
-        }
-        .into());
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod admission_validation_tests {
-    use super::*;
-    use pos_core::{event::CanonicalBytes, ids::EntityId};
-
-    fn entry(test_only_driver: bool) -> PluginEntry {
-        PluginEntry {
-            name: "test".to_owned(),
-            version: "0.1.0".to_owned(),
-            owned_event_types: Vec::new(),
-            driver: None,
-            approver: None,
-            last_tick: None,
-            event_cursor: Seq::ZERO,
-            registration: None,
-            output_admission: None,
-            test_only_driver,
-        }
-    }
-
-    fn draft(payload: Vec<u8>) -> EventDraft {
-        EventDraft::new(
-            EntityId::new(),
-            Kind::new("test.output"),
-            CanonicalBytes::from_vec(payload),
-        )
-    }
-
-    #[test]
-    fn test_driver_output_limits_are_enforced() {
-        let entry = entry(true);
-        let oversized = draft(vec![0; 4_097]);
-        assert!(matches!(
-            validate_plugin_output(&entry, &[oversized]),
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::EventBytesExceeded { .. }
-            ))
-        ));
-        let drafts = (0..1_001).map(|_| draft(Vec::new())).collect::<Vec<_>>();
-        assert!(matches!(
-            validate_plugin_output(&entry, &drafts),
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::EventCountExceeded { .. }
-            ))
-        ));
-    }
-
-    #[test]
-    fn missing_production_admission_is_rejected() {
-        let entry = entry(false);
-        assert!(matches!(
-            validate_plugin_output(&entry, &[draft(Vec::new())]),
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::MissingDeclaration { .. }
-            ))
-        ));
-    }
 }
 
 fn invoke_driver(
@@ -1014,7 +924,6 @@ struct PluginEntry {
     event_cursor: Seq,
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
-    test_only_driver: bool,
 }
 
 struct RegistrationOptions {
@@ -2857,7 +2766,6 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: options.registration,
                 output_admission: options.output_admission,
-                test_only_driver: false,
             },
         );
         Ok(())
@@ -2931,7 +2839,6 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
-                test_only_driver: true,
             },
         );
     }
@@ -4371,7 +4278,6 @@ mod tests {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
-                test_only_driver: false,
             },
         );
 
