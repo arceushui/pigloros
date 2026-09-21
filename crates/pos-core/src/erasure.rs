@@ -427,13 +427,13 @@ impl ErasureTopologyTransitionPermitV1 {
         if self.gate_identity != std::ptr::from_ref(gate) as usize {
             return false;
         }
-        match self.claimed_store.get() {
-            Some(claimed_store) => claimed_store == store_identity,
-            None => {
+        self.claimed_store.get().map_or_else(
+            || {
                 self.claimed_store.set(Some(store_identity));
                 true
-            }
-        }
+            },
+            |claimed_store| claimed_store == store_identity,
+        )
     }
 }
 
