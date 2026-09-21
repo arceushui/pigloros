@@ -39,6 +39,99 @@ const REQUIRED_KINDS: [WorldArtifactKindV1; 13] = [
 
 const CLOSURE_DOMAIN: &[u8] = b"pigloros.world-replay-closure.v1\0";
 
+#[cfg(feature = "test-support")]
+fn test_fixture_artifacts(
+    scope: Hash,
+    retention_policy: &WorldRetentionPolicyV1,
+    retention_lease: &WorldRetentionLeaseV1,
+) -> Result<Vec<WorldArtifactLeafV1>, WorldReplayClosureErrorV1> {
+    let kinds = [
+        (
+            WorldArtifactKindV1::OutputPolicy,
+            Hash::from_bytes([43; 32]),
+        ),
+        (
+            WorldArtifactKindV1::ExecutableBudgetPolicy,
+            Hash::from_bytes([44; 32]),
+        ),
+        (
+            WorldArtifactKindV1::RetentionPolicy,
+            retention_policy.digest(),
+        ),
+        (
+            WorldArtifactKindV1::RetentionLease,
+            retention_lease.digest(),
+        ),
+        (
+            WorldArtifactKindV1::BaseConfiguration,
+            Hash::from_bytes([45; 32]),
+        ),
+        (
+            WorldArtifactKindV1::ExecutionProfile,
+            Hash::from_bytes([46; 32]),
+        ),
+        (
+            WorldArtifactKindV1::AudiencePolicy,
+            Hash::from_bytes([47; 32]),
+        ),
+        (WorldArtifactKindV1::Schema, Hash::from_bytes([41; 32])),
+        (
+            WorldArtifactKindV1::ReducerImplementation,
+            Hash::from_bytes([40; 32]),
+        ),
+        (
+            WorldArtifactKindV1::RuntimeIdentity,
+            Hash::from_bytes([42; 32]),
+        ),
+        (
+            WorldArtifactKindV1::PluginImplementationIdentity,
+            Hash::from_bytes([48; 32]),
+        ),
+        (
+            WorldArtifactKindV1::KeyDependencyEvidence,
+            Hash::from_bytes([49; 32]),
+        ),
+        (
+            WorldArtifactKindV1::TimelinePayload,
+            Hash::from_bytes([50; 32]),
+        ),
+        (
+            WorldArtifactKindV1::OptionalView,
+            Hash::from_bytes([53; 32]),
+        ),
+    ];
+    kinds
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, native_digest))| {
+            let owner_offset = u8::try_from(index)
+                .map_err(|_| WorldReplayClosureErrorV1::ArtifactCountOutOfBounds)?;
+            WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
+                scope,
+                kind,
+                native_digest,
+                native_byte_length: 1,
+                owner: [100 + owner_offset; 32],
+                data_class: crate::ArtifactDataClassV1::StructuralAuditMetadata,
+                optionality: if kind == WorldArtifactKindV1::OptionalView {
+                    crate::ArtifactOptionalityV1::Optional
+                } else {
+                    crate::ArtifactOptionalityV1::Required
+                },
+                transition: if kind == WorldArtifactKindV1::OptionalView {
+                    crate::ArtifactTransitionRuleV1::RedactViews
+                } else {
+                    crate::ArtifactTransitionRuleV1::PreserveExact
+                },
+                source_lease_hash: retention_lease.digest(),
+                key_dependencies: Vec::new(),
+                child_node_hashes: Vec::new(),
+            })
+            .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)
+        })
+        .collect()
+}
+
 /// Fail-closed errors at the retained World Replay seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorldReplayClosureErrorV1 {
@@ -285,6 +378,10 @@ impl WorldReplayClosureV1 {
     ///
     /// This helper is available only with the explicit `test-support` feature;
     /// production callers must obtain a closure from their recording owner.
+    ///
+    /// # Errors
+    /// Returns a closed fixture-construction error if the deterministic test
+    /// records fail their own public validation.
     #[cfg(feature = "test-support")]
     pub fn test_fixture() -> Result<Self, WorldReplayClosureErrorV1> {
         const DAY_MICROS: u64 = 86_400_000_000;
@@ -330,91 +427,7 @@ impl WorldReplayClosureV1 {
                 optional_view_roots: vec![Hash::from_bytes([53; 32])],
             })
             .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
-        let kinds = [
-            (
-                WorldArtifactKindV1::OutputPolicy,
-                Hash::from_bytes([43; 32]),
-            ),
-            (
-                WorldArtifactKindV1::ExecutableBudgetPolicy,
-                Hash::from_bytes([44; 32]),
-            ),
-            (
-                WorldArtifactKindV1::RetentionPolicy,
-                retention_policy.digest(),
-            ),
-            (
-                WorldArtifactKindV1::RetentionLease,
-                retention_lease.digest(),
-            ),
-            (
-                WorldArtifactKindV1::BaseConfiguration,
-                Hash::from_bytes([45; 32]),
-            ),
-            (
-                WorldArtifactKindV1::ExecutionProfile,
-                Hash::from_bytes([46; 32]),
-            ),
-            (
-                WorldArtifactKindV1::AudiencePolicy,
-                Hash::from_bytes([47; 32]),
-            ),
-            (WorldArtifactKindV1::Schema, Hash::from_bytes([41; 32])),
-            (
-                WorldArtifactKindV1::ReducerImplementation,
-                Hash::from_bytes([40; 32]),
-            ),
-            (
-                WorldArtifactKindV1::RuntimeIdentity,
-                Hash::from_bytes([42; 32]),
-            ),
-            (
-                WorldArtifactKindV1::PluginImplementationIdentity,
-                Hash::from_bytes([48; 32]),
-            ),
-            (
-                WorldArtifactKindV1::KeyDependencyEvidence,
-                Hash::from_bytes([49; 32]),
-            ),
-            (
-                WorldArtifactKindV1::TimelinePayload,
-                Hash::from_bytes([50; 32]),
-            ),
-            (
-                WorldArtifactKindV1::OptionalView,
-                Hash::from_bytes([53; 32]),
-            ),
-        ];
-        let artifacts = kinds
-            .into_iter()
-            .enumerate()
-            .map(|(index, (kind, native_digest))| {
-                let owner_offset = u8::try_from(index)
-                    .map_err(|_| WorldReplayClosureErrorV1::ArtifactCountOutOfBounds)?;
-                WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
-                    scope,
-                    kind,
-                    native_digest,
-                    native_byte_length: 1,
-                    owner: [100 + owner_offset; 32],
-                    data_class: crate::ArtifactDataClassV1::StructuralAuditMetadata,
-                    optionality: if kind == WorldArtifactKindV1::OptionalView {
-                        crate::ArtifactOptionalityV1::Optional
-                    } else {
-                        crate::ArtifactOptionalityV1::Required
-                    },
-                    transition: if kind == WorldArtifactKindV1::OptionalView {
-                        crate::ArtifactTransitionRuleV1::RedactViews
-                    } else {
-                        crate::ArtifactTransitionRuleV1::PreserveExact
-                    },
-                    source_lease_hash: retention_lease.digest(),
-                    key_dependencies: Vec::new(),
-                    child_node_hashes: Vec::new(),
-                })
-                .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let artifacts = test_fixture_artifacts(scope, &retention_policy, &retention_lease)?;
         Self::new(WorldReplayClosureInputV1 {
             timeline_id,
             operation_identity: Hash::from_bytes([60; 32]),
