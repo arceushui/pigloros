@@ -2071,16 +2071,17 @@ fn emit_draft_execution_profiles(
         generated.push_str(&record(profile));
     }
     generated.push_str("];\n");
-    generated.push_str("#[allow(dead_code)]\n");
-    writeln!(
-        generated,
-        "const INSTALLED_EXECUTION_PROFILES: [InstalledExecutionProfileSource; {}] = [",
-        declaration.execution_profiles.len()
-    )?;
-    for profile in &declaration.execution_profiles {
-        generated.push_str(&record(profile));
+    if include_policy_constants {
+        writeln!(
+            generated,
+            "const INSTALLED_EXECUTION_PROFILES: [InstalledExecutionProfileSource; {}] = [",
+            declaration.execution_profiles.len()
+        )?;
+        for profile in &declaration.execution_profiles {
+            generated.push_str(&record(profile));
+        }
+        generated.push_str("];\n");
     }
-    generated.push_str("];\n");
     Ok(())
 }
 
