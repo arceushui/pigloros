@@ -47,6 +47,18 @@ pub enum WorldReplayClosureErrorV1 {
     /// The lease does not bind the supplied retention policy.
     #[error("World Replay lease and policy identities do not match")]
     PolicyMismatch,
+    /// The closure is missing an operation, source-head, or inventory identity.
+    #[error("World Replay closure is missing a binding identity")]
+    BindingIdentityMissing,
+    /// The trusted native verifier returned a different content identity.
+    #[error("World Replay native artifact identity does not match its recorded digest")]
+    NativeDigestMismatch,
+    /// The trusted native verifier could not establish an artifact identity.
+    #[error("World Replay native artifact verification is unavailable")]
+    NativeVerificationUnavailable,
+    /// The finite retention lease has expired.
+    #[error("World Replay retention lease has expired")]
+    RetentionExpired,
     /// A leaf is outside the closure's consumer-set scope.
     #[error("World Replay artifact is outside the consumer-set scope")]
     ScopeMismatch,
@@ -78,6 +90,12 @@ pub enum WorldReplayClosureErrorV1 {
 pub struct WorldReplayClosureInputV1 {
     /// Timeline whose retained history is being claimed.
     pub timeline_id: TimelineId,
+    /// Stable operation identity assigned by the recording owner.
+    pub operation_identity: Hash,
+    /// Exact source/head identity covered by this closure.
+    pub source_head: Hash,
+    /// Installed host inventory generation used to verify this closure.
+    pub inventory_generation: Hash,
     /// Exact RTP1 record bound to the lease.
     pub retention_policy: WorldRetentionPolicyV1,
     /// Exact RLS1 record that fixes the finite retention horizon.
@@ -92,6 +110,9 @@ pub struct WorldReplayClosureInputV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorldReplayClosureV1 {
     timeline_id: TimelineId,
+    operation_identity: Hash,
+    source_head: Hash,
+    inventory_generation: Hash,
     retention_policy: WorldRetentionPolicyV1,
     retention_lease: WorldRetentionLeaseV1,
     consumer_set: WorldConsumerSetV1,
@@ -118,6 +139,12 @@ impl WorldReplayClosureV1 {
         }
         if lease_input.policy_hash != input.retention_policy.digest() {
             return Err(WorldReplayClosureErrorV1::PolicyMismatch);
+        }
+        if input.operation_identity == Hash::zero()
+            || input.source_head == Hash::zero()
+            || input.inventory_generation == Hash::zero()
+        {
+            return Err(WorldReplayClosureErrorV1::BindingIdentityMissing);
         }
         let lease_digest = input.retention_lease.digest();
         let scope = input.consumer_set.scope();
@@ -190,6 +217,9 @@ impl WorldReplayClosureV1 {
         }
         Ok(Self {
             timeline_id: input.timeline_id,
+            operation_identity: input.operation_identity,
+            source_head: input.source_head,
+            inventory_generation: input.inventory_generation,
             retention_policy: input.retention_policy,
             retention_lease: input.retention_lease,
             consumer_set: input.consumer_set,
@@ -203,12 +233,33 @@ impl WorldReplayClosureV1 {
         self.timeline_id
     }
 
+    /// Return the recording operation identity bound to this closure.
+    #[must_use]
+    pub const fn operation_identity(&self) -> Hash {
+        self.operation_identity
+    }
+
+    /// Return the exact source/head identity covered by this closure.
+    #[must_use]
+    pub const fn source_head(&self) -> Hash {
+        self.source_head
+    }
+
+    /// Return the installed inventory generation used by this closure.
+    #[must_use]
+    pub const fn inventory_generation(&self) -> Hash {
+        self.inventory_generation
+    }
+
     /// Return the canonical closure identity used in Replay receipts.
     #[must_use]
     pub fn digest(&self) -> Hash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(CLOSURE_DOMAIN);
         hasher.update(&self.timeline_id.inner().to_bytes());
+        hasher.update(self.operation_identity.as_bytes());
+        hasher.update(self.source_head.as_bytes());
+        hasher.update(self.inventory_generation.as_bytes());
         hasher.update(&self.retention_policy.to_canonical_cbor());
         hasher.update(&self.retention_lease.to_canonical_cbor());
         hasher.update(self.consumer_set.encode().as_slice());
@@ -240,16 +291,20 @@ impl WorldReplayClosureV1 {
         let now = authority
             .now()
             .map_err(|_| WorldReplayClosureErrorV1::AuthorityUnavailable)?;
-        let expired = now.as_micros() >= self.retention_lease.as_input().retention_deadline_micros;
+        if now.as_micros() >= self.retention_lease.as_input().retention_deadline_micros {
+            return Err(WorldReplayClosureErrorV1::RetentionExpired);
+        }
         let mut claims = Vec::with_capacity(self.artifacts.len());
         for leaf in &self.artifacts {
-            let state = if expired {
-                ArtifactStateV1::MissingParentCut
-            } else {
-                authority
-                    .artifact_state(leaf)
-                    .map_err(|_| WorldReplayClosureErrorV1::AuthorityUnavailable)?
-            };
+            let verified_digest = authority
+                .verify_native_artifact(leaf)
+                .map_err(|_| WorldReplayClosureErrorV1::NativeVerificationUnavailable)?;
+            if verified_digest != leaf.as_input().native_digest {
+                return Err(WorldReplayClosureErrorV1::NativeDigestMismatch);
+            }
+            let state = authority
+                .artifact_state(leaf)
+                .map_err(|_| WorldReplayClosureErrorV1::AuthorityUnavailable)?;
             claims.push(ArtifactClaimInputV1 {
                 registration: crate::RegisteredArtifactV1::new(
                     ErasureArtifactClassV1::TimelineReplay,
@@ -269,6 +324,7 @@ impl WorldReplayClosureV1 {
         Ok(WorldReplayAdmissionV1 {
             closure_digest: self.digest(),
             evaluation,
+            optional_view_roots: self.consumer_set.optional_view_roots().to_vec(),
         })
     }
 }
@@ -292,6 +348,16 @@ pub trait WorldReplayClosureAuthorityV1 {
     /// cannot establish the current trusted time.
     fn now(&mut self) -> Result<WallTime, ErasureErrorV1>;
 
+    /// Verify the native bytes and dependency identity for one leaf.
+    ///
+    /// # Errors
+    /// Returns a payload-free authority or provenance error when the installed
+    /// native owner cannot verify the recorded identity.
+    fn verify_native_artifact(
+        &mut self,
+        artifact: &WorldArtifactLeafV1,
+    ) -> Result<Hash, ErasureErrorV1>;
+
     /// Return the current state of one registered native artifact.
     ///
     /// # Errors
@@ -308,6 +374,7 @@ pub trait WorldReplayClosureAuthorityV1 {
 pub struct WorldReplayAdmissionV1 {
     closure_digest: Hash,
     evaluation: ReplayClaimEvaluationV1,
+    optional_view_roots: Vec<Hash>,
 }
 
 impl WorldReplayAdmissionV1 {
@@ -329,10 +396,39 @@ impl WorldReplayAdmissionV1 {
     /// Returns [`WorldReplayClosureErrorV1::ClaimUnavailable`] when expiry,
     /// erasure, or another required artifact state weakened the claim.
     pub const fn require_authoritative_use(&self) -> Result<(), WorldReplayClosureErrorV1> {
-        if matches!(
-            self.evaluation.replay_claim(),
-            ErasureReplayClaimV1::Exact | ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
-        ) {
+        if self.evaluation.replay_claim() == ErasureReplayClaimV1::Exact {
+            Ok(())
+        } else {
+            Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+        }
+    }
+
+    /// Require authoritative Replay for explicitly requested optional views.
+    ///
+    /// # Errors
+    /// Returns [`WorldReplayClosureErrorV1::ClaimUnavailable`] when the
+    /// enclosing claim or any requested view is not currently authorized.
+    pub fn require_authoritative_use_for(
+        &self,
+        requested_view_roots: &[Hash],
+    ) -> Result<(), WorldReplayClosureErrorV1> {
+        self.require_authoritative_use()?;
+        let required_members_authorized = self
+            .evaluation
+            .artifacts()
+            .iter()
+            .filter(|artifact| artifact.optionality() == crate::ArtifactOptionalityV1::Required)
+            .all(|artifact| artifact.authoritative_use_permitted());
+        if required_members_authorized
+            && requested_view_roots.iter().all(|root| {
+                self.optional_view_roots.contains(root)
+                    && self.evaluation.artifacts().iter().any(|artifact| {
+                        artifact.artifact_digest().digest() == *root
+                            && artifact.to() == ErasureReplayClaimV1::Exact
+                            && artifact.authoritative_use_permitted()
+                    })
+            })
+        {
             Ok(())
         } else {
             Err(WorldReplayClosureErrorV1::ClaimUnavailable)
