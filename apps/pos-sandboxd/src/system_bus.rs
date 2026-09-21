@@ -1,7 +1,7 @@
 //! Typed system-bus submission of compiled transient-unit requests.
 
 use zbus::{zvariant::OwnedObjectPath, Connection};
-use zvariant::{Array, Fd, OwnedFd, OwnedValue, Structure, Value};
+use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
 use crate::{
     SystemdHardeningValue, SystemdTransientUnitProperty, SystemdTransientUnitValue,
@@ -106,46 +106,63 @@ impl SystemdTransientUnitTransport {
         unit_name: TransientServiceUnitName,
         request: TransientUnitRequest,
     ) -> Result<SystemdStartJob, SystemdTransientUnitTransportError> {
-        let proxy = match zbus_systemd::systemd1::ManagerProxy::new(&self.connection).await {
-            Ok(proxy) => proxy,
-            Err(error) => return Err(SystemdTransientUnitTransportError::Proxy(error)),
-        };
+        let proxy = zbus_systemd::systemd1::ManagerProxy::new(&self.connection).await;
         let properties = request
             .into_requested_properties()
             .into_iter()
             .map(encode_property)
             .collect::<Result<Vec<_>, _>>();
-        let properties = match properties {
-            Ok(properties) => properties,
-            Err(error) => return Err(error),
-        };
-        let job_path = match proxy
-            .start_transient_unit(unit_name.0, JOB_MODE.to_owned(), properties, Vec::new())
-            .await
-        {
-            Ok(job_path) => job_path,
-            Err(error) => {
-                return Err(SystemdTransientUnitTransportError::ManagerCall(error));
-            }
-        };
-        Ok(SystemdStartJob(job_path))
+        submit(proxy, properties, unit_name).await
     }
+}
+
+async fn submit(
+    proxy: Result<zbus_systemd::systemd1::ManagerProxy<'_>, zbus::Error>,
+    properties: Result<Vec<(String, OwnedValue)>, SystemdTransientUnitTransportError>,
+    unit_name: TransientServiceUnitName,
+) -> Result<SystemdStartJob, SystemdTransientUnitTransportError> {
+    let properties = match properties {
+        Ok(properties) => properties,
+        Err(error) => return Err(error),
+    };
+    let proxy = match proxy {
+        Ok(proxy) => proxy,
+        Err(error) => return Err(SystemdTransientUnitTransportError::Proxy(error)),
+    };
+    let job_path = match proxy
+        .start_transient_unit(unit_name.0, JOB_MODE.to_owned(), properties, Vec::new())
+        .await
+    {
+        Ok(job_path) => job_path,
+        Err(error) => {
+            return Err(SystemdTransientUnitTransportError::ManagerCall(error));
+        }
+    };
+    Ok(SystemdStartJob(job_path))
 }
 
 fn encode_property(
     property: SystemdTransientUnitProperty,
 ) -> Result<(String, OwnedValue), SystemdTransientUnitTransportError> {
     let (name, value) = property.into_parts();
-    let value = property_value(value).map_err(SystemdTransientUnitTransportError::Property)?;
-    owned_value(value).map(|value| (name.to_owned(), value))
+    encode_property_with(name, value, OwnedValue::try_from)
 }
 
-fn owned_value(value: Value<'static>) -> Result<OwnedValue, SystemdTransientUnitTransportError> {
-    OwnedValue::try_from(value).map_err(SystemdTransientUnitTransportError::Property)
+fn encode_property_with<O>(
+    name: &'static str,
+    value: SystemdTransientUnitValue,
+    owned_value: O,
+) -> Result<(String, OwnedValue), SystemdTransientUnitTransportError>
+where
+    O: FnOnce(Value<'static>) -> Result<OwnedValue, zvariant::Error>,
+{
+    owned_value(property_value(value))
+        .map(|value| (name.to_owned(), value))
+        .map_err(SystemdTransientUnitTransportError::Property)
 }
 
-fn property_value(value: SystemdTransientUnitValue) -> Result<Value<'static>, zvariant::Error> {
-    let value = match value {
+fn property_value(value: SystemdTransientUnitValue) -> Value<'static> {
+    match value {
         SystemdTransientUnitValue::Static(value) => match value {
             SystemdHardeningValue::Bool(value) => Value::from(value),
             SystemdHardeningValue::String(value) => Value::from(value.to_owned()),
@@ -161,18 +178,68 @@ fn property_value(value: SystemdTransientUnitValue) -> Result<Value<'static>, zv
         | SystemdTransientUnitValue::RestrictAddressFamilies(value) => Value::from(value),
         SystemdTransientUnitValue::FileDescriptorStoreMax(value) => Value::from(value),
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
-            return extra_file_descriptors_value(value);
+            extra_file_descriptors_value(value)
         }
-    };
-    Ok(value)
+    }
 }
 
-fn extra_file_descriptors_value(
-    descriptors: Vec<(OwnedFd, String)>,
-) -> Result<Value<'static>, zvariant::Error> {
-    let mut array = Array::new(&zvariant::signature!("(hs)"));
-    for (descriptor, name) in descriptors {
-        array.append(Value::from(Structure::from((Fd::from(descriptor), name))))?;
+fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'static> {
+    let descriptors = descriptors
+        .into_iter()
+        .map(|(descriptor, name)| (Fd::from(descriptor), name))
+        .collect::<Vec<_>>();
+    Value::from(descriptors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value() -> SystemdTransientUnitValue {
+        SystemdTransientUnitValue::FileDescriptorStoreMax(1)
     }
-    Ok(Value::from(array))
+
+    #[test]
+    fn owned_value_failure_is_classified() -> Result<(), &'static str> {
+        let error = encode_property_with("TestProperty", value(), |_| {
+            Err(zvariant::Error::IncorrectType)
+        });
+        let Err(error) = error else {
+            return Err("owned-value conversion failure was accepted");
+        };
+        assert!(matches!(
+            error,
+            SystemdTransientUnitTransportError::Property(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pre_submission_failures_are_classified() -> Result<(), &'static str> {
+        let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
+        let property_error = SystemdTransientUnitTransportError::Property(
+            zvariant::Error::IncorrectType,
+        );
+        let name = TransientServiceUnitName::from_attempt_id([0; 16]);
+        let error = submit(Err(proxy_error), Err(property_error), name).await;
+        let Err(error) = error else {
+            return Err("property failure was accepted");
+        };
+        assert!(matches!(
+            error,
+            SystemdTransientUnitTransportError::Property(_)
+        ));
+
+        let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
+        let name = TransientServiceUnitName::from_attempt_id([0; 16]);
+        let error = submit(Err(proxy_error), Ok(Vec::new()), name).await;
+        let Err(error) = error else {
+            return Err("proxy failure was accepted");
+        };
+        assert!(matches!(
+            error,
+            SystemdTransientUnitTransportError::Proxy(_)
+        ));
+        Ok(())
+    }
 }

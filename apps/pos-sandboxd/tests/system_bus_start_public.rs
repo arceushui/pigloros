@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fs::File,
     os::fd::OwnedFd as StdOwnedFd,
+    process::Command,
     sync::{Arc, Mutex},
 };
 
@@ -24,6 +25,7 @@ const X86_64: &[u8] = include_bytes!(
 );
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const JOB_PATH: &str = "/org/freedesktop/systemd1/job/381";
+const CONNECT_FAILURE_CHILD: &str = "PIGLOROS_CONNECT_FAILURE_CHILD";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedStart {
@@ -164,6 +166,29 @@ async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Err
     let SystemdTransientUnitTransportError::ManagerCall(_) = error else {
         return Err("manager rejection had the wrong error class".into());
     };
+    Ok(())
+}
+
+#[tokio::test]
+async fn system_bus_connection_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    if std::env::var_os(CONNECT_FAILURE_CHILD).is_some() {
+        let result = SystemdTransientUnitTransport::connect_system().await;
+        let error = result.err().ok_or("unusable system bus was accepted")?;
+        assert!(error.to_string().contains("failed to connect"));
+        let SystemdTransientUnitTransportError::Connect(_) = error else {
+            return Err("connection failure had the wrong error class".into());
+        };
+        return Ok(());
+    }
+
+    let status = Command::new(std::env::current_exe()?)
+        .args(["--exact", "system_bus_connection_failure_is_classified"])
+        .env(CONNECT_FAILURE_CHILD, "1")
+        .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null")
+        .status()?;
+    if !status.success() {
+        return Err("connection-failure child test failed".into());
+    }
     Ok(())
 }
 
