@@ -1372,6 +1372,36 @@ fn assert_sqlite_fork_retry_corruption_error(
 }
 
 #[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_corruption_error(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<usize>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        store.borrow_mut().commit_fork_admission(prepared.clone())?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(corrupt(&connection, &prepared)?, 1);
+    drop(connection);
+    let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.recover_fork_admission(prepared.operation()),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 fn assert_sqlite_fork_first_commit_failure(
     corrupt: impl FnOnce(
         &rusqlite::Connection,
@@ -1407,11 +1437,24 @@ fn fork_recovery_receipt_digest(
     prepared: &pos_core::PreparedErasureForkBatchV1,
     child: &TimelineMeta,
 ) -> ErasureReferenceV1 {
+    fork_recovery_receipt_digest_with_generation(
+        prepared,
+        prepared.expected_inventory_generation(),
+        child,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+fn fork_recovery_receipt_digest_with_generation(
+    prepared: &pos_core::PreparedErasureForkBatchV1,
+    expected_generation: ErasureReferenceV1,
+    child: &TimelineMeta,
+) -> ErasureReferenceV1 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/erasure-fork-recovery/v1");
     hasher.update(&prepared.operation().digest());
     hasher.update(&prepared.binding_digest().digest());
-    hasher.update(&prepared.expected_inventory_generation().digest());
+    hasher.update(&expected_generation.digest());
     hasher.update(&prepared.child_scope().digest());
     hasher.update(&prepared.successor_inventory().generation().digest());
     hasher.update(&child.id.inner().to_bytes());
@@ -1467,6 +1510,24 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
             "UPDATE erasure_fork_admissions SET child_scope=zeroblob(32)
              WHERE operation_digest=?1",
             rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        let expected_generation = ErasureReferenceV1::from_digest([201; 32]);
+        let receipt = fork_recovery_receipt_digest_with_generation(
+            prepared,
+            expected_generation,
+            prepared.child(),
+        );
+        connection.execute(
+            "UPDATE erasure_fork_admissions
+             SET expected_generation=?1, receipt_digest=?2
+             WHERE operation_digest=?3",
+            rusqlite::params![
+                expected_generation.digest().as_slice(),
+                receipt.digest().as_slice(),
+                prepared.operation().digest().as_slice(),
+            ],
         )
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
@@ -1544,7 +1605,9 @@ fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std
     for assignment in [
         "binding_digest='not-a-blob'",
         "expected_generation='not-a-blob'",
+        "expected_generation=X'00'",
         "child_scope='not-a-blob'",
+        "child_scope=X'00'",
         "child_id=X'00'",
         "child_name=X'00'",
         "child_mode=X'00'",
@@ -1752,6 +1815,49 @@ fn sqlite_fork_retry_rejects_corrupted_child() -> Result<(), Box<dyn std::error:
             rusqlite::params![prepared.child().id.to_string()],
         )
     })
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_a_missing_parent_or_mismatched_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            let mut altered_child = prepared.child().clone();
+            altered_child.fork_point = Some((TimelineId::new(), Seq::ZERO));
+            let receipt = fork_recovery_receipt_digest(prepared, &altered_child);
+            connection.execute(
+                "UPDATE erasure_fork_admissions
+                 SET parent_id=?1, fork_seq=0, receipt_digest=?2
+                 WHERE operation_digest=?3",
+                rusqlite::params![
+                    altered_child
+                        .fork_point
+                        .map(|(parent, _)| parent.to_string()),
+                    receipt.digest().as_slice(),
+                    prepared.operation().digest().as_slice(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            let mut altered_child = prepared.child().clone();
+            altered_child.name = Some("valid-but-different".to_owned());
+            let receipt = fork_recovery_receipt_digest(prepared, &altered_child);
+            connection.execute(
+                "UPDATE erasure_fork_admissions SET child_name=?1, receipt_digest=?2
+                 WHERE operation_digest=?3",
+                rusqlite::params![
+                    altered_child.name,
+                    receipt.digest().as_slice(),
+                    prepared.operation().digest().as_slice(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )
 }
 
 #[cfg(feature = "sqlite")]
