@@ -43,6 +43,65 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) mod test_support {
+    use std::{fmt::Debug, sync::Arc};
+
+    use pos_core::{
+        ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
+        WorldReplayClosureV1,
+    };
+    use pos_runtime::{
+        ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
+        WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    };
+    use pos_store::StoreConfig;
+
+    struct ExactWorldReplayVerifier;
+
+    impl WorldReplayVerifierV1 for ExactWorldReplayVerifier {
+        fn verify(
+            &self,
+            closure: &WorldReplayClosureV1,
+            inventory_generation: ErasureReferenceV1,
+        ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+            Ok(pos_runtime::world_replay::test_verified_world_replay(
+                closure,
+                inventory_generation,
+                ErasureReplayClaimV1::Exact,
+            ))
+        }
+    }
+
+    pub(crate) fn open_exact_host() -> ErasureExecutionHostV1 {
+        let composition = ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(ExactWorldReplayVerifier));
+        test_ok(ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ))
+    }
+
+    pub(crate) fn closure_for_host(host: &ErasureExecutionHostV1) -> WorldReplayClosureV1 {
+        let generation = test_ok(host.containment_gate().inventory_generation());
+        test_ok(
+            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
+                generation.digest(),
+            )),
+        )
+    }
+
+    pub(crate) fn test_ok<T, E: Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected test fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::host_error_to_core;
     use pos_core::{CoreError, ErasureHostErrorV1};

@@ -79,6 +79,47 @@ impl VerifiedWorldReplayV1 {
     }
 }
 
+/// Construct a verified result for an explicitly enabled downstream seam
+/// test.
+///
+/// This helper is unavailable from the normal dependency graph. Production
+/// code receives [`VerifiedWorldReplayV1`] only from an installed verifier.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_verified_world_replay(
+    closure: &WorldReplayClosureV1,
+    inventory_generation: ErasureReferenceV1,
+    replay_claim: ErasureReplayClaimV1,
+) -> VerifiedWorldReplayV1 {
+    test_verified_world_replay_with_fields(
+        closure.digest(),
+        closure.timeline_id(),
+        closure.source_head(),
+        inventory_generation,
+        replay_claim,
+    )
+}
+
+/// Construct a verifier result with explicit fields for runtime seam tests.
+///
+/// The function is available only to the crate's tests or to a dependency
+/// that explicitly enables the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_verified_world_replay_with_fields(
+    closure_digest: Hash,
+    timeline_id: TimelineId,
+    source_head: Hash,
+    inventory_generation: ErasureReferenceV1,
+    replay_claim: ErasureReplayClaimV1,
+) -> VerifiedWorldReplayV1 {
+    VerifiedWorldReplayV1 {
+        closure_digest,
+        timeline_id,
+        source_head,
+        inventory_generation,
+        replay_claim,
+    }
+}
+
 /// Installed native World Replay verifier.
 ///
 /// The trait is a composition-root seam, not a caller-side claim API.  The
@@ -97,4 +138,48 @@ pub trait WorldReplayVerifierV1: Send + Sync {
         closure: &WorldReplayClosureV1,
         inventory_generation: ErasureReferenceV1,
     ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1>;
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    trait TestValueExt<T> {
+        fn test_ok(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
+        fn test_ok(self) -> T {
+            self.unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "unexpected World Replay fixture error: {error:?}"
+                )))
+            })
+        }
+    }
+
+    #[test]
+    fn verified_result_exposes_bindings_and_requires_an_exact_claim() {
+        let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let generation = ErasureReferenceV1::from_digest([63; 32]);
+        let exact = test_verified_world_replay(&closure, generation, ErasureReplayClaimV1::Exact);
+        assert_eq!(exact.closure_digest(), closure.digest());
+        assert_eq!(exact.timeline_id(), closure.timeline_id());
+        assert_eq!(exact.source_head(), closure.source_head());
+        assert_eq!(exact.inventory_generation(), generation);
+        assert_eq!(exact.require_authoritative_use(), Ok(()));
+
+        let structural = test_verified_world_replay_with_fields(
+            closure.digest(),
+            closure.timeline_id(),
+            closure.source_head(),
+            generation,
+            ErasureReplayClaimV1::StructuralOnly,
+        );
+        assert_eq!(
+            structural.require_authoritative_use(),
+            Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
+        );
+    }
 }

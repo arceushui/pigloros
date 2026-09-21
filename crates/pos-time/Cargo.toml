@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-plugin-world = { path = "../../plugins/world" }
+pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 proptest = { workspace = true }
 pos-store = { path = "../pos-store", features = ["sqlite"] }
 

@@ -384,6 +384,19 @@ impl WorldReplayClosureV1 {
     /// records fail their own public validation.
     #[cfg(feature = "test-support")]
     pub fn test_fixture() -> Result<Self, WorldReplayClosureErrorV1> {
+        Self::test_fixture_with_inventory_generation(Hash::from_bytes([62; 32]))
+    }
+
+    /// Build the deterministic seam fixture against one caller-supplied
+    /// inventory generation.
+    ///
+    /// A host generation changes when a Timeline is admitted, so downstream
+    /// tests use this helper after creating their test topology. Production
+    /// callers must obtain the generation from their recovered host instead.
+    #[cfg(feature = "test-support")]
+    pub fn test_fixture_with_inventory_generation(
+        inventory_generation: Hash,
+    ) -> Result<Self, WorldReplayClosureErrorV1> {
         const DAY_MICROS: u64 = 86_400_000_000;
         let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
         let retention_policy = crate::retention::WorldRetentionPolicyV1::new(
@@ -432,7 +445,7 @@ impl WorldReplayClosureV1 {
             timeline_id,
             operation_identity: Hash::from_bytes([60; 32]),
             source_head: Hash::from_bytes([61; 32]),
-            inventory_generation: Hash::from_bytes([62; 32]),
+            inventory_generation,
             retention_policy,
             retention_lease,
             consumer_set,

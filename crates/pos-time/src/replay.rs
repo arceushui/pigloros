@@ -348,7 +348,7 @@ mod tests {
                 .remove(0);
             let mut registry = PluginRegistry::new().with_erasure_gate(gate);
             registry
-                .register(
+                .register_generated(
                     &WorldPlugin::new().with_bodies(bodies),
                     Some(Box::new(WorldReducer)),
                     Some(Box::new(driver)),
@@ -551,6 +551,44 @@ mod tests {
         for entity in invalid_entities {
             assert!(after_invalid.state_for_reducer("world", &entity).is_none());
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_replay_commands_use_an_installed_world_verifier() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("verified-replay").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(
+                    timeline.id(),
+                    &[draft(entity), draft(entity), draft(entity)],
+                )
+                .test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let events = super::replay(&mut reads, timeline, &mut registry, &closure).test_ok();
+        assert_eq!(events.len(), 3);
+        assert_eq!(count_for(&registry, &entity), 3);
+
+        let mut bounded_registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        bounded_registry.register("count", Box::new(CountReducer));
+        super::replay_at(
+            &mut reads,
+            timeline,
+            events[1].seq,
+            &mut bounded_registry,
+            &closure,
+        )
+        .test_ok();
+        assert_eq!(count_for(&bounded_registry, &entity), 2);
     }
 
     struct ReadFailStore;

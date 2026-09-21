@@ -2890,6 +2890,156 @@ mod tests {
         ErasureVerifiedEmptyInventoryQueryV1::new(snapshot).verified_inventory(maximum_requests)
     }
 
+    #[derive(Clone, Copy)]
+    enum WorldReplayVerifierModeV1 {
+        Exact,
+        Reject(WorldReplayVerificationErrorV1),
+        WrongDigest,
+        WrongTimeline,
+        WrongGeneration,
+    }
+
+    impl WorldReplayVerifierV1 for WorldReplayVerifierModeV1 {
+        fn verify(
+            &self,
+            closure: &WorldReplayClosureV1,
+            inventory_generation: ErasureReferenceV1,
+        ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+            match self {
+                Self::Exact => Ok(crate::world_replay::test_verified_world_replay(
+                    closure,
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                )),
+                Self::Reject(error) => Err(*error),
+                Self::WrongDigest => {
+                    Ok(crate::world_replay::test_verified_world_replay_with_fields(
+                        Hash::from_bytes([1; 32]),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+                Self::WrongTimeline => {
+                    Ok(crate::world_replay::test_verified_world_replay_with_fields(
+                        closure.digest(),
+                        TimelineId::new(),
+                        closure.source_head(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+                Self::WrongGeneration => {
+                    Ok(crate::world_replay::test_verified_world_replay_with_fields(
+                        closure.digest(),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        reference(1),
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+            }
+        }
+    }
+
+    fn test_ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
+        })
+    }
+
+    fn world_replay_host(
+        mode: WorldReplayVerifierModeV1,
+    ) -> (ErasureExecutionHostV1, WorldReplayClosureV1) {
+        let composition =
+            ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(Arc::new(mode));
+        let mut host = test_ok(ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ));
+        let generation = test_ok(host.containment_gate().inventory_generation());
+        let closure = test_ok(
+            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
+                generation.digest(),
+            )),
+        );
+        (host, closure)
+    }
+
+    #[test]
+    fn world_replay_admission_binds_the_installed_verifier_and_generation() {
+        let mut absent_host = test_ok(ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ));
+        let absent_generation = test_ok(absent_host.containment_gate().inventory_generation());
+        let absent_closure = test_ok(
+            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
+                absent_generation.digest(),
+            )),
+        );
+        let mut absent_reads = test_ok(absent_host.read_sender());
+        assert_eq!(
+            absent_reads.admit_world_replay(&absent_closure),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+
+        for (mode, expected) in [
+            (
+                WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::MissingVerifier),
+                ErasureHostErrorV1::AuthorizationDenied,
+            ),
+            (
+                WorldReplayVerifierModeV1::Reject(
+                    WorldReplayVerificationErrorV1::EvidenceUnavailable,
+                ),
+                ErasureHostErrorV1::AuthorizationDenied,
+            ),
+            (
+                WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::StaleGeneration),
+                ErasureHostErrorV1::StaleGeneration,
+            ),
+            (
+                WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::ClaimUnavailable),
+                ErasureHostErrorV1::AuthorizationDenied,
+            ),
+        ] {
+            let (mut host, closure) = world_replay_host(mode);
+            let mut reads = test_ok(host.read_sender());
+            assert_eq!(reads.admit_world_replay(&closure), Err(expected));
+        }
+
+        let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+        let generation = test_ok(host.containment_gate().inventory_generation());
+        let mut reads = test_ok(host.read_sender());
+        let capability = test_ok(reads.admit_world_replay(&closure));
+        assert_eq!(capability.closure_digest(), closure.digest());
+        assert_eq!(capability.inventory_generation(), generation);
+
+        let bad_generation = test_ok(
+            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes([2; 32])),
+        );
+        assert_eq!(
+            reads.admit_world_replay(&bad_generation),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+
+        for mode in [
+            WorldReplayVerifierModeV1::WrongDigest,
+            WorldReplayVerifierModeV1::WrongTimeline,
+            WorldReplayVerifierModeV1::WrongGeneration,
+        ] {
+            let (mut host, closure) = world_replay_host(mode);
+            let mut reads = test_ok(host.read_sender());
+            assert_eq!(
+                reads.admit_world_replay(&closure),
+                Err(ErasureHostErrorV1::Conflict)
+            );
+        }
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FaultModeV1 {
         BindGate,
