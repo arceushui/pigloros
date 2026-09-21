@@ -2603,6 +2603,7 @@ impl PluginRegistry {
         self.validate_registration_roles(&registration)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         OutputAdmissionV1::try_new(plugin.id(), plugin.version(), policy, budget)
+            .map_err(RuntimeError::from)
             .map(Some)
             .and_then(|output_admission| {
                 self.register_with_approver_slice(
