@@ -3066,6 +3066,14 @@ impl PluginRegistry {
             return Err(ActionRejected::CapabilityNotGranted);
         }
 
+        let draft = self.approve_action_draft(proposal)?;
+        Ok(draft)
+    }
+
+    fn approve_action_draft(
+        &self,
+        proposal: &ProposedAction,
+    ) -> Result<EventDraft, ActionRejected> {
         let (approver, admission) = self.action_approver_and_admission(&proposal.event_type)?;
         let draft = Self::validate_approver_draft(proposal, approver.approve(proposal))?;
         admission.validate_action(&draft).map_err(|error| {
