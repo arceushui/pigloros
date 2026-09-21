@@ -328,7 +328,7 @@ impl WorldReplayAdmissionV1 {
     /// # Errors
     /// Returns [`WorldReplayClosureErrorV1::ClaimUnavailable`] when expiry,
     /// erasure, or another required artifact state weakened the claim.
-    pub fn require_authoritative_use(&self) -> Result<(), WorldReplayClosureErrorV1> {
+    pub const fn require_authoritative_use(&self) -> Result<(), WorldReplayClosureErrorV1> {
         if matches!(
             self.evaluation.replay_claim(),
             ErasureReplayClaimV1::Exact | ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
