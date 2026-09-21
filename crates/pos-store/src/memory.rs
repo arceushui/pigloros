@@ -174,7 +174,7 @@ pub struct MemoryStore {
     /// Trusted Gateway authority bound to this adapter's protected append port.
     consent_authority_permit: Option<ConsentAppendPermit>,
     /// Host-owned erasure containment gate for protected Timeline operations.
-    erasure_gate: Option<Arc<dyn ErasureGate>>,
+    erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
@@ -488,8 +488,7 @@ impl MemoryStore {
 
     #[must_use]
     fn with_default_components(hasher: Box<dyn Hasher>) -> Self {
-        let erasure_gate: Option<Arc<dyn ErasureGate>> =
-            Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let erasure_gate_bound = false;
 
         Self {
@@ -2558,6 +2557,19 @@ impl GeographicReplayVerifier for MemoryStore {
 }
 
 impl MemoryStore {
+    fn ensure_host_transition_permit(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+    ) -> Result<(), CoreError> {
+        let Some(gate) = self.erasure_gate.as_ref() else {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        };
+        permit
+            .claim_for_store(gate, std::ptr::from_ref(self) as usize)
+            .then_some(())
+            .ok_or(CoreError::ErasureContainmentUnavailable)
+    }
+
     fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
         let chain = self.fork_chain(id)?;
         let mut logical_head = 0_u64;
@@ -2746,9 +2758,10 @@ impl EventStore for MemoryStore {
 
     fn create_timeline_for_host_transition(
         &mut self,
-        _permit: &ErasureTopologyTransitionPermitV1,
+        permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
     ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
         self.create_timeline(name)
     }
 
@@ -2782,10 +2795,11 @@ impl EventStore for MemoryStore {
 
     fn initialize_timeline_with_key_registry_for_host_transition(
         &mut self,
-        _permit: &ErasureTopologyTransitionPermitV1,
+        permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
         Self::initialize_timeline_with_key_registry_for_host_transition_unchecked(
             self,
             name,
@@ -3020,11 +3034,12 @@ impl EventStore for MemoryStore {
 
     fn fork_for_host_transition(
         &mut self,
-        _permit: &ErasureTopologyTransitionPermitV1,
+        permit: &ErasureTopologyTransitionPermitV1,
         parent: TimelineId,
         at_seq: Seq,
         name: &str,
     ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
         self.ensure_generic_timeline_visibility(parent)
             .and_then(|()| self.fork_timeline_unchecked(parent, at_seq, name))
     }
@@ -3312,6 +3327,20 @@ mod tests {
             .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
             .test_err();
         assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
+
+        let mut unbound = MemoryStore::new().without_erasure_gate();
+        let inventory =
+            pos_core::ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)
+                .test_ok();
+        let gate = ErasureContainmentGateV1::new_test_open();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(unbound
+                .create_timeline_for_host_transition(permit, "unbound-transition")
+                .is_err());
+            Ok((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
     }
 
     #[test]

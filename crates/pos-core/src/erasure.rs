@@ -4,7 +4,7 @@
 //! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -411,7 +411,30 @@ pub struct ErasureContainmentGateV1 {
 /// directly.
 #[derive(Debug)]
 pub struct ErasureTopologyTransitionPermitV1 {
+    gate_identity: usize,
+    claimed_store: Cell<Option<usize>>,
     _private: (),
+}
+
+impl ErasureTopologyTransitionPermitV1 {
+    /// Claim this one-transition capability for the bound gate and store.
+    ///
+    /// Store adapters call this at every raw topology mutation. The first
+    /// successful call binds the permit to that adapter for the remainder of
+    /// the fenced callback; later calls must name the same adapter.
+    #[must_use]
+    pub fn claim_for_store(&self, gate: &ErasureContainmentGateV1, store_identity: usize) -> bool {
+        if self.gate_identity != std::ptr::from_ref(gate) as usize {
+            return false;
+        }
+        match self.claimed_store.get() {
+            Some(claimed_store) => claimed_store == store_identity,
+            None => {
+                self.claimed_store.set(Some(store_identity));
+                true
+            }
+        }
+    }
 }
 
 /// Callback used by the host-owned inventory transition fence.
@@ -861,7 +884,11 @@ impl ErasureContainmentGateV1 {
         let identity = std::ptr::from_ref(self) as usize;
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
-        let permit = ErasureTopologyTransitionPermitV1 { _private: () };
+        let permit = ErasureTopologyTransitionPermitV1 {
+            gate_identity: std::ptr::from_ref(self) as usize,
+            claimed_store: Cell::new(None),
+            _private: (),
+        };
         let (candidate, result) = transition(&permit).map_err(containment_recovery_failure)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(Arc::new(candidate.clone())),
@@ -7167,6 +7194,33 @@ mod coverage_paths {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert!(!called);
+    }
+
+    #[test]
+    fn topology_transition_permit_binds_to_one_gate_and_store() -> Result<(), ErasureErrorV1> {
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)?;
+        let generation = inventory.generation();
+        let gate = ErasureContainmentGateV1::new_test_open();
+        let foreign_gate = ErasureContainmentGateV1::new_test_open();
+        let mut claims = None;
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            claims = Some((
+                permit.claim_for_store(&gate, 1),
+                permit.claim_for_store(&gate, 1),
+                permit.claim_for_store(&foreign_gate, 1),
+                permit.claim_for_store(&gate, 2),
+            ));
+            Ok((inventory.clone(), ()))
+        };
+
+        assert_eq!(
+            gate.install_from_verified_inventory_transition(&mut transition)
+                .map(|(inventory, ())| inventory.generation()),
+            Ok(generation)
+        );
+        assert_eq!(claims, Some((true, true, false, false)));
+        Ok(())
     }
 
     #[test]
