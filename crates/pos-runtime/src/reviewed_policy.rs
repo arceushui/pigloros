@@ -97,8 +97,8 @@ pub fn reviewed_retention_policy_hash_v1() -> Hash {
 /// configuration bytes identify the implementation configuration without
 /// making replay identity depend on a fresh ULID.
 #[must_use]
-pub fn canonical_plugin_configuration_v1(
-    plugin: &dyn Plugin,
+pub fn canonical_plugin_configuration_v1<P: Plugin + ?Sized>(
+    plugin: &P,
     details: &[u8],
 ) -> Result<Vec<u8>, ReviewedPolicyArtifactErrorV1> {
     if details.len() > MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 {

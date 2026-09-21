@@ -181,7 +181,7 @@ impl InstalledOutputPolicySourceV1 {
         }
     }
 
-    fn implementation_artifact(self, plugin: &dyn Plugin) -> Vec<u8> {
+    fn implementation_artifact<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<u8> {
         match self {
             #[cfg(debug_assertions)]
             Self::Generated => generated_implementation_artifact_v1(plugin),
@@ -270,7 +270,7 @@ impl InstalledOutputPolicySourceV1 {
         }
     }
 
-    fn event_types(self, plugin: &dyn Plugin) -> Vec<String> {
+    fn event_types<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<String> {
         let mut event_types = match self {
             #[cfg(debug_assertions)]
             Self::Generated => plugin
@@ -365,9 +365,9 @@ impl InstalledOutputPolicySourceV1 {
         .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EBP1" })
     }
 
-    fn build_policy(
+    fn build_policy<P: Plugin + ?Sized>(
         self,
-        plugin: &dyn Plugin,
+        plugin: &P,
         configuration_hash: Hash,
         budget: &ExecutableBudgetPolicyV1,
     ) -> Result<OutputPolicyV1, OutputAdmissionErrorV1> {
@@ -401,7 +401,7 @@ impl InstalledOutputPolicySourceV1 {
 
     /// Hash the exact implementation source owned by this installed root.
     #[must_use]
-    pub fn implementation_artifact_hash(self, plugin: &dyn Plugin) -> Hash {
+    pub fn implementation_artifact_hash<P: Plugin + ?Sized>(self, plugin: &P) -> Hash {
         crate::reviewed_policy::implementation_artifact_hash_v1(
             &self.implementation_artifact(plugin),
         )
@@ -413,7 +413,7 @@ impl InstalledOutputPolicySourceV1 {
 /// This remains a bounded fixture source; release registration has no generated
 /// fallback and must select one of the installed composition roots above.
 #[cfg(debug_assertions)]
-pub(crate) fn generated_implementation_artifact_v1(plugin: &dyn Plugin) -> Vec<u8> {
+pub(crate) fn generated_implementation_artifact_v1<P: Plugin + ?Sized>(plugin: &P) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"pigloros.generated-implementation.v1\0");
     hash_framed_bytes(&mut bytes, plugin.name().as_bytes());
