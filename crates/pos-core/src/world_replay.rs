@@ -286,7 +286,6 @@ impl WorldReplayClosureV1 {
     /// This helper is available only with the explicit `test-support` feature;
     /// production callers must obtain a closure from their recording owner.
     #[cfg(feature = "test-support")]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn test_fixture() -> Self {
         const DAY_MICROS: u64 = 86_400_000_000;
         let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
