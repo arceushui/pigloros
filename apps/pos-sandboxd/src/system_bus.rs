@@ -217,9 +217,8 @@ mod tests {
     #[tokio::test]
     async fn pre_submission_failures_are_classified() -> Result<(), &'static str> {
         let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
-        let property_error = SystemdTransientUnitTransportError::Property(
-            zvariant::Error::IncorrectType,
-        );
+        let property_error =
+            SystemdTransientUnitTransportError::Property(zvariant::Error::IncorrectType);
         let name = TransientServiceUnitName::from_attempt_id([0; 16]);
         let error = submit(Err(proxy_error), Err(property_error), name).await;
         let Err(error) = error else {
