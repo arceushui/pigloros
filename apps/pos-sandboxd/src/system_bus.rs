@@ -175,9 +175,7 @@ where
 
 fn classify_call_error(error: zbus::Error) -> SystemdTransientUnitTransportError {
     match error {
-        zbus::Error::Variant(error) => {
-            SystemdTransientUnitTransportError::Serialization(error)
-        }
+        zbus::Error::Variant(error) => SystemdTransientUnitTransportError::Serialization(error),
         error => SystemdTransientUnitTransportError::ManagerCall(error),
     }
 }
