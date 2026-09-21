@@ -4,8 +4,7 @@ use std::collections::HashSet;
 
 use pos_core::store::{EventReadBounds, SeqRange};
 use pos_core::{
-    CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId,
-    WorldReplayClosureV1,
+    CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::ErasureReadSenderV1;
 use pos_state::ProjectionRegistry;
@@ -55,9 +54,7 @@ pub fn compare(
         let mut second_effect = |sender: &mut ErasureReadSenderV1<'_>| {
             outcome = require_comparison_artifacts(sender, closures)
                 .and_then(|()| compare_with_sender(sender, a, b, fork_seq, registry_a, registry_b))
-                .and_then(|diff| {
-                    require_comparison_artifacts(sender, closures).map(|()| diff)
-                });
+                .and_then(|diff| require_comparison_artifacts(sender, closures).map(|()| diff));
         };
         second_fence = sender
             .with_protected_effect_fence(b, ErasureProtectedOperationV1::Export, &mut second_effect)

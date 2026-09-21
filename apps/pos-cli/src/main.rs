@@ -501,7 +501,10 @@ fn replay_retained_timeline(
     _timeline: TimelineId,
     _registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
-    Err("World Replay is unavailable until an installed native closure verifier is configured".into())
+    Err(
+        "World Replay is unavailable until an installed native closure verifier is configured"
+            .into(),
+    )
 }
 
 fn snapshot_retained_timeline(
@@ -509,7 +512,10 @@ fn snapshot_retained_timeline(
     _timeline: TimelineId,
     _registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
-    Err("World Snapshot is unavailable until an installed native closure verifier is configured".into())
+    Err(
+        "World Snapshot is unavailable until an installed native closure verifier is configured"
+            .into(),
+    )
 }
 
 fn cmd_timeline_compare(
@@ -538,7 +544,10 @@ fn run_timeline_compare(
     let fork_seq = parse_seq(fork_seq_str)?;
 
     let _ = (path, timeline_a, timeline_b, fork_seq);
-    Err("World comparison is unavailable until an installed native closure verifier is configured".into())
+    Err(
+        "World comparison is unavailable until an installed native closure verifier is configured"
+            .into(),
+    )
 }
 
 fn parse_merge_strategy_flag(

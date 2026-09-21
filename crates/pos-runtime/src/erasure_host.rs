@@ -31,9 +31,7 @@ use pos_core::{
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
 
-use crate::{
-    VerifiedWorldReplayV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
-};
+use crate::{VerifiedWorldReplayV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1};
 use pos_core::WorldReplayClosureV1;
 
 #[cfg(test)]
@@ -439,10 +437,7 @@ impl ErasureCoordinatorCompositionV1 {
     /// remains intentionally closed for World Replay, even when its erasure
     /// inventory is otherwise ready.
     #[must_use]
-    pub fn with_world_replay_verifier(
-        mut self,
-        verifier: Arc<dyn WorldReplayVerifierV1>,
-    ) -> Self {
+    pub fn with_world_replay_verifier(mut self, verifier: Arc<dyn WorldReplayVerifierV1>) -> Self {
         self.world_replay_verifier = Some(verifier);
         self
     }
