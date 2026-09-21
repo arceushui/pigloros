@@ -6756,15 +6756,8 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::output_policy::{
-        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
-        OutputPolicyV1,
-    };
     use pos_core::store::EventStore;
-    use pos_core::{
-        Capability, ConsentGrantedV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
-        FidelityBudgetV1, Hash, Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
-    };
+    use pos_core::{Capability, ConsentGrantedV1, Hash, Plugin, PluginId};
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 
     struct CoveragePlugin {
@@ -6814,78 +6807,9 @@ mod coverage_entrypoints {
     fn register_schema_failure_driver(registry: &mut PluginRegistry) {
         let plugin_id = PluginId::new();
         let binding_plugin = CoveragePlugin { id: plugin_id };
-        let profile_artifact =
-            pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
-        let declaration = OutputDeclarationV1::new(
-            "coverage.unknown".to_owned(),
-            OutputAuthorityV1::Authoritative,
-            OutputFidelityV1::L0,
-            4_096,
-            None,
-            None,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
-        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-            revision: 1,
-            workload_profile: WorkloadProfileV1::Interactive,
-            cut_budget_family: 0,
-            max_event_bytes: 4_096,
-            fidelity_budgets: [
-                FidelityBudgetV1 {
-                    level: 0,
-                    max_events: 1_000,
-                    max_bytes: 64 * 1024 * 1024,
-                    max_cpu_us: 500_000,
-                    shared_host_cpu_reservation_us: 0,
-                },
-                FidelityBudgetV1 {
-                    level: 1,
-                    max_events: 1_000,
-                    max_bytes: 64 * 1024 * 1024,
-                    max_cpu_us: 250_000,
-                    shared_host_cpu_reservation_us: 0,
-                },
-                FidelityBudgetV1 {
-                    level: 2,
-                    max_events: 1_000,
-                    max_bytes: 16 * 1024 * 1024,
-                    max_cpu_us: 50_000,
-                    shared_host_cpu_reservation_us: 0,
-                },
-            ],
-            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-                plugin_id,
-                cpu_reservations_us: [10; 3],
-            }],
-            accounting_semantics: 0,
-            execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(
-                &profile_artifact,
-            ),
-            max_pass_wall_duration_us: 1_000,
-        })
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
-        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-            plugin_id,
-            plugin_version: binding_plugin.version().to_owned(),
-            implementation_hash: pos_runtime::InstalledOutputPolicySourceV1::Generated
-                .implementation_artifact_hash(&binding_plugin),
-            base_configuration_digest: pos_runtime::host_artifact_hash_v1(
-                b"pigloros.base-configuration.v1",
-                &pos_runtime::canonical_plugin_configuration_v1(&binding_plugin, &[])
-                    .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error))),
-            ),
-            executable_profile_hash: budget.digest(),
-            retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
-            policy_revision: 1,
-            output_declarations: vec![declaration],
-        })
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
         let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
             &binding_plugin,
             pos_runtime::InstalledOutputPolicySourceV1::Generated,
-            policy,
-            budget,
             &[],
             "deterministic-local-v1",
         )

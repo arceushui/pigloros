@@ -991,6 +991,27 @@ struct PluginEntry {
     output_admission: Option<OutputAdmissionV1>,
 }
 
+#[cfg(debug_assertions)]
+struct GeneratedDriverPlugin {
+    id: PluginId,
+    name: &'static str,
+}
+
+#[cfg(debug_assertions)]
+impl Plugin for GeneratedDriverPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn capability(&self) -> Capability {
+        Capability::default()
+    }
+}
+
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
@@ -2462,7 +2483,7 @@ impl PluginRegistry {
                 max_pass_wall_duration_us: 1_000,
             },
         )?;
-        Ok(OutputPolicyBindingV1::from_installed_source(
+        Ok(OutputPolicyBindingV1::from_installed_source_with_policy(
             plugin,
             InstalledOutputPolicySourceV1::Generated,
             policy,
@@ -3023,21 +3044,15 @@ impl PluginRegistry {
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {
-        let name = driver.name().to_owned();
-        self.plugins.insert(
-            pos_core::ids::PluginId::new(),
-            PluginEntry {
-                name,
-                version: "0.1.0".to_owned(),
-                owned_event_types: Vec::new(),
-                driver: Some(driver),
-                approver: None,
-                last_tick: None,
-                event_cursor: Seq::ZERO,
-                registration: None,
-                output_admission: None,
-            },
-        );
+        let plugin_id = pos_core::ids::PluginId::new();
+        let plugin = GeneratedDriverPlugin {
+            id: plugin_id,
+            name: driver.name(),
+        };
+        let binding = Self::generated_output_binding(&plugin)
+            .unwrap_or_else(|error| panic!("generated test-driver binding failed: {error}"));
+        self.register_test_driver_with_verified_output_policy(plugin_id, binding, driver)
+            .unwrap_or_else(|error| panic!("generated test-driver registration failed: {error}"));
     }
 
     /// Register a direct fixture driver with a host-verified output binding.
@@ -6225,7 +6240,7 @@ mod tests {
             },
         )
         .test_ok();
-        let binding = OutputPolicyBindingV1::from_installed_source(
+        let binding = OutputPolicyBindingV1::from_installed_source_with_policy(
             &plugin,
             InstalledOutputPolicySourceV1::Generated,
             policy,

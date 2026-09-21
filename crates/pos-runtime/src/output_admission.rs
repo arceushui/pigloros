@@ -5,7 +5,8 @@ use pos_core::{
     event::EventDraft,
     output_policy::{OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_POLICY_BYTES_V1},
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
-    ExecutableBudgetPolicyV1, Hash, Plugin, PluginId, MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash, Plugin,
+    PluginCpuReservationV1, PluginId, WorkloadProfileV1, MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
 };
 use std::sync::Mutex;
 
@@ -135,7 +136,7 @@ impl OutputPolicyArtifactInputV1 {
 
 impl InstalledOutputPolicySourceV1 {
     fn accepts_plugin(self, plugin: &dyn Plugin) -> bool {
-        match self {
+        let name_matches = match self {
             #[cfg(debug_assertions)]
             Self::Generated => true,
             Self::Gateway => plugin.name() == "gateway-world-actions",
@@ -148,7 +149,15 @@ impl InstalledOutputPolicySourceV1 {
                 plugin.name(),
                 "proof-agent" | "proof-society" | "successful-sibling" | "failure-probe"
             ),
+        };
+        if !name_matches {
+            return false;
         }
+        #[cfg(debug_assertions)]
+        if matches!(self, Self::Generated) {
+            return true;
+        }
+        true
     }
 
     fn implementation_artifact(self, plugin: &dyn Plugin) -> Vec<u8> {
@@ -169,6 +178,135 @@ impl InstalledOutputPolicySourceV1 {
                 include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs").to_vec()
             }
         }
+    }
+
+    fn event_types(self, plugin: &dyn Plugin) -> Vec<String> {
+        let mut event_types = match self {
+            #[cfg(debug_assertions)]
+            Self::Generated => plugin
+                .capability()
+                .owned_event_types
+                .into_iter()
+                .map(|kind| kind.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            Self::Gateway => vec!["world.action".to_owned()],
+            Self::World => vec![
+                "world.observation".to_owned(),
+                "world.action".to_owned(),
+                "world.action.v1".to_owned(),
+                "world.observation.v1".to_owned(),
+                "world.config.v1".to_owned(),
+            ],
+            Self::RuleAgent => vec!["agent.decision".to_owned()],
+            Self::Agent => vec![
+                "agent.action".to_owned(),
+                "runtime.recorded_output".to_owned(),
+            ],
+            Self::SyntheticObservation => vec!["obs.synthetic".to_owned()],
+            Self::Society => vec!["society.signal".to_owned()],
+            Self::Experiment => match plugin.name() {
+                "proof-agent" => vec!["proof.agent.reaction.v1".to_owned()],
+                "proof-society" => vec!["society.signal".to_owned()],
+                "successful-sibling" => vec!["proof.failure.sibling".to_owned()],
+                "failure-probe" => vec!["proof.failure.probe".to_owned()],
+                _ => Vec::new(),
+            },
+        };
+        event_types.sort_unstable();
+        event_types
+    }
+
+    fn workload_profile(self) -> WorkloadProfileV1 {
+        match self {
+            #[cfg(debug_assertions)]
+            Self::Generated => WorkloadProfileV1::Interactive,
+            Self::Gateway | Self::Agent => WorkloadProfileV1::Interactive,
+            Self::RuleAgent | Self::SyntheticObservation => WorkloadProfileV1::Research,
+            Self::World | Self::Society | Self::Experiment => WorkloadProfileV1::Fork,
+        }
+    }
+
+    fn build_budget(
+        self,
+        plugin_id: PluginId,
+        execution_profile_hash: Hash,
+    ) -> Result<ExecutableBudgetPolicyV1, OutputAdmissionErrorV1> {
+        let workload_profile = self.workload_profile();
+        let max_event_bytes = match workload_profile {
+            WorkloadProfileV1::Research => 16_384,
+            WorkloadProfileV1::Interactive | WorkloadProfileV1::Fork => 4_096,
+        };
+        ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile,
+            cut_budget_family: 0,
+            max_event_bytes,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [500_000, 250_000, 50_000],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash,
+            max_pass_wall_duration_us: 1_000,
+        })
+        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EBP1" })
+    }
+
+    fn build_policy(
+        self,
+        plugin: &dyn Plugin,
+        configuration_hash: Hash,
+        budget: &ExecutableBudgetPolicyV1,
+    ) -> Result<OutputPolicyV1, OutputAdmissionErrorV1> {
+        let declarations = self
+            .event_types(plugin)
+            .into_iter()
+            .map(|event_type| {
+                pos_core::output_policy::OutputDeclarationV1::new(
+                    event_type.to_owned(),
+                    pos_core::output_policy::OutputAuthorityV1::Authoritative,
+                    OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EOP1" })?;
+        OutputPolicyV1::new(pos_core::output_policy::OutputPolicyInputV1 {
+            plugin_id: plugin.id(),
+            plugin_version: plugin.version().to_owned(),
+            implementation_hash: self.implementation_artifact_hash(plugin),
+            base_configuration_digest: configuration_hash,
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: crate::reviewed_policy::reviewed_retention_policy_hash_v1(),
+            policy_revision: 1,
+            output_declarations: declarations,
+        })
+        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EOP1" })
     }
 
     /// Hash the exact implementation source owned by this installed root.
@@ -225,6 +363,44 @@ impl OutputPolicyBindingV1 {
     pub fn from_installed_source(
         plugin: &dyn Plugin,
         source: InstalledOutputPolicySourceV1,
+        configuration_details: &[u8],
+        profile_id: &str,
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        if !source.accepts_plugin(plugin) {
+            return Err(OutputAdmissionErrorV1::PluginMismatch);
+        }
+        let configuration_artifact = crate::reviewed_policy::canonical_plugin_configuration_v1(
+            plugin,
+            configuration_details,
+        )
+        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration",
+        })?;
+        let execution_profile_artifact =
+            pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
+                .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
+        let configuration_hash = crate::reviewed_policy::host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        );
+        let budget = source.build_budget(
+            plugin.id(),
+            crate::reviewed_policy::execution_profile_artifact_hash_v1(&execution_profile_artifact),
+        )?;
+        let policy = source.build_policy(plugin, configuration_hash, &budget)?;
+        Self::from_installed_source_with_policy(
+            plugin,
+            source,
+            policy,
+            budget,
+            configuration_details,
+            profile_id,
+        )
+    }
+
+    pub(crate) fn from_installed_source_with_policy(
+        plugin: &dyn Plugin,
+        source: InstalledOutputPolicySourceV1,
         policy: OutputPolicyV1,
         budget: ExecutableBudgetPolicyV1,
         configuration_details: &[u8],
@@ -267,6 +443,42 @@ impl OutputPolicyBindingV1 {
         OutputPolicyArtifactInputV1,
     ) {
         (self.policy, self.budget, self.artifacts)
+    }
+
+    /// The host-owned structural EOP1 policy selected for this binding.
+    #[must_use]
+    pub const fn policy(&self) -> &OutputPolicyV1 {
+        &self.policy
+    }
+
+    /// The host-owned structural EBP1 budget selected for this binding.
+    #[must_use]
+    pub const fn budget(&self) -> &ExecutableBudgetPolicyV1 {
+        &self.budget
+    }
+
+    /// Exact implementation bytes retained by this binding.
+    #[must_use]
+    pub fn implementation_artifact(&self) -> &[u8] {
+        self.artifacts.implementation_artifact()
+    }
+
+    /// Exact canonical configuration bytes retained by this binding.
+    #[must_use]
+    pub fn configuration_artifact(&self) -> &[u8] {
+        self.artifacts.configuration_artifact()
+    }
+
+    /// Exact installed EPF1 bytes retained by this binding.
+    #[must_use]
+    pub fn execution_profile_artifact(&self) -> &[u8] {
+        self.artifacts.execution_profile_artifact()
+    }
+
+    /// Exact reviewed RTP1 bytes retained by this binding.
+    #[must_use]
+    pub fn retention_policy_artifact(&self) -> &[u8] {
+        self.artifacts.retention_policy_artifact()
     }
 }
 
@@ -659,7 +871,7 @@ impl OutputAdmissionV1 {
     /// Returns an identity or budget error when the policy does not describe
     /// the registered Plugin and its executable reservation.
     #[cfg(debug_assertions)]
-    pub fn try_new(
+    pub(crate) fn try_new(
         plugin_id: PluginId,
         plugin_version: &str,
         policy: OutputPolicyV1,
@@ -894,5 +1106,198 @@ impl OutputAdmissionV1 {
         }
         drop(usage);
         Ok(())
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+    use pos_core::{
+        event::{CanonicalBytes, EventDraft, Kind},
+        output_policy::{
+            OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        },
+        ExecutableBudgetPolicyInputV1, FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
+    };
+
+    fn budget(
+        plugin_id: PluginId,
+        max_event_bytes: u32,
+        max_events: u32,
+        max_bytes: u64,
+        max_cpu_us: u32,
+        cpu_reservations_us: [u32; 3],
+    ) -> ExecutableBudgetPolicyV1 {
+        ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events,
+                    max_bytes,
+                    max_cpu_us,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events,
+                    max_bytes,
+                    max_cpu_us,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events,
+                    max_bytes,
+                    max_cpu_us,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us,
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([7; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })
+        .expect("fixture budget is valid")
+    }
+
+    fn policy(plugin_id: PluginId, budget: &ExecutableBudgetPolicyV1) -> OutputPolicyV1 {
+        let declaration = OutputDeclarationV1::new(
+            "plugin.output".to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            16,
+            None,
+            None,
+        )
+        .expect("fixture declaration is valid");
+        OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "1.0.0".to_owned(),
+            implementation_hash: Hash::from_bytes([1; 32]),
+            base_configuration_digest: Hash::from_bytes([2; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([3; 32]),
+            policy_revision: 1,
+            output_declarations: vec![declaration],
+        })
+        .expect("fixture policy is valid")
+    }
+
+    fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {
+        EventDraft::new(
+            pos_core::EntityId::new(),
+            Kind::new(event_type),
+            CanonicalBytes::from_vec(bytes.to_vec()),
+        )
+    }
+
+    #[test]
+    fn accepts_declared_output_and_tracks_identity() {
+        let plugin_id = PluginId::new();
+        let budget = budget(plugin_id, 16, 2, 32, 100, [10, 10, 10]);
+        let admission =
+            OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget), budget)
+                .expect("fixture admission is valid");
+        admission
+            .validate_batch(&[draft("plugin.output", b"accepted")])
+            .expect("declared output is accepted");
+        assert!(matches!(
+            admission.validate_batch(&[
+                draft("plugin.output", b"second"),
+                draft("plugin.output", b"third")
+            ]),
+            Err(OutputAdmissionErrorV1::EventCountExceeded { level: 0, .. })
+        ));
+        assert_ne!(admission.policy_digest(), Hash::zero());
+    }
+
+    #[test]
+    fn rejects_missing_declarations_and_identity_mismatches() {
+        let plugin_id = PluginId::new();
+        let budget = budget(plugin_id, 16, 2, 32, 100, [10, 10, 10]);
+        let admission =
+            OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget), budget)
+                .expect("fixture admission is valid");
+        assert!(matches!(
+            admission.validate_batch(&[draft("plugin.unknown", b"x")]),
+            Err(OutputAdmissionErrorV1::MissingDeclaration { .. })
+        ));
+        assert!(matches!(
+            OutputAdmissionV1::try_new(
+                PluginId::new(),
+                "1.0.0",
+                policy(plugin_id, &budget),
+                budget.clone(),
+            ),
+            Err(OutputAdmissionErrorV1::PluginMismatch)
+        ));
+        assert!(matches!(
+            OutputAdmissionV1::try_new(plugin_id, "2.0.0", policy(plugin_id, &budget), budget),
+            Err(OutputAdmissionErrorV1::PluginVersionMismatch)
+        ));
+    }
+
+    #[test]
+    fn accounts_for_fidelity_and_resource_limits() {
+        let plugin_id = PluginId::new();
+        let bytes_budget = budget(plugin_id, 4, 2, 32, 100, [10, 10, 10]);
+        let bytes_admission = OutputAdmissionV1::try_new(
+            plugin_id,
+            "1.0.0",
+            policy(plugin_id, &bytes_budget),
+            bytes_budget,
+        )
+        .expect("fixture admission is valid");
+        assert!(matches!(
+            bytes_admission.validate_batch(&[draft("plugin.output", b"12345")]),
+            Err(OutputAdmissionErrorV1::EventBytesExceeded { .. })
+        ));
+
+        let batch_budget = budget(plugin_id, 16, 2, 3, 100, [10, 10, 10]);
+        let batch_admission = OutputAdmissionV1::try_new(
+            plugin_id,
+            "1.0.0",
+            policy(plugin_id, &batch_budget),
+            batch_budget,
+        )
+        .expect("fixture admission is valid");
+        assert!(matches!(
+            batch_admission
+                .validate_batch(&[draft("plugin.output", b"ab"), draft("plugin.output", b"cd")]),
+            Err(OutputAdmissionErrorV1::BatchBytesExceeded { .. })
+        ));
+
+        let cpu_budget = budget(plugin_id, 16, 2, 32, 10, [10, 10, 10]);
+        let cpu_admission = OutputAdmissionV1::try_new(
+            plugin_id,
+            "1.0.0",
+            policy(plugin_id, &cpu_budget),
+            cpu_budget,
+        )
+        .expect("fixture admission is valid");
+        assert!(matches!(
+            cpu_admission
+                .validate_batch(&[draft("plugin.output", b"a"), draft("plugin.output", b"b")]),
+            Err(OutputAdmissionErrorV1::CpuExceeded { .. })
+        ));
+
+        let no_cpu_plugin = PluginId::new();
+        let no_cpu_budget = budget(no_cpu_plugin, 16, 2, 32, 100, [10, 10, 10]);
+        assert!(matches!(
+            OutputAdmissionV1::try_new(
+                plugin_id,
+                "1.0.0",
+                policy(plugin_id, &no_cpu_budget),
+                no_cpu_budget,
+            ),
+            Err(OutputAdmissionErrorV1::MissingCpuReservation)
+        ));
     }
 }

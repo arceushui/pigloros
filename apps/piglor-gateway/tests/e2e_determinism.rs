@@ -5,17 +5,12 @@ use piglor_gateway::{
 use piglor_ledger::LedgerView;
 use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
 use pos_core::{
-    output_policy::{
-        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
-        OutputPolicyV1,
-    },
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash, Plugin,
-    PluginCpuReservationV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, WorkloadProfileV1,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Hash,
+    Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -26,10 +21,8 @@ use pos_plugin_society::{
     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 };
 use pos_runtime::{
-    canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
-    reviewed_retention_policy_hash_v1, Driver, ErasureExecutionHostV1,
-    InstalledOutputPolicySourceV1, ObservationView, OutputPolicyBindingV1, ProjectionKey,
-    RuntimeError, StepOutput,
+    Driver, ErasureExecutionHostV1, InstalledOutputPolicySourceV1, ObservationView,
+    OutputPolicyBindingV1, ProjectionKey, RuntimeError, StepOutput,
 };
 use pos_state::{EntityStateProjection, ProjectionRegistry};
 use pos_store::{open_store, SeqRange, StoreConfig};
@@ -110,70 +103,9 @@ struct ObservationProbeDriver {
 fn agent_output_binding(
     plugin: &AgentPlugin,
 ) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
-    let profile_artifact =
-        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
-    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
-        cut_budget_family: 0,
-        max_event_bytes: 4096,
-        fidelity_budgets: [
-            FidelityBudgetV1 {
-                level: 0,
-                max_events: 1,
-                max_bytes: 4096,
-                max_cpu_us: 100,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 1,
-                max_events: 1,
-                max_bytes: 4096,
-                max_cpu_us: 100,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 2,
-                max_events: 1,
-                max_bytes: 4096,
-                max_cpu_us: 100,
-                shared_host_cpu_reservation_us: 0,
-            },
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id: plugin.id(),
-            cpu_reservations_us: [10; 3],
-        }],
-        execution_profile_hash: execution_profile_artifact_hash_v1(&profile_artifact),
-        max_pass_wall_duration_us: 1_000,
-    })?;
-    let configuration_artifact = canonical_plugin_configuration_v1(plugin, &[])?;
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id: plugin.id(),
-        plugin_version: plugin.version().to_owned(),
-        implementation_hash: InstalledOutputPolicySourceV1::Agent
-            .implementation_artifact_hash(plugin),
-        base_configuration_digest: host_artifact_hash_v1(
-            b"pigloros.base-configuration.v1",
-            &configuration_artifact,
-        ),
-        executable_profile_hash: budget.digest(),
-        retention_policy_hash: reviewed_retention_policy_hash_v1(),
-        policy_revision: 1,
-        output_declarations: vec![OutputDeclarationV1::new(
-            EVENT_TYPE_ACTION.to_owned(),
-            OutputAuthorityV1::Authoritative,
-            OutputFidelityV1::L0,
-            4096,
-            None,
-            None,
-        )?],
-    })?;
     Ok(OutputPolicyBindingV1::from_installed_source(
         plugin,
         InstalledOutputPolicySourceV1::Agent,
-        policy,
-        budget,
         &[],
         "deterministic-local-v1",
     )?)
@@ -182,63 +114,9 @@ fn agent_output_binding(
 fn empty_output_binding(
     plugin: &dyn Plugin,
 ) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
-    let profile_artifact =
-        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
-    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
-        cut_budget_family: 0,
-        max_event_bytes: 4096,
-        fidelity_budgets: [
-            FidelityBudgetV1 {
-                level: 0,
-                max_events: 1,
-                max_bytes: 4096,
-                max_cpu_us: 100,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 1,
-                max_events: 1,
-                max_bytes: 4096,
-                max_cpu_us: 100,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 2,
-                max_events: 1,
-                max_bytes: 4096,
-                max_cpu_us: 100,
-                shared_host_cpu_reservation_us: 0,
-            },
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id: plugin.id(),
-            cpu_reservations_us: [10; 3],
-        }],
-        execution_profile_hash: execution_profile_artifact_hash_v1(&profile_artifact),
-        max_pass_wall_duration_us: 1_000,
-    })?;
-    let configuration_artifact = canonical_plugin_configuration_v1(plugin, &[])?;
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id: plugin.id(),
-        plugin_version: plugin.version().to_owned(),
-        implementation_hash: InstalledOutputPolicySourceV1::Generated
-            .implementation_artifact_hash(plugin),
-        base_configuration_digest: host_artifact_hash_v1(
-            b"pigloros.base-configuration.v1",
-            &configuration_artifact,
-        ),
-        executable_profile_hash: budget.digest(),
-        retention_policy_hash: reviewed_retention_policy_hash_v1(),
-        policy_revision: 1,
-        output_declarations: Vec::new(),
-    })?;
     Ok(OutputPolicyBindingV1::from_installed_source(
         plugin,
         InstalledOutputPolicySourceV1::Generated,
-        policy,
-        budget,
         &[],
         "deterministic-local-v1",
     )?)

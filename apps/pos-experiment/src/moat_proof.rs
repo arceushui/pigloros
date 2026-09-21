@@ -22,14 +22,8 @@ use pos_conformance::{
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
-    output_policy::{
-        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
-        OutputPolicyV1,
-    },
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
-    PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
 use pos_plugin_world::{
@@ -38,9 +32,7 @@ use pos_plugin_world::{
     EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1, SENSOR_MIN_RESOLUTION_MM,
 };
 use pos_runtime::{
-    canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1,
-    reviewed_retention_policy_hash_v1, Driver, DriverRecoveryEvidence, ObservationView,
-    RecoveryEventHeader, RuntimeError, StepOutput,
+    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -94,111 +86,25 @@ fn reviewed_output_binding(
 
 fn reviewed_output_binding_with_limits(
     plugin: &dyn Plugin,
-    event_types: &[&str],
+    _event_types: &[&str],
     profile_id: &str,
-    cpu_reservations_us: [u32; 3],
+    _cpu_reservations_us: [u32; 3],
     _implementation_artifact: &[u8],
     configuration_details: &[u8],
-    max_event_bytes: u32,
+    _max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
-    let name = plugin.name();
-    let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
-        .map_err(|error| RuntimeError::CapabilityMismatch {
-            name: name.to_owned(),
-            reason: error.to_string(),
-        })?;
-    let configuration_artifact = canonical_plugin_configuration_v1(plugin, configuration_details)
-        .map_err(|error| RuntimeError::CapabilityMismatch {
-        name: name.to_owned(),
-        reason: error.to_string(),
-    })?;
-    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Fork,
-        cut_budget_family: 0,
-        max_event_bytes,
-        fidelity_budgets: [
-            FidelityBudgetV1 {
-                level: 0,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 500_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 1,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 250_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 2,
-                max_events: 1_000,
-                max_bytes: 16 * 1024 * 1024,
-                max_cpu_us: 50_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id: plugin.id(),
-            cpu_reservations_us,
-        }],
-        accounting_semantics: 0,
-        execution_profile_hash: execution_profile_artifact_hash_v1(&profile_artifact),
-        max_pass_wall_duration_us: 1_000,
-    })
-    .map_err(|error| RuntimeError::CapabilityMismatch {
-        name: name.to_owned(),
-        reason: error.to_string(),
-    })?;
-    let declarations = event_types
-        .iter()
-        .map(|event_type| {
-            OutputDeclarationV1::new(
-                (*event_type).to_owned(),
-                OutputAuthorityV1::Authoritative,
-                OutputFidelityV1::L0,
-                4_096,
-                None,
-                None,
-            )
-            .map_err(|error| RuntimeError::CapabilityMismatch {
-                name: name.to_owned(),
-                reason: error.to_string(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let source = match plugin.name() {
         "world" => pos_runtime::InstalledOutputPolicySourceV1::World,
         "society" => pos_runtime::InstalledOutputPolicySourceV1::Society,
         _ => pos_runtime::InstalledOutputPolicySourceV1::Experiment,
     };
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id: plugin.id(),
-        plugin_version: plugin.version().to_owned(),
-        implementation_hash: source.implementation_artifact_hash(plugin),
-        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
-            b"pigloros.base-configuration.v1",
-            &configuration_artifact,
-        ),
-        executable_profile_hash: budget.digest(),
-        retention_policy_hash: reviewed_retention_policy_hash_v1(),
-        policy_revision: 1,
-        output_declarations: declarations,
-    })
-    .map_err(|error| RuntimeError::CapabilityMismatch {
-        name: name.to_owned(),
-        reason: error.to_string(),
-    })?;
-    Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
         source,
-        policy,
-        budget,
         configuration_details,
         profile_id,
-    )?)
+    )
+    .map_err(Into::into)
 }
 
 fn world_output_binding(

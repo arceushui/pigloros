@@ -30,18 +30,13 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EntityId, EventId, PluginId, TimelineId},
-    output_policy::{
-        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
-        OutputPolicyV1,
-    },
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError,
-    ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
-    FidelityBudgetV1, Plugin, PluginCpuReservationV1, ProposedAction, WorkloadProfileV1,
+    ErasureContainmentGateV1, Plugin, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -68,100 +63,16 @@ fn gateway_output_binding_with_inputs(
     plugin: &dyn Plugin,
     configuration_details: &[u8],
     profile_id: &str,
-    event_type: &str,
-    max_event_bytes: u32,
+    _event_type: &str,
+    _max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    let plugin_name = plugin.name().to_owned();
-    let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
-        .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-            name: plugin_name.clone(),
-            reason: error.to_string(),
-        })?;
-    let configuration_artifact =
-        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details).map_err(
-            |error| pos_runtime::RuntimeError::CapabilityMismatch {
-                name: plugin_name.clone(),
-                reason: error.to_string(),
-            },
-        )?;
-    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
-        cut_budget_family: 0,
-        max_event_bytes,
-        fidelity_budgets: [
-            FidelityBudgetV1 {
-                level: 0,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 500_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 1,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 250_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 2,
-                max_events: 1_000,
-                max_bytes: 16 * 1024 * 1024,
-                max_cpu_us: 50_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id: plugin.id(),
-            cpu_reservations_us: [500_000, 250_000, 50_000],
-        }],
-        accounting_semantics: 0,
-        execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact),
-        max_pass_wall_duration_us: 1_000,
-    })
-    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: plugin_name.clone(),
-        reason: error.to_string(),
-    })?;
-    let declaration = OutputDeclarationV1::new(
-        event_type.to_owned(),
-        OutputAuthorityV1::Authoritative,
-        OutputFidelityV1::L0,
-        4_096,
-        None,
-        None,
-    )
-    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: plugin_name.clone(),
-        reason: error.to_string(),
-    })?;
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id: plugin.id(),
-        plugin_version: plugin.version().to_owned(),
-        implementation_hash: pos_runtime::InstalledOutputPolicySourceV1::Gateway
-            .implementation_artifact_hash(plugin),
-        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
-            b"pigloros.base-configuration.v1",
-            &configuration_artifact,
-        ),
-        executable_profile_hash: budget.digest(),
-        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
-        policy_revision: 1,
-        output_declarations: vec![declaration],
-    })
-    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: plugin_name.clone(),
-        reason: error.to_string(),
-    })?;
-    Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
         pos_runtime::InstalledOutputPolicySourceV1::Gateway,
-        policy,
-        budget,
         configuration_details,
         profile_id,
-    )?)
+    )
+    .map_err(Into::into)
 }
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).

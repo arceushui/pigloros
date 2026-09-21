@@ -4,12 +4,7 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, PluginId, TimelineId},
-    output_policy::{
-        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
-        OutputPolicyV1,
-    },
-    Capability, ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
-    FidelityBudgetV1, Plugin, PluginCpuReservationV1, WorkloadProfileV1,
+    Capability, ErasureContainmentGateV1, Plugin,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -73,76 +68,9 @@ fn output_binding(
         version: plugin_version,
         event_types: event_types.iter().map(|kind| Kind::new(*kind)).collect(),
     };
-    let profile_artifact =
-        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")?;
-    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
-        cut_budget_family: 0,
-        max_event_bytes: 4_096,
-        fidelity_budgets: [
-            FidelityBudgetV1 {
-                level: 0,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 500_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 1,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 250_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 2,
-                max_events: 1_000,
-                max_bytes: 16 * 1024 * 1024,
-                max_cpu_us: 50_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
-            cpu_reservations_us: [10; 3],
-        }],
-        execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact),
-        max_pass_wall_duration_us: 1_000,
-    })?;
-    let configuration_artifact = pos_runtime::canonical_plugin_configuration_v1(&plugin, &[])?;
-    let output_declarations = event_types
-        .iter()
-        .map(|event_type| {
-            OutputDeclarationV1::new(
-                (*event_type).to_owned(),
-                OutputAuthorityV1::Authoritative,
-                OutputFidelityV1::L0,
-                4_096,
-                None,
-                None,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id,
-        plugin_version: plugin_version.to_owned(),
-        implementation_hash: pos_runtime::InstalledOutputPolicySourceV1::Agent
-            .implementation_artifact_hash(&plugin),
-        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
-            b"pigloros.base-configuration.v1",
-            &configuration_artifact,
-        ),
-        executable_profile_hash: budget.digest(),
-        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
-        policy_revision: 1,
-        output_declarations,
-    })?;
     Ok(OutputPolicyBindingV1::from_installed_source(
         &plugin,
         pos_runtime::InstalledOutputPolicySourceV1::Agent,
-        policy,
-        budget,
         &[],
         "deterministic-local-v1",
     )?)

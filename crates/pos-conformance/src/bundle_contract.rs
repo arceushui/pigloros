@@ -19,7 +19,7 @@ use crate::{
     DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
     DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
     DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
-    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, INSTALLED_EXECUTION_PROFILES,
 };
 
 pub const CONFORMANCE_BUNDLE_MAGIC_V1: &str = "CFB1";
@@ -127,7 +127,7 @@ pub fn draft_execution_profile_bytes_v1(
 fn installed_execution_profile_bytes_v1(
     profile_id: &str,
 ) -> Result<Vec<u8>, BundleContractErrorV1> {
-    let declaration = DRAFT_EXECUTION_PROFILES
+    let declaration = INSTALLED_EXECUTION_PROFILES
         .iter()
         .find(|candidate| candidate.profile_id == profile_id)
         .ok_or(BundleContractErrorV1::ProfileInvalid)?;

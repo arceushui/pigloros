@@ -119,14 +119,8 @@ use pos_core::{
     crypto::Hash,
     ids::{PluginId, TimelineId},
     manifest::AdapterRecord,
-    output_policy::{
-        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
-        OutputPolicyV1,
-    },
     plugin::Plugin,
     store::SeqRange,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
-    PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_experiment::{
     Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
@@ -162,91 +156,27 @@ fn builtin_output_binding(
 
 fn builtin_output_binding_with_inputs(
     plugin: &dyn Plugin,
-    event_type: &str,
-    cpu_reservations_us: [u32; 3],
+    _event_type: &str,
+    _cpu_reservations_us: [u32; 3],
     _implementation_artifact: &[u8],
     configuration_details: &[u8],
     profile_id: &str,
-    max_event_bytes: u32,
+    _max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
-    let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)?;
-    let execution_profile_hash = pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact);
-    let configuration_artifact =
-        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details)?;
-    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Research,
-        cut_budget_family: 0,
-        max_event_bytes,
-        fidelity_budgets: [
-            FidelityBudgetV1 {
-                level: 0,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 500_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 1,
-                max_events: 1_000,
-                max_bytes: 64 * 1024 * 1024,
-                max_cpu_us: 250_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-            FidelityBudgetV1 {
-                level: 2,
-                max_events: 1_000,
-                max_bytes: 16 * 1024 * 1024,
-                max_cpu_us: 50_000,
-                shared_host_cpu_reservation_us: 0,
-            },
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id: plugin.id(),
-            cpu_reservations_us,
-        }],
-        accounting_semantics: 0,
-        execution_profile_hash,
-        max_pass_wall_duration_us: 1_000,
-    })?;
-    let declaration = OutputDeclarationV1::new(
-        event_type.to_owned(),
-        OutputAuthorityV1::Authoritative,
-        OutputFidelityV1::L0,
-        4_096,
-        None,
-        None,
-    )?;
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id: plugin.id(),
-        plugin_version: plugin.version().to_owned(),
-        implementation_hash: match plugin.name() {
-            "rule-agent" => pos_runtime::InstalledOutputPolicySourceV1::RuleAgent
-                .implementation_artifact_hash(plugin),
-            "synthetic-obs" => pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation
-                .implementation_artifact_hash(plugin),
-            _ => {
-                return Err(format!(
-                    "no installed output source is registered for Plugin '{}'",
-                    plugin.name()
-                )
-                .into());
-            }
-        },
-        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
-            b"pigloros.base-configuration.v1",
-            &configuration_artifact,
-        ),
-        executable_profile_hash: budget.digest(),
-        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
-        policy_revision: 1,
-        output_declarations: vec![declaration],
-    })?;
+    let source = match plugin.name() {
+        "rule-agent" => pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+        "synthetic-obs" => pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+        _ => {
+            return Err(format!(
+                "no installed output source is registered for Plugin '{}'",
+                plugin.name()
+            )
+            .into());
+        }
+    };
     Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
-        policy,
-        budget,
+        source,
         configuration_details,
         profile_id,
     )?)
