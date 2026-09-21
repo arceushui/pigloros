@@ -7,6 +7,7 @@ COPY rust-toolchain.toml rustfmt.toml ./
 COPY crates/ crates/
 COPY plugins/ plugins/
 COPY apps/ apps/
+COPY fixtures/ fixtures/
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
