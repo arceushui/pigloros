@@ -1,7 +1,7 @@
 //! Typed system-bus submission of compiled transient-unit requests.
 
 use zbus::{zvariant::OwnedObjectPath, Connection};
-use zvariant::{OwnedValue, Value};
+use zvariant::{Array, OwnedFd, OwnedValue, Structure, Value};
 
 use crate::{
     SystemdHardeningValue, SystemdTransientUnitProperty, SystemdTransientUnitValue,
@@ -136,15 +136,16 @@ fn encode_property(
     property: SystemdTransientUnitProperty,
 ) -> Result<(String, OwnedValue), SystemdTransientUnitTransportError> {
     let (name, value) = property.into_parts();
-    owned_value(property_value(value)).map(|value| (name.to_owned(), value))
+    let value = property_value(value).map_err(SystemdTransientUnitTransportError::Property)?;
+    owned_value(value).map(|value| (name.to_owned(), value))
 }
 
 fn owned_value(value: Value<'static>) -> Result<OwnedValue, SystemdTransientUnitTransportError> {
     OwnedValue::try_from(value).map_err(SystemdTransientUnitTransportError::Property)
 }
 
-fn property_value(value: SystemdTransientUnitValue) -> Value<'static> {
-    match value {
+fn property_value(value: SystemdTransientUnitValue) -> Result<Value<'static>, zvariant::Error> {
+    let value = match value {
         SystemdTransientUnitValue::Static(value) => match value {
             SystemdHardeningValue::Bool(value) => Value::from(value),
             SystemdHardeningValue::String(value) => Value::from(value.to_owned()),
@@ -159,6 +160,19 @@ fn property_value(value: SystemdTransientUnitValue) -> Value<'static> {
         SystemdTransientUnitValue::SystemCallFilter(value)
         | SystemdTransientUnitValue::RestrictAddressFamilies(value) => Value::from(value),
         SystemdTransientUnitValue::FileDescriptorStoreMax(value) => Value::from(value),
-        SystemdTransientUnitValue::ExtraFileDescriptors(value) => Value::from(&value),
+        SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
+            return extra_file_descriptors_value(value);
+        }
+    };
+    Ok(value)
+}
+
+fn extra_file_descriptors_value(
+    descriptors: Vec<(OwnedFd, String)>,
+) -> Result<Value<'static>, zvariant::Error> {
+    let mut array = Array::new(zvariant::signature!("(hs)"));
+    for descriptor in descriptors {
+        array.append(Value::from(Structure::from(descriptor)))?;
     }
+    Ok(Value::from(array))
 }
