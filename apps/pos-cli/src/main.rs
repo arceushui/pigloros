@@ -20,6 +20,15 @@ macro_rules! output_stdout {
     }};
 }
 
+macro_rules! result_pipeline {
+    ($result:expr_2021 => |$binding:pat_param|; $($remaining:tt)+) => {
+        $result.and_then(|$binding| result_pipeline!($($remaining)+))
+    };
+    ($result:expr_2021 $(;)?) => {
+        $result
+    };
+}
+
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
@@ -28,6 +37,70 @@ mod coverage_entrypoints {
     fn builtin_reference_runner_registers_both_reference_plugins() {
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 1).is_ok());
+    }
+
+    #[test]
+    fn builtin_output_binding_reports_invalid_profile_budget_declaration_and_policy() {
+        let plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
+        assert!(builtin_output_binding_with_inputs(
+            &plugin,
+            "rule-agent.decision.v1",
+            [300_000, 150_000, 30_000],
+            &[],
+            &[],
+            "unknown-profile",
+            16_384,
+        )
+        .is_err());
+        assert!(builtin_output_binding_with_inputs(
+            &plugin,
+            "rule-agent.decision.v1",
+            [u32::MAX; 3],
+            &[],
+            &[],
+            "deterministic-local-v1",
+            16_384,
+        )
+        .is_err());
+        assert!(builtin_output_binding_with_inputs(
+            &plugin,
+            "",
+            [300_000, 150_000, 30_000],
+            &[],
+            &[],
+            "deterministic-local-v1",
+            16_384,
+        )
+        .is_err());
+
+        struct InvalidVersionPlugin;
+        impl pos_core::Plugin for InvalidVersionPlugin {
+            fn id(&self) -> pos_core::ids::PluginId {
+                pos_core::ids::PluginId::new()
+            }
+
+            fn name(&self) -> &'static str {
+                "invalid-cli-version"
+            }
+
+            fn capability(&self) -> pos_core::Capability {
+                pos_core::Capability::default()
+            }
+
+            fn version(&self) -> &'static str {
+                ""
+            }
+        }
+        assert!(builtin_output_binding_with_inputs(
+            &InvalidVersionPlugin,
+            "rule-agent.decision.v1",
+            [300_000, 150_000, 30_000],
+            &[],
+            &[],
+            "deterministic-local-v1",
+            16_384,
+        )
+        .is_err());
     }
 }
 
@@ -74,8 +147,27 @@ fn builtin_output_binding(
     implementation_artifact: &[u8],
     configuration_details: &[u8],
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
-    let profile_artifact =
-        pos_conformance::draft_execution_profile_bytes_v1("deterministic-local-v1")?;
+    builtin_output_binding_with_inputs(
+        plugin,
+        event_type,
+        cpu_reservations_us,
+        implementation_artifact,
+        configuration_details,
+        "deterministic-local-v1",
+        16_384,
+    )
+}
+
+fn builtin_output_binding_with_inputs(
+    plugin: &dyn Plugin,
+    event_type: &str,
+    cpu_reservations_us: [u32; 3],
+    implementation_artifact: &[u8],
+    configuration_details: &[u8],
+    profile_id: &str,
+    max_event_bytes: u32,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+    let profile_artifact = pos_conformance::draft_execution_profile_bytes_v1(profile_id)?;
     let execution_profile_hash = pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact);
     let configuration_artifact =
         pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
@@ -83,7 +175,7 @@ fn builtin_output_binding(
         revision: 1,
         workload_profile: WorkloadProfileV1::Research,
         cut_budget_family: 0,
-        max_event_bytes: 16_384,
+        max_event_bytes,
         fidelity_budgets: [
             FidelityBudgetV1 {
                 level: 0,
@@ -798,43 +890,43 @@ fn run_builtin_reference_experiment(
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
     let agent_configuration = serde_json::to_vec(agent_plugin.actions())?;
-    let (agent_policy, agent_budget) = builtin_output_binding(
-        &agent_plugin,
-        pos_plugin_rule_agent::EVENT_TYPE_DECISION,
-        [300_000, 150_000, 30_000],
-        include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
-        &agent_configuration,
-    )?;
-    exp.register_with_output_policy(
-        &agent_plugin,
-        agent_policy,
-        agent_budget,
-        Some(Box::new(RuleAgentReducer)),
-        Some(Box::new(RuleAgentDriver::new(
-            agent_entity,
-            agent_plugin.actions().to_vec(),
-        ))),
-    )?;
-
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
     let obs_configuration = 1.0_f64.to_be_bytes();
-    let (obs_policy, obs_budget) = builtin_output_binding(
-        &obs_plugin,
-        pos_plugin_synthetic_obs::EVENT_TYPE,
-        [200_000, 100_000, 20_000],
-        include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
-        &obs_configuration,
-    )?;
-    exp.register_with_output_policy(
-        &obs_plugin,
-        obs_policy,
-        obs_budget,
-        Some(Box::new(SyntheticReducer)),
-        Some(Box::new(SyntheticDriver::new(obs_entity))),
-    )?;
-
-    exp.run().map_err(Into::into)
+    result_pipeline! {
+        builtin_output_binding(
+            &agent_plugin,
+            pos_plugin_rule_agent::EVENT_TYPE_DECISION,
+            [300_000, 150_000, 30_000],
+            include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
+            &agent_configuration,
+        ) => |(agent_policy, agent_budget)|;
+        exp.register_with_output_policy(
+            &agent_plugin,
+            agent_policy,
+            agent_budget,
+            Some(Box::new(RuleAgentReducer)),
+            Some(Box::new(RuleAgentDriver::new(
+                agent_entity,
+                agent_plugin.actions().to_vec(),
+            ))),
+        ).map_err(Into::into) => |()|;
+        builtin_output_binding(
+            &obs_plugin,
+            pos_plugin_synthetic_obs::EVENT_TYPE,
+            [200_000, 100_000, 20_000],
+            include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+            &obs_configuration,
+        ) => |(obs_policy, obs_budget)|;
+        exp.register_with_output_policy(
+            &obs_plugin,
+            obs_policy,
+            obs_budget,
+            Some(Box::new(SyntheticReducer)),
+            Some(Box::new(SyntheticDriver::new(obs_entity))),
+        ).map_err(Into::into) => |()|;
+        exp.run().map_err(Into::into)
+    }
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {

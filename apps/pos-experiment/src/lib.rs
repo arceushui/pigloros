@@ -6699,8 +6699,15 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
+    use pos_core::output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    };
     use pos_core::store::EventStore;
-    use pos_core::{Capability, ConsentGrantedV1, Plugin, PluginId};
+    use pos_core::{
+        Capability, ConsentGrantedV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+        FidelityBudgetV1, Hash, Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
+    };
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 
     struct CoveragePlugin {
@@ -6745,6 +6752,76 @@ mod coverage_entrypoints {
                 )],
             })
         }
+    }
+
+    fn register_schema_failure_driver(registry: &mut PluginRegistry) {
+        let plugin_id = PluginId::new();
+        let declaration = OutputDeclarationV1::new(
+            "coverage.unknown".to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            4_096,
+            None,
+            None,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([1; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "test".to_owned(),
+            implementation_hash: Hash::from_bytes([2; 32]),
+            base_configuration_digest: Hash::from_bytes([3; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([4; 32]),
+            policy_revision: 1,
+            output_declarations: vec![declaration],
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .register_test_driver_with_output_policy(
+                plugin_id,
+                "test",
+                policy,
+                budget,
+                Box::new(UnknownDraftDriver),
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
     }
 
     struct FailingDriver;
@@ -7315,7 +7392,7 @@ mod coverage_entrypoints {
         let mut store = test_memory_store();
         let timeline = ok(store.create_timeline("coverage-schema-failure"));
         let mut registry = test_registry();
-        registry.register_test_driver(Box::new(UnknownDraftDriver));
+        register_schema_failure_driver(&mut registry);
         assert!(append_driver_drafts(
             &mut store,
             timeline.id(),
@@ -7332,9 +7409,7 @@ mod coverage_entrypoints {
             StopCondition::MaxTicks(1),
         ))
         .start());
-        session
-            .registry
-            .register_test_driver(Box::new(UnknownDraftDriver));
+        register_schema_failure_driver(&mut session.registry);
         assert!(matches!(
             session.step_tick(),
             Err(ExperimentError::Runtime(_))

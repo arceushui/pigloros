@@ -63,7 +63,10 @@ fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
+fn replay_policy_identity_digest(
+    entry: &PluginEntry,
+    admission: &OutputAdmissionV1,
+) -> pos_core::Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/replay-policy-identity/v1");
     hash_framed(&mut hasher, entry.name.as_bytes());
@@ -74,70 +77,68 @@ fn replay_policy_identity_digest(entry: &PluginEntry) -> pos_core::Hash {
     for event_type in owned_event_types {
         hash_framed(&mut hasher, event_type.as_bytes());
     }
-    if let Some(admission) = &entry.output_admission {
-        let policy = admission.policy().fields();
-        for hash in [
-            policy.implementation_hash,
-            policy.base_configuration_digest,
-            policy.retention_policy_hash,
-        ] {
-            hasher.update(hash.as_bytes());
-        }
-        hasher.update(&policy.policy_revision.to_le_bytes());
-        let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
-        declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
-        for declaration in declarations {
-            hash_framed(&mut hasher, declaration.event_type().as_bytes());
-            hasher.update(&[match declaration.authority() {
-                pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
-                pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
-                pos_core::output_policy::OutputAuthorityV1::Ephemeral => 2,
-            }]);
-            hasher.update(&[match declaration.fidelity() {
-                pos_core::output_policy::OutputFidelityV1::L0 => 0,
-                pos_core::output_policy::OutputFidelityV1::L1 => 1,
-                pos_core::output_policy::OutputFidelityV1::L2 => 2,
-            }]);
-            hasher.update(&declaration.max_bytes().to_le_bytes());
-            hasher.update(&declaration.stride_ticks().unwrap_or_default().to_le_bytes());
-            hasher.update(
-                &declaration
-                    .aggregate_min_group()
-                    .unwrap_or_default()
-                    .to_le_bytes(),
-            );
-        }
-        let budget = admission.budget().fields();
-        hasher.update(&budget.revision.to_le_bytes());
-        hasher.update(&[match budget.workload_profile {
-            pos_core::WorkloadProfileV1::Interactive => 0,
-            pos_core::WorkloadProfileV1::Fork => 1,
-            pos_core::WorkloadProfileV1::Research => 2,
-        }]);
-        hasher.update(&[budget.cut_budget_family]);
-        hasher.update(&budget.max_event_bytes.to_le_bytes());
-        for fidelity in budget.fidelity_budgets {
-            hasher.update(&[fidelity.level]);
-            hasher.update(&fidelity.max_events.to_le_bytes());
-            hasher.update(&fidelity.max_bytes.to_le_bytes());
-            hasher.update(&fidelity.max_cpu_us.to_le_bytes());
-            hasher.update(&fidelity.shared_host_cpu_reservation_us.to_le_bytes());
-        }
-        let mut reservations = budget
-            .plugin_cpu_reservations
-            .iter()
-            .map(|reservation| reservation.cpu_reservations_us)
-            .collect::<Vec<_>>();
-        reservations.sort_unstable();
-        for reservation in reservations {
-            hasher.update(&reservation[0].to_le_bytes());
-            hasher.update(&reservation[1].to_le_bytes());
-            hasher.update(&reservation[2].to_le_bytes());
-        }
-        hasher.update(&[budget.accounting_semantics]);
-        hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
-        hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
+    let policy = admission.policy().fields();
+    for hash in [
+        policy.implementation_hash,
+        policy.base_configuration_digest,
+        policy.retention_policy_hash,
+    ] {
+        hasher.update(hash.as_bytes());
     }
+    hasher.update(&policy.policy_revision.to_le_bytes());
+    let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
+    declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
+    for declaration in declarations {
+        hash_framed(&mut hasher, declaration.event_type().as_bytes());
+        hasher.update(&[match declaration.authority() {
+            pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
+            pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
+            pos_core::output_policy::OutputAuthorityV1::Ephemeral => 2,
+        }]);
+        hasher.update(&[match declaration.fidelity() {
+            pos_core::output_policy::OutputFidelityV1::L0 => 0,
+            pos_core::output_policy::OutputFidelityV1::L1 => 1,
+            pos_core::output_policy::OutputFidelityV1::L2 => 2,
+        }]);
+        hasher.update(&declaration.max_bytes().to_le_bytes());
+        hasher.update(&declaration.stride_ticks().unwrap_or_default().to_le_bytes());
+        hasher.update(
+            &declaration
+                .aggregate_min_group()
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+    }
+    let budget = admission.budget().fields();
+    hasher.update(&budget.revision.to_le_bytes());
+    hasher.update(&[match budget.workload_profile {
+        pos_core::WorkloadProfileV1::Interactive => 0,
+        pos_core::WorkloadProfileV1::Fork => 1,
+        pos_core::WorkloadProfileV1::Research => 2,
+    }]);
+    hasher.update(&[budget.cut_budget_family]);
+    hasher.update(&budget.max_event_bytes.to_le_bytes());
+    for fidelity in budget.fidelity_budgets {
+        hasher.update(&[fidelity.level]);
+        hasher.update(&fidelity.max_events.to_le_bytes());
+        hasher.update(&fidelity.max_bytes.to_le_bytes());
+        hasher.update(&fidelity.max_cpu_us.to_le_bytes());
+        hasher.update(&fidelity.shared_host_cpu_reservation_us.to_le_bytes());
+    }
+    let mut reservations = budget
+        .plugin_cpu_reservations
+        .iter()
+        .map(|reservation| reservation.cpu_reservations_us)
+        .collect::<Vec<_>>();
+    reservations.sort_unstable();
+    for reservation in reservations {
+        hasher.update(&reservation[0].to_le_bytes());
+        hasher.update(&reservation[1].to_le_bytes());
+        hasher.update(&reservation[2].to_le_bytes());
+    }
+    hasher.update(&[budget.accounting_semantics]);
+    hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
+    hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
     pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -2601,6 +2602,9 @@ impl PluginRegistry {
         let context = self.registration_context(plugin)?;
         self.validate_registration_roles(&registration)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        let output_admission =
+            OutputAdmissionV1::try_new(plugin.id(), plugin.version(), policy, budget)
+                .expect("generated output binding must be admissible");
         self.register_with_approver_slice(
             plugin,
             reducer,
@@ -2610,12 +2614,7 @@ impl PluginRegistry {
             context,
             RegistrationOptions {
                 registration: Some(registration),
-                output_admission: Some(OutputAdmissionV1::try_new(
-                    plugin.id(),
-                    plugin.version(),
-                    policy,
-                    budget,
-                )?),
+                output_admission: Some(output_admission),
             },
         )
     }
@@ -2931,10 +2930,12 @@ impl PluginRegistry {
     /// Iterate over stable replay identities for registered output policies.
     pub fn replay_policy_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
         self.plugins.values().filter_map(|entry| {
-            entry
-                .output_admission
-                .as_ref()
-                .map(|_| (entry.name.as_str(), replay_policy_identity_digest(entry)))
+            entry.output_admission.as_ref().map(|admission| {
+                (
+                    entry.name.as_str(),
+                    replay_policy_identity_digest(entry, admission),
+                )
+            })
         })
     }
 
@@ -3481,6 +3482,35 @@ mod tests {
         registry
             .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
             .test_ok();
+    }
+
+    #[test]
+    fn test_driver_duplicate_is_rejected_before_policy_validation() {
+        let mut registry = gated_registry();
+        register_output_driver(&mut registry, &["duplicate.output"], Box::new(NoopDriver));
+        let plugin_id =
+            *registry.plugins.keys().next().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("fixture plugin is missing"))
+            });
+        let (policy, budget) = {
+            let entry = registry.plugins.get(&plugin_id).unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("fixture entry is missing"))
+            });
+            let admission = entry.output_admission.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("fixture policy is missing"))
+            });
+            (admission.policy().clone(), admission.budget().clone())
+        };
+        let error = registry
+            .register_test_driver_with_output_policy(
+                plugin_id,
+                "test",
+                policy,
+                budget,
+                Box::new(NoopDriver),
+            )
+            .test_err();
+        assert!(matches!(error, RuntimeError::DuplicatePlugin { .. }));
     }
 
     fn gated_store() -> Box<dyn pos_core::store::EventStore> {

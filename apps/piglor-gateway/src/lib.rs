@@ -68,21 +68,37 @@ fn gateway_output_binding(
     plugin: &dyn Plugin,
     configuration_details: &[u8],
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), pos_runtime::RuntimeError> {
-    let plugin_name = plugin.name().to_owned();
-    let profile_artifact = pos_conformance::draft_execution_profile_bytes_v1(
+    gateway_output_binding_with_inputs(
+        plugin,
+        configuration_details,
         "deterministic-local-v1",
+        EVENT_TYPE_ACTION,
+        4_096,
     )
-    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: plugin_name.clone(),
-        reason: error.to_string(),
-    })?;
+}
+
+fn gateway_output_binding_with_inputs(
+    plugin: &dyn Plugin,
+    configuration_details: &[u8],
+    profile_id: &str,
+    event_type: &str,
+    max_event_bytes: u32,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), pos_runtime::RuntimeError> {
+    let plugin_name = plugin.name().to_owned();
+    let profile_artifact =
+        pos_conformance::draft_execution_profile_bytes_v1(profile_id).map_err(|error| {
+            pos_runtime::RuntimeError::CapabilityMismatch {
+                name: plugin_name.clone(),
+                reason: error.to_string(),
+            }
+        })?;
     let configuration_artifact =
         pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
         cut_budget_family: 0,
-        max_event_bytes: 4_096,
+        max_event_bytes,
         fidelity_budgets: [
             FidelityBudgetV1 {
                 level: 0,
@@ -119,7 +135,7 @@ fn gateway_output_binding(
         reason: error.to_string(),
     })?;
     let declaration = OutputDeclarationV1::new(
-        EVENT_TYPE_ACTION.to_owned(),
+        event_type.to_owned(),
         OutputAuthorityV1::Authoritative,
         OutputFidelityV1::L0,
         4_096,
@@ -202,13 +218,15 @@ mod coverage_tests {
         }
     }
 
-    use super::{Gateway, OwnTracksOwnerKey};
+    use super::{
+        gateway_output_binding_with_inputs, Gateway, GatewayActionPlugin, OwnTracksOwnerKey,
+    };
     use pos_core::{
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
-        CanonicalBytes, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
-        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Seq,
+        CanonicalBytes, Capability, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Plugin, PluginId, Seq,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
@@ -226,6 +244,64 @@ mod coverage_tests {
             expiry_secs: 0,
             grant_seq,
         }
+    }
+
+    #[test]
+    fn output_binding_reports_each_structural_failure() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        assert!(gateway_output_binding_with_inputs(
+            &plugin,
+            &[],
+            "unknown-profile",
+            "world.action.v1",
+            4_096,
+        )
+        .is_err());
+        assert!(gateway_output_binding_with_inputs(
+            &plugin,
+            &[],
+            "deterministic-local-v1",
+            "world.action.v1",
+            0,
+        )
+        .is_err());
+        assert!(gateway_output_binding_with_inputs(
+            &plugin,
+            &[],
+            "deterministic-local-v1",
+            "",
+            4_096,
+        )
+        .is_err());
+
+        struct InvalidVersionPlugin;
+        impl Plugin for InvalidVersionPlugin {
+            fn id(&self) -> PluginId {
+                PluginId::new()
+            }
+
+            fn name(&self) -> &'static str {
+                "invalid-gateway-version"
+            }
+
+            fn capability(&self) -> Capability {
+                Capability::default()
+            }
+
+            fn version(&self) -> &'static str {
+                ""
+            }
+        }
+        assert!(gateway_output_binding_with_inputs(
+            &InvalidVersionPlugin,
+            &[],
+            "deterministic-local-v1",
+            "world.action.v1",
+            4_096,
+        )
+        .is_err());
     }
 
     #[test]

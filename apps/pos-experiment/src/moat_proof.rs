@@ -81,6 +81,26 @@ fn reviewed_output_binding(
     implementation_artifact: &[u8],
     configuration_details: &[u8],
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    reviewed_output_binding_with_limits(
+        plugin,
+        event_types,
+        profile_id,
+        cpu_reservations_us,
+        implementation_artifact,
+        configuration_details,
+        4_096,
+    )
+}
+
+fn reviewed_output_binding_with_limits(
+    plugin: &dyn Plugin,
+    event_types: &[&str],
+    profile_id: &str,
+    cpu_reservations_us: [u32; 3],
+    implementation_artifact: &[u8],
+    configuration_details: &[u8],
+    max_event_bytes: u32,
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
     let name = plugin.name();
     let profile_artifact =
         pos_conformance::draft_execution_profile_bytes_v1(profile_id).map_err(|error| {
@@ -94,7 +114,7 @@ fn reviewed_output_binding(
         revision: 1,
         workload_profile: WorkloadProfileV1::Fork,
         cut_budget_family: 0,
-        max_event_bytes: 4_096,
+        max_event_bytes,
         fidelity_budgets: [
             FidelityBudgetV1 {
                 level: 0,
@@ -634,20 +654,20 @@ fn register_plugins_for_profile(
     topology: &ProofTopology,
     profile_id: &str,
 ) -> Result<(), RuntimeError> {
-    let (world_policy, world_budget) = world_output_binding(
-        &topology.world_plugin,
-        &topology.input,
-        topology.body,
-        profile_id,
-    )?;
-    let (agent_policy, agent_budget) = proof_agent_output_binding(
-        &topology.agent_plugin,
-        topology.input.agent_response_threshold,
-        profile_id,
-    )?;
-    let (society_policy, society_budget) =
-        proof_society_output_binding(&topology.society_plugin, profile_id)?;
     result_pipeline! {
+        world_output_binding(
+            &topology.world_plugin,
+            &topology.input,
+            topology.body,
+            profile_id,
+        ) => |(world_policy, world_budget)|;
+        proof_agent_output_binding(
+            &topology.agent_plugin,
+            topology.input.agent_response_threshold,
+            profile_id,
+        ) => |(agent_policy, agent_budget)|;
+        proof_society_output_binding(&topology.society_plugin, profile_id)
+            => |(society_policy, society_budget)|;
         experiment.register_with_output_policy_and_approver(
             &topology.world_plugin,
             world_policy,
@@ -693,22 +713,22 @@ fn build_registry_for_profile(
     topology: &ProofTopology,
     profile_id: &str,
 ) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
-    let mut registry =
-        pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-    let (world_policy, world_budget) = world_output_binding(
-        &topology.world_plugin,
-        &topology.input,
-        topology.body,
-        profile_id,
-    )?;
-    let (agent_policy, agent_budget) = proof_agent_output_binding(
-        &topology.agent_plugin,
-        topology.input.agent_response_threshold,
-        profile_id,
-    )?;
-    let (society_policy, society_budget) =
-        proof_society_output_binding(&topology.society_plugin, profile_id)?;
     result_pipeline! {
+        let mut registry =
+            pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
+        world_output_binding(
+            &topology.world_plugin,
+            &topology.input,
+            topology.body,
+            profile_id,
+        ) => |(world_policy, world_budget)|;
+        proof_agent_output_binding(
+            &topology.agent_plugin,
+            topology.input.agent_response_threshold,
+            profile_id,
+        ) => |(agent_policy, agent_budget)|;
+        proof_society_output_binding(&topology.society_plugin, profile_id)
+            => |(society_policy, society_budget)|;
         registry.register_with_output_policy_and_approver(
             &topology.world_plugin,
             world_policy,
@@ -1769,28 +1789,26 @@ fn failure_probe(
         store_config: pos_store::StoreConfig::Memory,
     })
     .with_resource_limit(resource_limit);
-    let (sibling_policy, sibling_budget) = reviewed_output_binding(
-        &sibling_plugin,
-        &["proof.failure.sibling"],
-        profile_id,
-        [300_000, 150_000, 30_000],
-        include_bytes!("moat_proof.rs"),
-        b"successful-sibling:v1",
-    )
-    .map_err(MoatProofError::from)?;
     let mut failure_details = class.as_bytes().to_vec();
     failure_details.push(0);
     failure_details.extend_from_slice(&resource_limit.to_be_bytes());
-    let (failure_policy, failure_budget) = reviewed_output_binding(
-        &plugin,
-        &["proof.failure.probe"],
-        profile_id,
-        [200_000, 100_000, 20_000],
-        include_bytes!("moat_proof.rs"),
-        &failure_details,
-    )
-    .map_err(MoatProofError::from)?;
     result_pipeline! {
+        reviewed_output_binding(
+            &sibling_plugin,
+            &["proof.failure.sibling"],
+            profile_id,
+            [300_000, 150_000, 30_000],
+            include_bytes!("moat_proof.rs"),
+            b"successful-sibling:v1",
+        ).map_err(MoatProofError::from) => |(sibling_policy, sibling_budget)|;
+        reviewed_output_binding(
+            &plugin,
+            &["proof.failure.probe"],
+            profile_id,
+            [200_000, 100_000, 20_000],
+            include_bytes!("moat_proof.rs"),
+            &failure_details,
+        ).map_err(MoatProofError::from) => |(failure_policy, failure_budget)|;
         experiment.register_with_output_policy(
             &sibling_plugin,
             sibling_policy,
@@ -2362,6 +2380,70 @@ mod tests {
             resource_limit: 100,
             network_enabled: false,
         }
+    }
+
+    #[test]
+    fn reviewed_output_binding_reports_each_structural_failure() {
+        let plugin = ProofAgentPlugin::new();
+        assert!(reviewed_output_binding_with_limits(
+            &plugin,
+            &[AGENT_EVENT_TYPE],
+            "unknown-profile",
+            [300_000, 150_000, 30_000],
+            &[],
+            &[],
+            4_096,
+        )
+        .is_err());
+        assert!(reviewed_output_binding_with_limits(
+            &plugin,
+            &[AGENT_EVENT_TYPE],
+            "deterministic-local-v1",
+            [300_000, 150_000, 30_000],
+            &[],
+            &[],
+            0,
+        )
+        .is_err());
+        assert!(reviewed_output_binding_with_limits(
+            &plugin,
+            &[""],
+            "deterministic-local-v1",
+            [300_000, 150_000, 30_000],
+            &[],
+            &[],
+            4_096,
+        )
+        .is_err());
+
+        struct InvalidVersionPlugin;
+        impl Plugin for InvalidVersionPlugin {
+            fn id(&self) -> PluginId {
+                PluginId::new()
+            }
+
+            fn name(&self) -> &'static str {
+                "invalid-moat-version"
+            }
+
+            fn capability(&self) -> Capability {
+                Capability::default()
+            }
+
+            fn version(&self) -> &'static str {
+                ""
+            }
+        }
+        assert!(reviewed_output_binding_with_limits(
+            &InvalidVersionPlugin,
+            &[AGENT_EVENT_TYPE],
+            "deterministic-local-v1",
+            [300_000, 150_000, 30_000],
+            &[],
+            &[],
+            4_096,
+        )
+        .is_err());
     }
 
     #[test]
