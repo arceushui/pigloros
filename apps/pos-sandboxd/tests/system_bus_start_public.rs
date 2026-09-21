@@ -68,13 +68,15 @@ impl RecordingManager {
             })
             .transpose()?
             .ok_or_else(|| fdo::Error::Failed("missing descriptor property".to_owned()))?;
+        let auxiliary_count = auxiliary.len();
+        drop(auxiliary);
         let call = ObservedStart {
             unit_name: name,
             mode,
             property_names,
             property_signatures,
             descriptor_names,
-            auxiliary_count: auxiliary.into_iter().count(),
+            auxiliary_count,
         };
         self.observed
             .lock()
