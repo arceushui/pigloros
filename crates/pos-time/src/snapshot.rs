@@ -154,7 +154,7 @@ fn verify_snapshot_effect(
 ) -> Result<(), SnapshotError> {
     sender
         .admit_world_replay(closure)
-        .map_err(crate::host_error_to_core)?
+        .map_err(|_| SnapshotError::ArtifactUnavailable)?
         .require_authoritative_use()
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
     let tail_events = sender
@@ -170,7 +170,7 @@ fn verify_snapshot_effect(
     verify_snapshot_event_sets(snap, registry, &tail_events, &all_events)?;
     sender
         .admit_world_replay(closure)
-        .map_err(crate::host_error_to_core)?
+        .map_err(|_| SnapshotError::ArtifactUnavailable)?
         .require_authoritative_use()
         .map_err(|_| SnapshotError::ArtifactUnavailable)
 }
