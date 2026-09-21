@@ -124,8 +124,7 @@ impl pos_runtime::OutputPolicyAuthorityV1 for InstalledExperimentOutputPolicyAut
     fn resolve(
         &self,
         plugin: &dyn Plugin,
-    ) -> Result<pos_runtime::OutputPolicyArtifactInputV1, pos_runtime::OutputAdmissionErrorV1>
-    {
+    ) -> Result<pos_runtime::OutputPolicyArtifactInputV1, pos_runtime::OutputAdmissionErrorV1> {
         if plugin.name() != self.plugin_name {
             return Err(pos_runtime::OutputAdmissionErrorV1::PluginMismatch);
         }
