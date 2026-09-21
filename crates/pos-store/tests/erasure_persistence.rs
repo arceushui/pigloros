@@ -134,12 +134,14 @@ where
         }
     };
     let publication = gate.install_from_verified_inventory_transition(&mut transition);
-    match transition_error {
-        Some(error) => Err(error),
-        None => publication
-            .map(|(_, outcome)| outcome)
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing),
-    }
+    transition_error.map_or_else(
+        || {
+            publication
+                .map(|(_, outcome)| outcome)
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)
+        },
+        |error| Err(error),
+    )
 }
 
 fn commit_fork_admission_direct<S>(
@@ -162,12 +164,14 @@ where
         }
     };
     let publication = gate.install_from_verified_inventory_transition(&mut transition);
-    match transition_error {
-        Some(error) => Err(error),
-        None => publication
-            .map(|(_, outcome)| outcome)
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing),
-    }
+    transition_error.map_or_else(
+        || {
+            publication
+                .map(|(_, outcome)| outcome)
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)
+        },
+        |error| Err(error),
+    )
 }
 
 impl<S: ErasurePersistencePortV1> ErasureStateResolverV1 for Host<S> {
