@@ -50,7 +50,8 @@ use pos_core::{
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, ErasureTopologyTransitionPermitV1, KeyRegistryStateV1,
+    ErasureStateResolverV1, ErasureTopologyTransitionPermitV1,
+    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1, KeyRegistryStateV1,
     PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
     ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
@@ -3329,9 +3330,10 @@ mod tests {
         assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
 
         let mut unbound = MemoryStore::new().without_erasure_gate();
-        let inventory =
-            pos_core::ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)
-                .test_ok();
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
         let gate = ErasureContainmentGateV1::new_test_open();
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
             assert!(unbound
