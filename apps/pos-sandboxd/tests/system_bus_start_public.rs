@@ -43,8 +43,6 @@ struct RecordingManager {
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl RecordingManager {
     #[zbus(name = "StartTransientUnit")]
-    // The generated D-Bus interface requires its decoded wire arguments by value.
-    #[allow(clippy::needless_pass_by_value)]
     fn start_transient_unit(
         &self,
         name: String,
@@ -70,13 +68,16 @@ impl RecordingManager {
             })
             .transpose()?
             .ok_or_else(|| fdo::Error::Failed("missing descriptor property".to_owned()))?;
+        let auxiliary_count = auxiliary.len();
+        // The generated D-Bus interface owns every decoded wire argument.
+        drop(auxiliary);
         let call = ObservedStart {
             unit_name: name,
             mode,
             property_names,
             property_signatures,
             descriptor_names,
-            auxiliary_count: auxiliary.len(),
+            auxiliary_count,
         };
         self.observed
             .lock()
