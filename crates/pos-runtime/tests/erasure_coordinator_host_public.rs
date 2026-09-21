@@ -131,6 +131,7 @@ struct TestAuthority {
     allow_dispatch: AtomicBool,
     allow_ack: AtomicBool,
     allow_receipt: AtomicBool,
+    fail_fork_child_scope: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
     use_closed_scope_resolution: AtomicBool,
     fork_child_scope: std::sync::atomic::AtomicU8,
@@ -152,6 +153,7 @@ impl Default for TestAuthority {
             allow_dispatch: AtomicBool::new(false),
             allow_ack: AtomicBool::new(false),
             allow_receipt: AtomicBool::new(false),
+            fail_fork_child_scope: AtomicBool::new(false),
             fail_fork_scope_extension: AtomicBool::new(false),
             use_closed_scope_resolution: AtomicBool::new(false),
             fork_child_scope: std::sync::atomic::AtomicU8::new(19),
@@ -371,6 +373,9 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         _parent: TimelineId,
         child: &pos_core::TimelineMeta,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        if self.fail_fork_child_scope.load(Ordering::Acquire) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         let mut timelines = self
             .timelines
             .lock()
@@ -673,6 +678,16 @@ fn assert_frozen_fork_retries(
         Err(ErasureHostErrorV1::Conflict)
     );
     authority.set_fork_child_scope(19);
+    authority
+        .fail_fork_child_scope
+        .store(true, Ordering::Release);
+    assert_eq!(
+        commands.fork_timeline_identified(operation, parent, pos_core::Seq::ZERO, "frozen-child",),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    authority
+        .fail_fork_child_scope
+        .store(false, Ordering::Release);
     assert_eq!(
         commands.fork_timeline_identified(
             operation,

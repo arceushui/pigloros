@@ -74,6 +74,10 @@ thread_local! {
     /// Test-only delay used to exercise the final materialization elapsed guard.
     static BOUNDED_MATERIALIZE_FINAL_DELAY_MILLIS: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
+    /// Test-only fault injection for the next unchecked chain-hash lookup.
+    static FAIL_NEXT_CHAIN_HASH_AT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection for the next visible Timeline deletion.
+    static FAIL_NEXT_VISIBLE_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -122,6 +126,16 @@ fn bounded_materialize_final_delay_for_test() {
     if delay_millis != 0 {
         std::thread::sleep(std::time::Duration::from_millis(delay_millis));
     }
+}
+
+#[cfg(test)]
+fn fail_next_chain_hash_at_for_test() {
+    FAIL_NEXT_CHAIN_HASH_AT.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn fail_next_visible_delete_for_test() {
+    FAIL_NEXT_VISIBLE_DELETE.with(|fail| fail.set(true));
 }
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
@@ -291,6 +305,12 @@ fn delete_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreEr
 }
 
 fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+    #[cfg(test)]
+    if FAIL_NEXT_VISIBLE_DELETE.with(|fail| fail.replace(false)) {
+        return Err(CoreError::Storage(
+            "injected visible Timeline deletion failure".to_owned(),
+        ));
+    }
     if has_child_timeline(&store.timelines, id) {
         return Err(CoreError::Storage(
             "cannot delete timeline that still has forks".to_owned(),
@@ -2558,6 +2578,12 @@ impl MemoryStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<Hash, CoreError> {
+        #[cfg(test)]
+        if FAIL_NEXT_CHAIN_HASH_AT.with(|fail| fail.replace(false)) {
+            return Err(CoreError::Storage(
+                "injected chain-hash lookup failure".to_owned(),
+            ));
+        }
         let logical_head = self.logical_head_unchecked(timeline)?;
         if at_seq > logical_head {
             return Err(CoreError::ForkBeyondHead {
@@ -6174,6 +6200,18 @@ mod tests {
             Some(KeyRegistryStateV1::new())
         );
 
+        let mut existing_invalid = new_store();
+        existing_invalid
+            .create_timeline("existing-invalid")
+            .test_ok();
+        assert!(matches!(
+            existing_invalid.initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                "existing-invalid",
+                &super::coverage_entrypoints::invalid_registry(),
+            ),
+            Err(CoreError::Serialization(_))
+        ));
+
         let mut already_registered = new_store();
         already_registered.save_key_registry(&persisted).test_ok();
         let created = already_registered
@@ -6193,6 +6231,17 @@ mod tests {
             Err(CoreError::Serialization(_))
         ));
         assert!(rollback.list_timelines().test_ok().is_empty());
+
+        let mut rollback_failure = new_store();
+        fail_next_visible_delete_for_test();
+        assert!(matches!(
+            rollback_failure
+                .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                    "rollback-failure",
+                    &super::coverage_entrypoints::invalid_registry(),
+                ),
+            Err(CoreError::Storage(message)) if message.contains("rollback also failed")
+        ));
     }
 
     #[test]
@@ -6386,6 +6435,51 @@ mod coverage_entrypoints {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_recovery_receipt_digest(
+        operation: ErasureReferenceV1,
+        binding: ErasureReferenceV1,
+        expected_generation: ErasureReferenceV1,
+        child_scope: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: &TimelineMeta,
+    ) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-recovery/v1");
+        hasher.update(&operation.digest());
+        hasher.update(&binding.digest());
+        hasher.update(&expected_generation.digest());
+        hasher.update(&child_scope.digest());
+        hasher.update(&successor_generation.digest());
+        hasher.update(&child.id.inner().to_bytes());
+        hasher.update(b"historical");
+        match &child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        let (parent, at_seq) = child
+            .fork_point
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fork point")));
+        hasher.update(&parent.inner().to_bytes());
+        hasher.update(&at_seq.as_u64().to_be_bytes());
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    }
+
     fn identity(key: u8, scope: u8) -> AppendIdentity {
         AppendIdentity::new(
             AppendDedupKey::from_keyed_hash([key; 32]),
@@ -6520,9 +6614,47 @@ mod coverage_entrypoints {
         expect_err(store.revoke_owntracks_enrollment());
         expect_err(store.logical_head(pos_core::TimelineId::new()));
         expect_err(store.fork(root.id(), Seq::from_u64(2), "beyond"));
+        fail_next_chain_hash_at_for_test();
+        expect_err(store.fork(root.id(), Seq::ZERO, "chain-hash-failure"));
         let child = ok(store.fork(root.id(), Seq::ZERO, "child"));
         let _ = ok(store.compute_chain_hash_at(root.id(), Seq::ZERO));
         expect_err(store.compute_chain_hash_at(child.id(), Seq::from_u64(1)));
+
+        let mut recovery_store = new_store();
+        let recovery_parent = ok(recovery_store.create_timeline("recovery-parent"));
+        let recovery_child =
+            TimelineMeta::forked_from(recovery_parent.id(), Seq::ZERO, "recovery-child");
+        let recovery_operation = ErasureReferenceV1::from_digest([241; 32]);
+        let recovery_binding = ErasureReferenceV1::from_digest([242; 32]);
+        let recovery_generation = ErasureReferenceV1::from_digest([243; 32]);
+        let recovery_scope = ErasureReferenceV1::from_digest([244; 32]);
+        let recovery_successor = ErasureReferenceV1::from_digest([245; 32]);
+        let recovery_receipt = fork_recovery_receipt_digest(
+            recovery_operation,
+            recovery_binding,
+            recovery_generation,
+            recovery_scope,
+            recovery_successor,
+            &recovery_child,
+        );
+        recovery_store.erasure_fork_admissions.insert(
+            recovery_operation,
+            ErasureForkRecoveryV1::from_persisted(
+                recovery_operation,
+                recovery_binding,
+                recovery_generation,
+                recovery_scope,
+                recovery_successor,
+                recovery_child,
+                recovery_receipt,
+            )
+            .test_ok(),
+        );
+        fail_next_chain_hash_at_for_test();
+        assert_eq!(
+            recovery_store.recover_fork_admission(recovery_operation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         store.test_corrupt(TestCorruption::ForkParent {
             timeline: child.id(),
             parent: pos_core::TimelineId::new(),

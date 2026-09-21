@@ -11842,6 +11842,41 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_ledger_initialization_reports_timeline_lookup_failures() {
+        let mut malformed = new_store();
+        malformed
+            .create_timeline("malformed-timeline-row")
+            .test_ok();
+        malformed
+            .conn
+            .execute(
+                "UPDATE timelines SET id='not-a-ulid' WHERE name='malformed-timeline-row'",
+                [],
+            )
+            .test_ok();
+        assert!(matches!(
+            malformed.initialize_timeline_with_key_registry(
+                "malformed-timeline-row",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::Serialization(_))
+        ));
+
+        let mut missing_table = new_store();
+        missing_table
+            .conn
+            .execute_batch("DROP TABLE timelines")
+            .test_ok();
+        assert!(matches!(
+            missing_table.initialize_timeline_with_key_registry(
+                "missing-timelines-table",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+    }
+
+    #[test]
     fn sqlite_key_registry_persists_and_rejects_stale_authorization() {
         let mut store = new_store();
         let mut persisted = KeyRegistryStateV1::new();
