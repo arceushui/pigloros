@@ -14,7 +14,7 @@ pub use hardening::{
 };
 pub use system_bus::{
     SystemdStartJob, SystemdTransientUnitTransport, SystemdTransientUnitTransportError,
-    TransientServiceUnitName,
+    TransientServiceUnitName, TransientServiceUnitNameError,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,

@@ -19,8 +19,14 @@ pub struct TransientServiceUnitName(String);
 
 impl TransientServiceUnitName {
     /// Derive the collision-resistant unit name from the authoritative attempt ID.
-    #[must_use]
-    pub fn from_attempt_id(attempt_id: [u8; 16]) -> Self {
+    ///
+    /// # Errors
+    /// Returns [`TransientServiceUnitNameError::ZeroAttemptId`] when the
+    /// identifier is not a valid nonzero attempt identity.
+    pub fn from_attempt_id(attempt_id: [u8; 16]) -> Result<Self, TransientServiceUnitNameError> {
+        if attempt_id == [0; 16] {
+            return Err(TransientServiceUnitNameError::ZeroAttemptId);
+        }
         let mut name = String::with_capacity(UNIT_PREFIX.len() + 32 + UNIT_SUFFIX.len());
         name.push_str(UNIT_PREFIX);
         for byte in attempt_id {
@@ -28,7 +34,7 @@ impl TransientServiceUnitName {
             name.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
         }
         name.push_str(UNIT_SUFFIX);
-        Self(name)
+        Ok(Self(name))
     }
 
     /// Return the exact systemd unit name.
@@ -36,6 +42,14 @@ impl TransientServiceUnitName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Failure to construct a valid transient service-unit name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum TransientServiceUnitNameError {
+    /// ADR-069 reserves the all-zero value and requires a nonzero attempt ID.
+    #[error("the transient service-unit attempt ID must be nonzero")]
+    ZeroAttemptId,
 }
 
 /// The typed systemd job identity returned after request submission.
@@ -59,9 +73,9 @@ pub enum SystemdTransientUnitTransportError {
     /// The generated systemd manager proxy could not be constructed.
     #[error("failed to construct the typed systemd manager proxy")]
     Proxy(#[source] zbus::Error),
-    /// One closed property value could not be represented as an owned D-Bus value.
-    #[error("failed to encode a typed transient-unit property")]
-    Property(#[source] zvariant::Error),
+    /// One closed request value could not be serialized for D-Bus.
+    #[error("failed to serialize the typed transient-unit request")]
+    Serialization(#[source] zvariant::Error),
     /// systemd rejected or failed the typed `StartTransientUnit` call.
     #[error("systemd rejected the transient-unit request")]
     ManagerCall(#[source] zbus::Error),
@@ -100,7 +114,7 @@ impl SystemdTransientUnitTransport {
     /// establish property readback, launcher readiness, release, or enforcement.
     ///
     /// # Errors
-    /// Returns a classified proxy, property-conversion, or manager-call failure.
+    /// Returns a classified proxy, serialization, or manager-call failure.
     pub async fn start(
         &self,
         unit_name: TransientServiceUnitName,
@@ -134,9 +148,7 @@ async fn submit(
         .await
     {
         Ok(job_path) => job_path,
-        Err(error) => {
-            return Err(SystemdTransientUnitTransportError::ManagerCall(error));
-        }
+        Err(error) => return Err(classify_call_error(error)),
     };
     Ok(SystemdStartJob(job_path))
 }
@@ -158,7 +170,16 @@ where
 {
     owned_value(property_value(value))
         .map(|value| (name.to_owned(), value))
-        .map_err(SystemdTransientUnitTransportError::Property)
+        .map_err(SystemdTransientUnitTransportError::Serialization)
+}
+
+fn classify_call_error(error: zbus::Error) -> SystemdTransientUnitTransportError {
+    match error {
+        zbus::Error::Variant(error) => {
+            SystemdTransientUnitTransportError::Serialization(error)
+        }
+        error => SystemdTransientUnitTransportError::ManagerCall(error),
+    }
 }
 
 fn property_value(value: SystemdTransientUnitValue) -> Value<'static> {
@@ -206,7 +227,16 @@ mod tests {
         });
         assert_eq!(
             error.as_ref().err().map(ToString::to_string),
-            Some("failed to encode a typed transient-unit property".to_owned())
+            Some("failed to serialize the typed transient-unit request".to_owned())
+        );
+    }
+
+    #[test]
+    fn call_serialization_failure_is_classified() {
+        let error = classify_call_error(zbus::Error::Variant(zvariant::Error::IncorrectType));
+        assert_eq!(
+            error.to_string(),
+            "failed to serialize the typed transient-unit request"
         );
     }
 
@@ -214,16 +244,16 @@ mod tests {
     async fn pre_submission_failures_are_classified() {
         let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
         let property_error =
-            SystemdTransientUnitTransportError::Property(zvariant::Error::IncorrectType);
-        let name = TransientServiceUnitName::from_attempt_id([0; 16]);
+            SystemdTransientUnitTransportError::Serialization(zvariant::Error::IncorrectType);
+        let name = TransientServiceUnitName("test.service".to_owned());
         let error = submit(Err(proxy_error), Err(property_error), name).await;
         assert_eq!(
             error.as_ref().err().map(ToString::to_string),
-            Some("failed to encode a typed transient-unit property".to_owned())
+            Some("failed to serialize the typed transient-unit request".to_owned())
         );
 
         let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
-        let name = TransientServiceUnitName::from_attempt_id([0; 16]);
+        let name = TransientServiceUnitName("test.service".to_owned());
         let error = submit(Err(proxy_error), Ok(Vec::new()), name).await;
         assert_eq!(
             error.as_ref().err().map(ToString::to_string),

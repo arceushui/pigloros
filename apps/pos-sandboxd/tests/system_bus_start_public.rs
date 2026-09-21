@@ -11,7 +11,7 @@ use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
 use pos_sandboxd::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter,
     SystemdTransientUnitTransport, SystemdTransientUnitTransportError, TransientServiceUnitName,
-    TransientUnitLaunchInputs, TransientUnitRequest,
+    TransientServiceUnitNameError, TransientUnitLaunchInputs, TransientUnitRequest,
 };
 use zbus::{
     connection::{socket::channel::Channel, Builder},
@@ -26,6 +26,43 @@ const X86_64: &[u8] = include_bytes!(
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const JOB_PATH: &str = "/org/freedesktop/systemd1/job/381";
 const CONNECT_FAILURE_CHILD: &str = "PIGLOROS_CONNECT_FAILURE_CHILD";
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 35] = [
+    ("Type", "s"),
+    ("RootDirectory", "s"),
+    ("BindReadOnlyPaths", "a(ssbt)"),
+    ("DynamicUser", "b"),
+    ("NoNewPrivileges", "b"),
+    ("PrivateDevices", "b"),
+    ("PrivateIPC", "b"),
+    ("PrivateMounts", "b"),
+    ("PrivateNetwork", "b"),
+    ("PrivatePIDs", "s"),
+    ("PrivateUsersEx", "s"),
+    ("CapabilityBoundingSet", "t"),
+    ("AmbientCapabilities", "t"),
+    ("ProtectSystem", "s"),
+    ("ProtectHome", "s"),
+    ("ProtectControlGroupsEx", "s"),
+    ("ProtectKernelTunables", "b"),
+    ("ProtectKernelModules", "b"),
+    ("ProtectKernelLogs", "b"),
+    ("ProtectClock", "b"),
+    ("ProtectHostname", "b"),
+    ("ProtectProc", "s"),
+    ("ProcSubset", "s"),
+    ("RestrictNamespaces", "t"),
+    ("RestrictSUIDSGID", "b"),
+    ("RestrictRealtime", "b"),
+    ("LockPersonality", "b"),
+    ("SystemCallArchitectures", "as"),
+    ("SystemCallFilter", "(bas)"),
+    ("RestrictAddressFamilies", "(bas)"),
+    ("UMask", "u"),
+    ("KillMode", "s"),
+    ("SendSIGKILL", "b"),
+    ("FileDescriptorStoreMax", "u"),
+    ("ExtraFileDescriptors", "a(hs)"),
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedStart {
@@ -110,7 +147,7 @@ fn descriptor_names(value: OwnedValue) -> fdo::Result<Vec<String>> {
 async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dyn Error>> {
     let observed = Arc::new(Mutex::new(None));
     let (transport, _server) = transport(Arc::clone(&observed), false).await?;
-    let name = TransientServiceUnitName::from_attempt_id([0xab; 16]);
+    let name = TransientServiceUnitName::from_attempt_id([0xab; 16])?;
     assert_eq!(
         name.as_str(),
         "pigloros-attempt-abababababababababababababababab.service"
@@ -136,14 +173,13 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
         "pigloros-attempt-abababababababababababababababab.service"
     );
     assert_eq!(call.mode, "fail");
-    assert_eq!(call.property_names.len(), 35);
-    assert_eq!(call.property_names[0], "Type");
-    assert_eq!(call.property_names[1], "RootDirectory");
-    assert_eq!(call.property_names[34], "ExtraFileDescriptors");
-    assert_eq!(call.property_signatures[0], "s");
-    assert_eq!(call.property_signatures[2], "a(ssbt)");
-    assert_eq!(call.property_signatures[28], "(bas)");
-    assert_eq!(call.property_signatures[34], "a(hs)");
+    let property_shape = call
+        .property_names
+        .iter()
+        .zip(&call.property_signatures)
+        .map(|(name, signature)| (name.as_str(), signature.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(property_shape, EXPECTED_PROPERTY_SHAPE);
     assert_eq!(
         call.descriptor_names,
         ["piglor-host-service-v1", "piglor-release-v1"]
@@ -152,12 +188,20 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+fn zero_attempt_identity_cannot_name_a_transient_unit() {
+    assert_eq!(
+        TransientServiceUnitName::from_attempt_id([0; 16]),
+        Err(TransientServiceUnitNameError::ZeroAttemptId)
+    );
+}
+
 #[tokio::test]
 async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Error>> {
     let (transport, _server) = transport(Arc::new(Mutex::new(None)), true).await?;
     let result = transport
         .start(
-            TransientServiceUnitName::from_attempt_id([0x01; 16]),
+            TransientServiceUnitName::from_attempt_id([0x01; 16])?,
             request(LaunchMode::AirGapped)?,
         )
         .await;
