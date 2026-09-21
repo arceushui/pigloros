@@ -106,20 +106,13 @@ pub fn canonical_plugin_configuration_v1(
     }
     let mut capability = plugin.capability().owned_event_types;
     capability.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
-    let Some(artifact_len) = capability
-        .iter()
-        .try_fold(
-            4usize
-                .checked_add(8 + plugin.name().len())
-                .and_then(|length| length.checked_add(8 + plugin.version().len())),
-            |length, event_type| {
-                length.and_then(|length| length.checked_add(8 + event_type.as_str().len()))
-            },
-        )
-        .and_then(|length| length.checked_add(8 + details.len()))
-    else {
-        return Err(ReviewedPolicyArtifactErrorV1::ConfigurationArtifactTooLarge);
-    };
+    let mut artifact_len = 4usize
+        .saturating_add(8 + plugin.name().len())
+        .saturating_add(8 + plugin.version().len());
+    for event_type in &capability {
+        artifact_len = artifact_len.saturating_add(8 + event_type.as_str().len());
+    }
+    artifact_len = artifact_len.saturating_add(8 + details.len());
     if artifact_len > MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 {
         return Err(ReviewedPolicyArtifactErrorV1::ConfigurationArtifactTooLarge);
     }
