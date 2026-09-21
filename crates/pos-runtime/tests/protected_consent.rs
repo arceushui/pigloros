@@ -51,7 +51,7 @@ fn gated_store() -> Box<dyn EventStore> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn register_output_driver(
-    registry: &mut PluginRegistry,
+    registry: &mut RuntimePluginRegistry,
     event_type: &str,
     driver: Box<dyn Driver>,
 ) {
