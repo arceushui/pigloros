@@ -5,9 +5,14 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
+    output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentError, ConsentGate, ConsentGrantedV1, ErasureContainmentGateV1, Plugin, PluginId,
-    ProposedAction, Reducer, State,
+    ConsentError, ConsentGate, ConsentGrantedV1, ErasureContainmentGateV1,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Plugin,
+    PluginCpuReservationV1, PluginId, ProposedAction, Reducer, State, WorkloadProfileV1,
 };
 use pos_runtime::{
     ActionSubmissionError, Driver, ObservationView, PluginRegistry as RuntimePluginRegistry,
@@ -42,6 +47,74 @@ fn gated_store() -> Box<dyn EventStore> {
     let mut store = test_ok(open_store(StoreConfig::Memory));
     test_ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     store
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn register_output_driver(
+    registry: &mut PluginRegistry,
+    event_type: &str,
+    driver: Box<dyn Driver>,
+) {
+    let plugin_id = PluginId::new();
+    let budget = test_ok(ExecutableBudgetPolicyV1::new(
+        ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        },
+    ));
+    let declaration = test_ok(OutputDeclarationV1::new(
+        event_type.to_owned(),
+        OutputAuthorityV1::Authoritative,
+        OutputFidelityV1::L0,
+        4_096,
+        None,
+        None,
+    ));
+    let policy = test_ok(OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: "test".to_owned(),
+        implementation_hash: Hash::from_bytes([0x42; 32]),
+        base_configuration_digest: Hash::from_bytes([0x43; 32]),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: Hash::from_bytes([0x44; 32]),
+        policy_revision: 1,
+        output_declarations: vec![declaration],
+    }));
+    test_ok(
+        registry.register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver),
+    );
 }
 
 /// Bind the host-owned erasure gate for all ordinary live-registry fixtures.
@@ -521,7 +594,11 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let grant = grant(subject);
     let token = authority.record_grant_on_timeline(timeline, &grant);
     let mut registry = PluginRegistry::new().with_consent_authority(authority.clone());
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
 
     let drafts =
         test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 1, &[]));
@@ -558,7 +635,11 @@ fn protected_public_seam_fails_closed_without_a_bound_gate() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new();
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
@@ -608,7 +689,11 @@ fn protected_public_seam_rejects_a_gate_that_returns_a_different_token() {
     let returned = other_authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry =
         PluginRegistry::new().with_consent_gate(Arc::new(MismatchedDraftGate { returned }));
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
@@ -625,9 +710,13 @@ fn protected_public_seam_rejects_a_draft_for_a_different_subject() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    registry.register_test_driver(Box::new(MismatchedSubjectDriver {
-        entity: other_subject,
-    }));
+    register_output_driver(
+        &mut registry,
+        "geo.position.v1",
+        Box::new(MismatchedSubjectDriver {
+            entity: other_subject,
+        }),
+    );
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
@@ -643,9 +732,13 @@ fn protected_public_seam_rejects_a_retention_draft_for_a_different_subject() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    registry.register_test_driver(Box::new(MismatchedRetentionDriver {
-        entity: EntityId::new(),
-    }));
+    register_output_driver(
+        &mut registry,
+        "retention.extend.v1",
+        Box::new(MismatchedRetentionDriver {
+            entity: EntityId::new(),
+        }),
+    );
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
@@ -683,9 +776,13 @@ impl ConsentGate for RejectingDraftGate {
 fn ordinary_public_seam_routes_every_draft_through_the_bound_gate() {
     let timeline = TimelineId::new();
     let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(RejectingDraftGate));
-    registry.register_test_driver(Box::new(ProtectedEventDriver {
-        entity: EntityId::new(),
-    }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver {
+            entity: EntityId::new(),
+        }),
+    );
 
     let error = test_err(registry.step_all_anchored(timeline, Seq::ZERO));
     assert!(matches!(
@@ -742,7 +839,11 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
         observed_now_secs: observed_now_secs.clone(),
     });
     let mut registry = PluginRegistry::new().with_consent_gate(gate);
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
 
     let drafts = test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
@@ -773,7 +874,11 @@ fn protected_append_fence_rejects_before_store_append() {
         observed_now_secs,
     });
     let mut registry = PluginRegistry::new().with_consent_gate(gate);
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
     let drafts =
         test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
 
@@ -797,7 +902,11 @@ fn append_fence_revalidates_caller_supplied_drafts() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline.id(), &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
     let _staged =
         test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
     let replacement = vec![EventDraft::new(
@@ -845,7 +954,11 @@ fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_gate(Arc::new(RejectingDraftGate));
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
 
     let error = test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert!(matches!(
@@ -890,14 +1003,22 @@ fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
         .is_ok());
 
     let mut ordinary_step = PluginRegistry::new().with_consent_authority(authority.clone());
-    ordinary_step.register_test_driver(Box::new(MismatchedSubjectDriver { entity: subject }));
+    register_output_driver(
+        &mut ordinary_step,
+        "geo.position.v1",
+        Box::new(MismatchedSubjectDriver { entity: subject }),
+    );
     assert!(matches!(
         test_err(ordinary_step.step_all(timeline)),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
 
     let mut ordinary_tick = PluginRegistry::new().with_consent_authority(authority);
-    ordinary_tick.register_test_driver(Box::new(MismatchedSubjectDriver { entity: subject }));
+    register_output_driver(
+        &mut ordinary_tick,
+        "geo.position.v1",
+        Box::new(MismatchedSubjectDriver { entity: subject }),
+    );
     assert!(matches!(
         test_err(ordinary_tick.tick_cadenced(timeline, 0)),
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -918,7 +1039,11 @@ fn protected_cadenced_public_seam_stages_and_commits() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    registry.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
 
     let drafts =
         test_ok(registry.tick_cadenced_anchored_protected(timeline, 0, Seq::ZERO, token, 1, &[]));
@@ -1106,10 +1231,14 @@ fn public_registry_rejects_a_protected_driver_without_matching_consent() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut protected = PluginRegistry::new().with_consent_authority(authority);
-    protected.register_test_driver(Box::new(SensitiveEventDriver {
-        entity: EntityId::new(),
-        event_type: "persona.profile.v1",
-    }));
+    register_output_driver(
+        &mut protected,
+        "persona.profile.v1",
+        Box::new(SensitiveEventDriver {
+            entity: EntityId::new(),
+            event_type: "persona.profile.v1",
+        }),
+    );
     assert!(matches!(
         test_err(protected.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[])),
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -1124,7 +1253,11 @@ fn public_registry_rechecks_revocation_when_committing() {
     let consent_grant = grant(subject);
     let token = authority.record_grant_on_timeline(timeline, &consent_grant);
     let mut revoked = PluginRegistry::new().with_consent_authority(authority.clone());
-    revoked.register_test_driver(Box::new(ProtectedEventDriver { entity: subject }));
+    register_output_driver(
+        &mut revoked,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
     test_ok(revoked.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     test_ok(authority.record_revocation_on_timeline(
         timeline,
@@ -1259,9 +1392,13 @@ fn public_registry_deduplicates_subscriptions_before_authorization() {
 fn public_registry_enforces_the_driver_resource_limit() {
     let timeline = TimelineId::new();
     let mut limited = PluginRegistry::new().with_resource_limit(0);
-    limited.register_test_driver(Box::new(CadencedDraftDriver {
-        entity: EntityId::new(),
-    }));
+    register_output_driver(
+        &mut limited,
+        "runtime.public.cadence",
+        Box::new(CadencedDraftDriver {
+            entity: EntityId::new(),
+        }),
+    );
     assert!(matches!(
         test_err(limited.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::ResourceExhausted { .. }
@@ -1440,7 +1577,11 @@ fn public_cadence_executes_driver_output_through_the_consent_boundary() {
     let timeline = TimelineId::new();
     let entity = EntityId::new();
     let mut registry = PluginRegistry::new();
-    registry.register_test_driver(Box::new(CadencedDraftDriver { entity }));
+    register_output_driver(
+        &mut registry,
+        "runtime.public.cadence",
+        Box::new(CadencedDraftDriver { entity }),
+    );
 
     let drafts = test_ok(registry.tick_cadenced(timeline, 0));
     assert_eq!(drafts.len(), 1);
@@ -1587,10 +1728,14 @@ fn protected_draft_seam_rejects_a_modality_not_in_the_presented_token() {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    registry.register_test_driver(Box::new(SensitiveEventDriver {
-        entity: subject,
-        event_type: "persona.profile.v1",
-    }));
+    register_output_driver(
+        &mut registry,
+        "persona.profile.v1",
+        Box::new(SensitiveEventDriver {
+            entity: subject,
+            event_type: "persona.profile.v1",
+        }),
+    );
 
     assert!(matches!(
         test_err(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[],)),
