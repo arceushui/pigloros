@@ -689,7 +689,9 @@ impl WorldReplayAdmissionV1 {
     }
 }
 
-#[cfg(all(test, feature = "test-support"))]
+#[cfg(test)]
+#[cfg(feature = "test-support")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

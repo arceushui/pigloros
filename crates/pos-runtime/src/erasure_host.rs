@@ -2557,7 +2557,6 @@ impl ErasureReadSenderV1<'_> {
         {
             return Err(ErasureHostErrorV1::Conflict);
         }
-        self.host.ensure_generation(self.generation)?;
         Ok(capability)
     }
 
