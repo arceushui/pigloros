@@ -204,10 +204,10 @@ mod tests {
         let error = encode_property_with("TestProperty", value(), |_| {
             Err(zvariant::Error::IncorrectType)
         });
-        assert!(matches!(
-            error,
-            Err(SystemdTransientUnitTransportError::Property(_))
-        ));
+        assert_eq!(
+            error.as_ref().err().map(ToString::to_string),
+            Some("failed to encode a typed transient-unit property".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -217,17 +217,17 @@ mod tests {
             SystemdTransientUnitTransportError::Property(zvariant::Error::IncorrectType);
         let name = TransientServiceUnitName::from_attempt_id([0; 16]);
         let error = submit(Err(proxy_error), Err(property_error), name).await;
-        assert!(matches!(
-            error,
-            Err(SystemdTransientUnitTransportError::Property(_))
-        ));
+        assert_eq!(
+            error.as_ref().err().map(ToString::to_string),
+            Some("failed to encode a typed transient-unit property".to_owned())
+        );
 
         let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
         let name = TransientServiceUnitName::from_attempt_id([0; 16]);
         let error = submit(Err(proxy_error), Ok(Vec::new()), name).await;
-        assert!(matches!(
-            error,
-            Err(SystemdTransientUnitTransportError::Proxy(_))
-        ));
+        assert_eq!(
+            error.as_ref().err().map(ToString::to_string),
+            Some("failed to construct the typed systemd manager proxy".to_owned())
+        );
     }
 }
