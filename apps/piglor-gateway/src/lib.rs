@@ -822,18 +822,6 @@ fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
     configuration_details
 }
 
-fn gateway_action_registry_builder(
-    bodies: impl IntoIterator<Item = EntityId>,
-    authority: Option<ConsentAuthority>,
-) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    gateway_action_registry_builder_with_inputs(
-        bodies,
-        authority,
-        "deterministic-local-v1",
-        EVENT_TYPE_ACTION,
-    )
-}
-
 fn gateway_action_registry_builder_with_inputs(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -877,7 +865,13 @@ fn gateway_action_registry_builder_for_test(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> PluginRegistry {
-    gateway_action_registry_builder(bodies, authority).unwrap_or_else(|error| {
+    gateway_action_registry_builder_with_inputs(
+        bodies,
+        authority,
+        "deterministic-local-v1",
+        EVENT_TYPE_ACTION,
+    )
+    .unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!(
             "gateway action registration must remain valid in test fixtures: {error:?}"
         )))
