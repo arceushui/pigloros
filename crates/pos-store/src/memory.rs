@@ -3430,6 +3430,213 @@ mod tests {
     }
 
     #[test]
+    fn host_transition_store_seams_cover_success_and_rejection_paths() {
+        let mut store = new_store();
+        let gate = Arc::clone(
+            store
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind("missing memory test gate")),
+        );
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let root = store
+                .create_timeline_for_host_transition(permit, "host-root")
+                .test_ok();
+            let meta_root = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-root-with-meta"),
+                )
+                .test_ok();
+            assert!(store
+                .get_timeline_for_host_transition(permit, root.id())
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "host-root-with-meta")
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "missing-host-name")
+                .test_ok()
+                .is_none());
+
+            let child_meta = TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-meta");
+            let child = store
+                .fork_for_host_transition_with_meta(permit, root.id(), Seq::ZERO, child_meta)
+                .test_ok();
+            assert_eq!(child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+            let ordinary_child = store
+                .fork_for_host_transition(permit, root.id(), Seq::ZERO, "host-child")
+                .test_ok();
+            assert_eq!(ordinary_child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+
+            let existing = store
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "host-ledger-existing",
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(existing.1);
+            let reused = store
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "host-ledger-existing",
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(!reused.1);
+            let preallocated = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("host-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(preallocated.1);
+            assert_ne!(meta_root.id(), preallocated.0.id());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+
+        let foreign_gate = ErasureContainmentGateV1::new_test_open();
+        let mut rejected = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(store
+                .create_timeline_for_host_transition(permit, "foreign-root")
+                .is_err());
+            assert!(store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("foreign-root-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition(permit, TimelineId::new(), Seq::ZERO, "foreign-child")
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    TimelineMeta::root("foreign-child-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .get_timeline_for_host_transition(permit, TimelineId::new())
+                .is_err());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "foreign-name")
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "foreign-ledger",
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("foreign-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        foreign_gate
+            .install_from_verified_inventory_transition(&mut rejected)
+            .test_ok();
+
+        let preissued_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        preissued_gate.issue_topology_store_binding().test_ok();
+        assert!(matches!(
+            MemoryStore::new().bind_erasure_gate(preissued_gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+
+        let mut mismatch = new_store();
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("host-transition", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([8; 32]),
+                Some(PublicKey::from_bytes([9; 32])),
+            ))
+            .test_ok();
+        mismatch.save_key_registry(&persisted).test_ok();
+        let mismatch_gate = Arc::clone(
+            mismatch
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind("missing mismatch gate")),
+        );
+        let mut mismatch_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(mismatch
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "mismatched-host-ledger",
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        mismatch_gate
+            .install_from_verified_inventory_transition(&mut mismatch_transition)
+            .test_ok();
+
+        let mut invalid_loaded = new_store();
+        invalid_loaded.key_registry = Some(super::coverage_entrypoints::invalid_registry());
+        let invalid_loaded_gate = Arc::clone(
+            invalid_loaded
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind("missing invalid registry gate")),
+        );
+        let mut invalid_loaded_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(invalid_loaded
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "invalid-loaded-host-ledger",
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        invalid_loaded_gate
+            .install_from_verified_inventory_transition(&mut invalid_loaded_transition)
+            .test_ok();
+
+        let mut rollback = new_store();
+        let rollback_gate = Arc::clone(
+            rollback
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind("missing rollback gate")),
+        );
+        let mut rollback_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            fail_next_visible_delete_for_test();
+            let error = rollback
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "rollback-host-ledger",
+                    &super::coverage_entrypoints::invalid_registry(),
+                )
+                .test_err();
+            assert!(error.to_string().contains("rollback also failed"));
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        rollback_gate
+            .install_from_verified_inventory_transition(&mut rollback_transition)
+            .test_ok();
+    }
+
+    #[test]
     fn rejoin_adapter_rejects_missing_corrupt_and_remapped_evidence() {
         let proof = crate::test_rejoin_proof();
         let mut store = MemoryStore::new();

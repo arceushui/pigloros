@@ -4414,6 +4414,12 @@ mod key_registry_coverage {
                     .create_timeline_for_host_transition(permit, "minimal-host-transition")
                     .is_err());
                 assert!(store
+                    .create_timeline_for_host_transition_with_meta(
+                        permit,
+                        TimelineMeta::root("minimal-host-transition-with-meta"),
+                    )
+                    .is_err());
+                assert!(store
                     .fork_for_host_transition(
                         permit,
                         TimelineId::new(),
@@ -4422,9 +4428,34 @@ mod key_registry_coverage {
                     )
                     .is_err());
                 assert!(store
+                    .fork_for_host_transition_with_meta(
+                        permit,
+                        TimelineId::new(),
+                        Seq::ZERO,
+                        TimelineMeta::forked_from(
+                            TimelineId::new(),
+                            Seq::ZERO,
+                            "minimal-host-fork-with-meta",
+                        ),
+                    )
+                    .is_err());
+                assert!(store
+                    .get_timeline_for_host_transition(permit, TimelineId::new())
+                    .is_err());
+                assert!(store
+                    .find_timeline_by_name_for_host_transition(permit, "minimal-host-name")
+                    .is_err());
+                assert!(store
                     .initialize_timeline_with_key_registry_for_host_transition(
                         permit,
                         "minimal-host-ledger",
+                        &KeyRegistryStateV1::new(),
+                    )
+                    .is_err());
+                assert!(store
+                    .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                        permit,
+                        &TimelineMeta::root("minimal-host-ledger-with-meta"),
                         &KeyRegistryStateV1::new(),
                     )
                     .is_err());

@@ -640,6 +640,7 @@ pub fn import_timeline_with_verified_signatures(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pos_core::Hasher;
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -702,6 +703,69 @@ mod tests {
             checked_logical_head(u64::MAX, 1),
             Err(CoreError::Storage(_))
         ));
+    }
+
+    #[test]
+    fn fork_child_exactness_covers_metadata_sequence_event_and_chain_failures() {
+        let parent = pos_core::TimelineId::new();
+        let expected = pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "child");
+        let hasher = pos_crypto::chain::Blake3Hasher;
+        let genesis = hasher.genesis_hash();
+        let event_id = pos_core::EventId::new();
+        let payload = pos_core::CanonicalBytes::from_static(b"child-event");
+        let child_head = hasher.hash_event(&genesis, event_id.to_string().as_bytes(), &payload);
+
+        assert_eq!(
+            fork_child_is_exact(
+                &expected,
+                &expected,
+                pos_core::Seq::from_u64(1),
+                child_head.as_bytes(),
+                genesis,
+                [Ok((pos_core::Seq::from_u64(1), event_id, payload.clone()))],
+                &hasher,
+            )
+            .test_ok(),
+            true
+        );
+        assert_eq!(
+            fork_child_is_exact(
+                &expected,
+                &pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "other"),
+                pos_core::Seq::ZERO,
+                genesis.as_bytes(),
+                genesis,
+                std::iter::empty(),
+                &hasher,
+            )
+            .test_ok(),
+            false
+        );
+        assert_eq!(
+            fork_child_is_exact(
+                &expected,
+                &expected,
+                pos_core::Seq::from_u64(1),
+                child_head.as_bytes(),
+                genesis,
+                [Ok((pos_core::Seq::from_u64(2), event_id, payload.clone()))],
+                &hasher,
+            )
+            .test_ok(),
+            false
+        );
+        assert_eq!(
+            fork_child_is_exact(
+                &expected,
+                &expected,
+                pos_core::Seq::ZERO,
+                genesis.as_bytes(),
+                genesis,
+                [Err(pos_core::ErasureErrorV1::ProvenanceMissing)],
+                &hasher,
+            ),
+            Err(pos_core::ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     #[test]

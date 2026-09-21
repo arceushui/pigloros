@@ -721,6 +721,27 @@ where
     Ok((shared, gate, request.reference(), child, prepared))
 }
 
+fn assert_fork_admission_rejects_a_foreign_transition_permit<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+    S: ErasureForkPersistencePortV1,
+{
+    let (shared, _, _, _, prepared) = prepared_fork(store)?;
+    let foreign_gate = ErasureContainmentGateV1::new_test_open();
+    let successor = prepared.successor_inventory().clone();
+    let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| {
+        let outcome = shared
+            .borrow_mut()
+            .commit_fork_admission(permit, prepared.clone());
+        Ok::<_, ErasureErrorV1>((successor.clone(), outcome))
+    };
+    let (_, outcome) = foreign_gate.install_from_verified_inventory_transition(&mut transition)?;
+    assert_eq!(outcome, Err(ErasureErrorV1::ProvenanceMissing));
+    Ok(())
+}
+
 fn prepare_overlap_admission<S>(
     coordinator: &mut ErasureCoordinatorStateMachineV1<Host<S>>,
     request: ErasureReferenceV1,
@@ -1144,6 +1165,12 @@ fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
 }
 
 #[test]
+fn memory_fork_admission_rejects_a_foreign_transition_permit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_foreign_transition_permit(MemoryStore::new())
+}
+
+#[test]
 fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn std::error::Error>>
 {
     let (shared, request, _) = complete(MemoryStore::new())?;
@@ -1479,6 +1506,13 @@ fn sqlite_fork_admission_commits_every_overlapping_request(
 fn sqlite_fork_admission_preserves_a_positively_unaffected_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_positively_unaffected_fork(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_rejects_a_foreign_transition_permit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_foreign_transition_permit(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]

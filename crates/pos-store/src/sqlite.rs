@@ -6564,6 +6564,181 @@ mod tests {
     }
 
     #[test]
+    fn host_transition_store_seams_cover_success_and_rejection_paths() {
+        let mut store = new_store();
+        let gate = Arc::clone(
+            store
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind("missing sqlite test gate")),
+        );
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let root = store
+                .create_timeline_for_host_transition(permit, "host-root")
+                .test_ok();
+            let meta_root = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-root-with-meta"),
+                )
+                .test_ok();
+            assert!(store
+                .get_timeline_for_host_transition(permit, root.id())
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "host-root-with-meta")
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "missing-host-name")
+                .test_ok()
+                .is_none());
+
+            let child_meta = TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-meta");
+            let child = store
+                .fork_for_host_transition_with_meta(permit, root.id(), Seq::ZERO, child_meta)
+                .test_ok();
+            assert_eq!(child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+            let ordinary_child = store
+                .fork_for_host_transition(permit, root.id(), Seq::ZERO, "host-child")
+                .test_ok();
+            assert_eq!(ordinary_child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+
+            let existing = store
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "host-ledger-existing",
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(existing.1);
+            let reused = store
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "host-ledger-existing",
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(!reused.1);
+            let preallocated = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("host-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(preallocated.1);
+            assert_ne!(meta_root.id(), preallocated.0.id());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+
+        let foreign_gate = ErasureContainmentGateV1::new_test_open();
+        let mut rejected = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(store
+                .create_timeline_for_host_transition(permit, "foreign-root")
+                .is_err());
+            assert!(store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("foreign-root-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition(permit, TimelineId::new(), Seq::ZERO, "foreign-child")
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    TimelineMeta::root("foreign-child-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .get_timeline_for_host_transition(permit, TimelineId::new())
+                .is_err());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "foreign-name")
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition(
+                    permit,
+                    "foreign-ledger",
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("foreign-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        foreign_gate
+            .install_from_verified_inventory_transition(&mut rejected)
+            .test_ok();
+
+        let preissued_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        preissued_gate.issue_topology_store_binding().test_ok();
+        assert!(matches!(
+            SqliteStore::open_in_memory()
+                .test_ok()
+                .bind_erasure_gate(preissued_gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+
+        let mut duplicate = new_store();
+        let duplicate_gate = Arc::clone(
+            duplicate
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind("missing duplicate gate")),
+        );
+        let mut duplicate_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let root = duplicate
+                .create_timeline_for_host_transition(permit, "duplicate-root")
+                .test_ok();
+            let mut duplicate_meta = TimelineMeta::root("duplicate-meta");
+            duplicate_meta.id = root.id();
+            assert!(duplicate
+                .create_timeline_for_host_transition_with_meta(permit, duplicate_meta)
+                .is_err());
+            let beyond =
+                TimelineMeta::forked_from(root.id(), Seq::from_u64(1), "beyond-host-parent");
+            assert!(duplicate
+                .fork_for_host_transition_with_meta(permit, root.id(), Seq::from_u64(1), beyond,)
+                .is_err());
+            let missing_name = TimelineMeta {
+                id: TimelineId::new(),
+                mode: TimelineMode::Live,
+                name: None,
+                owner: None,
+                fork_point: None,
+            };
+            assert!(duplicate
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &missing_name,
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        duplicate_gate
+            .install_from_verified_inventory_transition(&mut duplicate_transition)
+            .test_ok();
+    }
+
+    #[test]
     fn rejoin_adapter_rejects_missing_corrupt_and_remapped_evidence() {
         let proof = crate::test_rejoin_proof();
         let mut store = new_store();

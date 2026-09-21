@@ -7272,6 +7272,8 @@ mod coverage_paths {
         let foreign_store_binding = foreign_gate
             .issue_topology_store_binding()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(store_binding, store_binding.clone());
+        assert_ne!(store_binding, foreign_store_binding);
         assert_eq!(
             gate.issue_topology_store_binding(),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
