@@ -1851,16 +1851,31 @@ impl ErasureExecutionHostV1 {
                 return Err(map_erasure_error(error));
             }
         };
+        let parent_owner = self
+            .store
+            .host_store()
+            .get_timeline_for_host_transition(parent)
+            .map_store_error()?
+            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?
+            .meta
+            .owner;
         let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
             Some(recovered_child)
                 if recovered_child.mode == TimelineMode::Historical
                     && recovered_child.name.as_deref() == Some(name)
-                    && recovered_child.fork_point == Some((parent, at_seq)) =>
+                    && recovered_child.fork_point == Some((parent, at_seq))
+                    && recovered_child.owner == parent_owner =>
             {
                 recovered_child.clone()
             }
             Some(_) => return Err(ErasureHostErrorV1::Conflict),
-            None => TimelineMeta::forked_from(parent, at_seq, name),
+            None => TimelineMeta {
+                id: TimelineId::new(),
+                mode: TimelineMode::Historical,
+                name: Some(name.to_owned()),
+                owner: parent_owner,
+                fork_point: Some((parent, at_seq)),
+            },
         };
         Ok((child, recovered))
     }
@@ -1995,9 +2010,8 @@ impl ErasureExecutionHostV1 {
             .prepare_fork_batch(admission_input, admissions)?;
         let successor = batch.successor_inventory().clone();
         match self.store.host_store().commit_fork_admission(batch)? {
-            ErasureCasOutcomeV1::Applied | ErasureCasOutcomeV1::ExactRetry => {
-                Ok((successor, Timeline::new(input.child.clone())))
-            }
+            ErasureCasOutcomeV1::Applied => Ok((successor, Timeline::new(input.child.clone()))),
+            ErasureCasOutcomeV1::ExactRetry => Err(ErasureErrorV1::ReceiptCommitFailed),
         }
     }
 
@@ -2381,10 +2395,8 @@ impl ErasureCommandSenderV1<'_> {
                 .host
                 .store
                 .host_store()
-                .list_timelines()
-                .map_store_error()?
-                .into_iter()
-                .find(|timeline| timeline.meta.name.as_deref() == Some(name));
+                .find_timeline_by_name_for_host_transition(name)
+                .map_store_error()?;
             if let Some(existing) = existing {
                 inventory
                     .require_unaffected_topology(existing.id())
@@ -3573,6 +3585,20 @@ mod tests {
             } else {
                 self.inner.get_timeline(id)
             }
+        }
+
+        fn get_timeline_for_host_transition(
+            &self,
+            id: TimelineId,
+        ) -> Result<Option<Timeline>, CoreError> {
+            self.inner.get_timeline_for_host_transition(id)
+        }
+
+        fn find_timeline_by_name_for_host_transition(
+            &self,
+            name: &str,
+        ) -> Result<Option<Timeline>, CoreError> {
+            self.inner.find_timeline_by_name_for_host_transition(name)
         }
 
         fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {

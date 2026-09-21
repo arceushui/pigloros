@@ -718,6 +718,42 @@ pub trait EventStore: Send {
     /// Returns a [`CoreError::Storage`] error on I/O failure.
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError>;
 
+    /// Get Timeline metadata for a trusted host topology transition.
+    ///
+    /// Unlike [`Self::get_timeline`], this seam must inspect the durable
+    /// record without applying ordinary protected-read visibility. The
+    /// execution host uses it only while deciding whether a transition may
+    /// proceed; it must not be exposed as a generic reader.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter cannot inspect its
+    /// durable topology.
+    fn get_timeline_for_host_transition(
+        &self,
+        id: TimelineId,
+    ) -> Result<Option<Timeline>, CoreError> {
+        self.get_timeline(id)
+    }
+
+    /// Find one Timeline by name for a trusted host topology transition.
+    ///
+    /// This is the name-based counterpart to
+    /// [`Self::get_timeline_for_host_transition`]. It must not hide a record
+    /// merely because an ordinary protected read is currently frozen.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter cannot inspect its
+    /// durable topology.
+    fn find_timeline_by_name_for_host_transition(
+        &self,
+        name: &str,
+    ) -> Result<Option<Timeline>, CoreError> {
+        self.list_timelines()?
+            .into_iter()
+            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+            .map_or(Ok(None), |timeline| Ok(Some(timeline)))
+    }
+
     /// Return the last logical sequence visible through a stitched Timeline.
     ///
     /// [`Timeline::head`] is the head of that Timeline's own persisted segment.

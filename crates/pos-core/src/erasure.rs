@@ -8,7 +8,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
         Arc, RwLock,
     },
 };
@@ -395,10 +395,19 @@ pub trait ErasureGate: Send + Sync {
 /// published here. A Timeline is bound to an opaque scope reference by the
 /// authoritative topology resolver; no selector is re-evaluated by this gate.
 pub struct ErasureContainmentGateV1 {
+    topology_binding_id: u64,
     authority: RwLock<Arc<ErasureGateStateV1>>,
     fence_lock: std::sync::Mutex<()>,
     fail_closed_unbound: bool,
     poisoned: AtomicBool,
+}
+
+/// Opaque host-issued identity binding one store adapter to one containment
+/// gate for topology transitions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureTopologyStoreBindingV1 {
+    gate_id: u64,
+    store_id: u64,
 }
 
 /// Capability proving that a store mutation is executing inside the host's
@@ -411,8 +420,8 @@ pub struct ErasureContainmentGateV1 {
 /// directly.
 #[derive(Debug)]
 pub struct ErasureTopologyTransitionPermitV1 {
-    gate_identity: usize,
-    claimed_store: Cell<Option<usize>>,
+    gate_id: u64,
+    claimed_store_id: Cell<Option<u64>>,
     _private: (),
 }
 
@@ -423,17 +432,20 @@ impl ErasureTopologyTransitionPermitV1 {
     /// successful call binds the permit to that adapter for the remainder of
     /// the fenced callback; later calls must name the same adapter.
     #[must_use]
-    pub fn claim_for_store<T>(&self, gate: &ErasureContainmentGateV1, store: &T) -> bool {
-        if self.gate_identity != std::ptr::from_ref(gate) as usize {
+    pub fn claim_for_store(
+        &self,
+        gate: &ErasureContainmentGateV1,
+        binding: &ErasureTopologyStoreBindingV1,
+    ) -> bool {
+        if self.gate_id != gate.topology_binding_id || binding.gate_id != self.gate_id {
             return false;
         }
-        let store_identity = std::ptr::from_ref(store) as usize;
-        self.claimed_store.get().map_or_else(
+        self.claimed_store_id.get().map_or_else(
             || {
-                self.claimed_store.set(Some(store_identity));
+                self.claimed_store_id.set(Some(binding.store_id));
                 true
             },
-            |claimed_store| claimed_store == store_identity,
+            |claimed_store_id| claimed_store_id == binding.store_id,
         )
     }
 }
@@ -454,8 +466,11 @@ struct ErasureGateStateV1 {
     frozen_timelines: BTreeSet<TimelineId>,
 }
 
+static NEXT_ERASURE_TOPOLOGY_GATE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_ERASURE_TOPOLOGY_STORE_ID: AtomicU64 = AtomicU64::new(1);
+
 thread_local! {
-    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 struct ActiveContainmentFence;
@@ -491,6 +506,8 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub fn new_fail_closed() -> Self {
         Self {
+            topology_binding_id: NEXT_ERASURE_TOPOLOGY_GATE_ID
+                .fetch_add(1, AtomicOrdering::Relaxed),
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
                 timeline_scopes: BTreeMap::new(),
@@ -514,6 +531,8 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub fn new_test_open() -> Self {
         Self {
+            topology_binding_id: NEXT_ERASURE_TOPOLOGY_GATE_ID
+                .fetch_add(1, AtomicOrdering::Relaxed),
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
                 timeline_scopes: BTreeMap::new(),
@@ -525,6 +544,19 @@ impl ErasureContainmentGateV1 {
             fence_lock: std::sync::Mutex::new(()),
             fail_closed_unbound: false,
             poisoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Issue an opaque binding for one host-owned store adapter.
+    ///
+    /// The trusted composition root calls this while binding the adapter to
+    /// this gate. The resulting value cannot be constructed or retargeted by
+    /// an adapter caller.
+    #[must_use]
+    pub fn issue_topology_store_binding(&self) -> ErasureTopologyStoreBindingV1 {
+        ErasureTopologyStoreBindingV1 {
+            gate_id: self.topology_binding_id,
+            store_id: NEXT_ERASURE_TOPOLOGY_STORE_ID.fetch_add(1, AtomicOrdering::Relaxed),
         }
     }
 
@@ -882,12 +914,12 @@ impl ErasureContainmentGateV1 {
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
-        let identity = std::ptr::from_ref(self) as usize;
+        let identity = self.topology_binding_id;
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
         let permit = ErasureTopologyTransitionPermitV1 {
-            gate_identity: std::ptr::from_ref(self) as usize,
-            claimed_store: Cell::new(None),
+            gate_id: self.topology_binding_id,
+            claimed_store_id: Cell::new(None),
             _private: (),
         };
         let (candidate, result) = transition(&permit).map_err(containment_recovery_failure)?;
@@ -903,7 +935,7 @@ impl ErasureContainmentGateV1 {
     }
 
     fn is_fence_active(&self) -> bool {
-        let identity = std::ptr::from_ref(self) as usize;
+        let identity = self.topology_binding_id;
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity))
     }
 
@@ -1106,7 +1138,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
             .map_err(containment_recovery_failure)?
             .clone();
         self.authorize_state(timeline, operation, &authority)?;
-        let identity = std::ptr::from_ref(self) as usize;
+        let identity = self.topology_binding_id;
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
         effect();
@@ -7204,15 +7236,17 @@ mod coverage_paths {
         let generation = inventory.generation();
         let gate = ErasureContainmentGateV1::new_test_open();
         let foreign_gate = ErasureContainmentGateV1::new_test_open();
+        let store_binding = gate.issue_topology_store_binding();
+        let other_store_binding = gate.issue_topology_store_binding();
+        let foreign_store_binding = foreign_gate.issue_topology_store_binding();
         let mut claims = None;
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
-            let store = 1_u8;
-            let foreign_store = 2_u8;
             claims = Some((
-                permit.claim_for_store(&gate, &store),
-                permit.claim_for_store(&gate, &store),
-                permit.claim_for_store(&foreign_gate, &store),
-                permit.claim_for_store(&gate, &foreign_store),
+                permit.claim_for_store(&gate, &store_binding),
+                permit.claim_for_store(&gate, &store_binding),
+                permit.claim_for_store(&foreign_gate, &store_binding),
+                permit.claim_for_store(&gate, &other_store_binding),
+                permit.claim_for_store(&gate, &foreign_store_binding),
             ));
             Ok((inventory.clone(), ()))
         };
@@ -7222,7 +7256,7 @@ mod coverage_paths {
                 .map(|(inventory, ())| inventory.generation()),
             Ok(generation)
         );
-        assert_eq!(claims, Some((true, true, false, false)));
+        assert_eq!(claims, Some((true, true, false, false, false)));
         Ok(())
     }
 

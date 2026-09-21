@@ -197,6 +197,46 @@ pub(crate) fn generic_timeline_is_visible(
     }
 }
 
+/// Validate one exact persisted Fork child independently of backend storage.
+///
+/// Backends supply their own metadata and ordered event readers, while this
+/// helper owns the shared metadata, sequence, and chain-head invariant.
+pub(crate) fn fork_child_is_exact<I>(
+    expected_meta: &pos_core::TimelineMeta,
+    actual_meta: &pos_core::TimelineMeta,
+    stored_head: pos_core::Seq,
+    stored_chain_head: &[u8],
+    chain_head: pos_core::Hash,
+    events: I,
+    hasher: &dyn pos_core::Hasher,
+) -> Result<bool, pos_core::ErasureErrorV1>
+where
+    I: IntoIterator<Item = (pos_core::Seq, pos_core::EventId, pos_core::CanonicalBytes)>,
+{
+    if actual_meta != expected_meta {
+        return Ok(false);
+    }
+    let mut expected_head = pos_core::Seq::ZERO;
+    let mut expected_chain_head = chain_head;
+    for (seq, event_id, payload) in events {
+        let expected_seq = expected_head
+            .as_u64()
+            .checked_add(1)
+            .map(pos_core::Seq::from_u64)
+            .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)?;
+        if seq != expected_seq {
+            return Ok(false);
+        }
+        expected_chain_head = hasher.hash_event(
+            &expected_chain_head,
+            event_id.to_string().as_bytes(),
+            &payload,
+        );
+        expected_head = expected_seq;
+    }
+    Ok(stored_head == expected_head && stored_chain_head == expected_chain_head.as_bytes())
+}
+
 /// Refuse protected drafts before a generic adapter evaluates Timeline visibility.
 ///
 /// This preserves the public boundary's `TimelineNotFound` response and, importantly,

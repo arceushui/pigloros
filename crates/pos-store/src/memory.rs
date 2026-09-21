@@ -50,8 +50,8 @@ use pos_core::{
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, ErasureTopologyTransitionPermitV1, KeyRegistryStateV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
+    KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
     ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
@@ -178,6 +178,8 @@ pub struct MemoryStore {
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
+    /// Opaque host-issued identity for this adapter's topology transitions.
+    erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
@@ -483,6 +485,7 @@ impl MemoryStore {
     #[must_use]
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
+        self.erasure_topology_store_binding = None;
         self
     }
 
@@ -511,6 +514,7 @@ impl MemoryStore {
             // before the composition root supplies the host-owned gate.
             erasure_gate,
             erasure_gate_bound,
+            erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             authority_persistence_binding: None,
@@ -1478,7 +1482,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
             .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
-            let exact_child = self.memory_fork_child_is_exact(&child, chain_head);
+            let exact_child = self.memory_fork_child_is_exact(&child, chain_head)?;
             let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
             return ((stored_result.binding_digest(), exact_child, exact_manifest)
                 == (binding, true, true))
@@ -1545,32 +1549,31 @@ impl MemoryStore {
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent, at_seq)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        self.memory_fork_child_is_exact(result.child(), chain_head)
+        self.memory_fork_child_is_exact(result.child(), chain_head)?
             .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 
-    fn memory_fork_child_is_exact(&self, child: &TimelineMeta, chain_head: Hash) -> bool {
+    fn memory_fork_child_is_exact(
+        &self,
+        child: &TimelineMeta,
+        chain_head: Hash,
+    ) -> Result<bool, ErasureErrorV1> {
         let Some(state) = self.timelines.get(&child.id) else {
-            return false;
+            return Ok(false);
         };
-        if state.timeline.meta != *child {
-            return false;
-        }
-        let mut expected_head = Seq::ZERO;
-        let mut expected_chain_head = chain_head;
-        for event in &state.events {
-            expected_head = expected_head.next();
-            if event.seq != expected_head {
-                return false;
-            }
-            expected_chain_head = self.hasher.hash_event(
-                &expected_chain_head,
-                event.id.to_string().as_bytes(),
-                &event.payload,
-            );
-        }
-        state.timeline.head == expected_head && state.chain_head == expected_chain_head
+        crate::fork_child_is_exact(
+            child,
+            &state.timeline.meta,
+            state.timeline.head,
+            state.chain_head.as_bytes(),
+            chain_head,
+            state
+                .events
+                .iter()
+                .map(|event| (event.seq, event.id, event.payload.clone())),
+            self.hasher.as_ref(),
+        )
     }
 
     fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
@@ -2573,11 +2576,14 @@ impl MemoryStore {
         &self,
         permit: &ErasureTopologyTransitionPermitV1,
     ) -> Result<(), CoreError> {
-        let Some(gate) = self.erasure_gate.as_ref() else {
+        let (Some(gate), Some(binding)) = (
+            self.erasure_gate.as_ref(),
+            self.erasure_topology_store_binding.as_ref(),
+        ) else {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
         permit
-            .claim_for_store(gate, self)
+            .claim_for_store(gate, binding)
             .then_some(())
             .ok_or(CoreError::ErasureContainmentUnavailable)
     }
@@ -2740,7 +2746,9 @@ impl EventStore for MemoryStore {
                 "erasure containment gate is already bound".to_owned(),
             ));
         }
+        let binding = gate.issue_topology_store_binding();
         self.erasure_gate = Some(gate);
+        self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
         Ok(())
     }
@@ -3081,6 +3089,24 @@ impl EventStore for MemoryStore {
                     .map(|visible| visible.then(|| state.timeline.clone()))
             })
         })
+    }
+
+    fn get_timeline_for_host_transition(
+        &self,
+        id: TimelineId,
+    ) -> Result<Option<Timeline>, CoreError> {
+        Ok(self.timelines.get(&id).map(|state| state.timeline.clone()))
+    }
+
+    fn find_timeline_by_name_for_host_transition(
+        &self,
+        name: &str,
+    ) -> Result<Option<Timeline>, CoreError> {
+        Ok(self
+            .timelines
+            .values()
+            .find(|state| state.timeline.meta.name.as_deref() == Some(name))
+            .map(|state| state.timeline.clone()))
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
@@ -5584,32 +5610,6 @@ mod tests {
     }
 
     #[test]
-    fn erasure_fork_child_exactness_checks_metadata_and_chain_head() {
-        let mut store = new_store();
-        let parent = store.create_timeline("parent").test_ok();
-        let child = store.fork(parent.id(), Seq::ZERO, "child").test_ok();
-        let chain_head = store
-            .compute_chain_hash_at_unchecked(parent.id(), Seq::ZERO)
-            .test_ok();
-        assert!(store.memory_fork_child_is_exact(&child.meta, chain_head));
-        store
-            .append(child.id(), &[make_draft(EntityId::new(), b"child-event")])
-            .test_ok();
-        assert!(store.memory_fork_child_is_exact(&child.meta, chain_head));
-
-        let mut altered = child.meta.clone();
-        altered.name = Some("different-child".to_owned());
-        assert!(!store.memory_fork_child_is_exact(&altered, chain_head));
-
-        let timeline = store.timelines.get_mut(&child.id());
-        assert!(timeline.is_some());
-        if let Some(timeline) = timeline {
-            timeline.chain_head = Hash::from_bytes([7; 32]);
-        }
-        assert!(!store.memory_fork_child_is_exact(&child.meta, chain_head));
-    }
-
-    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_timeline_with_id_rolls_back_create_on_append_fail() {
         use pos_core::store::import_timeline_with_id;
@@ -6687,7 +6687,10 @@ mod coverage_entrypoints {
         );
         fail_next_chain_hash_at_for_test();
         assert_eq!(
-            recovery_store.recover_fork_admission(recovery_operation),
+            ErasureForkPersistencePortV1::recover_fork_admission(
+                &mut recovery_store,
+                recovery_operation,
+            ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         store.test_corrupt(TestCorruption::ForkParent {

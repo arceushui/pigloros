@@ -50,10 +50,11 @@ use pos_core::{
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
     ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureStateResolverV1,
-    ErasureTopologyTransitionPermitV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1,
-    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -148,6 +149,8 @@ pub struct SqliteStore {
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
+    /// Opaque host-issued identity for this adapter's topology transitions.
+    erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     #[cfg(test)]
     destruction_transaction_hook:
@@ -505,6 +508,7 @@ impl SqliteStore {
     #[must_use]
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
+        self.erasure_topology_store_binding = None;
         self
     }
 
@@ -759,6 +763,7 @@ impl SqliteStore {
             // before the composition root supplies the host-owned gate.
             erasure_gate,
             erasure_gate_bound,
+            erasure_topology_store_binding: None,
             authority_persistence_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
@@ -3508,11 +3513,14 @@ impl SqliteStore {
         &self,
         permit: &ErasureTopologyTransitionPermitV1,
     ) -> Result<(), CoreError> {
-        let Some(gate) = self.erasure_gate.as_ref() else {
+        let (Some(gate), Some(binding)) = (
+            self.erasure_gate.as_ref(),
+            self.erasure_topology_store_binding.as_ref(),
+        ) else {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
         permit
-            .claim_for_store(gate, self)
+            .claim_for_store(gate, binding)
             .then_some(())
             .ok_or(CoreError::ErasureContainmentUnavailable)
     }
@@ -3769,7 +3777,9 @@ impl EventStore for SqliteStore {
                 "erasure containment gate is already bound".to_owned(),
             ));
         }
+        let binding = gate.issue_topology_store_binding();
         self.erasure_gate = Some(gate);
+        self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
         Ok(())
     }
@@ -4390,36 +4400,52 @@ impl EventStore for SqliteStore {
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
         self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
-            let row = store
-                .conn
-                .query_row(
-                    "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
-                    params![id.to_string()],
-                    read_timeline_row,
-                )
-                .optional()
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-            match row {
-                None => Ok(None),
-                Some(timeline_row) => {
-                    let timeline = timeline_fields_to_timeline(
-                        &timeline_row.id,
-                        timeline_row.name,
-                        &timeline_row.mode,
-                        timeline_row.parent_id,
-                        timeline_row.fork_seq,
-                        timeline_row.head_seq,
-                    )?;
-                    let mut timeline = timeline;
-                    timeline.meta.owner = store.timeline_owner(timeline.id())?;
-                    crate::generic_timeline_is_visible(
-                        store.timeline_contains_geographic_evidence(timeline.id()),
-                    )
-                    .map(|visible| visible.then_some(timeline))
-                }
-            }
+            store
+                .get_timeline_for_host_transition(id)
+                .and_then(|timeline| {
+                    timeline.map_or(Ok(None), |timeline| {
+                        crate::generic_timeline_is_visible(
+                            store.timeline_contains_geographic_evidence(timeline.id()),
+                        )
+                        .map(|visible| visible.then_some(timeline))
+                    })
+                })
         })
+    }
+
+    fn get_timeline_for_host_transition(
+        &self,
+        id: TimelineId,
+    ) -> Result<Option<Timeline>, CoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+                params![id.to_string()],
+                read_timeline_row,
+            )
+            .optional()
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        row.map_or(Ok(None), |timeline_row| {
+            let mut timeline = timeline_fields_to_timeline(
+                &timeline_row.id,
+                timeline_row.name,
+                &timeline_row.mode,
+                timeline_row.parent_id,
+                timeline_row.fork_seq,
+                timeline_row.head_seq,
+            )?;
+            timeline.meta.owner = self.timeline_owner(timeline.id())?;
+            Ok(Some(timeline))
+        })
+    }
+
+    fn find_timeline_by_name_for_host_transition(
+        &self,
+        name: &str,
+    ) -> Result<Option<Timeline>, CoreError> {
+        self.find_timeline_by_name_unchecked(name)
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
@@ -5253,8 +5279,26 @@ fn sqlite_timeline_is_exact(
     let Some((name, mode, parent, fork_seq, head, stored_chain_head)) = row else {
         return Ok(false);
     };
-    let expected_parent = child.fork_point.map(|(parent, _)| parent.to_string());
-    let expected_fork = child.fork_point.map(|(_, at_seq)| seq_as_i64(at_seq));
+    let actual_mode = match mode.as_str() {
+        "historical" => TimelineMode::Historical,
+        "live" => TimelineMode::Live,
+        "future" => TimelineMode::Future,
+        _ => return Ok(false),
+    };
+    let actual_fork_point = match (parent, fork_seq) {
+        (Some(parent), Some(fork_seq)) => Some((
+            match parse_timeline_id(&parent) {
+                Ok(parent) => parent,
+                Err(_) => return Ok(false),
+            },
+            match u64::try_from(fork_seq) {
+                Ok(fork_seq) => Seq::from_u64(fork_seq),
+                Err(_) => return Ok(false),
+            },
+        )),
+        (None, None) => None,
+        _ => return Ok(false),
+    };
     let owner = conn
         .query_row(
             "SELECT owner_id FROM timeline_owners WHERE timeline_id=?1",
@@ -5263,23 +5307,24 @@ fn sqlite_timeline_is_exact(
         )
         .optional()
         .map_err(map_erasure_receipt_failure)?;
-    let expected_owner = child.owner.map(|value| value.to_string());
-    let metadata_matches = (
-        name.as_ref(),
-        mode.as_str(),
-        parent.as_ref(),
-        fork_seq,
-        owner.as_ref(),
-    ) == (
-        child.name.as_ref(),
-        mode_str(child.mode),
-        expected_parent.as_ref(),
-        expected_fork,
-        expected_owner.as_ref(),
-    );
-    if !metadata_matches {
-        return Ok(false);
-    }
+    let actual_owner = match owner {
+        Some(owner) => match parse_entity_id(&owner) {
+            Ok(owner) => Some(owner),
+            Err(_) => return Ok(false),
+        },
+        None => None,
+    };
+    let actual_meta = TimelineMeta {
+        id: child.id,
+        mode: actual_mode,
+        name,
+        owner: actual_owner,
+        fork_point: actual_fork_point,
+    };
+    let stored_head = match u64::try_from(head) {
+        Ok(head) => Seq::from_u64(head),
+        Err(_) => return Ok(false),
+    };
 
     let mut statement = conn
         .prepare(
@@ -5289,22 +5334,16 @@ fn sqlite_timeline_is_exact(
              ORDER BY seq",
         )
         .map_err(map_erasure_receipt_failure)?;
-    let mut events = statement
+    let mut event_rows = statement
         .query(params![child.id.to_string()])
         .map_err(map_erasure_receipt_failure)?;
-    let mut expected_head = 0_u64;
-    let mut expected_chain_head = chain_head;
-    while let Some(row) = events.next().map_err(map_erasure_receipt_failure)? {
+    let mut event_values = Vec::new();
+    while let Some(row) = event_rows.next().map_err(map_erasure_receipt_failure)? {
         let seq = row
             .get::<_, i64>(0)
             .map_err(map_erasure_receipt_failure)
-            .and_then(|seq| u64::try_from(seq).map_err(|_| ErasureErrorV1::ProvenanceMissing))?;
-        let expected_seq = expected_head
-            .checked_add(1)
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if seq != expected_seq {
-            return Ok(false);
-        }
+            .and_then(|seq| u64::try_from(seq).map_err(|_| ErasureErrorV1::ProvenanceMissing))
+            .map(Seq::from_u64)?;
         let event_id = row
             .get::<_, String>(1)
             .map_err(map_erasure_receipt_failure)
@@ -5314,15 +5353,17 @@ fn sqlite_timeline_is_exact(
         let payload = row
             .get::<_, Vec<u8>>(2)
             .map_err(map_erasure_receipt_failure)?;
-        expected_chain_head = hasher.hash_event(
-            &expected_chain_head,
-            event_id.to_string().as_bytes(),
-            &CanonicalBytes::from_vec(payload),
-        );
-        expected_head = seq;
+        event_values.push((seq, event_id, CanonicalBytes::from_vec(payload)));
     }
-    Ok(u64::try_from(head).ok() == Some(expected_head)
-        && stored_chain_head.as_slice() == expected_chain_head.as_bytes())
+    crate::fork_child_is_exact(
+        child,
+        &actual_meta,
+        stored_head,
+        &stored_chain_head,
+        chain_head,
+        event_values,
+        hasher,
+    )
 }
 
 fn sqlite_fork_admission_is_exact(
