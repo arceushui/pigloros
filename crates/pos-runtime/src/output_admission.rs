@@ -3,10 +3,9 @@
 use pos_conformance::ExecutionProfileV1;
 use pos_core::{
     event::EventDraft,
-    output_policy::{OutputFidelityV1, OutputPolicyV1},
+    output_policy::{OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_POLICY_BYTES_V1},
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
     ExecutableBudgetPolicyV1, Hash, Plugin, PluginId, MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
-    MAX_OUTPUT_POLICY_BYTES_V1,
 };
 use std::sync::Mutex;
 
