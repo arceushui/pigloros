@@ -2954,7 +2954,7 @@ mod tests {
     ) -> (ErasureExecutionHostV1, WorldReplayClosureV1) {
         let composition =
             ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(Arc::new(mode));
-        let mut host = test_ok(ErasureExecutionHostV1::open_with_authority(
+        let host = test_ok(ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Memory,
             &composition,
             ErasureRecoveryLimitsV1::compiled_maximum(),
