@@ -839,17 +839,16 @@ where
     Ok(())
 }
 
+type PreparedPositiveFork<S> = (
+    Rc<RefCell<S>>,
+    ErasureReferenceV1,
+    TimelineId,
+    pos_core::PreparedErasureForkBatchV1,
+);
+
 fn prepared_positively_unaffected_fork<S>(
     mut store: S,
-) -> Result<
-    (
-        Rc<RefCell<S>>,
-        ErasureReferenceV1,
-        TimelineId,
-        pos_core::PreparedErasureForkBatchV1,
-    ),
-    Box<dyn std::error::Error>,
->
+) -> Result<PreparedPositiveFork<S>, Box<dyn std::error::Error>>
 where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
