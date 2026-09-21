@@ -3690,8 +3690,13 @@ mod tests {
             if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault create".to_owned()))
             } else {
-                self.inner
-                    .create_timeline_for_host_transition_with_meta(permit, meta)
+                let timeline = self
+                    .inner
+                    .create_timeline_for_host_transition_with_meta(permit, meta)?;
+                if let Some(hook) = &self.timeline_created_hook {
+                    hook(timeline.id());
+                }
+                Ok(timeline)
             }
         }
 
@@ -3877,7 +3882,7 @@ mod tests {
                 );
             }
             let fail_after_recovery = matches!(self.fault, FaultModeV1::NonemptyInventory)
-                && self.inventory_snapshot_calls > 0;
+                && self.inventory_snapshot_calls > 1;
             self.inventory_snapshot_calls += 1;
             if fail_after_recovery {
                 return Err(ErasureErrorV1::ProvenanceMissing);
@@ -3912,7 +3917,7 @@ mod tests {
                 );
             }
             let fail_after_recovery = matches!(self.fault, FaultModeV1::NonemptyInventory)
-                && self.inventory_snapshot_calls > 0;
+                && self.inventory_snapshot_calls > 1;
             self.inventory_snapshot_calls += 1;
             if fail_after_recovery {
                 return Err(ErasureErrorV1::ProvenanceMissing);
