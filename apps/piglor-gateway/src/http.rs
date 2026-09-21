@@ -441,7 +441,15 @@ const fn gateway_store_status(error: &CoreError) -> Option<StatusCode> {
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let status = match &self {
+        let status = self.status_code();
+        let body = Json(json!({ "error": self.to_string() }));
+        (status, body).into_response()
+    }
+}
+
+impl GatewayError {
+    fn status_code(&self) -> StatusCode {
+        match self {
             Self::InvalidId(_)
             | Self::InvalidPageLimit { .. }
             | Self::InvalidEventsQuery(_)
@@ -488,9 +496,7 @@ impl IntoResponse for GatewayError {
                 }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
-        };
-        let body = Json(json!({ "error": self.to_string() }));
-        (status, body).into_response()
+        }
     }
 }
 

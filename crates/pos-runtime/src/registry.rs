@@ -3066,7 +3066,21 @@ impl PluginRegistry {
             return Err(ActionRejected::CapabilityNotGranted);
         }
 
-        let Some(plugin_id) = self.approver_map.get(&proposal.event_type) else {
+        let (approver, admission) = self.action_approver_and_admission(&proposal.event_type)?;
+        let draft = Self::validate_approver_draft(proposal, approver.approve(proposal))?;
+        admission.validate_action(&draft).map_err(|error| {
+            ActionRejected::DomainValidationFailed(format!(
+                "action output admission failed: {error}"
+            ))
+        })?;
+        Ok(draft)
+    }
+
+    fn action_approver_and_admission(
+        &self,
+        event_type: &Kind,
+    ) -> Result<(&dyn ActionApprover, &OutputAdmissionV1), ActionRejected> {
+        let Some(plugin_id) = self.approver_map.get(event_type) else {
             return Err(ActionRejected::UnknownEventType);
         };
         let Some(entry) = self.plugins.get(plugin_id) else {
@@ -3075,18 +3089,12 @@ impl PluginRegistry {
         let Some(approver) = entry.approver.as_deref() else {
             return Err(ActionRejected::UnknownEventType);
         };
-        let draft = Self::validate_approver_draft(proposal, approver.approve(proposal))?;
         let Some(admission) = entry.output_admission.as_ref() else {
             return Err(ActionRejected::DomainValidationFailed(
                 "action approver has no bound output policy".to_owned(),
             ));
         };
-        admission.validate_action(&draft).map_err(|error| {
-            ActionRejected::DomainValidationFailed(format!(
-                "action output admission failed: {error}"
-            ))
-        })?;
-        Ok(draft)
+        Ok((approver, admission))
     }
 
     fn validate_approver_draft(
