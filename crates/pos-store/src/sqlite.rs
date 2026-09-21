@@ -5257,6 +5257,27 @@ fn sqlite_timeline_is_exact(
     child: &TimelineMeta,
     chain_head: Hash,
 ) -> Result<bool, ErasureErrorV1> {
+    let Some((actual_meta, stored_head, stored_chain_head)) =
+        sqlite_timeline_exact_metadata(conn, child)?
+    else {
+        return Ok(false);
+    };
+    let event_values = sqlite_timeline_exact_events(conn, child)?;
+    crate::fork_child_is_exact(
+        child,
+        &actual_meta,
+        stored_head,
+        &stored_chain_head,
+        chain_head,
+        event_values,
+        hasher,
+    )
+}
+
+fn sqlite_timeline_exact_metadata(
+    conn: &Connection,
+    child: &TimelineMeta,
+) -> Result<Option<(TimelineMeta, Seq, Vec<u8>)>, ErasureErrorV1> {
     let row = conn
         .query_row(
             "SELECT name, mode, parent_id, fork_seq, head_seq, chain_head
@@ -5277,27 +5298,27 @@ fn sqlite_timeline_is_exact(
         .optional()
         .map_err(map_erasure_receipt_failure)?;
     let Some((name, mode, parent, fork_seq, head, stored_chain_head)) = row else {
-        return Ok(false);
+        return Ok(None);
     };
     let actual_mode = match mode.as_str() {
         "historical" => TimelineMode::Historical,
         "live" => TimelineMode::Live,
         "future" => TimelineMode::Future,
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     let actual_fork_point = match (parent, fork_seq) {
         (Some(parent), Some(fork_seq)) => Some((
             match parse_timeline_id(&parent) {
                 Ok(parent) => parent,
-                Err(_) => return Ok(false),
+                Err(_) => return Ok(None),
             },
             match u64::try_from(fork_seq) {
                 Ok(fork_seq) => Seq::from_u64(fork_seq),
-                Err(_) => return Ok(false),
+                Err(_) => return Ok(None),
             },
         )),
         (None, None) => None,
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     let owner = conn
         .query_row(
@@ -5310,7 +5331,7 @@ fn sqlite_timeline_is_exact(
     let actual_owner = match owner {
         Some(owner) => match parse_entity_id(&owner) {
             Ok(owner) => Some(owner),
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(None),
         },
         None => None,
     };
@@ -5323,9 +5344,15 @@ fn sqlite_timeline_is_exact(
     };
     let stored_head = match u64::try_from(head) {
         Ok(head) => Seq::from_u64(head),
-        Err(_) => return Ok(false),
+        Err(_) => return Ok(None),
     };
+    Ok(Some((actual_meta, stored_head, stored_chain_head)))
+}
 
+fn sqlite_timeline_exact_events(
+    conn: &Connection,
+    child: &TimelineMeta,
+) -> Result<Vec<(Seq, EventId, CanonicalBytes)>, ErasureErrorV1> {
     let mut statement = conn
         .prepare(
             "SELECT seq, event_id, payload
@@ -5355,15 +5382,7 @@ fn sqlite_timeline_is_exact(
             .map_err(map_erasure_receipt_failure)?;
         event_values.push((seq, event_id, CanonicalBytes::from_vec(payload)));
     }
-    crate::fork_child_is_exact(
-        child,
-        &actual_meta,
-        stored_head,
-        &stored_chain_head,
-        chain_head,
-        event_values,
-        hasher,
-    )
+    Ok(event_values)
 }
 
 fn sqlite_fork_admission_is_exact(
