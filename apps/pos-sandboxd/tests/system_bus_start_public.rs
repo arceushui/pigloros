@@ -15,7 +15,7 @@ use pos_sandboxd::{
 use zbus::{
     connection::{socket::channel::Channel, Builder},
     fdo,
-    zvariant::{OwnedFd, OwnedObjectPath, OwnedValue},
+    zvariant::{OwnedFd, OwnedObjectPath, OwnedValue, Structure},
     Guid,
 };
 
@@ -65,14 +65,7 @@ impl RecordingManager {
             .into_iter()
             .find_map(|(property, value)| {
                 (property == "ExtraFileDescriptors").then(|| {
-                    Vec::<(OwnedFd, String)>::try_from(value)
-                        .map(|descriptors| {
-                            descriptors
-                                .into_iter()
-                                .map(|(_, name)| name)
-                                .collect::<Vec<_>>()
-                        })
-                        .map_err(|error| fdo::Error::Failed(error.to_string()))
+                    descriptor_names(value)
                 })
             })
             .transpose()?
@@ -91,6 +84,23 @@ impl RecordingManager {
             .replace(call);
         OwnedObjectPath::try_from(JOB_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
+}
+
+fn descriptor_names(value: OwnedValue) -> fdo::Result<Vec<String>> {
+    Vec::<Structure<'static>>::try_from(value)
+        .map_err(|error| fdo::Error::Failed(error.to_string()))?
+        .into_iter()
+        .map(|descriptor| {
+            let mut fields = descriptor.into_fields().into_iter();
+            fields
+                .next()
+                .ok_or_else(|| fdo::Error::Failed("descriptor is missing its fd".to_owned()))?;
+            let name = fields.next().ok_or_else(|| {
+                fdo::Error::Failed("descriptor is missing its name".to_owned())
+            })?;
+            String::try_from(name).map_err(|error| fdo::Error::Failed(error.to_string()))
+        })
+        .collect()
 }
 
 #[tokio::test]
