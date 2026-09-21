@@ -3767,23 +3767,23 @@ mod tests {
                     )
             }
         }
-    }
 
-    fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
-        &mut self,
-        permit: &ErasureTopologyTransitionPermitV1,
-        meta: &TimelineMeta,
-        expected_registry: &KeyRegistryStateV1,
-    ) -> Result<(Timeline, bool), CoreError> {
-        if self.fault == FaultModeV1::EventStore {
-            Err(CoreError::Storage("fault ledger initialization".to_owned()))
-        } else {
-            self.inner
-                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
-                    permit,
-                    meta,
-                    expected_registry,
-                )
+        fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
+            &mut self,
+            permit: &ErasureTopologyTransitionPermitV1,
+            meta: &TimelineMeta,
+            expected_registry: &KeyRegistryStateV1,
+        ) -> Result<(Timeline, bool), CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                Err(CoreError::Storage("fault ledger initialization".to_owned()))
+            } else {
+                self.inner
+                    .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                        permit,
+                        meta,
+                        expected_registry,
+                    )
+            }
         }
     }
 
