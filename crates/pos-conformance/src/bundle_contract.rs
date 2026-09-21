@@ -127,7 +127,7 @@ pub fn draft_execution_profile_bytes_v1(
 fn installed_execution_profile_bytes_v1(
     profile_id: &str,
 ) -> Result<Vec<u8>, BundleContractErrorV1> {
-    let declaration = INSTALLED_EXECUTION_PROFILES
+    let declaration = DRAFT_EXECUTION_PROFILES
         .iter()
         .find(|candidate| candidate.profile_id == profile_id)
         .ok_or(BundleContractErrorV1::ProfileInvalid)?;

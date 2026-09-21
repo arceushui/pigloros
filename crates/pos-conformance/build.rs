@@ -2015,7 +2015,7 @@ fn emit_draft_execution_profiles(
     }
     writeln!(
         generated,
-        "const INSTALLED_EXECUTION_PROFILES: [InstalledExecutionProfileSource; {}] = [",
+        "const DRAFT_EXECUTION_PROFILES: [InstalledExecutionProfileSource; {}] = [",
         declaration.execution_profiles.len()
     )?;
     for profile in &declaration.execution_profiles {
@@ -2068,7 +2068,7 @@ fn emit_draft_execution_profiles(
             profile.maximum_evaluator_version,
         )?;
     }
-    generated.push_str("];\nconst DRAFT_EXECUTION_PROFILES: &[InstalledExecutionProfileSource] = &INSTALLED_EXECUTION_PROFILES;\n");
+    generated.push_str("];\n");
     Ok(())
 }
 
