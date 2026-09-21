@@ -499,7 +499,7 @@ mod tests {
                 .test_ok();
             timeline.id()
         };
-        let mut projected = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(gate);
         projected.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
         let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
