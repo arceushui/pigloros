@@ -4,7 +4,12 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, PluginId, TimelineId},
-    ErasureContainmentGateV1,
+    output_policy::{
+        OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+        OutputPolicyV1,
+    },
+    ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -29,6 +34,73 @@ const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 
 fn gated_registry() -> PluginRegistry {
     PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+}
+
+fn output_binding(
+    plugin_id: PluginId,
+    plugin_version: &str,
+    event_types: &[&str],
+) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+    let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 4_096,
+        fidelity_budgets: [
+            FidelityBudgetV1 {
+                level: 0,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 500_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 1,
+                max_events: 1_000,
+                max_bytes: 64 * 1024 * 1024,
+                max_cpu_us: 250_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+            FidelityBudgetV1 {
+                level: 2,
+                max_events: 1_000,
+                max_bytes: 16 * 1024 * 1024,
+                max_cpu_us: 50_000,
+                shared_host_cpu_reservation_us: 0,
+            },
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id,
+            cpu_reservations_us: [10; 3],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash: Hash::from_bytes([0x41; 32]),
+        max_pass_wall_duration_us: 1_000,
+    })?;
+    let output_declarations = event_types
+        .iter()
+        .map(|event_type| {
+            OutputDeclarationV1::new(
+                (*event_type).to_owned(),
+                OutputAuthorityV1::Authoritative,
+                OutputFidelityV1::L0,
+                4_096,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id,
+        plugin_version: plugin_version.to_owned(),
+        implementation_hash: Hash::from_bytes([0x42; 32]),
+        base_configuration_digest: Hash::from_bytes([0x43; 32]),
+        executable_profile_hash: budget.digest(),
+        retention_policy_hash: Hash::from_bytes([0x44; 32]),
+        policy_revision: 1,
+        output_declarations,
+    })?;
+    Ok((policy, budget))
 }
 
 trait TestValueExt<T> {
@@ -1008,7 +1080,21 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
         Box::new(provider),
     );
     let mut registry = gated_registry();
-    registry.register_test_driver(Box::new(driver));
+    let (policy, budget) = output_binding(
+        host.plugin,
+        PLUGIN_VERSION,
+        &[EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE],
+    )
+    .test_ok();
+    registry
+        .register_test_driver_with_output_policy(
+            host.plugin,
+            PLUGIN_VERSION,
+            policy,
+            budget,
+            Box::new(driver),
+        )
+        .test_ok();
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
     registry.restore_driver_state(&segments, &events).test_ok();
@@ -1184,10 +1270,35 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
         Box::new(provider),
     );
     let mut registry = gated_registry();
-    registry.register_test_driver(Box::new(PrecedingDriver {
-        entity: host.other_agent,
-    }));
-    registry.register_test_driver(Box::new(driver));
+    let preceding_plugin = PluginId::new();
+    let (preceding_policy, preceding_budget) =
+        output_binding(preceding_plugin, PLUGIN_VERSION, &["world.observation"]).test_ok();
+    registry
+        .register_test_driver_with_output_policy(
+            preceding_plugin,
+            PLUGIN_VERSION,
+            preceding_policy,
+            preceding_budget,
+            Box::new(PrecedingDriver {
+                entity: host.other_agent,
+            }),
+        )
+        .test_ok();
+    let (policy, budget) = output_binding(
+        host.plugin,
+        PLUGIN_VERSION,
+        &[EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE],
+    )
+    .test_ok();
+    registry
+        .register_test_driver_with_output_policy(
+            host.plugin,
+            PLUGIN_VERSION,
+            policy,
+            budget,
+            Box::new(driver),
+        )
+        .test_ok();
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)
         .test_ok();
