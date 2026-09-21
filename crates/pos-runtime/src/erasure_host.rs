@@ -3040,6 +3040,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn world_replay_admission_rejects_a_stale_sender_before_verification() {
+        let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+        let current = test_ok(host.containment_gate().inventory_generation());
+        let stale = reference(1);
+        assert_ne!(stale, current);
+        let mut reads = ErasureReadSenderV1 {
+            host: &mut host,
+            generation: stale,
+        };
+        assert_eq!(
+            reads.admit_world_replay(&closure),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FaultModeV1 {
         BindGate,
