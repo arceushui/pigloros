@@ -572,19 +572,24 @@ impl OutputPolicyClosureV1 {
     /// revalidated before use.
     #[must_use]
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
-        let mut output = b"OPC1".to_vec();
-        for bytes in [
+        let members = [
             self.output_policy_bytes(),
             self.executable_budget_bytes(),
             self.implementation_artifact(),
             self.configuration_artifact(),
             self.execution_profile_artifact(),
             self.retention_policy_artifact(),
-        ] {
+        ];
+        let total_len = members.iter().fold(4usize, |length, bytes| {
+            length.saturating_add(8).saturating_add(bytes.len())
+        });
+        debug_assert!(total_len <= MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1);
+        let mut output = Vec::with_capacity(total_len.min(MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1));
+        output.extend_from_slice(b"OPC1");
+        for bytes in members {
             output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
             output.extend_from_slice(bytes);
         }
-        debug_assert!(output.len() <= MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1);
         output
     }
 }
