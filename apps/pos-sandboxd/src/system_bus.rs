@@ -1,7 +1,7 @@
 //! Typed system-bus submission of compiled transient-unit requests.
 
 use zbus::{zvariant::OwnedObjectPath, Connection};
-use zvariant::{Array, OwnedFd, OwnedValue, Structure, Value};
+use zvariant::{Array, Fd, OwnedFd, OwnedValue, Structure, Value};
 
 use crate::{
     SystemdHardeningValue, SystemdTransientUnitProperty, SystemdTransientUnitValue,
@@ -170,9 +170,9 @@ fn property_value(value: SystemdTransientUnitValue) -> Result<Value<'static>, zv
 fn extra_file_descriptors_value(
     descriptors: Vec<(OwnedFd, String)>,
 ) -> Result<Value<'static>, zvariant::Error> {
-    let mut array = Array::new(zvariant::signature!("(hs)"));
-    for descriptor in descriptors {
-        array.append(Value::from(Structure::from(descriptor)))?;
+    let mut array = Array::new(&zvariant::signature!("(hs)"));
+    for (descriptor, name) in descriptors {
+        array.append(Value::from(Structure::from((Fd::from(descriptor), name))))?;
     }
     Ok(Value::from(array))
 }
