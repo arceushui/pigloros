@@ -3060,10 +3060,17 @@ impl PluginRegistry {
             id: plugin_id,
             name: driver.name(),
         };
-        let binding = Self::generated_output_binding(&plugin)
-            .unwrap_or_else(|error| panic!("generated test-driver binding failed: {error}"));
+        let binding = Self::generated_output_binding(&plugin).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "generated test-driver binding failed: {error}"
+            )))
+        });
         self.register_test_driver_with_verified_output_policy(plugin_id, binding, driver)
-            .unwrap_or_else(|error| panic!("generated test-driver registration failed: {error}"));
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "generated test-driver registration failed: {error}"
+                )))
+            });
     }
 
     /// Register a direct fixture driver with a host-verified output binding.
@@ -3102,7 +3109,7 @@ impl PluginRegistry {
             plugin_id,
             PluginEntry {
                 name,
-                version: plugin_version.to_owned(),
+                version: plugin_version,
                 owned_event_types: admission
                     .policy()
                     .fields()

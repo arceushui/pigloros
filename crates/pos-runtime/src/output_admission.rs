@@ -91,10 +91,10 @@ pub enum InstalledOutputPolicySourceV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OutputPolicyArtifactInputV1 {
-    implementation_artifact: Vec<u8>,
-    configuration_artifact: Vec<u8>,
-    execution_profile_artifact: Vec<u8>,
-    retention_policy_artifact: Vec<u8>,
+    implementation: Vec<u8>,
+    configuration: Vec<u8>,
+    execution_profile: Vec<u8>,
+    retention_policy: Vec<u8>,
 }
 
 impl OutputPolicyArtifactInputV1 {
@@ -111,27 +111,27 @@ impl OutputPolicyArtifactInputV1 {
             retention_policy_artifact,
         )?;
         Ok(Self {
-            implementation_artifact: implementation_artifact.to_vec(),
-            configuration_artifact: configuration_artifact.to_vec(),
-            execution_profile_artifact: execution_profile_artifact.to_vec(),
-            retention_policy_artifact: retention_policy_artifact.to_vec(),
+            implementation: implementation_artifact.to_vec(),
+            configuration: configuration_artifact.to_vec(),
+            execution_profile: execution_profile_artifact.to_vec(),
+            retention_policy: retention_policy_artifact.to_vec(),
         })
     }
 
     pub(crate) fn implementation_artifact(&self) -> &[u8] {
-        &self.implementation_artifact
+        &self.implementation
     }
 
     pub(crate) fn configuration_artifact(&self) -> &[u8] {
-        &self.configuration_artifact
+        &self.configuration
     }
 
     pub(crate) fn execution_profile_artifact(&self) -> &[u8] {
-        &self.execution_profile_artifact
+        &self.execution_profile
     }
 
     pub(crate) fn retention_policy_artifact(&self) -> &[u8] {
-        &self.retention_policy_artifact
+        &self.retention_policy
     }
 }
 
@@ -164,7 +164,7 @@ impl InstalledOutputPolicySourceV1 {
             .any(|expected| owner.verifies_instance(plugin, expected))
     }
 
-    fn native_plugin_type_names(self) -> &'static [&'static str] {
+    const fn native_plugin_type_names(self) -> &'static [&'static str] {
         match self {
             #[cfg(debug_assertions)]
             Self::Generated => &[],
@@ -308,7 +308,7 @@ impl InstalledOutputPolicySourceV1 {
         event_types
     }
 
-    fn workload_profile(self) -> WorkloadProfileV1 {
+    const fn workload_profile(self) -> WorkloadProfileV1 {
         match self {
             #[cfg(debug_assertions)]
             Self::Generated => WorkloadProfileV1::Interactive,
@@ -378,7 +378,7 @@ impl InstalledOutputPolicySourceV1 {
             .into_iter()
             .map(|event_type| {
                 pos_core::output_policy::OutputDeclarationV1::new(
-                    event_type.to_owned(),
+                    event_type,
                     pos_core::output_policy::OutputAuthorityV1::Authoritative,
                     OutputFidelityV1::L0,
                     4_096,
@@ -561,7 +561,7 @@ impl OutputPolicyBindingV1 {
         )
     }
 
-    pub(crate) fn owner_token(&self) -> PluginOwnerTokenV1 {
+    pub(crate) const fn owner_token(&self) -> PluginOwnerTokenV1 {
         self.owner_token
     }
 
@@ -901,9 +901,10 @@ impl OutputPolicyClosureV1 {
     }
 }
 
-/// Validate a complete host artifact set without minting an admission
-/// closure.  Closure construction remains private to registry registration;
-/// this read-only seam is useful to independent host preflight tooling.
+/// Validate a complete host artifact set without minting an admission closure.
+///
+/// Closure construction remains private to registry registration; this
+/// read-only seam is useful to independent host preflight tooling.
 ///
 /// # Errors
 /// Returns the closed artifact or identity error reported by the native
@@ -932,7 +933,7 @@ fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn validate_leaf_lengths(
+const fn validate_leaf_lengths(
     implementation_artifact: &[u8],
     configuration_artifact: &[u8],
     execution_profile_artifact: &[u8],

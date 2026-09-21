@@ -96,7 +96,10 @@ pub fn reviewed_retention_policy_hash_v1() -> Hash {
 /// address.  Name, version, owned namespaces and the caller's canonical
 /// configuration bytes identify the implementation configuration without
 /// making replay identity depend on a fresh ULID.
-#[must_use]
+///
+/// # Errors
+/// Returns an artifact-size error when the details or canonical CFG1 output
+/// exceeds the reviewed V1 bounds.
 pub fn canonical_plugin_configuration_v1<P: Plugin + ?Sized>(
     plugin: &P,
     details: &[u8],
