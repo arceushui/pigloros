@@ -94,11 +94,13 @@ enum UnaffectedTopologyTransitionError {
     Host(ErasureHostErrorV1),
     Erasure(ErasureErrorV1),
     RejectedAsAffected,
+    #[cfg(test)]
     RollbackFailed,
 }
 
 struct TopologyTransitionResultV1 {
     timeline: Timeline,
+    #[cfg(test)]
     created: bool,
 }
 
@@ -135,13 +137,6 @@ trait ErasureHostStore:
     + ErasureForkPersistencePortV1
     + ErasurePersistencePortV1
 {
-    fn initialize_timeline_with_key_registry_for_host_transition_result(
-        &mut self,
-        permit: &ErasureTopologyTransitionPermitV1,
-        name: &str,
-        expected_registry: &KeyRegistryStateV1,
-    ) -> Result<TopologyTransitionResultV1, CoreError>;
-
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
         permit: &ErasureTopologyTransitionPermitV1,
@@ -157,22 +152,6 @@ where
         + ErasureForkPersistencePortV1
         + ErasurePersistencePortV1,
 {
-    fn initialize_timeline_with_key_registry_for_host_transition_result(
-        &mut self,
-        permit: &ErasureTopologyTransitionPermitV1,
-        name: &str,
-        expected_registry: &KeyRegistryStateV1,
-    ) -> Result<TopologyTransitionResultV1, CoreError> {
-        let (timeline, created) =
-            pos_core::store::EventStore::initialize_timeline_with_key_registry_for_host_transition(
-                self,
-                permit,
-                name,
-                expected_registry,
-            )?;
-        Ok(TopologyTransitionResultV1 { timeline, created })
-    }
-
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
         permit: &ErasureTopologyTransitionPermitV1,
@@ -186,7 +165,13 @@ where
                 meta,
                 expected_registry,
             )?;
-        Ok(TopologyTransitionResultV1 { timeline, created })
+        #[cfg(test)]
+        return Ok(TopologyTransitionResultV1 { timeline, created });
+        #[cfg(not(test))]
+        {
+            let _ = created;
+            Ok(TopologyTransitionResultV1 { timeline })
+        }
     }
 }
 
@@ -1617,6 +1602,7 @@ impl ErasureExecutionHostV1 {
         state_machine.verified_inventory_with_limits(limits)
     }
 
+    #[cfg(test)]
     fn rollback_unaffected_topology_timeline(
         &mut self,
         timeline: &Timeline,
@@ -1746,6 +1732,7 @@ impl ErasureExecutionHostV1 {
                         Some(UnaffectedTopologyTransitionError::RejectedAsAffected);
                     Err(ErasureErrorV1::PolicyConflict)
                 }
+                #[cfg(test)]
                 Err(UnaffectedTopologyTransitionError::RollbackFailed) => {
                     transition_failure = Some(UnaffectedTopologyTransitionError::RollbackFailed);
                     Err(ErasureErrorV1::ReceiptCommitFailed)
@@ -1770,6 +1757,7 @@ impl ErasureExecutionHostV1 {
                 Some(UnaffectedTopologyTransitionError::RejectedAsAffected) => {
                     Err(ErasureHostErrorV1::Conflict)
                 }
+                #[cfg(test)]
                 Some(UnaffectedTopologyTransitionError::RollbackFailed) => {
                     self.poison();
                     Err(ErasureHostErrorV1::RecoveryUnavailable)
@@ -2438,6 +2426,7 @@ impl ErasureCommandSenderV1<'_> {
                         )
                         .map(|timeline| TopologyTransitionResultV1 {
                             timeline,
+                            #[cfg(test)]
                             created: true,
                         })
                 })?;
@@ -2529,6 +2518,7 @@ impl ErasureCommandSenderV1<'_> {
                     )
                     .map(|timeline| TopologyTransitionResultV1 {
                         timeline,
+                        #[cfg(test)]
                         created: true,
                     })
             },
