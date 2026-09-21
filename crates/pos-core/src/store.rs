@@ -730,9 +730,12 @@ pub trait EventStore: Send {
     /// durable topology.
     fn get_timeline_for_host_transition(
         &self,
-        id: TimelineId,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        _id: TimelineId,
     ) -> Result<Option<Timeline>, CoreError> {
-        self.get_timeline(id)
+        Err(CoreError::Storage(
+            "host topology metadata lookup is unsupported by this EventStore".to_owned(),
+        ))
     }
 
     /// Find one Timeline by name for a trusted host topology transition.
@@ -746,12 +749,12 @@ pub trait EventStore: Send {
     /// durable topology.
     fn find_timeline_by_name_for_host_transition(
         &self,
-        name: &str,
+        _permit: &ErasureTopologyTransitionPermitV1,
+        _name: &str,
     ) -> Result<Option<Timeline>, CoreError> {
-        self.list_timelines()?
-            .into_iter()
-            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
-            .map_or(Ok(None), |timeline| Ok(Some(timeline)))
+        Err(CoreError::Storage(
+            "host topology metadata lookup is unsupported by this EventStore".to_owned(),
+        ))
     }
 
     /// Return the last logical sequence visible through a stitched Timeline.

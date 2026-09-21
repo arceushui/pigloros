@@ -4,11 +4,11 @@
 //! exposes the host-owned artifact-registration and `ReplayClaim` policy seam.
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
         Arc, RwLock,
     },
 };
@@ -395,7 +395,7 @@ pub trait ErasureGate: Send + Sync {
 /// published here. A Timeline is bound to an opaque scope reference by the
 /// authoritative topology resolver; no selector is re-evaluated by this gate.
 pub struct ErasureContainmentGateV1 {
-    topology_binding_id: u64,
+    topology_binding_id: Arc<()>,
     authority: RwLock<Arc<ErasureGateStateV1>>,
     fence_lock: std::sync::Mutex<()>,
     fail_closed_unbound: bool,
@@ -404,11 +404,20 @@ pub struct ErasureContainmentGateV1 {
 
 /// Opaque host-issued identity binding one store adapter to one containment
 /// gate for topology transitions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ErasureTopologyStoreBindingV1 {
-    gate_id: u64,
-    store_id: u64,
+    gate_identity: Arc<()>,
+    store_identity: Arc<()>,
 }
+
+impl PartialEq for ErasureTopologyStoreBindingV1 {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.gate_identity, &other.gate_identity)
+            && Arc::ptr_eq(&self.store_identity, &other.store_identity)
+    }
+}
+
+impl Eq for ErasureTopologyStoreBindingV1 {}
 
 /// Capability proving that a store mutation is executing inside the host's
 /// topology-transition fence.
@@ -420,8 +429,8 @@ pub struct ErasureTopologyStoreBindingV1 {
 /// directly.
 #[derive(Debug)]
 pub struct ErasureTopologyTransitionPermitV1 {
-    gate_id: u64,
-    claimed_store_id: Cell<Option<u64>>,
+    gate_identity: Arc<()>,
+    claimed_store_identity: RefCell<Option<Arc<()>>>,
     _private: (),
 }
 
@@ -437,19 +446,21 @@ impl ErasureTopologyTransitionPermitV1 {
         gate: &ErasureContainmentGateV1,
         binding: &ErasureTopologyStoreBindingV1,
     ) -> bool {
-        if self.gate_id != gate.topology_binding_id {
+        if !Arc::ptr_eq(&self.gate_identity, &gate.topology_binding_id)
+            || !Arc::ptr_eq(&binding.gate_identity, &gate.topology_binding_id)
+        {
             return false;
         }
-        if binding.gate_id != gate.topology_binding_id {
-            return false;
-        }
-        self.claimed_store_id.get().map_or_else(
-            || {
-                self.claimed_store_id.set(Some(binding.store_id));
+        let mut claimed_store_identity = self.claimed_store_identity.borrow_mut();
+        match claimed_store_identity.as_ref() {
+            Some(claimed_store_identity) => {
+                Arc::ptr_eq(claimed_store_identity, &binding.store_identity)
+            }
+            None => {
+                *claimed_store_identity = Some(Arc::clone(&binding.store_identity));
                 true
-            },
-            |claimed_store_id| claimed_store_id == binding.store_id,
-        )
+            }
+        }
     }
 }
 
@@ -469,11 +480,8 @@ struct ErasureGateStateV1 {
     frozen_timelines: BTreeSet<TimelineId>,
 }
 
-static NEXT_ERASURE_TOPOLOGY_GATE_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_ERASURE_TOPOLOGY_STORE_ID: AtomicU64 = AtomicU64::new(1);
-
 thread_local! {
-    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_CONTAINMENT_FENCES: RefCell<Vec<Arc<()>>> = const { RefCell::new(Vec::new()) };
 }
 
 struct ActiveContainmentFence;
@@ -509,8 +517,7 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub fn new_fail_closed() -> Self {
         Self {
-            topology_binding_id: NEXT_ERASURE_TOPOLOGY_GATE_ID
-                .fetch_add(1, AtomicOrdering::Relaxed),
+            topology_binding_id: Arc::new(()),
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
                 timeline_scopes: BTreeMap::new(),
@@ -534,8 +541,7 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub fn new_test_open() -> Self {
         Self {
-            topology_binding_id: NEXT_ERASURE_TOPOLOGY_GATE_ID
-                .fetch_add(1, AtomicOrdering::Relaxed),
+            topology_binding_id: Arc::new(()),
             authority: RwLock::new(Arc::new(ErasureGateStateV1 {
                 inventory: None,
                 timeline_scopes: BTreeMap::new(),
@@ -558,8 +564,8 @@ impl ErasureContainmentGateV1 {
     #[must_use]
     pub fn issue_topology_store_binding(&self) -> ErasureTopologyStoreBindingV1 {
         ErasureTopologyStoreBindingV1 {
-            gate_id: self.topology_binding_id,
-            store_id: NEXT_ERASURE_TOPOLOGY_STORE_ID.fetch_add(1, AtomicOrdering::Relaxed),
+            gate_identity: Arc::clone(&self.topology_binding_id),
+            store_identity: Arc::new(()),
         }
     }
 
@@ -917,12 +923,12 @@ impl ErasureContainmentGateV1 {
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
-        let identity = self.topology_binding_id;
+        let identity = Arc::clone(&self.topology_binding_id);
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
         let permit = ErasureTopologyTransitionPermitV1 {
-            gate_id: self.topology_binding_id,
-            claimed_store_id: Cell::new(None),
+            gate_identity: Arc::clone(&self.topology_binding_id),
+            claimed_store_identity: RefCell::new(None),
             _private: (),
         };
         let (candidate, result) = transition(&permit).map_err(containment_recovery_failure)?;
@@ -938,8 +944,12 @@ impl ErasureContainmentGateV1 {
     }
 
     fn is_fence_active(&self) -> bool {
-        let identity = self.topology_binding_id;
-        ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow().contains(&identity))
+        ACTIVE_CONTAINMENT_FENCES.with(|active| {
+            active
+                .borrow()
+                .iter()
+                .any(|identity| Arc::ptr_eq(identity, &self.topology_binding_id))
+        })
     }
 
     /// Return the installed complete-inventory generation.
@@ -1141,7 +1151,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
             .map_err(containment_recovery_failure)?
             .clone();
         self.authorize_state(timeline, operation, &authority)?;
-        let identity = self.topology_binding_id;
+        let identity = Arc::clone(&self.topology_binding_id);
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
         effect();
@@ -4376,6 +4386,7 @@ pub trait ErasureForkPersistencePortV1 {
     /// error without leaving either side visible.
     fn commit_fork_admission(
         &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
 

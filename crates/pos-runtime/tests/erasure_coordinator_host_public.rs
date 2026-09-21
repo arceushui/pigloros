@@ -1403,8 +1403,11 @@ fn assert_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     let mut reads = test_stage("open fork failure reader", host.read_sender())?;
     let timelines = test_stage("read fork failure timelines", reads.timelines())?;
-    assert_eq!(timelines.len(), 1);
-    assert_eq!(timelines[0].id(), parent.id());
+    assert!(timelines.is_empty());
+    assert_eq!(
+        reads.timeline(parent.id()),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
     Ok(())
 }
 

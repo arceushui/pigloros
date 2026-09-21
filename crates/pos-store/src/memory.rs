@@ -1471,8 +1471,11 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
 impl ErasureForkPersistencePortV1 for MemoryStore {
     fn commit_fork_admission(
         &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.ensure_host_transition_permit(permit)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         let binding = admission.binding_digest();
         let operation = admission.operation();
         let child = admission.child().clone();
@@ -1571,7 +1574,7 @@ impl MemoryStore {
             state
                 .events
                 .iter()
-                .map(|event| (event.seq, event.id, event.payload.clone())),
+                .map(|event| Ok((event.seq, event.id, event.payload.clone()))),
             self.hasher.as_ref(),
         )
     }
@@ -3093,15 +3096,19 @@ impl EventStore for MemoryStore {
 
     fn get_timeline_for_host_transition(
         &self,
+        permit: &ErasureTopologyTransitionPermitV1,
         id: TimelineId,
     ) -> Result<Option<Timeline>, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
         Ok(self.timelines.get(&id).map(|state| state.timeline.clone()))
     }
 
     fn find_timeline_by_name_for_host_transition(
         &self,
+        permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
     ) -> Result<Option<Timeline>, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
         Ok(self
             .timelines
             .values()

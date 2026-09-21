@@ -3768,6 +3768,34 @@ impl SqliteStore {
             Ok(Some(timeline))
         })
     }
+
+    fn get_timeline_for_host_transition_unchecked(
+        &self,
+        id: TimelineId,
+    ) -> Result<Option<Timeline>, CoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+                params![id.to_string()],
+                read_timeline_row,
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+
+        row.map_or(Ok(None), |timeline_row| {
+            let mut timeline = timeline_fields_to_timeline(
+                &timeline_row.id,
+                timeline_row.name,
+                &timeline_row.mode,
+                timeline_row.parent_id,
+                timeline_row.fork_seq,
+                timeline_row.head_seq,
+            )?;
+            timeline.meta.owner = self.timeline_owner(timeline.id())?;
+            Ok(Some(timeline))
+        })
+    }
 }
 
 impl EventStore for SqliteStore {
@@ -4401,7 +4429,7 @@ impl EventStore for SqliteStore {
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
         self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
             store
-                .get_timeline_for_host_transition(id)
+                .get_timeline_for_host_transition_unchecked(id)
                 .and_then(|timeline| {
                     timeline.map_or(Ok(None), |timeline| {
                         crate::generic_timeline_is_visible(
@@ -4415,36 +4443,19 @@ impl EventStore for SqliteStore {
 
     fn get_timeline_for_host_transition(
         &self,
+        permit: &ErasureTopologyTransitionPermitV1,
         id: TimelineId,
     ) -> Result<Option<Timeline>, CoreError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
-                params![id.to_string()],
-                read_timeline_row,
-            )
-            .optional()
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-        row.map_or(Ok(None), |timeline_row| {
-            let mut timeline = timeline_fields_to_timeline(
-                &timeline_row.id,
-                timeline_row.name,
-                &timeline_row.mode,
-                timeline_row.parent_id,
-                timeline_row.fork_seq,
-                timeline_row.head_seq,
-            )?;
-            timeline.meta.owner = self.timeline_owner(timeline.id())?;
-            Ok(Some(timeline))
-        })
+        self.ensure_host_transition_permit(permit)?;
+        self.get_timeline_for_host_transition_unchecked(id)
     }
 
     fn find_timeline_by_name_for_host_transition(
         &self,
+        permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
     ) -> Result<Option<Timeline>, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
         self.find_timeline_by_name_unchecked(name)
     }
 
@@ -5012,8 +5023,11 @@ fn sqlite_erasure_inventory_snapshot(
 impl ErasureForkPersistencePortV1 for SqliteStore {
     fn commit_fork_admission(
         &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.ensure_host_transition_permit(permit)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(map_erasure_receipt_failure)?;
@@ -5262,14 +5276,45 @@ fn sqlite_timeline_is_exact(
     else {
         return Ok(false);
     };
-    let event_values = sqlite_timeline_exact_events(conn, child)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT seq, event_id, payload
+             FROM events
+             WHERE timeline_id=?1
+             ORDER BY seq",
+        )
+        .map_err(map_erasure_receipt_failure)?;
+    let mut event_rows = statement
+        .query(params![child.id.to_string()])
+        .map_err(map_erasure_receipt_failure)?;
+    let events = std::iter::from_fn(|| match event_rows.next() {
+        Ok(Some(row)) => Some((|| {
+            let seq = row
+                .get::<_, i64>(0)
+                .map_err(map_erasure_receipt_failure)
+                .and_then(|seq| u64::try_from(seq).map_err(|_| ErasureErrorV1::ProvenanceMissing))
+                .map(Seq::from_u64)?;
+            let event_id = row
+                .get::<_, String>(1)
+                .map_err(map_erasure_receipt_failure)
+                .and_then(|event_id| {
+                    parse_event_id(&event_id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
+                })?;
+            let payload = row
+                .get::<_, Vec<u8>>(2)
+                .map_err(map_erasure_receipt_failure)?;
+            Ok((seq, event_id, CanonicalBytes::from_vec(payload)))
+        })()),
+        Ok(None) => None,
+        Err(error) => Some(Err(map_erasure_receipt_failure(error))),
+    });
     crate::fork_child_is_exact(
         child,
         &actual_meta,
         stored_head,
         &stored_chain_head,
         chain_head,
-        event_values,
+        events,
         hasher,
     )
 }
@@ -5347,42 +5392,6 @@ fn sqlite_timeline_exact_metadata(
         Err(_) => return Ok(None),
     };
     Ok(Some((actual_meta, stored_head, stored_chain_head)))
-}
-
-fn sqlite_timeline_exact_events(
-    conn: &Connection,
-    child: &TimelineMeta,
-) -> Result<Vec<(Seq, EventId, CanonicalBytes)>, ErasureErrorV1> {
-    let mut statement = conn
-        .prepare(
-            "SELECT seq, event_id, payload
-             FROM events
-             WHERE timeline_id=?1
-             ORDER BY seq",
-        )
-        .map_err(map_erasure_receipt_failure)?;
-    let mut event_rows = statement
-        .query(params![child.id.to_string()])
-        .map_err(map_erasure_receipt_failure)?;
-    let mut event_values = Vec::new();
-    while let Some(row) = event_rows.next().map_err(map_erasure_receipt_failure)? {
-        let seq = row
-            .get::<_, i64>(0)
-            .map_err(map_erasure_receipt_failure)
-            .and_then(|seq| u64::try_from(seq).map_err(|_| ErasureErrorV1::ProvenanceMissing))
-            .map(Seq::from_u64)?;
-        let event_id = row
-            .get::<_, String>(1)
-            .map_err(map_erasure_receipt_failure)
-            .and_then(|event_id| {
-                parse_event_id(&event_id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
-            })?;
-        let payload = row
-            .get::<_, Vec<u8>>(2)
-            .map_err(map_erasure_receipt_failure)?;
-        event_values.push((seq, event_id, CanonicalBytes::from_vec(payload)));
-    }
-    Ok(event_values)
 }
 
 fn sqlite_fork_admission_is_exact(

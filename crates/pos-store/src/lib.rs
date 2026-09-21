@@ -211,14 +211,20 @@ pub(crate) fn fork_child_is_exact<I>(
     hasher: &dyn pos_core::Hasher,
 ) -> Result<bool, pos_core::ErasureErrorV1>
 where
-    I: IntoIterator<Item = (pos_core::Seq, pos_core::EventId, pos_core::CanonicalBytes)>,
+    I: IntoIterator<
+        Item = Result<
+            (pos_core::Seq, pos_core::EventId, pos_core::CanonicalBytes),
+            pos_core::ErasureErrorV1,
+        >,
+    >,
 {
     if actual_meta != expected_meta {
         return Ok(false);
     }
     let mut expected_head = pos_core::Seq::ZERO;
     let mut expected_chain_head = chain_head;
-    for (seq, event_id, payload) in events {
+    for event in events {
+        let (seq, event_id, payload) = event?;
         let expected_seq = expected_head
             .as_u64()
             .checked_add(1)
