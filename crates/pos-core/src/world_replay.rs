@@ -40,6 +40,7 @@ const REQUIRED_KINDS: [WorldArtifactKindV1; 13] = [
 const CLOSURE_DOMAIN: &[u8] = b"pigloros.world-replay-closure.v1\0";
 
 #[cfg(feature = "test-support")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn test_fixture_artifacts(
     scope: Hash,
     retention_policy: &WorldRetentionPolicyV1,
@@ -383,6 +384,7 @@ impl WorldReplayClosureV1 {
     /// Returns a closed fixture-construction error if the deterministic test
     /// records fail their own public validation.
     #[cfg(feature = "test-support")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn test_fixture() -> Result<Self, WorldReplayClosureErrorV1> {
         Self::test_fixture_with_inventory_generation(Hash::from_bytes([62; 32]))
     }
@@ -398,6 +400,7 @@ impl WorldReplayClosureV1 {
     /// Returns a closed fixture-construction error if the deterministic test
     /// records fail their own public validation.
     #[cfg(feature = "test-support")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn test_fixture_with_inventory_generation(
         inventory_generation: Hash,
     ) -> Result<Self, WorldReplayClosureErrorV1> {

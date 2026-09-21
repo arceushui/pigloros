@@ -355,11 +355,26 @@ fn expiry_denies_use_and_missing_required_artifacts_degrade_the_claim() -> TestR
         missing_admission.evaluation().replay_claim(),
         ErasureReplayClaimV1::UnverifiableArtifactsMissing
     );
+    assert_eq!(
+        missing_admission.require_authoritative_use(),
+        Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+    );
+    assert_eq!(
+        missing_admission.require_authoritative_use_for(&[]),
+        Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+    );
     Ok(())
 }
 
 #[test]
 fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
+    let mut retained = Authority::new(WallTime::from_micros(1));
+    let retained_admission = admitted(&mut retained)?;
+    assert_eq!(
+        retained_admission.require_authoritative_use_for(&[hash(53)]),
+        Ok(())
+    );
+
     let mut authority =
         Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::TransitionOptionalView);
     let admission = admitted(&mut authority)?;
