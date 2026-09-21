@@ -5,9 +5,7 @@
 //! The runtime owns the installed verifier boundary and the opaque verified
 //! result used by protected Replay, Snapshot, and comparison operations.
 
-use pos_core::{
-    ErasureReferenceV1, ErasureReplayClaimV1, Hash, TimelineId, WorldReplayClosureV1,
-};
+use pos_core::{ErasureReferenceV1, ErasureReplayClaimV1, Hash, TimelineId, WorldReplayClosureV1};
 
 /// Closed reasons why an installed World Replay verifier could not issue a
 /// protected-use capability.
@@ -72,9 +70,7 @@ impl VerifiedWorldReplayV1 {
     /// Returns [`WorldReplayVerificationErrorV1::ClaimUnavailable`] when the
     /// installed owner reports an expired, erased, redacted, or otherwise
     /// non-authoritative result.
-    pub const fn require_authoritative_use(
-        &self,
-    ) -> Result<(), WorldReplayVerificationErrorV1> {
+    pub const fn require_authoritative_use(&self) -> Result<(), WorldReplayVerificationErrorV1> {
         if matches!(self.replay_claim, ErasureReplayClaimV1::Exact) {
             Ok(())
         } else {
@@ -84,7 +80,7 @@ impl VerifiedWorldReplayV1 {
 
     /// Construct a result only inside the runtime verifier implementation.
     #[allow(dead_code)]
-    pub(crate) const fn from_verified_evidence(
+    pub(crate) fn from_verified_evidence(
         closure: &WorldReplayClosureV1,
         inventory_generation: ErasureReferenceV1,
         replay_claim: ErasureReplayClaimV1,
