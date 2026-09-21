@@ -824,7 +824,7 @@ fn gateway_action_registry_with_authority(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Arc<PluginRegistry> {
-    Arc::new(gateway_action_registry_builder(bodies, authority))
+    Arc::new(gateway_action_registry_builder_for_test(bodies, authority))
 }
 
 fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
@@ -838,7 +838,7 @@ fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-) -> PluginRegistry {
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     let mut registry = PluginRegistry::new().without_erasure_gate();
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
@@ -848,31 +848,52 @@ fn gateway_action_registry_builder(
     bodies.dedup();
     let configuration_details = gateway_configuration_details(&bodies);
     let world_plugin = WorldPlugin::new().with_bodies(bodies);
-    drop(
-        gateway_output_binding(&descriptor, &configuration_details).and_then(|(policy, budget)| {
-            registry.register_with_output_policy_and_approver(
-                &descriptor,
-                policy,
-                budget,
-                None,
-                None,
-                Some(Box::new(GatewayWorldActionApprover(world_plugin))),
-                [Kind::new(EVENT_TYPE_ACTION)],
-            )
-        }),
-    );
+    let (policy, budget) = gateway_output_binding(&descriptor, &configuration_details)?;
+    registry.register_with_output_policy_and_approver(
+        &descriptor,
+        policy,
+        budget,
+        None,
+        None,
+        Some(Box::new(GatewayWorldActionApprover(world_plugin))),
+        [Kind::new(EVENT_TYPE_ACTION)],
+    )?;
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
     }
-    registry
+    Ok(registry)
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn gateway_action_registry_builder_for_test(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+) -> PluginRegistry {
+    gateway_action_registry_builder(bodies, authority).unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!(
+            "gateway action registration must remain valid in test fixtures: {error:?}"
+        )))
+    })
+}
+
+fn gateway_action_registry_with_authority_and_erasure_gate_checked(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+    gate: Arc<ErasureContainmentGateV1>,
+) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
+    let mut registry = gateway_action_registry_builder(bodies, authority)?;
+    registry.bind_erasure_gate(gate);
+    Ok(Arc::new(registry))
+}
+
+#[cfg(test)]
 fn gateway_action_registry_with_authority_and_erasure_gate(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Arc<PluginRegistry> {
-    let mut registry = gateway_action_registry_builder(bodies, authority);
+    let mut registry = gateway_action_registry_builder_for_test(bodies, authority);
     registry.bind_erasure_gate(gate);
     Arc::new(registry)
 }
@@ -1014,6 +1035,9 @@ pub enum GatewayError {
     /// A host revocation must bind the sequence it is about to commit.
     #[error("consent revocation fence does not match the current Timeline position")]
     ConsentRevocationFenceMismatch,
+    /// The production action registry could not be bound to its declared policy.
+    #[error("action registry initialization failed: {0}")]
+    ActionRegistry(#[from] pos_runtime::RuntimeError),
 }
 
 /// An existing, owner-only `OwnTracks` activation key loaded from disk.
@@ -1386,11 +1410,11 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
                 gate,
-            ),
+            )?,
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
@@ -1423,11 +1447,11 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
                 gate,
-            ),
+            )?,
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
@@ -1464,11 +1488,11 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
                 bodies,
                 Some(consent_authority.clone()),
                 gate,
-            ),
+            )?,
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
@@ -1501,11 +1525,11 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
+            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
                 gate,
-            ),
+            )?,
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
             pending_consent_cleanup: new_pending_consent_cleanup(),
