@@ -631,6 +631,50 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     })
 }
 
+fn register_static_plugins(
+    experiment: &mut Experiment,
+    scenario: &MultiRateScenario,
+    observation: &FixturePlugin,
+    society: &SocietyPlugin,
+    probe: &FixturePlugin,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (observation_policy, observation_budget) =
+        empty_output_binding(observation.id(), observation.version())?;
+    let (society_policy, society_budget) = empty_output_binding(society.id(), society.version())?;
+    let (probe_policy, probe_budget) = empty_output_binding(probe.id(), probe.version())?;
+    experiment
+        .register_with_output_policy(
+            observation,
+            observation_policy,
+            observation_budget,
+            Some(Box::new(EntityStateProjection)),
+            None,
+        )
+        .test_ok()?;
+    experiment
+        .register_with_output_policy(
+            society,
+            society_policy,
+            society_budget,
+            Some(Box::new(SocietyReducer)),
+            None,
+        )
+        .test_ok()?;
+    experiment
+        .register_with_output_policy(
+            probe,
+            probe_policy,
+            probe_budget,
+            None,
+            Some(Box::new(ObservationProbeDriver {
+                subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
+                log: Arc::clone(&scenario.probe_log),
+            })),
+        )
+        .test_ok()?;
+    Ok(())
+}
+
 fn register_experiment(
     scenario: &mut MultiRateScenario,
 ) -> Result<
@@ -648,10 +692,6 @@ fn register_experiment(
     let slow = AgentPlugin::new();
     let (fast_policy, fast_budget) = agent_output_binding(fast.id())?;
     let (slow_policy, slow_budget) = agent_output_binding(slow.id())?;
-    let (observation_policy, observation_budget) =
-        empty_output_binding(observation.id(), observation.version())?;
-    let (society_policy, society_budget) = empty_output_binding(society.id(), society.version())?;
-    let (probe_policy, probe_budget) = empty_output_binding(probe.id(), probe.version())?;
     let mut experiment = Experiment::new(ExperimentConfig {
         name: "multi-rate-host".to_owned(),
         stop: StopCondition::MaxTicks(10),
@@ -659,24 +699,7 @@ fn register_experiment(
             path: scenario.path.clone(),
         },
     });
-    experiment
-        .register_with_output_policy(
-            &observation,
-            observation_policy,
-            observation_budget,
-            Some(Box::new(EntityStateProjection)),
-            None,
-        )
-        .test_ok()?;
-    experiment
-        .register_with_output_policy(
-            &society,
-            society_policy,
-            society_budget,
-            Some(Box::new(SocietyReducer)),
-            None,
-        )
-        .test_ok()?;
+    register_static_plugins(&mut experiment, scenario, &observation, &society, &probe)?;
     experiment
         .register_with_output_policy(
             &fast,
@@ -693,18 +716,6 @@ fn register_experiment(
                 }),
                 vec!["fast".to_owned()],
             ))),
-        )
-        .test_ok()?;
-    experiment
-        .register_with_output_policy(
-            &probe,
-            probe_policy,
-            probe_budget,
-            None,
-            Some(Box::new(ObservationProbeDriver {
-                subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
-                log: Arc::clone(&scenario.probe_log),
-            })),
         )
         .test_ok()?;
     experiment

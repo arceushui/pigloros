@@ -1153,7 +1153,7 @@ impl Experiment {
     ///
     /// # Errors
     /// Returns registration, generated-policy, or output-admission errors.
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn register_generated(
         &mut self,
         plugin: &dyn pos_core::Plugin,
@@ -1215,7 +1215,7 @@ impl Experiment {
     ///
     /// # Errors
     /// Returns registration, generated-policy, or output-admission errors.
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn pos_core::Plugin,
