@@ -393,6 +393,10 @@ impl WorldReplayClosureV1 {
     /// A host generation changes when a Timeline is admitted, so downstream
     /// tests use this helper after creating their test topology. Production
     /// callers must obtain the generation from their recovered host instead.
+    ///
+    /// # Errors
+    /// Returns a closed fixture-construction error if the deterministic test
+    /// records fail their own public validation.
     #[cfg(feature = "test-support")]
     pub fn test_fixture_with_inventory_generation(
         inventory_generation: Hash,
