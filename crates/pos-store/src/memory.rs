@@ -50,8 +50,7 @@ use pos_core::{
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, ErasureTopologyTransitionPermitV1,
-    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1, KeyRegistryStateV1,
+    ErasureStateResolverV1, ErasureTopologyTransitionPermitV1, KeyRegistryStateV1,
     PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
     ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
@@ -3232,8 +3231,9 @@ mod tests {
         },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
-        KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
-        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
+        ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1, KeyIdentityV1,
+        KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnTracksEnrollmentRequestV1,
+        OwnTracksEnrollmentStore, PublicKey,
     };
 
     fn authorized_export_timeline(

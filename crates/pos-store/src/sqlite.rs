@@ -50,8 +50,7 @@ use pos_core::{
     ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
     ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureStateResolverV1,
-    ErasureTopologyTransitionPermitV1, ErasureVerifiedEmptyInventoryQueryV1,
-    ErasureVerifiedInventoryQueryV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    ErasureTopologyTransitionPermitV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
     KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1,
     PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
     StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
@@ -6197,7 +6196,8 @@ mod tests {
         geo_admission::GeoLocationAdmissionFenceV1,
         ids::{EntityId, EventId},
         store::{EventReadBounds, SeqRange, TimelineExport},
-        CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
+        CoreError, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+        KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };
 
