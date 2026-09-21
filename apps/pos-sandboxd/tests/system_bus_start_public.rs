@@ -9,14 +9,14 @@ use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
 use pos_sandboxd::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter,
-    SystemdTransientUnitTransport, SystemdTransientUnitTransportError,
-    TransientServiceUnitName, TransientUnitLaunchInputs, TransientUnitRequest,
+    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, TransientServiceUnitName,
+    TransientUnitLaunchInputs, TransientUnitRequest,
 };
 use zbus::{
-    Guid,
-    connection::{Builder, socket::channel::Channel},
+    connection::{socket::channel::Channel, Builder},
     fdo,
     zvariant::{OwnedFd, OwnedObjectPath, OwnedValue},
+    Guid,
 };
 
 const X86_64: &[u8] = include_bytes!(
@@ -89,8 +89,7 @@ impl RecordingManager {
             .lock()
             .map_err(|error| fdo::Error::Failed(error.to_string()))?
             .replace(call);
-        OwnedObjectPath::try_from(JOB_PATH)
-            .map_err(|error| fdo::Error::Failed(error.to_string()))
+        OwnedObjectPath::try_from(JOB_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
 }
 

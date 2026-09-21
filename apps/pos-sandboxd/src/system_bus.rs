@@ -1,6 +1,6 @@
 //! Typed system-bus submission of compiled transient-unit requests.
 
-use zbus::{Connection, zvariant::OwnedObjectPath};
+use zbus::{zvariant::OwnedObjectPath, Connection};
 use zvariant::{OwnedValue, Value};
 
 use crate::{
@@ -119,16 +119,16 @@ impl SystemdTransientUnitTransport {
             Ok(properties) => properties,
             Err(error) => return Err(error),
         };
-        proxy
-            .start_transient_unit(
-                unit_name.0,
-                JOB_MODE.to_owned(),
-                properties,
-                Vec::new(),
-            )
+        let job_path = match proxy
+            .start_transient_unit(unit_name.0, JOB_MODE.to_owned(), properties, Vec::new())
             .await
-            .map(SystemdStartJob)
-            .map_err(SystemdTransientUnitTransportError::ManagerCall)
+        {
+            Ok(job_path) => job_path,
+            Err(error) => {
+                return Err(SystemdTransientUnitTransportError::ManagerCall(error));
+            }
+        };
+        Ok(SystemdStartJob(job_path))
     }
 }
 
@@ -150,15 +150,15 @@ fn property_value(value: SystemdTransientUnitValue) -> Value<'static> {
             SystemdHardeningValue::String(value) => Value::from(value.to_owned()),
             SystemdHardeningValue::U64(value) => Value::from(value),
             SystemdHardeningValue::U32(value) => Value::from(value),
-            SystemdHardeningValue::StringArray(value) => Value::from(
-                value.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ),
+            SystemdHardeningValue::StringArray(value) => {
+                Value::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
+            }
         },
         SystemdTransientUnitValue::RootDirectory(value) => Value::from(value),
         SystemdTransientUnitValue::BindReadOnlyPaths(value) => Value::from(value),
         SystemdTransientUnitValue::SystemCallFilter(value)
         | SystemdTransientUnitValue::RestrictAddressFamilies(value) => Value::from(value),
         SystemdTransientUnitValue::FileDescriptorStoreMax(value) => Value::from(value),
-        SystemdTransientUnitValue::ExtraFileDescriptors(value) => Value::from(value),
+        SystemdTransientUnitValue::ExtraFileDescriptors(value) => Value::from(&value),
     }
 }

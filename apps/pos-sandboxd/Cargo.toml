@@ -9,7 +9,10 @@ publish.workspace = true
 [dependencies]
 pos-reference = { path = "../../crates/pos-reference" }
 thiserror = { workspace = true }
-zbus = { version = "=5.19.0", default-features = false, features = ["p2p", "tokio"] }
+zbus = { version = "=5.19.0", default-features = false, features = [
+  "p2p",
+  "tokio",
+] }
 zbus_systemd = { version = "=0.26100.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
