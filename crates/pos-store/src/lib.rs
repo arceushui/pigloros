@@ -715,45 +715,36 @@ mod tests {
         let payload = pos_core::CanonicalBytes::from_static(b"child-event");
         let child_head = hasher.hash_event(&genesis, event_id.to_string().as_bytes(), &payload);
 
-        assert_eq!(
-            fork_child_is_exact(
-                &expected,
-                &expected,
-                pos_core::Seq::from_u64(1),
-                child_head.as_bytes(),
-                genesis,
-                [Ok((pos_core::Seq::from_u64(1), event_id, payload.clone()))],
-                &hasher,
-            )
-            .test_ok(),
-            true
-        );
-        assert_eq!(
-            fork_child_is_exact(
-                &expected,
-                &pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "other"),
-                pos_core::Seq::ZERO,
-                genesis.as_bytes(),
-                genesis,
-                std::iter::empty(),
-                &hasher,
-            )
-            .test_ok(),
-            false
-        );
-        assert_eq!(
-            fork_child_is_exact(
-                &expected,
-                &expected,
-                pos_core::Seq::from_u64(1),
-                child_head.as_bytes(),
-                genesis,
-                [Ok((pos_core::Seq::from_u64(2), event_id, payload.clone()))],
-                &hasher,
-            )
-            .test_ok(),
-            false
-        );
+        assert!(fork_child_is_exact(
+            &expected,
+            &expected,
+            pos_core::Seq::from_u64(1),
+            child_head.as_bytes(),
+            genesis,
+            [Ok((pos_core::Seq::from_u64(1), event_id, payload.clone()))],
+            &hasher,
+        )
+        .test_ok());
+        assert!(!fork_child_is_exact(
+            &expected,
+            &pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "other"),
+            pos_core::Seq::ZERO,
+            genesis.as_bytes(),
+            genesis,
+            std::iter::empty(),
+            &hasher,
+        )
+        .test_ok());
+        assert!(!fork_child_is_exact(
+            &expected,
+            &expected,
+            pos_core::Seq::from_u64(1),
+            child_head.as_bytes(),
+            genesis,
+            [Ok((pos_core::Seq::from_u64(2), event_id, payload))],
+            &hasher,
+        )
+        .test_ok());
         assert_eq!(
             fork_child_is_exact(
                 &expected,

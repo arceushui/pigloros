@@ -3315,9 +3315,9 @@ mod tests {
         },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
-        ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1, KeyIdentityV1,
-        KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnTracksEnrollmentRequestV1,
-        OwnTracksEnrollmentStore, PublicKey,
+        ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+        ErasureVerifiedInventoryV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
+        KeyRoleV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
     };
 
     fn authorized_export_timeline(
@@ -3429,17 +3429,11 @@ mod tests {
             .test_ok();
     }
 
-    #[test]
-    fn host_transition_store_seams_cover_success_and_rejection_paths() {
-        let mut store = new_store();
-        let gate =
-            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
-                std::panic::resume_unwind(Box::new("missing memory test gate"))
-            }));
-        let snapshot =
-            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
-        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
-        let inventory = query.verified_inventory(1).test_ok();
+    fn cover_memory_host_transition_success(
+        store: &mut MemoryStore,
+        gate: &ErasureContainmentGateV1,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
             let root = store
                 .create_timeline_for_host_transition(permit, "host-root")
@@ -3502,7 +3496,12 @@ mod tests {
         };
         gate.install_from_verified_inventory_transition(&mut transition)
             .test_ok();
+    }
 
+    fn cover_memory_host_transition_rejections(
+        store: &mut MemoryStore,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
         let foreign_gate = ErasureContainmentGateV1::new_test_open();
         let mut rejected = |permit: &ErasureTopologyTransitionPermitV1| {
             assert!(store
@@ -3550,14 +3549,9 @@ mod tests {
         foreign_gate
             .install_from_verified_inventory_transition(&mut rejected)
             .test_ok();
+    }
 
-        let preissued_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        preissued_gate.issue_topology_store_binding().test_ok();
-        assert!(matches!(
-            MemoryStore::new().bind_erasure_gate(preissued_gate),
-            Err(CoreError::ErasureContainmentUnavailable)
-        ));
-
+    fn cover_memory_mismatched_registry(inventory: &ErasureVerifiedInventoryV1) {
         let mut mismatch = new_store();
         let mut persisted = KeyRegistryStateV1::new();
         persisted
@@ -3587,7 +3581,9 @@ mod tests {
         mismatch_gate
             .install_from_verified_inventory_transition(&mut mismatch_transition)
             .test_ok();
+    }
 
+    fn cover_memory_invalid_loaded_registry(inventory: &ErasureVerifiedInventoryV1) {
         let mut invalid_loaded = new_store();
         invalid_loaded.key_registry = Some(super::coverage_entrypoints::invalid_registry());
         let invalid_loaded_gate =
@@ -3607,7 +3603,9 @@ mod tests {
         invalid_loaded_gate
             .install_from_verified_inventory_transition(&mut invalid_loaded_transition)
             .test_ok();
+    }
 
+    fn cover_memory_rollback_failure(inventory: &ErasureVerifiedInventoryV1) {
         let mut rollback = new_store();
         let rollback_gate = Arc::clone(
             rollback
@@ -3630,6 +3628,30 @@ mod tests {
         rollback_gate
             .install_from_verified_inventory_transition(&mut rollback_transition)
             .test_ok();
+    }
+
+    #[test]
+    fn host_transition_store_seams_cover_success_and_rejection_paths() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing memory test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        cover_memory_host_transition_success(&mut store, &gate, &inventory);
+        cover_memory_host_transition_rejections(&mut store, &inventory);
+        let preissued_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        preissued_gate.issue_topology_store_binding().test_ok();
+        assert!(matches!(
+            MemoryStore::new().bind_erasure_gate(preissued_gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+        cover_memory_mismatched_registry(&inventory);
+        cover_memory_invalid_loaded_registry(&inventory);
+        cover_memory_rollback_failure(&inventory);
     }
 
     #[test]

@@ -6429,8 +6429,8 @@ mod tests {
         ids::{EntityId, EventId},
         store::{EventReadBounds, SeqRange, TimelineExport},
         CoreError, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
-        KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
-        OwnTracksEnrollmentStore,
+        ErasureVerifiedInventoryV1, KeyRegistrationV1, OwnTracksEnrollmentRequestV1,
+        OwnTracksEnrollmentStatusV1, OwnTracksEnrollmentStore,
     };
 
     fn authorized_export_timeline(
@@ -6563,17 +6563,11 @@ mod tests {
             .test_ok();
     }
 
-    #[test]
-    fn host_transition_store_seams_cover_success_and_rejection_paths() {
-        let mut store = new_store();
-        let gate =
-            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
-                std::panic::resume_unwind(Box::new("missing sqlite test gate"))
-            }));
-        let snapshot =
-            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
-        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
-        let inventory = query.verified_inventory(1).test_ok();
+    fn cover_sqlite_host_transition_success(
+        store: &mut SqliteStore,
+        gate: &ErasureContainmentGateV1,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
             let root = store
                 .create_timeline_for_host_transition(permit, "host-root")
@@ -6636,7 +6630,12 @@ mod tests {
         };
         gate.install_from_verified_inventory_transition(&mut transition)
             .test_ok();
+    }
 
+    fn cover_sqlite_host_transition_rejections(
+        store: &mut SqliteStore,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
         let foreign_gate = ErasureContainmentGateV1::new_test_open();
         let mut rejected = |permit: &ErasureTopologyTransitionPermitV1| {
             assert!(store
@@ -6684,7 +6683,9 @@ mod tests {
         foreign_gate
             .install_from_verified_inventory_transition(&mut rejected)
             .test_ok();
+    }
 
+    fn cover_sqlite_duplicate_and_invalid_paths(inventory: &ErasureVerifiedInventoryV1) {
         let preissued_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         preissued_gate.issue_topology_store_binding().test_ok();
         assert!(matches!(
@@ -6734,6 +6735,22 @@ mod tests {
         duplicate_gate
             .install_from_verified_inventory_transition(&mut duplicate_transition)
             .test_ok();
+    }
+
+    #[test]
+    fn host_transition_store_seams_cover_success_and_rejection_paths() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing sqlite test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        cover_sqlite_host_transition_success(&mut store, &gate, &inventory);
+        cover_sqlite_host_transition_rejections(&mut store, &inventory);
+        cover_sqlite_duplicate_and_invalid_paths(&inventory);
     }
 
     #[test]
