@@ -917,6 +917,10 @@ impl Plugin for WorldPlugin {
             has_reducer: true,
         }
     }
+
+    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("lib.rs"))
+    }
 }
 
 impl ActionApprover for WorldPlugin {

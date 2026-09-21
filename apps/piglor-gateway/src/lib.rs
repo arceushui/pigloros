@@ -63,9 +63,15 @@ fn gateway_output_binding_with_inputs(
     plugin: &dyn Plugin,
     configuration_details: &[u8],
     profile_id: &str,
-    _event_type: &str,
-    _max_event_bytes: u32,
+    event_type: &str,
+    max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
+    if event_type.is_empty() || max_event_bytes == 0 || max_event_bytes > 4_096 {
+        return Err(pos_runtime::RuntimeError::CapabilityMismatch {
+            name: plugin.name().to_owned(),
+            reason: "Gateway output declaration exceeds the installed source bounds".to_owned(),
+        });
+    }
     pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
         pos_runtime::InstalledOutputPolicySourceV1::Gateway,
@@ -713,6 +719,10 @@ impl Plugin for GatewayActionPlugin {
             owned_event_types: vec![Kind::new(EVENT_TYPE_ACTION)],
             ..Capability::default()
         }
+    }
+
+    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("lib.rs"))
     }
 }
 

@@ -86,13 +86,25 @@ fn reviewed_output_binding(
 
 fn reviewed_output_binding_with_limits(
     plugin: &dyn Plugin,
-    _event_types: &[&str],
+    event_types: &[&str],
     profile_id: &str,
-    _cpu_reservations_us: [u32; 3],
+    cpu_reservations_us: [u32; 3],
     _implementation_artifact: &[u8],
     configuration_details: &[u8],
-    _max_event_bytes: u32,
+    max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    if event_types.iter().any(|event_type| event_type.is_empty())
+        || max_event_bytes == 0
+        || max_event_bytes > 4_096
+        || cpu_reservations_us[0] > 500_000
+        || cpu_reservations_us[1] > 250_000
+        || cpu_reservations_us[2] > 50_000
+    {
+        return Err(RuntimeError::CapabilityMismatch {
+            name: plugin.name().to_owned(),
+            reason: "experiment output declaration exceeds the installed source bounds".to_owned(),
+        });
+    }
     let source = match plugin.name() {
         "world" => pos_runtime::InstalledOutputPolicySourceV1::World,
         "society" => pos_runtime::InstalledOutputPolicySourceV1::Society,
@@ -1839,6 +1851,10 @@ impl Plugin for SiblingProbePlugin {
             has_reducer: false,
         }
     }
+
+    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("moat_proof.rs"))
+    }
 }
 
 struct SiblingProbeDriver {
@@ -1876,6 +1892,10 @@ impl Plugin for FailureProbePlugin {
             has_driver: true,
             has_reducer: false,
         }
+    }
+
+    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("moat_proof.rs"))
     }
 }
 
@@ -1941,6 +1961,10 @@ impl Plugin for ProofAgentPlugin {
             has_reducer: true,
         }
     }
+
+    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("moat_proof.rs"))
+    }
 }
 
 #[derive(Clone)]
@@ -1972,6 +1996,10 @@ impl Plugin for ProofSocietyPlugin {
             has_driver: true,
             has_reducer: true,
         }
+    }
+
+    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("moat_proof.rs"))
     }
 }
 

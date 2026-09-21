@@ -157,7 +157,35 @@ impl InstalledOutputPolicySourceV1 {
         if matches!(self, Self::Generated) {
             return true;
         }
-        true
+        // Names are only a routing hint.  The installed artifact identity is
+        // the ownership proof; a same-name fixture without the native source
+        // bytes must fail closed here.
+        plugin
+            .installed_implementation_artifact()
+            .is_some_and(|artifact| {
+                self.native_implementation_artifact()
+                    .is_some_and(|expected| artifact == expected)
+            })
+    }
+
+    fn native_implementation_artifact(self) -> Option<&'static [u8]> {
+        match self {
+            #[cfg(debug_assertions)]
+            Self::Generated => None,
+            Self::Gateway => Some(include_bytes!("../../../apps/piglor-gateway/src/lib.rs")),
+            Self::World => Some(include_bytes!("../../../plugins/world/src/lib.rs")),
+            Self::RuleAgent => Some(include_bytes!(
+                "../../../plugins/entities/rule-agent/src/lib.rs"
+            )),
+            Self::Agent => Some(include_bytes!("../../../plugins/agent/src/lib.rs")),
+            Self::SyntheticObservation => Some(include_bytes!(
+                "../../../plugins/observations/synthetic/src/lib.rs"
+            )),
+            Self::Society => Some(include_bytes!("../../../plugins/society/src/lib.rs")),
+            Self::Experiment => Some(include_bytes!(
+                "../../../apps/pos-experiment/src/moat_proof.rs"
+            )),
+        }
     }
 
     fn implementation_artifact(self, plugin: &dyn Plugin) -> Vec<u8> {

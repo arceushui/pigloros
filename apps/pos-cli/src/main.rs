@@ -156,13 +156,26 @@ fn builtin_output_binding(
 
 fn builtin_output_binding_with_inputs(
     plugin: &dyn Plugin,
-    _event_type: &str,
-    _cpu_reservations_us: [u32; 3],
+    event_type: &str,
+    cpu_reservations_us: [u32; 3],
     _implementation_artifact: &[u8],
     configuration_details: &[u8],
     profile_id: &str,
-    _max_event_bytes: u32,
+    max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+    if event_type.is_empty()
+        || max_event_bytes == 0
+        || max_event_bytes > 16_384
+        || cpu_reservations_us[0] > 500_000
+        || cpu_reservations_us[1] > 250_000
+        || cpu_reservations_us[2] > 50_000
+    {
+        return Err(format!(
+            "Plugin '{}' output declaration exceeds the installed source bounds",
+            plugin.name()
+        )
+        .into());
+    }
     let source = match plugin.name() {
         "rule-agent" => pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
         "synthetic-obs" => pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,

@@ -494,7 +494,7 @@ mod tests {
         };
         Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Agent,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )?)

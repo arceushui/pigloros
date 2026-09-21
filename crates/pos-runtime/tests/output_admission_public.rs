@@ -467,20 +467,35 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
 }
 
 #[test]
-fn registry_rejects_policy_declarations_outside_plugin_capability() -> TestResult {
+fn public_binding_rejects_foreign_capability_name() -> TestResult {
     let plugin = ForeignCapabilityPlugin {
         id: PluginId::new(),
     };
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
-        &plugin,
-        InstalledOutputPolicySourceV1::RuleAgent,
-        &[],
-        "deterministic-local-v1",
-    )?;
-    let mut registry = PluginRegistry::new();
     assert!(matches!(
-        registry.register_with_output_policy(&plugin, binding, None, None,),
-        Err(RuntimeError::CapabilityMismatch { .. })
+        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "deterministic-local-v1",
+        ),
+        Err(OutputAdmissionErrorV1::PluginMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn public_binding_rejects_name_only_installed_source_claims() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    assert!(matches!(
+        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "deterministic-local-v1",
+        ),
+        Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
     Ok(())
 }
@@ -640,16 +655,31 @@ fn explicit_registration_rejects_unowned_installed_source() -> TestResult {
         ),
         Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
-        &plugin,
-        InstalledOutputPolicySourceV1::RuleAgent,
-        b"fixture-configuration",
-        "deterministic-local-v1",
-    )?;
-    let mut registry = PluginRegistry::new();
     assert!(matches!(
-        registry.register_with_output_policy(&plugin, binding, None, None,),
-        Err(RuntimeError::CapabilityMismatch { .. })
+        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::RuleAgent,
+            b"fixture-configuration",
+            "deterministic-local-v1",
+        ),
+        Err(OutputAdmissionErrorV1::PluginMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn explicit_registration_rejects_name_only_source_even_with_configuration() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    assert!(matches!(
+        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Agent,
+            b"fixture-configuration",
+            "deterministic-local-v1",
+        ),
+        Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
     Ok(())
 }
