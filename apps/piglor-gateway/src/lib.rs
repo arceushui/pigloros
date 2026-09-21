@@ -231,6 +231,26 @@ mod coverage_tests {
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
 
+    struct InvalidVersionPlugin;
+
+    impl Plugin for InvalidVersionPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-gateway-version"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
+
     fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
         ConsentGrantedV1 {
             subject_id,
@@ -276,24 +296,6 @@ mod coverage_tests {
         )
         .is_err());
 
-        struct InvalidVersionPlugin;
-        impl Plugin for InvalidVersionPlugin {
-            fn id(&self) -> PluginId {
-                PluginId::new()
-            }
-
-            fn name(&self) -> &'static str {
-                "invalid-gateway-version"
-            }
-
-            fn capability(&self) -> Capability {
-                Capability::default()
-            }
-
-            fn version(&self) -> &'static str {
-                ""
-            }
-        }
         assert!(gateway_output_binding_with_inputs(
             &InvalidVersionPlugin,
             &[],

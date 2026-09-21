@@ -2368,6 +2368,26 @@ mod tests {
         ids::EventId,
     };
 
+    struct InvalidVersionPlugin;
+
+    impl Plugin for InvalidVersionPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-moat-version"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
+
     fn input() -> MoatProofInputV1 {
         MoatProofInputV1 {
             scenario_id: "proof-test".to_owned(),
@@ -2416,24 +2436,6 @@ mod tests {
         )
         .is_err());
 
-        struct InvalidVersionPlugin;
-        impl Plugin for InvalidVersionPlugin {
-            fn id(&self) -> PluginId {
-                PluginId::new()
-            }
-
-            fn name(&self) -> &'static str {
-                "invalid-moat-version"
-            }
-
-            fn capability(&self) -> Capability {
-                Capability::default()
-            }
-
-            fn version(&self) -> &'static str {
-                ""
-            }
-        }
         assert!(reviewed_output_binding_with_limits(
             &InvalidVersionPlugin,
             &[AGENT_EVENT_TYPE],

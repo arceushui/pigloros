@@ -33,6 +33,26 @@ macro_rules! result_pipeline {
 mod coverage_entrypoints {
     use super::*;
 
+    struct InvalidVersionPlugin;
+
+    impl pos_core::Plugin for InvalidVersionPlugin {
+        fn id(&self) -> pos_core::ids::PluginId {
+            pos_core::ids::PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-cli-version"
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
+
     #[test]
     fn builtin_reference_runner_registers_both_reference_plugins() {
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
@@ -73,24 +93,6 @@ mod coverage_entrypoints {
         )
         .is_err());
 
-        struct InvalidVersionPlugin;
-        impl pos_core::Plugin for InvalidVersionPlugin {
-            fn id(&self) -> pos_core::ids::PluginId {
-                pos_core::ids::PluginId::new()
-            }
-
-            fn name(&self) -> &'static str {
-                "invalid-cli-version"
-            }
-
-            fn capability(&self) -> pos_core::Capability {
-                pos_core::Capability::default()
-            }
-
-            fn version(&self) -> &'static str {
-                ""
-            }
-        }
         assert!(builtin_output_binding_with_inputs(
             &InvalidVersionPlugin,
             "rule-agent.decision.v1",
