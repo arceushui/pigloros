@@ -5309,7 +5309,7 @@ fn sqlite_timeline_is_exact(
         expected_chain_head = hasher.hash_event(
             &expected_chain_head,
             event_id.to_string().as_bytes(),
-            &payload,
+            &CanonicalBytes::from_vec(payload),
         );
         expected_head = seq;
     }
