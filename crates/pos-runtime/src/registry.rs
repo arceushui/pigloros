@@ -3081,13 +3081,11 @@ impl PluginRegistry {
                 "action approver has no bound output policy".to_owned(),
             ));
         };
-        admission
-            .validate_batch(std::slice::from_ref(&draft))
-            .map_err(|error| {
-                ActionRejected::DomainValidationFailed(format!(
-                    "action output admission failed: {error}"
-                ))
-            })?;
+        admission.validate_action(&draft).map_err(|error| {
+            ActionRejected::DomainValidationFailed(format!(
+                "action output admission failed: {error}"
+            ))
+        })?;
         Ok(draft)
     }
 

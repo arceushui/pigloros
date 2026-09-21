@@ -140,6 +140,27 @@ impl OutputAdmissionV1 {
     /// Returns a declaration or resource-limit error when any draft exceeds
     /// the bound policy.
     pub fn validate_batch(&self, drafts: &[EventDraft]) -> Result<(), OutputAdmissionErrorV1> {
+        self.validate_batch_with_usage(drafts, true)
+    }
+
+    /// Validate one host-approved action without consuming the Driver cut budget.
+    ///
+    /// Actions are individually fenced append operations rather than staged
+    /// Driver output. They still require the registered policy, declaration,
+    /// byte, count, and CPU checks, but their admission must not exhaust the
+    /// next independent action by retaining the previous action's usage.
+    ///
+    /// # Errors
+    /// Returns the same declaration or resource-limit error as [`Self::validate_batch`].
+    pub fn validate_action(&self, draft: &EventDraft) -> Result<(), OutputAdmissionErrorV1> {
+        self.validate_batch_with_usage(std::slice::from_ref(draft), false)
+    }
+
+    fn validate_batch_with_usage(
+        &self,
+        drafts: &[EventDraft],
+        retain_usage: bool,
+    ) -> Result<(), OutputAdmissionErrorV1> {
         // Hold the usage lock across validation and commit so concurrent host
         // invocations cannot validate against the same stale cumulative total.
         let mut usage = self
@@ -210,11 +231,12 @@ impl OutputAdmissionV1 {
                 });
             }
         }
-        *usage = AdmissionUsage {
-            events: counts,
-            bytes,
-        };
-        drop(usage);
+        if retain_usage {
+            *usage = AdmissionUsage {
+                events: counts,
+                bytes,
+            };
+        }
         Ok(())
     }
 }

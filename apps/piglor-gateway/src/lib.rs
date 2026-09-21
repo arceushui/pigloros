@@ -64,19 +64,6 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
-fn gateway_output_binding(
-    plugin: &dyn Plugin,
-    configuration_details: &[u8],
-) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), pos_runtime::RuntimeError> {
-    gateway_output_binding_with_inputs(
-        plugin,
-        configuration_details,
-        "deterministic-local-v1",
-        EVENT_TYPE_ACTION,
-        4_096,
-    )
-}
-
 fn gateway_output_binding_with_inputs(
     plugin: &dyn Plugin,
     configuration_details: &[u8],
@@ -839,6 +826,20 @@ fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    gateway_action_registry_builder_with_inputs(
+        bodies,
+        authority,
+        "deterministic-local-v1",
+        EVENT_TYPE_ACTION,
+    )
+}
+
+fn gateway_action_registry_builder_with_inputs(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+    profile_id: &str,
+    event_type: &str,
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     let mut registry = PluginRegistry::new().without_erasure_gate();
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
@@ -848,7 +849,13 @@ fn gateway_action_registry_builder(
     bodies.dedup();
     let configuration_details = gateway_configuration_details(&bodies);
     let world_plugin = WorldPlugin::new().with_bodies(bodies);
-    let (policy, budget) = gateway_output_binding(&descriptor, &configuration_details)?;
+    let (policy, budget) = gateway_output_binding_with_inputs(
+        &descriptor,
+        &configuration_details,
+        profile_id,
+        event_type,
+        4_096,
+    )?;
     registry.register_with_output_policy_and_approver(
         &descriptor,
         policy,
@@ -856,7 +863,7 @@ fn gateway_action_registry_builder(
         None,
         None,
         Some(Box::new(GatewayWorldActionApprover(world_plugin))),
-        [Kind::new(EVENT_TYPE_ACTION)],
+        [Kind::new(event_type)],
     )?;
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
@@ -882,7 +889,24 @@ fn gateway_action_registry_with_authority_and_erasure_gate_checked(
     authority: Option<ConsentAuthority>,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
-    let mut registry = gateway_action_registry_builder(bodies, authority)?;
+    gateway_action_registry_with_authority_and_erasure_gate_checked_with_inputs(
+        bodies,
+        authority,
+        gate,
+        "deterministic-local-v1",
+        EVENT_TYPE_ACTION,
+    )
+}
+
+fn gateway_action_registry_with_authority_and_erasure_gate_checked_with_inputs(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+    gate: Arc<ErasureContainmentGateV1>,
+    profile_id: &str,
+    event_type: &str,
+) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
+    let mut registry =
+        gateway_action_registry_builder_with_inputs(bodies, authority, profile_id, event_type)?;
     registry.bind_erasure_gate(gate);
     Ok(Arc::new(registry))
 }
@@ -1352,6 +1376,32 @@ impl Gateway {
             .map_err(GatewayError::ConsentCodec)
     }
 
+    fn from_host_components(
+        store: executor::StoreExecutor,
+        bus: broadcast::Sender<EventNotice>,
+        limits: GatewayLimits,
+        owntracks_enabled: bool,
+        action_registry: Result<Arc<PluginRegistry>, pos_runtime::RuntimeError>,
+        consent_authority: ConsentAuthority,
+        authorization: Option<Arc<GatewayAuthorization>>,
+    ) -> Result<Self, GatewayError> {
+        let action_registry = action_registry.map_err(GatewayError::ActionRegistry)?;
+        Ok(Self {
+            store,
+            bus,
+            limits,
+            owntracks_enabled,
+            action_registry,
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
     /// Wrap an existing store backend.
     ///
     /// Human action submission is intentionally disabled until the host supplies
@@ -1402,27 +1452,22 @@ impl Gateway {
     ) -> Result<Self, GatewayError> {
         store.bind_erasure_gate(Arc::clone(&gate))?;
         let consent_authority = ConsentAuthority::new();
-        Ok(Self {
-            store: executor::StoreExecutor::new_with_consent_authority(
+        Self::from_host_components(
+            executor::StoreExecutor::new_with_consent_authority(
                 store,
                 consent_authority.append_permit(),
             ),
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            gateway_action_registry_with_authority_and_erasure_gate_checked(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
                 gate,
-            )?,
+            ),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            None,
+        )
     }
 
     /// Construct a Gateway whose executor exclusively owns the recovered
@@ -1433,8 +1478,8 @@ impl Gateway {
     /// single-consumer command stream.
     ///
     /// # Errors
-    /// Returns a store error if the recovered host cannot bind the Gateway's
-    /// independently owned consent authority.
+    /// Returns a store or action-registry error if the recovered host or its
+    /// declared output policy cannot be bound.
     pub fn new_with_erasure_host(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -1442,24 +1487,19 @@ impl Gateway {
             host,
             consent_authority.append_permit(),
         )?;
-        Ok(Self {
+        Self::from_host_components(
             store,
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            gateway_action_registry_with_authority_and_erasure_gate_checked(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
                 gate,
-            )?,
+            ),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            None,
+        )
     }
 
     /// Construct an action-capable Gateway over one recovered erasure host.
@@ -1470,8 +1510,8 @@ impl Gateway {
     /// therefore cannot enable a proposed action outside ADR-060 containment.
     ///
     /// # Errors
-    /// Returns a store error if the recovered host cannot bind the Gateway's
-    /// independently owned consent authority.
+    /// Returns a store or action-registry error if the recovered host or its
+    /// declared output policy cannot be bound.
     pub fn new_with_erasure_host_and_authorization(
         host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
@@ -1483,32 +1523,27 @@ impl Gateway {
             host,
             consent_authority.append_permit(),
         )?;
-        Ok(Self {
+        Self::from_host_components(
             store,
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            gateway_action_registry_with_authority_and_erasure_gate_checked(
                 bodies,
                 Some(consent_authority.clone()),
                 gate,
-            )?,
+            ),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: Some(Arc::new(authorization)),
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            Some(Arc::new(authorization)),
+        )
     }
 
     /// Construct authenticated local `OwnTracks` ingress behind one recovered
     /// host-owned Gateway store and erasure containment gate.
     ///
     /// # Errors
-    /// Returns a store error if the recovered host cannot bind the Gateway's
-    /// independently owned consent authority.
+    /// Returns a store or action-registry error if the recovered host or its
+    /// declared output policy cannot be bound.
     pub fn new_with_owntracks_erasure_host(
         host: ErasureExecutionHostV1,
         owner_key: &OwnTracksOwnerKey,
@@ -1520,24 +1555,19 @@ impl Gateway {
             owner_key.0,
             consent_authority.append_permit(),
         )?;
-        Ok(Self {
+        Self::from_host_components(
             store,
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: true,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate_checked(
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            true,
+            gateway_action_registry_with_authority_and_erasure_gate_checked(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
                 gate,
-            )?,
+            ),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            None,
+        )
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.
@@ -3412,6 +3442,66 @@ mod tests {
     fn gateway_action_registry_exposes_the_host_action_schema() {
         let registry = gateway_action_registry();
         assert!(registry.schemas.contains(EVENT_TYPE_ACTION));
+    }
+
+    #[test]
+    fn gateway_action_registry_builder_propagates_binding_errors() {
+        let invalid_profile = gateway_action_registry_builder_with_inputs(
+            std::iter::empty(),
+            None,
+            "unknown-profile",
+            EVENT_TYPE_ACTION,
+        );
+        assert!(matches!(
+            invalid_profile,
+            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
+        ));
+
+        let invalid_event_type = gateway_action_registry_builder_with_inputs(
+            std::iter::empty(),
+            None,
+            "deterministic-local-v1",
+            "world.unowned",
+        );
+        assert!(matches!(
+            invalid_event_type,
+            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
+        ));
+
+        let checked_error =
+            gateway_action_registry_with_authority_and_erasure_gate_checked_with_inputs(
+                std::iter::empty(),
+                None,
+                Arc::new(ErasureContainmentGateV1::new_test_open()),
+                "unknown-profile",
+                EVENT_TYPE_ACTION,
+            );
+        assert!(matches!(
+            checked_error,
+            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
+        ));
+
+        let store = executor::StoreExecutor::new_with_consent_authority(
+            open_store(StoreConfig::Memory).test_ok(),
+            ConsentAuthority::new().append_permit(),
+        );
+        let initialization_error = Gateway::from_host_components(
+            store,
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            Err(pos_runtime::RuntimeError::UnknownEventType(
+                "world.unowned".to_owned(),
+            )),
+            ConsentAuthority::new(),
+            None,
+        );
+        assert!(matches!(
+            initialization_error,
+            Err(GatewayError::ActionRegistry(
+                pos_runtime::RuntimeError::UnknownEventType(_)
+            ))
+        ));
     }
 
     #[test]
