@@ -1852,14 +1852,21 @@ impl ErasureExecutionHostV1 {
                 return Err(map_erasure_error(error));
             }
         };
-        let parent_owner = self
+        let parent_owner = match self
             .store
             .host_store()
             .get_timeline_for_host_transition(parent)
             .map_store_error()?
-            .ok_or(ErasureHostErrorV1::Conflict)?
-            .meta
-            .owner;
+        {
+            Some(parent) => parent.meta.owner,
+            None => {
+                let (_, _, inventory) = self.ready_state()?;
+                if inventory.request_count() != 0 {
+                    return Err(ErasureHostErrorV1::Conflict);
+                }
+                None
+            }
+        };
         let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
             Some(recovered_child)
                 if recovered_child.mode == TimelineMode::Historical
