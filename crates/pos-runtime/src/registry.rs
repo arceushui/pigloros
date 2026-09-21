@@ -3493,9 +3493,10 @@ mod tests {
                 std::panic::resume_unwind(Box::new("fixture plugin is missing"))
             });
         let (policy, budget) = {
-            let entry = registry.plugins.get(&plugin_id).unwrap_or_else(|| {
-                std::panic::resume_unwind(Box::new("fixture entry is missing"))
-            });
+            let entry = registry
+                .plugins
+                .get(&plugin_id)
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("fixture entry is missing")));
             let admission = entry.output_admission.as_ref().unwrap_or_else(|| {
                 std::panic::resume_unwind(Box::new("fixture policy is missing"))
             });
