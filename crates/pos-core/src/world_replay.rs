@@ -100,12 +100,11 @@ fn test_fixture_artifacts(
             Hash::from_bytes([53; 32]),
         ),
     ];
-    Ok(kinds
+    const OWNER_OFFSETS: [u8; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+    kinds
         .into_iter()
-        .enumerate()
-        .map(|(index, (kind, native_digest))| {
-            let owner_offset =
-                u8::try_from(index).expect("deterministic fixture index must fit in an owner byte");
+        .zip(OWNER_OFFSETS)
+        .map(|((kind, native_digest), owner_offset)| {
             WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
                 scope,
                 kind,
@@ -127,9 +126,9 @@ fn test_fixture_artifacts(
                 key_dependencies: Vec::new(),
                 child_node_hashes: Vec::new(),
             })
-            .expect("deterministic World Replay fixture leaf must be valid")
+            .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)
         })
-        .collect::<Vec<_>>())
+        .collect()
 }
 
 /// Fail-closed errors at the retained World Replay seam.
@@ -402,61 +401,53 @@ impl WorldReplayClosureV1 {
         inventory_generation: Hash,
     ) -> Result<Self, WorldReplayClosureErrorV1> {
         const DAY_MICROS: u64 = 86_400_000_000;
-        let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
-        let retention_policy = crate::retention::WorldRetentionPolicyV1::new(
-            crate::retention::WorldRetentionPolicyInputV1 {
-                policy_revision: 1,
-                purpose: "world-replay".to_owned(),
-                audience_policy_hash: Hash::from_bytes([10; 32]),
-                minimum_post_admission_days: 90,
-                maximum_active_days: 30,
-                maximum_total_days: 120,
-            },
-        )
-        .expect("deterministic World Replay fixture policy must be valid");
-        let retention_lease = crate::retention::WorldRetentionLeaseV1::new(
-            &retention_policy,
-            crate::retention::WorldRetentionLeaseInputV1 {
-                timeline_id,
-                policy_hash: retention_policy.digest(),
-                started_at_micros: 0,
-                admission_closes_at_micros: 30 * DAY_MICROS,
-                retention_deadline_micros: 120 * DAY_MICROS,
-            },
-        )
-        .expect("deterministic World Replay fixture lease must be valid");
-        let scope = Hash::from_bytes([9; 32]);
-        let consumer_set =
-            WorldConsumerSetV1::new(crate::world_consumer_set::WorldConsumerSetInputV1 {
-                scope,
-                consumers: vec![crate::world_consumer_set::WorldConsumerV1::new(
-                    "entity-state".to_owned(),
-                    Hash::from_bytes([40; 32]),
-                    Hash::from_bytes([41; 32]),
-                    Hash::from_bytes([42; 32]),
-                )
-                .expect("deterministic World Replay fixture consumer must be valid")],
-                producers: vec![crate::world_consumer_set::WorldProducerV1::new(
-                    PluginId::from_ulid(Ulid::from(1_u128)),
-                    Hash::from_bytes([43; 32]),
-                )
-                .expect("deterministic World Replay fixture producer must be valid")],
-                optional_view_roots: vec![Hash::from_bytes([53; 32])],
-            })
-            .expect("deterministic World Replay fixture consumer set must be valid");
-        let artifacts = test_fixture_artifacts(scope, &retention_policy, &retention_lease)
-            .expect("deterministic World Replay fixture artifacts must be valid");
-        Ok(Self::new(WorldReplayClosureInputV1 {
-            timeline_id,
-            operation_identity: Hash::from_bytes([60; 32]),
-            source_head: Hash::from_bytes([61; 32]),
+        build_test_fixture(
             inventory_generation,
-            retention_policy,
-            retention_lease,
-            consumer_set,
-            artifacts,
-        })
-        .expect("deterministic World Replay fixture closure must be valid"))
+            || {
+                crate::retention::WorldRetentionPolicyV1::new(
+                    crate::retention::WorldRetentionPolicyInputV1 {
+                        policy_revision: 1,
+                        purpose: "world-replay".to_owned(),
+                        audience_policy_hash: Hash::from_bytes([10; 32]),
+                        minimum_post_admission_days: 90,
+                        maximum_active_days: 30,
+                        maximum_total_days: 120,
+                    },
+                )
+            },
+            |policy, timeline_id| {
+                crate::retention::WorldRetentionLeaseV1::new(
+                    policy,
+                    crate::retention::WorldRetentionLeaseInputV1 {
+                        timeline_id,
+                        policy_hash: policy.digest(),
+                        started_at_micros: 0,
+                        admission_closes_at_micros: 30 * DAY_MICROS,
+                        retention_deadline_micros: 120 * DAY_MICROS,
+                    },
+                )
+            },
+            |scope| {
+                build_test_consumer_set(
+                    scope,
+                    || {
+                        crate::world_consumer_set::WorldConsumerV1::new(
+                            "entity-state".to_owned(),
+                            Hash::from_bytes([40; 32]),
+                            Hash::from_bytes([41; 32]),
+                            Hash::from_bytes([42; 32]),
+                        )
+                    },
+                    || {
+                        crate::world_consumer_set::WorldProducerV1::new(
+                            PluginId::from_ulid(Ulid::from(1_u128)),
+                            Hash::from_bytes([43; 32]),
+                        )
+                    },
+                )
+            },
+            test_fixture_artifacts,
+        )
     }
 
     /// Admit the closure against a host-owned clock and artifact authority.
@@ -512,6 +503,78 @@ impl WorldReplayClosureV1 {
             optional_view_roots: self.consumer_set.optional_view_roots().to_vec(),
         })
     }
+}
+
+#[cfg(feature = "test-support")]
+fn build_test_consumer_set<ConsumerFactory, ProducerFactory, ConsumerError, ProducerError>(
+    scope: Hash,
+    make_consumer: ConsumerFactory,
+    make_producer: ProducerFactory,
+) -> Result<WorldConsumerSetV1, WorldReplayClosureErrorV1>
+where
+    ConsumerFactory: FnOnce() -> Result<crate::world_consumer_set::WorldConsumerV1, ConsumerError>,
+    ProducerFactory: FnOnce() -> Result<crate::world_consumer_set::WorldProducerV1, ProducerError>,
+{
+    let consumer = make_consumer().map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+    let producer = make_producer().map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+    WorldConsumerSetV1::new(crate::world_consumer_set::WorldConsumerSetInputV1 {
+        scope,
+        consumers: vec![consumer],
+        producers: vec![producer],
+        optional_view_roots: vec![Hash::from_bytes([53; 32])],
+    })
+    .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)
+}
+
+#[cfg(feature = "test-support")]
+fn build_test_fixture<
+    PolicyFactory,
+    LeaseFactory,
+    ConsumerFactory,
+    ArtifactFactory,
+    PolicyError,
+    LeaseError,
+    ConsumerError,
+    ArtifactError,
+>(
+    inventory_generation: Hash,
+    make_policy: PolicyFactory,
+    make_lease: LeaseFactory,
+    make_consumer_set: ConsumerFactory,
+    make_artifacts: ArtifactFactory,
+) -> Result<WorldReplayClosureV1, WorldReplayClosureErrorV1>
+where
+    PolicyFactory: FnOnce() -> Result<WorldRetentionPolicyV1, PolicyError>,
+    LeaseFactory:
+        FnOnce(&WorldRetentionPolicyV1, TimelineId) -> Result<WorldRetentionLeaseV1, LeaseError>,
+    ConsumerFactory: FnOnce(Hash) -> Result<WorldConsumerSetV1, ConsumerError>,
+    ArtifactFactory: FnOnce(
+        Hash,
+        &WorldRetentionPolicyV1,
+        &WorldRetentionLeaseV1,
+    ) -> Result<Vec<WorldArtifactLeafV1>, ArtifactError>,
+{
+    let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
+    let retention_policy =
+        make_policy().map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+    let retention_lease = make_lease(&retention_policy, timeline_id)
+        .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+    let scope = Hash::from_bytes([9; 32]);
+    let consumer_set =
+        make_consumer_set(scope).map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+    let artifacts = make_artifacts(scope, &retention_policy, &retention_lease)
+        .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+    let closure = WorldReplayClosureV1::new(WorldReplayClosureInputV1 {
+        timeline_id,
+        operation_identity: Hash::from_bytes([60; 32]),
+        source_head: Hash::from_bytes([61; 32]),
+        inventory_generation,
+        retention_policy,
+        retention_lease,
+        consumer_set,
+        artifacts,
+    })?;
+    Ok(closure)
 }
 
 fn has_identity(
@@ -621,5 +684,182 @@ impl WorldReplayAdmissionV1 {
         } else {
             Err(WorldReplayClosureErrorV1::ClaimUnavailable)
         }
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use super::*;
+
+    fn valid_policy() -> Result<WorldRetentionPolicyV1, crate::retention::WorldRetentionErrorV1> {
+        WorldRetentionPolicyV1::new(crate::retention::WorldRetentionPolicyInputV1 {
+            policy_revision: 1,
+            purpose: "world-replay".to_owned(),
+            audience_policy_hash: Hash::from_bytes([10; 32]),
+            minimum_post_admission_days: 90,
+            maximum_active_days: 30,
+            maximum_total_days: 120,
+        })
+    }
+
+    fn valid_lease(
+        policy: &WorldRetentionPolicyV1,
+        timeline_id: TimelineId,
+    ) -> Result<WorldRetentionLeaseV1, crate::retention::WorldRetentionErrorV1> {
+        WorldRetentionLeaseV1::new(
+            policy,
+            crate::retention::WorldRetentionLeaseInputV1 {
+                timeline_id,
+                policy_hash: policy.digest(),
+                started_at_micros: 0,
+                admission_closes_at_micros: 30 * 86_400_000_000,
+                retention_deadline_micros: 120 * 86_400_000_000,
+            },
+        )
+    }
+
+    fn valid_consumer_set(
+    ) -> Result<WorldConsumerSetV1, crate::world_consumer_set::WorldConsumerSetErrorV1> {
+        WorldConsumerSetV1::new(crate::world_consumer_set::WorldConsumerSetInputV1 {
+            scope: Hash::from_bytes([9; 32]),
+            consumers: vec![crate::world_consumer_set::WorldConsumerV1::new(
+                "entity-state".to_owned(),
+                Hash::from_bytes([40; 32]),
+                Hash::from_bytes([41; 32]),
+                Hash::from_bytes([42; 32]),
+            )?],
+            producers: vec![crate::world_consumer_set::WorldProducerV1::new(
+                PluginId::from_ulid(Ulid::from(1_u128)),
+                Hash::from_bytes([43; 32]),
+            )?],
+            optional_view_roots: vec![Hash::from_bytes([53; 32])],
+        })
+    }
+
+    #[test]
+    fn fixture_builder_closes_factory_failures() -> Result<(), Box<dyn std::error::Error>> {
+        let policy_failure = build_test_fixture(
+            Hash::from_bytes([62; 32]),
+            || Err::<WorldRetentionPolicyV1, _>(()),
+            |_, _| Err::<WorldRetentionLeaseV1, _>(()),
+            |_| Err::<WorldConsumerSetV1, _>(()),
+            |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
+        );
+        assert_eq!(
+            policy_failure,
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+
+        let policy = valid_policy()?;
+        let lease_failure = build_test_fixture(
+            Hash::from_bytes([62; 32]),
+            move || Ok::<_, ()>(policy),
+            |_, _| Err::<WorldRetentionLeaseV1, _>(()),
+            |_| Err::<WorldConsumerSetV1, _>(()),
+            |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
+        );
+        assert_eq!(
+            lease_failure,
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+
+        let policy = valid_policy()?;
+        let consumer_failure = build_test_fixture(
+            Hash::from_bytes([62; 32]),
+            move || Ok::<_, ()>(policy),
+            valid_lease,
+            |_| Err::<WorldConsumerSetV1, _>(()),
+            |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
+        );
+        assert_eq!(
+            consumer_failure,
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+
+        let policy = valid_policy()?;
+        let consumer_set = valid_consumer_set()?;
+        let artifact_failure = build_test_fixture(
+            Hash::from_bytes([62; 32]),
+            move || Ok::<_, ()>(policy),
+            valid_lease,
+            move |_| Ok::<_, ()>(consumer_set),
+            |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
+        );
+        assert_eq!(
+            artifact_failure,
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+
+        let policy = valid_policy()?;
+        let consumer_set = valid_consumer_set()?;
+        let invalid_closure = build_test_fixture(
+            Hash::zero(),
+            move || Ok::<_, ()>(policy),
+            valid_lease,
+            move |_| Ok::<_, ()>(consumer_set),
+            test_fixture_artifacts,
+        );
+        assert_eq!(
+            invalid_closure,
+            Err(WorldReplayClosureErrorV1::BindingIdentityMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixture_artifacts_reject_invalid_scope() -> Result<(), Box<dyn std::error::Error>> {
+        let policy = valid_policy()?;
+        let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
+        let lease = valid_lease(&policy, timeline_id)?;
+        assert_eq!(
+            test_fixture_artifacts(Hash::zero(), &policy, &lease),
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixture_consumer_set_closes_factory_failures() -> Result<(), Box<dyn std::error::Error>> {
+        let consumer_failure = build_test_consumer_set(
+            Hash::from_bytes([9; 32]),
+            || Err::<crate::world_consumer_set::WorldConsumerV1, _>(()),
+            || Err::<crate::world_consumer_set::WorldProducerV1, _>(()),
+        );
+        assert_eq!(
+            consumer_failure,
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+
+        let consumer = crate::world_consumer_set::WorldConsumerV1::new(
+            "entity-state".to_owned(),
+            Hash::from_bytes([40; 32]),
+            Hash::from_bytes([41; 32]),
+            Hash::from_bytes([42; 32]),
+        )?;
+        let consumer_for_failure = consumer.clone();
+        let producer_failure = build_test_consumer_set(
+            Hash::from_bytes([9; 32]),
+            move || Ok::<_, ()>(consumer_for_failure),
+            || Err::<crate::world_consumer_set::WorldProducerV1, _>(()),
+        );
+        assert_eq!(
+            producer_failure,
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+
+        let producer = crate::world_consumer_set::WorldProducerV1::new(
+            PluginId::from_ulid(Ulid::from(1_u128)),
+            Hash::from_bytes([43; 32]),
+        )?;
+        let invalid_set = build_test_consumer_set(
+            Hash::zero(),
+            move || Ok::<_, ()>(consumer),
+            move || Ok::<_, ()>(producer),
+        );
+        assert_eq!(
+            invalid_set,
+            Err(WorldReplayClosureErrorV1::EvaluationRejected)
+        );
+        Ok(())
     }
 }
