@@ -870,7 +870,7 @@ impl OutputAdmissionV1 {
     /// # Errors
     /// Returns an identity or budget error when the policy does not describe
     /// the registered Plugin and its executable reservation.
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub(crate) fn try_new(
         plugin_id: PluginId,
         plugin_version: &str,
