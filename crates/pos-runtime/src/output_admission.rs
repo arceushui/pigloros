@@ -88,7 +88,7 @@ pub enum InstalledOutputPolicySourceV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct OutputPolicyArtifactInputV1 {
+pub(crate) struct OutputPolicyArtifactInputV1 {
     implementation_artifact: Vec<u8>,
     configuration_artifact: Vec<u8>,
     execution_profile_artifact: Vec<u8>,
