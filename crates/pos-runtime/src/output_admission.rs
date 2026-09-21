@@ -64,9 +64,9 @@ pub enum OutputAdmissionErrorV1 {
 /// Installed implementation source selected by a trusted composition root.
 ///
 /// These variants are the only artifact roots accepted by production output
-/// admission.  The runtime resolves their exact bytes from the repository's
-/// installed source tree; callers cannot inject replacement implementation,
-/// profile, or retention bytes.
+/// admission. The runtime observes the concrete Plugin type at this boundary,
+/// resolves its complete native source bundle from the repository, and rejects
+/// same-name or caller-authored fixture types before policy construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstalledOutputPolicySourceV1 {
     /// The bounded generated source used only by debug registration fixtures.
@@ -135,7 +135,7 @@ impl OutputPolicyArtifactInputV1 {
 }
 
 impl InstalledOutputPolicySourceV1 {
-    fn accepts_plugin(self, plugin: &dyn Plugin) -> bool {
+    fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
         let name_matches = match self {
             #[cfg(debug_assertions)]
             Self::Generated => true,
@@ -157,34 +157,27 @@ impl InstalledOutputPolicySourceV1 {
         if matches!(self, Self::Generated) {
             return true;
         }
-        // Names are only a routing hint.  The installed artifact identity is
-        // the ownership proof; a same-name fixture without the native source
-        // bytes must fail closed here.
-        plugin
-            .installed_implementation_artifact()
-            .is_some_and(|artifact| {
-                self.native_implementation_artifact()
-                    .is_some_and(|expected| artifact == expected)
-            })
+        self.native_plugin_type_names()
+            .iter()
+            .any(|expected| *expected == std::any::type_name::<P>())
     }
 
-    fn native_implementation_artifact(self) -> Option<&'static [u8]> {
+    fn native_plugin_type_names(self) -> &'static [&'static str] {
         match self {
             #[cfg(debug_assertions)]
-            Self::Generated => None,
-            Self::Gateway => Some(include_bytes!("../../../apps/piglor-gateway/src/lib.rs")),
-            Self::World => Some(include_bytes!("../../../plugins/world/src/lib.rs")),
-            Self::RuleAgent => Some(include_bytes!(
-                "../../../plugins/entities/rule-agent/src/lib.rs"
-            )),
-            Self::Agent => Some(include_bytes!("../../../plugins/agent/src/lib.rs")),
-            Self::SyntheticObservation => Some(include_bytes!(
-                "../../../plugins/observations/synthetic/src/lib.rs"
-            )),
-            Self::Society => Some(include_bytes!("../../../plugins/society/src/lib.rs")),
-            Self::Experiment => Some(include_bytes!(
-                "../../../apps/pos-experiment/src/moat_proof.rs"
-            )),
+            Self::Generated => &[],
+            Self::Gateway => &["piglor_gateway::GatewayActionPlugin"],
+            Self::World => &["pos_plugin_world::WorldPlugin"],
+            Self::RuleAgent => &["pos_plugin_rule_agent::RuleAgentPlugin"],
+            Self::Agent => &["pos_plugin_agent::AgentPlugin"],
+            Self::SyntheticObservation => &["pos_plugin_synthetic_obs::SyntheticObsPlugin"],
+            Self::Society => &["pos_plugin_society::SocietyPlugin"],
+            Self::Experiment => &[
+                "pos_experiment::moat_proof::SiblingProbePlugin",
+                "pos_experiment::moat_proof::FailureProbePlugin",
+                "pos_experiment::moat_proof::ProofAgentPlugin",
+                "pos_experiment::moat_proof::ProofSocietyPlugin",
+            ],
         }
     }
 
@@ -192,19 +185,88 @@ impl InstalledOutputPolicySourceV1 {
         match self {
             #[cfg(debug_assertions)]
             Self::Generated => generated_implementation_artifact_v1(plugin),
-            Self::Gateway => include_bytes!("../../../apps/piglor-gateway/src/lib.rs").to_vec(),
-            Self::World => include_bytes!("../../../plugins/world/src/lib.rs").to_vec(),
-            Self::RuleAgent => {
-                include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs").to_vec()
-            }
-            Self::Agent => include_bytes!("../../../plugins/agent/src/lib.rs").to_vec(),
-            Self::SyntheticObservation => {
-                include_bytes!("../../../plugins/observations/synthetic/src/lib.rs").to_vec()
-            }
-            Self::Society => include_bytes!("../../../plugins/society/src/lib.rs").to_vec(),
-            Self::Experiment => {
-                include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs").to_vec()
-            }
+            Self::Gateway => source_artifact_bundle(&[
+                (
+                    "src/lib.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/lib.rs"),
+                ),
+                (
+                    "src/authorization.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/authorization.rs"),
+                ),
+                (
+                    "src/executor.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/executor.rs"),
+                ),
+                (
+                    "src/http.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/http.rs"),
+                ),
+                (
+                    "src/ledger_config.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/ledger_config.rs"),
+                ),
+                (
+                    "src/owntracks.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/owntracks.rs"),
+                ),
+                (
+                    "src/owntracks_http.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/owntracks_http.rs"),
+                ),
+                (
+                    "src/main.rs",
+                    include_bytes!("../../../apps/piglor-gateway/src/main.rs"),
+                ),
+            ]),
+            Self::World => source_artifact_bundle(&[(
+                "src/lib.rs",
+                include_bytes!("../../../plugins/world/src/lib.rs"),
+            )]),
+            Self::RuleAgent => source_artifact_bundle(&[(
+                "src/lib.rs",
+                include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
+            )]),
+            Self::Agent => source_artifact_bundle(&[
+                (
+                    "src/lib.rs",
+                    include_bytes!("../../../plugins/agent/src/lib.rs"),
+                ),
+                (
+                    "src/protocol.rs",
+                    include_bytes!("../../../plugins/agent/src/protocol.rs"),
+                ),
+                (
+                    "src/provider.rs",
+                    include_bytes!("../../../plugins/agent/src/provider.rs"),
+                ),
+                (
+                    "src/provider_driver.rs",
+                    include_bytes!("../../../plugins/agent/src/provider_driver.rs"),
+                ),
+                (
+                    "src/replay.rs",
+                    include_bytes!("../../../plugins/agent/src/replay.rs"),
+                ),
+            ]),
+            Self::SyntheticObservation => source_artifact_bundle(&[(
+                "src/lib.rs",
+                include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+            )]),
+            Self::Society => source_artifact_bundle(&[(
+                "src/lib.rs",
+                include_bytes!("../../../plugins/society/src/lib.rs"),
+            )]),
+            Self::Experiment => source_artifact_bundle(&[
+                (
+                    "src/lib.rs",
+                    include_bytes!("../../../apps/pos-experiment/src/lib.rs"),
+                ),
+                (
+                    "src/moat_proof.rs",
+                    include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs"),
+                ),
+            ]),
         }
     }
 
@@ -369,6 +431,18 @@ pub(crate) fn generated_implementation_artifact_v1(plugin: &dyn Plugin) -> Vec<u
     bytes
 }
 
+fn source_artifact_bundle(parts: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"PSB1");
+    for (path, source) in parts {
+        bytes.extend_from_slice(&(path.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(path.as_bytes());
+        bytes.extend_from_slice(&(source.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(source);
+    }
+    bytes
+}
+
 #[cfg(debug_assertions)]
 fn hash_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
@@ -388,8 +462,8 @@ impl OutputPolicyBindingV1 {
     /// # Errors
     /// Returns a closed artifact or profile error before registration can
     /// mutate the registry.
-    pub fn from_installed_source(
-        plugin: &dyn Plugin,
+    pub fn from_installed_source<P: Plugin + ?Sized>(
+        plugin: &P,
         source: InstalledOutputPolicySourceV1,
         configuration_details: &[u8],
         profile_id: &str,
@@ -426,8 +500,8 @@ impl OutputPolicyBindingV1 {
         )
     }
 
-    pub(crate) fn from_installed_source_with_policy(
-        plugin: &dyn Plugin,
+    pub(crate) fn from_installed_source_with_policy<P: Plugin + ?Sized>(
+        plugin: &P,
         source: InstalledOutputPolicySourceV1,
         policy: OutputPolicyV1,
         budget: ExecutableBudgetPolicyV1,

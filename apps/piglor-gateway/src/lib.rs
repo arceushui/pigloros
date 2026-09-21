@@ -720,10 +720,6 @@ impl Plugin for GatewayActionPlugin {
             ..Capability::default()
         }
     }
-
-    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
-        Some(include_bytes!("lib.rs"))
-    }
 }
 
 #[cfg(test)]

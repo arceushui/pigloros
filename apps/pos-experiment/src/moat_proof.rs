@@ -1851,10 +1851,6 @@ impl Plugin for SiblingProbePlugin {
             has_reducer: false,
         }
     }
-
-    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
-        Some(include_bytes!("moat_proof.rs"))
-    }
 }
 
 struct SiblingProbeDriver {
@@ -1892,10 +1888,6 @@ impl Plugin for FailureProbePlugin {
             has_driver: true,
             has_reducer: false,
         }
-    }
-
-    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
-        Some(include_bytes!("moat_proof.rs"))
     }
 }
 
@@ -1961,10 +1953,6 @@ impl Plugin for ProofAgentPlugin {
             has_reducer: true,
         }
     }
-
-    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
-        Some(include_bytes!("moat_proof.rs"))
-    }
 }
 
 #[derive(Clone)]
@@ -1996,10 +1984,6 @@ impl Plugin for ProofSocietyPlugin {
             has_driver: true,
             has_reducer: true,
         }
-    }
-
-    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
-        Some(include_bytes!("moat_proof.rs"))
     }
 }
 

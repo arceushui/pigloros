@@ -29,15 +29,6 @@ pub trait Plugin: Send + Sync {
     fn version(&self) -> &'static str {
         "0.1.0"
     }
-    /// Exact implementation bytes owned by an installed composition root.
-    ///
-    /// Production plugins override this with their native source artifact so
-    /// the host can prove that an output-policy binding belongs to the
-    /// installed implementation selected by that root. Fixture plugins leave
-    /// this unset and must use the debug-only generated source instead.
-    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
-        None
-    }
 }
 
 /// A proposed action submitted through the capability-checked envelope (ADR-057).

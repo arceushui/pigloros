@@ -166,10 +166,6 @@ impl Plugin for SocietyPlugin {
             has_reducer: true,
         }
     }
-
-    fn installed_implementation_artifact(&self) -> Option<&'static [u8]> {
-        Some(include_bytes!("lib.rs"))
-    }
 }
 
 /// Build a [`EVENT_TYPE_SIGNAL`] draft.
