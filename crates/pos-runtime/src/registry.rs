@@ -3066,11 +3066,29 @@ impl PluginRegistry {
             return Err(ActionRejected::CapabilityNotGranted);
         }
 
-        let Some(approver) = self.approver_for(&proposal.event_type) else {
+        let Some(plugin_id) = self.approver_map.get(&proposal.event_type) else {
             return Err(ActionRejected::UnknownEventType);
         };
-
-        Self::validate_approver_draft(proposal, approver.approve(proposal))
+        let Some(entry) = self.plugins.get(plugin_id) else {
+            return Err(ActionRejected::UnknownEventType);
+        };
+        let Some(approver) = entry.approver.as_deref() else {
+            return Err(ActionRejected::UnknownEventType);
+        };
+        let draft = Self::validate_approver_draft(proposal, approver.approve(proposal))?;
+        let Some(admission) = entry.output_admission.as_ref() else {
+            return Err(ActionRejected::DomainValidationFailed(
+                "action approver has no bound output policy".to_owned(),
+            ));
+        };
+        admission
+            .validate_batch(std::slice::from_ref(&draft))
+            .map_err(|error| {
+                ActionRejected::DomainValidationFailed(format!(
+                    "action output admission failed: {error}"
+                ))
+            })?;
+        Ok(draft)
     }
 
     fn validate_approver_draft(
@@ -5768,6 +5786,18 @@ mod tests {
         }
     }
 
+    struct OverPolicyActionApprover;
+
+    impl ActionApprover for OverPolicyActionApprover {
+        fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+            Ok(EventDraft::new(
+                proposal.actor_entity_id,
+                proposal.event_type.clone(),
+                CanonicalBytes::from_vec(vec![0; 5]),
+            ))
+        }
+    }
+
     struct ForgingActionApprover {
         entity: EntityId,
         event_type: Kind,
@@ -6012,6 +6042,78 @@ mod tests {
             Err(ActionSubmissionError::Rejected(
                 ActionRejected::UnknownEventType
             ))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugin_registry_rejects_action_outputs_outside_registered_policy() {
+        let plugin = plugin_with_caps("oversized_approver", &["action.type"], false, false);
+        let mut reg = gated_registry();
+        let plugin_id = plugin.id();
+        let (policy, budget) = PluginRegistry::generated_output_binding_with_budget_input(
+            &plugin,
+            plugin.version(),
+            ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile: WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 4,
+                fidelity_budgets: [
+                    FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 500_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 250_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 1_000,
+                        max_bytes: 16 * 1024 * 1024,
+                        max_cpu_us: 50_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                    plugin_id,
+                    cpu_reservations_us: [10; 3],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: Hash::from_bytes([0x41; 32]),
+                max_pass_wall_duration_us: 1_000,
+            },
+        )
+        .test_ok();
+        reg.register_with_output_policy_and_approver(
+            &plugin,
+            policy,
+            budget,
+            None,
+            None,
+            Some(Box::new(OverPolicyActionApprover)),
+            [Kind::new("action.type")],
+        )
+        .test_ok();
+        let proposal = ProposedAction::new(
+            Kind::new("action.type"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"small"),
+            Kind::new("action.type.submit"),
+        );
+        let result = reg.submit_action(TimelineId::new(), &proposal);
+        assert!(matches!(
+            result,
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::DomainValidationFailed(reason)
+            )) if reason.contains("action output admission failed")
         ));
     }
 
