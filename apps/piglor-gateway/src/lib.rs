@@ -3475,13 +3475,12 @@ mod tests {
             Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
         ));
 
-        {
-            let store = executor::StoreExecutor::new_with_consent_authority(
-                open_store(StoreConfig::Memory).test_ok(),
-                ConsentAuthority::new().append_permit(),
-            );
-            let initialization_error = Gateway::from_host_components(
-                store,
+        assert!(matches!(
+            Gateway::from_host_components(
+                executor::StoreExecutor::new_with_consent_authority(
+                    open_store(StoreConfig::Memory).test_ok(),
+                    ConsentAuthority::new().append_permit(),
+                ),
                 broadcast::channel(EVENT_BUS_CAPACITY).0,
                 GatewayLimits::LOCAL_DEFAULT,
                 false,
@@ -3490,14 +3489,11 @@ mod tests {
                 )),
                 ConsentAuthority::new(),
                 None,
-            );
-            assert!(matches!(
-                initialization_error,
-                Err(GatewayError::ActionRegistry(
-                    pos_runtime::RuntimeError::UnknownEventType(_)
-                ))
-            ));
-        }
+            ),
+            Err(GatewayError::ActionRegistry(
+                pos_runtime::RuntimeError::UnknownEventType(_)
+            ))
+        ));
     }
 
     #[test]
