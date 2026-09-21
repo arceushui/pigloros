@@ -320,7 +320,7 @@ mod tests {
         )
         .test_ok();
         let gate = host.containment_gate();
-        let (fork_a, fork_b, fork_seq, entity) = {
+        let (fork_a, fork_b, fork_seq) = {
             let mut commands = host.command_sender().test_ok();
             let parent = commands.create_timeline("hosted-compare").test_ok();
             let entity = EntityId::new();
@@ -333,7 +333,7 @@ mod tests {
                 .fork_timeline(parent.id(), fork_seq, "hosted-b")
                 .test_ok();
             commands.append(fork_a.id(), &[draft(entity)]).test_ok();
-            (fork_a.id(), fork_b.id(), fork_seq, entity)
+            (fork_a.id(), fork_b.id(), fork_seq)
         };
         let mut registry_a = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry_a.register("count", Box::new(CountReducer));
