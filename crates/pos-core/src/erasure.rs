@@ -566,7 +566,10 @@ impl ErasureContainmentGateV1 {
     /// this gate, before sharing the gate through an `Arc`. Binding issuance
     /// is one-shot: once the adapter has consumed it, a holder of the public
     /// read-only gate cannot authorize a second store.
-    #[must_use]
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when this
+    /// gate has already issued its one store binding.
+    #[must_use = "use the binding to bind the host store"]
     pub fn issue_topology_store_binding(
         &self,
     ) -> Result<ErasureTopologyStoreBindingV1, ErasureContainmentErrorV1> {
@@ -7263,8 +7266,12 @@ mod coverage_paths {
         let generation = inventory.generation();
         let gate = ErasureContainmentGateV1::new_test_open();
         let foreign_gate = ErasureContainmentGateV1::new_test_open();
-        let store_binding = gate.issue_topology_store_binding()?;
-        let foreign_store_binding = foreign_gate.issue_topology_store_binding()?;
+        let store_binding = gate
+            .issue_topology_store_binding()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let foreign_store_binding = foreign_gate
+            .issue_topology_store_binding()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         assert_eq!(
             gate.issue_topology_store_binding(),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
