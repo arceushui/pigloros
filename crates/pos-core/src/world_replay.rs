@@ -40,6 +40,9 @@ const REQUIRED_KINDS: [WorldArtifactKindV1; 13] = [
 const CLOSURE_DOMAIN: &[u8] = b"pigloros.world-replay-closure.v1\0";
 
 #[cfg(feature = "test-support")]
+const TEST_FIXTURE_OWNER_OFFSETS: [u8; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+
+#[cfg(feature = "test-support")]
 fn test_fixture_artifacts(
     scope: Hash,
     retention_policy: &WorldRetentionPolicyV1,
@@ -100,10 +103,9 @@ fn test_fixture_artifacts(
             Hash::from_bytes([53; 32]),
         ),
     ];
-    const OWNER_OFFSETS: [u8; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
     kinds
         .into_iter()
-        .zip(OWNER_OFFSETS)
+        .zip(TEST_FIXTURE_OWNER_OFFSETS)
         .map(|((kind, native_digest), owner_offset)| {
             WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
                 scope,
