@@ -6,11 +6,12 @@
 //! authority to report the current clock and every artifact state before a
 //! Replay claim can be used.
 
+use crate::retention::{WorldRetentionLeaseV1, WorldRetentionPolicyV1};
 use crate::{
     ArtifactClaimInputV1, ArtifactStateV1, ErasureArtifactClassV1, ErasureErrorV1,
     ErasureReferenceV1, ErasureReplayClaimV1, Hash, ReplayClaimEvaluationV1,
     ReplayClaimEvaluatorV1, TimelineId, WallTime, WorldArtifactKindV1, WorldArtifactLeafV1,
-    WorldConsumerSetV1, WorldRetentionLeaseV1, WorldRetentionPolicyV1,
+    WorldConsumerSetV1,
 };
 
 /// Maximum number of native artifact leaves in one retained World closure.
