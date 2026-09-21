@@ -140,7 +140,7 @@ where
                 .map(|(_, outcome)| outcome)
                 .map_err(|_| ErasureErrorV1::ProvenanceMissing)
         },
-        |error| Err(error),
+        Err,
     )
 }
 
@@ -170,7 +170,7 @@ where
                 .map(|(_, outcome)| outcome)
                 .map_err(|_| ErasureErrorV1::ProvenanceMissing)
         },
-        |error| Err(error),
+        Err,
     )
 }
 

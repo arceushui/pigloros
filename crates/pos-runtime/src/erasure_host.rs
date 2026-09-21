@@ -2568,7 +2568,7 @@ impl ErasureCommandSenderV1<'_> {
     #[cfg(test)]
     pub(crate) fn commit_fork_admission(
         &mut self,
-        admission: PreparedErasureForkBatchV1,
+        admission: &PreparedErasureForkBatchV1,
     ) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
         let gate = Arc::clone(&self.host.gate);
@@ -6223,7 +6223,7 @@ mod tests {
             Err(ErasureHostErrorV1::StaleGeneration)
         );
         assert_eq!(
-            sender.commit_fork_admission(batch),
+            sender.commit_fork_admission(&batch),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
         assert_eq!(
@@ -6767,7 +6767,7 @@ mod tests {
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
             let result = host.prepare_identified_fork(&prepare_input, permit);
             if let Err(error) = &result {
-                transition_failure = Some(error.clone());
+                transition_failure = Some(*error);
             }
             result
         };
@@ -6801,7 +6801,7 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             sender
-                .commit_fork_admission(batch.clone())
+                .commit_fork_admission(&batch)
                 .map(|timeline| timeline.id()),
             Ok(child)
         );
@@ -6815,7 +6815,7 @@ mod tests {
         );
         assert_eq!(
             sender
-                .commit_fork_admission(batch)
+                .commit_fork_admission(&batch)
                 .map(|timeline| timeline.id()),
             Ok(child)
         );
@@ -6843,7 +6843,7 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(sender.create_timeline("intervening").is_ok());
         assert_eq!(
-            sender.commit_fork_admission(batch),
+            sender.commit_fork_admission(&batch),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
     }
@@ -6867,7 +6867,7 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             host.command_sender()
-                .and_then(|mut sender| sender.commit_fork_admission(batch)),
+                .and_then(|mut sender| sender.commit_fork_admission(&batch)),
             Err(ErasureHostErrorV1::Conflict)
         );
     }
@@ -6893,9 +6893,9 @@ mod tests {
             let mut sender = host
                 .command_sender()
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-            assert!(sender.commit_fork_admission(batch.clone()).is_ok());
+            assert!(sender.commit_fork_admission(&batch).is_ok());
             assert_eq!(
-                sender.commit_fork_admission(batch),
+                sender.commit_fork_admission(&batch),
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
             );
         }
@@ -6924,7 +6924,7 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             host.command_sender()
-                .and_then(|mut sender| sender.commit_fork_admission(batch)),
+                .and_then(|mut sender| sender.commit_fork_admission(&batch)),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         assert_eq!(host.state, HostStateV1::Poisoned);
@@ -7265,7 +7265,7 @@ mod tests {
         let batch = empty_fork_batch(parent.id(), child, operation)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         host.command_sender()
-            .and_then(|mut sender| sender.commit_fork_admission(batch))
+            .and_then(|mut sender| sender.commit_fork_admission(&batch))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1 {
             resolved_child_scope: Some(operation),
