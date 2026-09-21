@@ -783,7 +783,6 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         ),
         Err(ErasureHostErrorV1::Conflict)
     );
-    assert_eq!(commands.key_registry(), Ok(None));
     assert_eq!(
         commands.fork_timeline(timeline.id(), pos_core::Seq::ZERO, "affected-ordinary-fork",),
         Err(ErasureHostErrorV1::Conflict)
@@ -802,6 +801,9 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         Err(ErasureHostErrorV1::AccessFrozen)
     );
     assert_frozen_fork_retries(&mut commands, &authority, timeline.id(), child.id())?;
+    drop(commands);
+    let mut reader = test_stage("open read sender", host.read_sender())?;
+    assert_eq!(reader.key_registry(), Ok(None));
     Ok(())
 }
 
