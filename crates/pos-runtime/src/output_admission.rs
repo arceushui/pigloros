@@ -214,6 +214,7 @@ impl OutputAdmissionV1 {
             events: counts,
             bytes,
         };
+        drop(usage);
         Ok(())
     }
 }
