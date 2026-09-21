@@ -798,44 +798,6 @@ fn parse_limit_flag(args: &[String]) -> Result<Option<usize>, Box<dyn std::error
     Ok(None)
 }
 
-#[cfg(test)]
-thread_local! {
-    static FAIL_STATE_REG_JSON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn state_registry_to_json(
-    state_reg: &pos_core::StateRegistry,
-) -> Result<serde_json::Value, serde_json::Error> {
-    #[cfg(test)]
-    if FAIL_STATE_REG_JSON.with(std::cell::Cell::get) {
-        return serde_json::from_str("{");
-    }
-    serde_json::to_value(state_reg)
-}
-
-/// Count unique entity IDs captured in a snapshot's projection state.
-fn count_snapshot_entities(snapshot: &pos_time::Snapshot) -> usize {
-    let mut entities = std::collections::HashSet::new();
-    for state_reg in snapshot.registry.values() {
-        // Soft-skip registries that cannot be JSON-encoded.
-        let Ok(value) = state_registry_to_json(state_reg) else {
-            continue;
-        };
-        accumulate_entities_from_registry_json(&value, &mut entities);
-    }
-    entities.len()
-}
-
-/// Pull entity id keys from a serialized [`pos_core::StateRegistry`]-shaped JSON value.
-fn accumulate_entities_from_registry_json(
-    value: &serde_json::Value,
-    entities: &mut std::collections::HashSet<String>,
-) {
-    if let Some(states) = value.get("states").and_then(serde_json::Value::as_object) {
-        entities.extend(states.keys().cloned());
-    }
-}
-
 /// Serialize and write the run manifest next to the store.
 fn save_run_manifest(
     path: &str,
@@ -931,54 +893,6 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
     };
-
-    #[test]
-    fn accumulate_entities_skips_missing_or_non_object_states() {
-        let mut entities = std::collections::HashSet::new();
-        accumulate_entities_from_registry_json(&serde_json::Value::Null, &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(&serde_json::json!({"nope": 1}), &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": "not-an-object"}),
-            &mut entities,
-        );
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": {"e1": {}, "e2": {}}}),
-            &mut entities,
-        );
-        assert_eq!(entities.len(), 2);
-        assert!(entities.contains("e1"));
-        assert!(entities.contains("e2"));
-    }
-
-    #[test]
-    fn count_snapshot_entities_counts_unique_ids() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-        };
-        assert_eq!(count_snapshot_entities(&snapshot), 0);
-    }
-
-    #[test]
-    fn count_snapshot_entities_soft_skips_json_errors() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-        };
-        FAIL_STATE_REG_JSON.with(|f| f.set(true));
-        let n = count_snapshot_entities(&snapshot);
-        FAIL_STATE_REG_JSON.with(|f| f.set(false));
-        assert_eq!(n, 0);
-    }
 
     #[test]
     fn open_memory_store_ok() {
