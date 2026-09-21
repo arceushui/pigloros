@@ -11,11 +11,20 @@ use pos_core::{
     WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1, WorldReplayClosureAuthorityV1,
     WorldReplayClosureErrorV1, WorldReplayClosureInputV1, WorldReplayClosureV1,
 };
+use std::fmt::Debug;
 use ulid::Ulid;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const DAY_MICROS: u64 = 86_400_000_000;
+
+fn test_ok<T, E: Debug>(value: Result<T, E>) -> T {
+    value.unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!(
+            "unexpected world replay fixture error: {error:?}"
+        )))
+    })
+}
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -26,19 +35,18 @@ fn timeline(value: u128) -> TimelineId {
 }
 
 fn policy() -> WorldRetentionPolicyV1 {
-    WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
+    test_ok(WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
         policy_revision: 1,
         purpose: "world-replay".to_owned(),
         audience_policy_hash: hash(10),
         minimum_post_admission_days: 90,
         maximum_active_days: 30,
         maximum_total_days: 120,
-    })
-    .expect("valid retention policy fixture")
+    }))
 }
 
 fn lease(timeline_id: TimelineId, policy: &WorldRetentionPolicyV1) -> WorldRetentionLeaseV1 {
-    WorldRetentionLeaseV1::new(
+    test_ok(WorldRetentionLeaseV1::new(
         policy,
         WorldRetentionLeaseInputV1 {
             timeline_id,
@@ -47,28 +55,24 @@ fn lease(timeline_id: TimelineId, policy: &WorldRetentionPolicyV1) -> WorldReten
             admission_closes_at_micros: 30 * DAY_MICROS,
             retention_deadline_micros: 120 * DAY_MICROS,
         },
-    )
-    .expect("valid retention lease fixture")
+    ))
 }
 
 fn consumer_set(reducer: Hash, output_policy: Hash) -> WorldConsumerSetV1 {
-    WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+    test_ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
         scope: hash(9),
-        consumers: vec![WorldConsumerV1::new(
+        consumers: vec![test_ok(WorldConsumerV1::new(
             "entity-state".to_owned(),
             reducer,
             hash(41),
             hash(42),
-        )
-        .expect("valid consumer fixture")],
-        producers: vec![WorldProducerV1::new(
+        ))],
+        producers: vec![test_ok(WorldProducerV1::new(
             PluginId::from_ulid(Ulid::from(1_u128)),
             output_policy,
-        )
-        .expect("valid producer fixture")],
+        ))],
         optional_view_roots: vec![hash(53)],
-    })
-    .expect("valid consumer-set fixture")
+    }))
 }
 
 fn leaf(
@@ -80,7 +84,7 @@ fn leaf(
     optionality: ArtifactOptionalityV1,
     transition: ArtifactTransitionRuleV1,
 ) -> WorldArtifactLeafV1 {
-    WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
+    test_ok(WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
         scope,
         kind,
         native_digest,
@@ -92,16 +96,18 @@ fn leaf(
         source_lease_hash: lease_hash,
         key_dependencies: Vec::new(),
         child_node_hashes: Vec::new(),
-    })
-    .expect("valid artifact leaf fixture")
+    }))
 }
 
-fn artifacts(
-    policy: &WorldRetentionPolicyV1,
-    retention_lease: &WorldRetentionLeaseV1,
-    scope: Hash,
-) -> Vec<WorldArtifactLeafV1> {
-    let lease_hash = retention_lease.digest();
+fn artifact_specs(
+    policy_digest: Hash,
+    lease_digest: Hash,
+) -> [(
+    WorldArtifactKindV1,
+    Hash,
+    ArtifactOptionalityV1,
+    ArtifactTransitionRuleV1,
+); 14] {
     [
         (
             WorldArtifactKindV1::OutputPolicy,
@@ -117,13 +123,13 @@ fn artifacts(
         ),
         (
             WorldArtifactKindV1::RetentionPolicy,
-            policy.digest(),
+            policy_digest,
             ArtifactOptionalityV1::Required,
             ArtifactTransitionRuleV1::PreserveExact,
         ),
         (
             WorldArtifactKindV1::RetentionLease,
-            retention_lease.digest(),
+            lease_digest,
             ArtifactOptionalityV1::Required,
             ArtifactTransitionRuleV1::PreserveExact,
         ),
@@ -188,20 +194,29 @@ fn artifacts(
             ArtifactTransitionRuleV1::RedactViews,
         ),
     ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, (kind, digest, optionality, transition))| {
-        leaf(
-            scope,
-            lease_hash,
-            kind,
-            digest,
-            [100 + u8::try_from(index).expect("fixture index fits in a byte"); 32],
-            optionality,
-            transition,
-        )
-    })
-    .collect()
+}
+
+fn artifacts(
+    policy: &WorldRetentionPolicyV1,
+    retention_lease: &WorldRetentionLeaseV1,
+    scope: Hash,
+) -> Vec<WorldArtifactLeafV1> {
+    let lease_hash = retention_lease.digest();
+    artifact_specs(policy.digest(), retention_lease.digest())
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, digest, optionality, transition))| {
+            leaf(
+                scope,
+                lease_hash,
+                kind,
+                digest,
+                [100 + test_ok(u8::try_from(index)); 32],
+                optionality,
+                transition,
+            )
+        })
+        .collect()
 }
 
 fn closure_input() -> WorldReplayClosureInputV1 {
@@ -215,25 +230,51 @@ fn closure_input() -> WorldReplayClosureInputV1 {
         source_head: hash(61),
         inventory_generation: hash(62),
         retention_policy: retention_policy.clone(),
-        retention_lease: retention_lease.clone(),
+        retention_lease,
         consumer_set: consumer_set(hash(40), hash(43)),
         artifacts: artifacts(&retention_policy, &retention_lease, scope),
     }
 }
 
+#[derive(Clone, Copy)]
+enum AuthorityMode {
+    Normal,
+    FailNow,
+    FailArtifact,
+    FailNativeVerification,
+    WrongNativeDigest,
+    TransitionOptionalView,
+}
+
 struct Authority {
     now: WallTime,
     missing: Option<WorldArtifactKindV1>,
-    fail_now: bool,
-    fail_artifact: bool,
-    fail_native_verification: bool,
-    wrong_native_digest: bool,
-    transition_optional_view: bool,
+    mode: AuthorityMode,
+}
+
+impl Authority {
+    fn new(now: WallTime) -> Self {
+        Self {
+            now,
+            missing: None,
+            mode: AuthorityMode::Normal,
+        }
+    }
+
+    fn with_missing(mut self, kind: WorldArtifactKindV1) -> Self {
+        self.missing = Some(kind);
+        self
+    }
+
+    fn with_mode(mut self, mode: AuthorityMode) -> Self {
+        self.mode = mode;
+        self
+    }
 }
 
 impl WorldReplayClosureAuthorityV1 for Authority {
     fn now(&mut self) -> Result<WallTime, ErasureErrorV1> {
-        if self.fail_now {
+        if matches!(self.mode, AuthorityMode::FailNow) {
             Err(ErasureErrorV1::ProvenanceMissing)
         } else {
             Ok(self.now)
@@ -244,9 +285,9 @@ impl WorldReplayClosureAuthorityV1 for Authority {
         &mut self,
         artifact: &WorldArtifactLeafV1,
     ) -> Result<Hash, ErasureErrorV1> {
-        if self.fail_native_verification {
+        if matches!(self.mode, AuthorityMode::FailNativeVerification) {
             Err(ErasureErrorV1::ProvenanceMissing)
-        } else if self.wrong_native_digest {
+        } else if matches!(self.mode, AuthorityMode::WrongNativeDigest) {
             Ok(hash(254))
         } else {
             Ok(artifact.as_input().native_digest)
@@ -257,13 +298,13 @@ impl WorldReplayClosureAuthorityV1 for Authority {
         &mut self,
         artifact: &WorldArtifactLeafV1,
     ) -> Result<ArtifactStateV1, ErasureErrorV1> {
-        if self.fail_artifact {
+        if matches!(self.mode, AuthorityMode::FailArtifact) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if self.missing == Some(artifact.as_input().kind) {
             return Ok(ArtifactStateV1::MissingRequiredOutput);
         }
-        if self.transition_optional_view
+        if matches!(self.mode, AuthorityMode::TransitionOptionalView)
             && artifact.as_input().kind == WorldArtifactKindV1::OptionalView
         {
             Ok(ArtifactStateV1::TransitionApplied)
@@ -281,15 +322,7 @@ fn admitted(
 
 #[test]
 fn retained_closure_admits_exact_authoritative_replay() -> TestResult {
-    let mut authority = Authority {
-        now: WallTime::from_micros(1),
-        missing: None,
-        fail_now: false,
-        fail_artifact: false,
-        fail_native_verification: false,
-        wrong_native_digest: false,
-        transition_optional_view: false,
-    };
+    let mut authority = Authority::new(WallTime::from_micros(1));
     let closure = WorldReplayClosureV1::new(closure_input())?;
     let digest = closure.digest();
     let admission = closure.admit(&mut authority)?;
@@ -309,29 +342,14 @@ fn retained_closure_admits_exact_authoritative_replay() -> TestResult {
 
 #[test]
 fn expiry_denies_use_and_missing_required_artifacts_degrade_the_claim() -> TestResult {
-    let mut expired = Authority {
-        now: WallTime::from_micros(120 * DAY_MICROS),
-        missing: None,
-        fail_now: false,
-        fail_artifact: false,
-        fail_native_verification: false,
-        wrong_native_digest: false,
-        transition_optional_view: false,
-    };
+    let mut expired = Authority::new(WallTime::from_micros(120 * DAY_MICROS));
     assert_eq!(
         admitted(&mut expired),
         Err(WorldReplayClosureErrorV1::RetentionExpired)
     );
 
-    let mut missing = Authority {
-        now: WallTime::from_micros(1),
-        missing: Some(WorldArtifactKindV1::Schema),
-        fail_now: false,
-        fail_artifact: false,
-        fail_native_verification: false,
-        wrong_native_digest: false,
-        transition_optional_view: false,
-    };
+    let mut missing =
+        Authority::new(WallTime::from_micros(1)).with_missing(WorldArtifactKindV1::Schema);
     let missing_admission = admitted(&mut missing)?;
     assert_eq!(
         missing_admission.evaluation().replay_claim(),
@@ -342,15 +360,8 @@ fn expiry_denies_use_and_missing_required_artifacts_degrade_the_claim() -> TestR
 
 #[test]
 fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
-    let mut authority = Authority {
-        now: WallTime::from_micros(1),
-        missing: None,
-        fail_now: false,
-        fail_artifact: false,
-        fail_native_verification: false,
-        wrong_native_digest: false,
-        transition_optional_view: true,
-    };
+    let mut authority =
+        Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::TransitionOptionalView);
     let admission = admitted(&mut authority)?;
     assert_eq!(
         admission.evaluation().replay_claim(),
@@ -408,7 +419,7 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
         Err(WorldReplayClosureErrorV1::ScopeMismatch)
     );
 
-    let mut unowned = base.clone();
+    let mut unowned = base;
     unowned.artifacts[0] = leaf(
         hash(9),
         unowned.retention_lease.digest(),
@@ -422,7 +433,11 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
         WorldReplayClosureV1::new(unowned),
         Err(WorldReplayClosureErrorV1::UnownedArtifact)
     );
+}
 
+#[test]
+fn structural_validation_rejects_duplicate_digest_and_zero_length() {
+    let base = closure_input();
     let mut duplicate = base.clone();
     duplicate.artifacts.push(duplicate.artifacts[0].clone());
     assert_eq!(
@@ -440,25 +455,16 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
         ArtifactOptionalityV1::Required,
         ArtifactTransitionRuleV1::PreserveExact,
     );
-    let duplicate_digest_closure =
-        WorldReplayClosureV1::new(duplicate_digest).expect("structural closure");
-    let mut authority = Authority {
-        now: WallTime::from_micros(1),
-        missing: None,
-        fail_now: false,
-        fail_artifact: false,
-        fail_native_verification: false,
-        wrong_native_digest: false,
-        transition_optional_view: false,
-    };
+    let duplicate_digest_closure = test_ok(WorldReplayClosureV1::new(duplicate_digest));
+    let mut authority = Authority::new(WallTime::from_micros(1));
     assert_eq!(
         duplicate_digest_closure.admit(&mut authority),
         Err(WorldReplayClosureErrorV1::EvaluationRejected)
     );
 
-    let mut zero_length = base.clone();
+    let mut zero_length = base;
     let zero_length_lease_hash = zero_length.retention_lease.digest();
-    zero_length.artifacts[0] = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
+    zero_length.artifacts[0] = test_ok(WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
         scope: hash(9),
         kind: WorldArtifactKindV1::OutputPolicy,
         native_digest: hash(43),
@@ -470,8 +476,7 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
         source_lease_hash: zero_length_lease_hash,
         key_dependencies: Vec::new(),
         child_node_hashes: Vec::new(),
-    })
-    .expect("zero-length fixture remains structurally valid");
+    }));
     assert_eq!(
         WorldReplayClosureV1::new(zero_length),
         Err(WorldReplayClosureErrorV1::UnownedArtifact)
@@ -506,15 +511,15 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
     );
 
     let mut wrong_policy = base.clone();
-    wrong_policy.retention_policy = WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
-        policy_revision: 1,
-        purpose: "different-purpose".to_owned(),
-        audience_policy_hash: hash(10),
-        minimum_post_admission_days: 90,
-        maximum_active_days: 30,
-        maximum_total_days: 120,
-    })
-    .expect("valid alternate retention policy fixture");
+    wrong_policy.retention_policy =
+        test_ok(WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
+            policy_revision: 1,
+            purpose: "different-purpose".to_owned(),
+            audience_policy_hash: hash(10),
+            minimum_post_admission_days: 90,
+            maximum_active_days: 30,
+            maximum_total_days: 120,
+        }));
     assert_eq!(
         WorldReplayClosureV1::new(wrong_policy),
         Err(WorldReplayClosureErrorV1::PolicyMismatch)
@@ -575,61 +580,32 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
 }
 
 #[test]
-fn authority_failures_are_not_treated_as_replay_evidence() -> TestResult {
-    let mut clock_failure = Authority {
-        now: WallTime::from_micros(1),
-        missing: None,
-        fail_now: true,
-        fail_artifact: false,
-        fail_native_verification: false,
-        wrong_native_digest: false,
-        transition_optional_view: false,
-    };
+fn authority_failures_are_not_treated_as_replay_evidence() {
+    let mut clock_failure =
+        Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::FailNow);
     assert_eq!(
         admitted(&mut clock_failure),
         Err(WorldReplayClosureErrorV1::AuthorityUnavailable)
     );
 
-    let mut artifact_failure = Authority {
-        now: WallTime::from_micros(1),
-        missing: None,
-        fail_now: false,
-        fail_artifact: true,
-        fail_native_verification: false,
-        wrong_native_digest: false,
-        transition_optional_view: false,
-    };
+    let mut artifact_failure =
+        Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::FailArtifact);
     assert_eq!(
         admitted(&mut artifact_failure),
         Err(WorldReplayClosureErrorV1::AuthorityUnavailable)
     );
 
-    let mut native_failure = Authority {
-        now: WallTime::from_micros(1),
-        missing: None,
-        fail_now: false,
-        fail_artifact: false,
-        fail_native_verification: true,
-        wrong_native_digest: false,
-        transition_optional_view: false,
-    };
+    let mut native_failure =
+        Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::FailNativeVerification);
     assert_eq!(
         admitted(&mut native_failure),
         Err(WorldReplayClosureErrorV1::NativeVerificationUnavailable)
     );
 
-    let mut wrong_native = Authority {
-        now: WallTime::from_micros(1),
-        missing: None,
-        fail_now: false,
-        fail_artifact: false,
-        fail_native_verification: false,
-        wrong_native_digest: true,
-        transition_optional_view: false,
-    };
+    let mut wrong_native =
+        Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::WrongNativeDigest);
     assert_eq!(
         admitted(&mut wrong_native),
         Err(WorldReplayClosureErrorV1::NativeDigestMismatch)
     );
-    Ok(())
 }
