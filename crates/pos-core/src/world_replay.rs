@@ -40,7 +40,6 @@ const REQUIRED_KINDS: [WorldArtifactKindV1; 13] = [
 const CLOSURE_DOMAIN: &[u8] = b"pigloros.world-replay-closure.v1\0";
 
 #[cfg(feature = "test-support")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn test_fixture_artifacts(
     scope: Hash,
     retention_policy: &WorldRetentionPolicyV1,
@@ -101,12 +100,12 @@ fn test_fixture_artifacts(
             Hash::from_bytes([53; 32]),
         ),
     ];
-    kinds
+    Ok(kinds
         .into_iter()
         .enumerate()
         .map(|(index, (kind, native_digest))| {
-            let owner_offset = u8::try_from(index)
-                .map_err(|_| WorldReplayClosureErrorV1::ArtifactCountOutOfBounds)?;
+            let owner_offset =
+                u8::try_from(index).expect("deterministic fixture index must fit in an owner byte");
             WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
                 scope,
                 kind,
@@ -128,9 +127,9 @@ fn test_fixture_artifacts(
                 key_dependencies: Vec::new(),
                 child_node_hashes: Vec::new(),
             })
-            .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)
+            .expect("deterministic World Replay fixture leaf must be valid")
         })
-        .collect()
+        .collect::<Vec<_>>())
 }
 
 /// Fail-closed errors at the retained World Replay seam.
@@ -384,7 +383,6 @@ impl WorldReplayClosureV1 {
     /// Returns a closed fixture-construction error if the deterministic test
     /// records fail their own public validation.
     #[cfg(feature = "test-support")]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn test_fixture() -> Result<Self, WorldReplayClosureErrorV1> {
         Self::test_fixture_with_inventory_generation(Hash::from_bytes([62; 32]))
     }
@@ -400,7 +398,6 @@ impl WorldReplayClosureV1 {
     /// Returns a closed fixture-construction error if the deterministic test
     /// records fail their own public validation.
     #[cfg(feature = "test-support")]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn test_fixture_with_inventory_generation(
         inventory_generation: Hash,
     ) -> Result<Self, WorldReplayClosureErrorV1> {
@@ -416,7 +413,7 @@ impl WorldReplayClosureV1 {
                 maximum_total_days: 120,
             },
         )
-        .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+        .expect("deterministic World Replay fixture policy must be valid");
         let retention_lease = crate::retention::WorldRetentionLeaseV1::new(
             &retention_policy,
             crate::retention::WorldRetentionLeaseInputV1 {
@@ -427,7 +424,7 @@ impl WorldReplayClosureV1 {
                 retention_deadline_micros: 120 * DAY_MICROS,
             },
         )
-        .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+        .expect("deterministic World Replay fixture lease must be valid");
         let scope = Hash::from_bytes([9; 32]);
         let consumer_set =
             WorldConsumerSetV1::new(crate::world_consumer_set::WorldConsumerSetInputV1 {
@@ -438,17 +435,18 @@ impl WorldReplayClosureV1 {
                     Hash::from_bytes([41; 32]),
                     Hash::from_bytes([42; 32]),
                 )
-                .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?],
+                .expect("deterministic World Replay fixture consumer must be valid")],
                 producers: vec![crate::world_consumer_set::WorldProducerV1::new(
                     PluginId::from_ulid(Ulid::from(1_u128)),
                     Hash::from_bytes([43; 32]),
                 )
-                .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?],
+                .expect("deterministic World Replay fixture producer must be valid")],
                 optional_view_roots: vec![Hash::from_bytes([53; 32])],
             })
-            .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
-        let artifacts = test_fixture_artifacts(scope, &retention_policy, &retention_lease)?;
-        Self::new(WorldReplayClosureInputV1 {
+            .expect("deterministic World Replay fixture consumer set must be valid");
+        let artifacts = test_fixture_artifacts(scope, &retention_policy, &retention_lease)
+            .expect("deterministic World Replay fixture artifacts must be valid");
+        Ok(Self::new(WorldReplayClosureInputV1 {
             timeline_id,
             operation_identity: Hash::from_bytes([60; 32]),
             source_head: Hash::from_bytes([61; 32]),
@@ -458,6 +456,7 @@ impl WorldReplayClosureV1 {
             consumer_set,
             artifacts,
         })
+        .expect("deterministic World Replay fixture closure must be valid"))
     }
 
     /// Admit the closure against a host-owned clock and artifact authority.
