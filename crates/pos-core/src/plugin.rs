@@ -56,7 +56,7 @@ impl PluginOwnerTokenV1 {
     fn for_instance<P: ?Sized>(plugin: &P) -> Self {
         Self {
             type_name: type_name::<P>(),
-            instance_address: std::ptr::from_ref(plugin) as *const () as usize,
+            instance_address: std::ptr::from_ref(plugin).cast::<()>() as usize,
         }
     }
 
@@ -66,7 +66,7 @@ impl PluginOwnerTokenV1 {
     pub fn verifies_instance<P: ?Sized>(&self, plugin: &P, expected_type_name: &str) -> bool {
         self.type_name == expected_type_name
             && self.type_name == type_name::<P>()
-            && self.instance_address == std::ptr::from_ref(plugin) as *const () as usize
+            && self.instance_address == std::ptr::from_ref(plugin).cast::<()>() as usize
     }
 }
 
