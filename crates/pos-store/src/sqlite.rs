@@ -3716,7 +3716,7 @@ impl SqliteStore {
         &mut self,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
-    ) -> Result<Timeline, CoreError> {
+    ) -> Result<(Timeline, bool), CoreError> {
         let persisted = self.load_key_registry()?;
         if persisted
             .as_ref()
@@ -3730,8 +3730,10 @@ impl SqliteStore {
             self.save_key_registry_in_transaction(expected_registry)?;
         }
 
-        self.find_timeline_by_name_unchecked(name)?
-            .map_or_else(|| self.create_timeline(name), Ok)
+        self.find_timeline_by_name_unchecked(name)?.map_or_else(
+            || self.create_timeline(name).map(|timeline| (timeline, true)),
+            |timeline| Ok((timeline, false)),
+        )
     }
 
     fn find_timeline_by_name_unchecked(&self, name: &str) -> Result<Option<Timeline>, CoreError> {
@@ -3864,7 +3866,7 @@ impl EventStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let result =
             self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
-        finish_immediate_transaction(&self.conn, result)
+        finish_immediate_transaction(&self.conn, result).map(|(timeline, _)| timeline)
     }
 
     fn initialize_timeline_with_key_registry_for_host_transition(
@@ -3872,9 +3874,14 @@ impl EventStore for SqliteStore {
         permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
-    ) -> Result<Timeline, CoreError> {
+    ) -> Result<(Timeline, bool), CoreError> {
         self.ensure_host_transition_permit(permit)?;
-        self.initialize_timeline_with_key_registry(name, expected_registry)
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result =
+            self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
+        finish_immediate_transaction(&self.conn, result)
     }
 
     fn append_signed_authorized(

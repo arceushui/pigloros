@@ -907,7 +907,7 @@ pub trait EventStore: Send {
         _permit: &ErasureTopologyTransitionPermitV1,
         _name: &str,
         _expected_registry: &crate::KeyRegistryStateV1,
-    ) -> Result<Timeline, CoreError> {
+    ) -> Result<(Timeline, bool), CoreError> {
         Err(CoreError::Storage(
             "host topology transitions are unsupported by this EventStore".to_owned(),
         ))

@@ -155,21 +155,14 @@ where
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<TopologyTransitionResultV1, CoreError> {
-        let existed = self
-            .list_timelines()?
-            .iter()
-            .any(|timeline| timeline.meta.name.as_deref() == Some(name));
-        let timeline =
+        let (timeline, created) =
             pos_core::store::EventStore::initialize_timeline_with_key_registry_for_host_transition(
                 self,
                 permit,
                 name,
                 expected_registry,
             )?;
-        Ok(TopologyTransitionResultV1 {
-            timeline,
-            created: !existed,
-        })
+        Ok(TopologyTransitionResultV1 { timeline, created })
     }
 }
 
@@ -3595,7 +3588,7 @@ mod tests {
             permit: &ErasureTopologyTransitionPermitV1,
             name: &str,
             expected_registry: &KeyRegistryStateV1,
-        ) -> Result<Timeline, CoreError> {
+        ) -> Result<(Timeline, bool), CoreError> {
             if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault ledger initialization".to_owned()))
             } else {

@@ -1349,15 +1349,15 @@ fn public_sender_reaches_partial_failure_after_deadline_without_acknowledgement(
     Ok(())
 }
 
-#[test]
-fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
+fn assert_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
+    config: StoreConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open fork failure host",
         open_with_authority(
-            StoreConfig::Memory,
+            config,
             authority_plugin,
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
@@ -1400,7 +1400,28 @@ fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
         ),
         Err(ErasureHostErrorV1::RecoveryUnavailable)
     );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    let mut reads = test_stage("open fork failure reader", host.read_sender())?;
+    let timelines = test_stage("read fork failure timelines", reads.timelines())?;
+    assert_eq!(timelines.len(), 1);
+    assert_eq!(timelines[0].id(), parent.id());
     Ok(())
+}
+
+#[test]
+fn memory_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
+        StoreConfig::Memory,
+    )
+}
+
+#[test]
+fn sqlite_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_host_fails_closed_when_fork_scope_authority_rejects_an_active_request(
+        StoreConfig::SqliteInMemory,
+    )
 }
 
 #[test]
@@ -2099,14 +2120,14 @@ fn authentication_denial_preserves_a_recovered_host() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-#[test]
-fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+fn assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+    config: StoreConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
     let mut host = test_stage(
         "open stale-fork host",
         open_with_authority(
-            StoreConfig::Memory,
+            config,
             authority,
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
@@ -2142,7 +2163,25 @@ fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventor
             Err(ErasureHostErrorV1::StaleGeneration)
         ));
     }
-    assert!(host.read_sender().is_ok());
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    let mut reads = test_stage("open stale-fork reader", host.read_sender())?;
+    let timelines = test_stage("read stale-fork timelines", reads.timelines())?;
+    assert_eq!(timelines.len(), 3);
     Ok(())
+}
+
+#[test]
+fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+        StoreConfig::Memory,
+    )
+}
+
+#[test]
+fn sqlite_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+        StoreConfig::SqliteInMemory,
+    )
 }
