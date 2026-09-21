@@ -1986,6 +1986,11 @@ fn emit_draft_execution_profiles(
     declaration: &DraftAuthorityDeclaration,
     include_policy_constants: bool,
 ) -> Result<(), std::fmt::Error> {
+    let source_type = if include_policy_constants {
+        "InstalledExecutionProfileSource"
+    } else {
+        "DraftExecutionProfileSource"
+    };
     if include_policy_constants {
         generated.push_str(
             "struct InstalledExecutionProfileSource {\n\
@@ -2017,7 +2022,7 @@ fn emit_draft_execution_profiles(
     let record = |profile: &DraftExecutionProfile| {
         if !include_policy_constants {
             return format!(
-                "    InstalledExecutionProfileSource {{ profile_id: {:?} }},\n",
+                "    {source_type} {{ profile_id: {:?} }},\n",
                 profile.profile_id
             );
         }
@@ -2043,7 +2048,7 @@ fn emit_draft_execution_profiles(
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "    InstalledExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: [{}], allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},\n",
+            "    {source_type} {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: [{}], allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},\n",
             profile.profile_id,
             profile.semantic_version,
             profile.network_allowed,
@@ -2064,7 +2069,7 @@ fn emit_draft_execution_profiles(
 
     writeln!(
         generated,
-        "const DRAFT_EXECUTION_PROFILES: [InstalledExecutionProfileSource; {}] = [",
+        "const DRAFT_EXECUTION_PROFILES: [{source_type}; {}] = [",
         declaration.execution_profiles.len()
     )?;
     for profile in &declaration.execution_profiles {
