@@ -1354,9 +1354,13 @@ mod tests {
     fn rejects_missing_declarations_and_identity_mismatches() {
         let plugin_id = PluginId::new();
         let budget = budget(plugin_id, 16, 2, 32, 100, [10, 10, 10]);
-        let admission =
-            OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget), budget)
-                .expect("fixture admission is valid");
+        let admission = OutputAdmissionV1::try_new(
+            plugin_id,
+            "1.0.0",
+            policy(plugin_id, &budget),
+            budget.clone(),
+        )
+        .expect("fixture admission is valid");
         assert!(matches!(
             admission.validate_batch(&[draft("plugin.unknown", b"x")]),
             Err(OutputAdmissionErrorV1::MissingDeclaration { .. })
