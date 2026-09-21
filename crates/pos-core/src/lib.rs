@@ -21,6 +21,7 @@ pub mod entity;
 pub mod erasure;
 pub mod error;
 pub mod event;
+pub mod executable_budget;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
@@ -28,14 +29,24 @@ pub mod hasher;
 pub mod ids;
 pub mod key_registry;
 pub mod manifest;
+pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
 pub mod plugin;
+pub mod retention;
 pub mod state;
 pub mod store;
 pub mod timeline;
+pub mod world_artifact;
+pub mod world_consumer_set;
 pub mod world_transform;
+
+pub use world_artifact::{
+    WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
+    WorldArtifactLeafInputV1, WorldArtifactLeafV1, MAX_WORLD_ARTIFACT_CHILDREN_V1,
+    MAX_WORLD_ARTIFACT_KEYS_V1, MAX_WORLD_ARTIFACT_LEAF_BYTES_V1,
+};
 
 // Re-export commonly used types at the crate root.
 pub use authority::{
@@ -137,6 +148,11 @@ pub use erasure::{
 };
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
+pub use executable_budget::{
+    ExecutableBudgetErrorV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
+    MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
+};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
 pub use geo_cell_admission::{
@@ -187,6 +203,11 @@ pub use store::{
     EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
+pub use world_consumer_set::{
+    WorldConsumerSetErrorV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldProducerV1, WORLD_CONSUMER_SET_MAX_BYTES, WORLD_CONSUMER_SET_MAX_CONSUMERS,
+    WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES, WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS,
+};
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
     WorldOriginReferenceV1, WorldOriginRegistryV1, WorldOriginV1, WorldTransformError,
