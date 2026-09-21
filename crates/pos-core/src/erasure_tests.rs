@@ -1112,8 +1112,8 @@ fn assert_fork_retry_rejects_child_corruption(
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let mut included_child_without_scope = inventory.clone();
-    included_child_without_scope
+    let mut excluded_child = inventory.clone();
+    excluded_child
         .classifications
         .iter_mut()
         .find(|(timeline, _)| *timeline == child)
@@ -1121,7 +1121,7 @@ fn assert_fork_retry_rejects_child_corruption(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .membership = ErasureInventoryMembershipV1::Excluded;
     assert_eq!(
-        included_child_without_scope.fork_retry_scope_requirements(parent, child),
+        excluded_child.fork_retry_scope_requirements(parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
