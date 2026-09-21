@@ -64,9 +64,7 @@ impl RecordingManager {
         let descriptor_names = properties
             .into_iter()
             .find_map(|(property, value)| {
-                (property == "ExtraFileDescriptors").then(|| {
-                    descriptor_names(value)
-                })
+                (property == "ExtraFileDescriptors").then(|| descriptor_names(value))
             })
             .transpose()?
             .ok_or_else(|| fdo::Error::Failed("missing descriptor property".to_owned()))?;
@@ -76,7 +74,7 @@ impl RecordingManager {
             property_names,
             property_signatures,
             descriptor_names,
-            auxiliary_count: auxiliary.len(),
+            auxiliary_count: auxiliary.into_iter().count(),
         };
         self.observed
             .lock()
@@ -95,9 +93,9 @@ fn descriptor_names(value: OwnedValue) -> fdo::Result<Vec<String>> {
             fields
                 .next()
                 .ok_or_else(|| fdo::Error::Failed("descriptor is missing its fd".to_owned()))?;
-            let name = fields.next().ok_or_else(|| {
-                fdo::Error::Failed("descriptor is missing its name".to_owned())
-            })?;
+            let name = fields
+                .next()
+                .ok_or_else(|| fdo::Error::Failed("descriptor is missing its name".to_owned()))?;
             String::try_from(name).map_err(|error| fdo::Error::Failed(error.to_string()))
         })
         .collect()
