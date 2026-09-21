@@ -1500,7 +1500,7 @@ fn assert_sqlite_fork_retry_corruption_error(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, gate, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1531,7 +1531,7 @@ fn assert_sqlite_fork_recovery_corruption_error(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, gate, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1561,7 +1561,7 @@ fn assert_sqlite_fork_first_commit_failure(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, gate, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let connection = rusqlite::Connection::open(path)?;
     corrupt(&connection, &prepared)?;
     drop(connection);
@@ -2078,7 +2078,7 @@ fn sqlite_fresh_fork_rejects_a_locked_database() -> Result<(), Box<dyn std::erro
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, gate, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("BEGIN IMMEDIATE")?;
     assert_eq!(
@@ -2119,7 +2119,7 @@ fn sqlite_fork_recovery_rejects_negative_persisted_sequence(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, gate, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared)?,
