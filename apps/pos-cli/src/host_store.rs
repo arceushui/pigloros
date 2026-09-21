@@ -43,22 +43,6 @@ impl HostedCliStore {
             .and_then(|mut host| operation(&mut host).map_err(hosted_cli_store_error))
     }
 
-    fn with_read_sender<T>(
-        &self,
-        operation: impl FnOnce(
-            &mut pos_runtime::ErasureReadSenderV1<'_>,
-        ) -> Result<T, pos_core::CoreError>,
-    ) -> Result<T, pos_core::CoreError> {
-        self.host
-            .lock()
-            .map_err(|_| pos_core::CoreError::ErasureContainmentUnavailable)
-            .and_then(|mut host| {
-                host.read_sender()
-                    .map_err(hosted_cli_store_error)
-                    .and_then(|mut sender| operation(&mut sender))
-            })
-    }
-
     fn containment_gate(&self) -> std::sync::Arc<pos_core::ErasureContainmentGateV1> {
         self.gate.clone()
     }
