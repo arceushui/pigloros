@@ -209,6 +209,9 @@ fn closure_input() -> WorldReplayClosureInputV1 {
     let scope = hash(9);
     WorldReplayClosureInputV1 {
         timeline_id,
+        operation_identity: hash(60),
+        source_head: hash(61),
+        inventory_generation: hash(62),
         retention_policy: retention_policy.clone(),
         retention_lease: retention_lease.clone(),
         consumer_set: consumer_set(hash(40), hash(43)),
@@ -221,6 +224,8 @@ struct Authority {
     missing: Option<WorldArtifactKindV1>,
     fail_now: bool,
     fail_artifact: bool,
+    fail_native_verification: bool,
+    wrong_native_digest: bool,
     transition_optional_view: bool,
 }
 
@@ -230,6 +235,19 @@ impl WorldReplayClosureAuthorityV1 for Authority {
             Err(ErasureErrorV1::ProvenanceMissing)
         } else {
             Ok(self.now)
+        }
+    }
+
+    fn verify_native_artifact(
+        &mut self,
+        artifact: &WorldArtifactLeafV1,
+    ) -> Result<Hash, ErasureErrorV1> {
+        if self.fail_native_verification {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        } else if self.wrong_native_digest {
+            Ok(hash(254))
+        } else {
+            Ok(artifact.as_input().native_digest)
         }
     }
 
@@ -266,6 +284,8 @@ fn retained_closure_admits_exact_authoritative_replay() -> TestResult {
         missing: None,
         fail_now: false,
         fail_artifact: false,
+        fail_native_verification: false,
+        wrong_native_digest: false,
         transition_optional_view: false,
     };
     let closure = WorldReplayClosureV1::new(closure_input())?;
@@ -278,27 +298,27 @@ fn retained_closure_admits_exact_authoritative_replay() -> TestResult {
     );
     admission.require_authoritative_use()?;
     assert_eq!(closure.timeline_id(), timeline(1));
+    assert_eq!(closure.operation_identity(), hash(60));
+    assert_eq!(closure.source_head(), hash(61));
+    assert_eq!(closure.inventory_generation(), hash(62));
     assert_eq!(closure.artifacts().len(), 14);
     Ok(())
 }
 
 #[test]
-fn expiry_and_missing_required_artifacts_degrade_the_claim() -> TestResult {
+fn expiry_denies_use_and_missing_required_artifacts_degrade_the_claim() -> TestResult {
     let mut expired = Authority {
         now: WallTime::from_micros(120 * DAY_MICROS),
         missing: None,
         fail_now: false,
         fail_artifact: false,
+        fail_native_verification: false,
+        wrong_native_digest: false,
         transition_optional_view: false,
     };
-    let expired_admission = admitted(&mut expired)?;
     assert_eq!(
-        expired_admission.evaluation().replay_claim(),
-        ErasureReplayClaimV1::UnverifiableArtifactsMissing
-    );
-    assert_eq!(
-        expired_admission.require_authoritative_use(),
-        Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+        admitted(&mut expired),
+        Err(WorldReplayClosureErrorV1::RetentionExpired)
     );
 
     let mut missing = Authority {
@@ -306,6 +326,8 @@ fn expiry_and_missing_required_artifacts_degrade_the_claim() -> TestResult {
         missing: Some(WorldArtifactKindV1::Schema),
         fail_now: false,
         fail_artifact: false,
+        fail_native_verification: false,
+        wrong_native_digest: false,
         transition_optional_view: false,
     };
     let missing_admission = admitted(&mut missing)?;
@@ -323,14 +345,20 @@ fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
         missing: None,
         fail_now: false,
         fail_artifact: false,
+        fail_native_verification: false,
+        wrong_native_digest: false,
         transition_optional_view: true,
     };
     let admission = admitted(&mut authority)?;
     assert_eq!(
         admission.evaluation().replay_claim(),
-        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        ErasureReplayClaimV1::Exact
     );
     admission.require_authoritative_use()?;
+    assert_eq!(
+        admission.require_authoritative_use_for(&[hash(53)]),
+        Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+    );
     Ok(())
 }
 
@@ -344,6 +372,14 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
             ..base.clone()
         }),
         Err(WorldReplayClosureErrorV1::ArtifactCountOutOfBounds)
+    );
+
+    assert_eq!(
+        WorldReplayClosureV1::new(WorldReplayClosureInputV1 {
+            operation_identity: Hash::zero(),
+            ..base.clone()
+        }),
+        Err(WorldReplayClosureErrorV1::BindingIdentityMissing)
     );
 
     let mut missing = base.clone();
@@ -409,6 +445,8 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
         missing: None,
         fail_now: false,
         fail_artifact: false,
+        fail_native_verification: false,
+        wrong_native_digest: false,
         transition_optional_view: false,
     };
     assert_eq!(
@@ -541,6 +579,8 @@ fn authority_failures_are_not_treated_as_replay_evidence() -> TestResult {
         missing: None,
         fail_now: true,
         fail_artifact: false,
+        fail_native_verification: false,
+        wrong_native_digest: false,
         transition_optional_view: false,
     };
     assert_eq!(
@@ -553,11 +593,41 @@ fn authority_failures_are_not_treated_as_replay_evidence() -> TestResult {
         missing: None,
         fail_now: false,
         fail_artifact: true,
+        fail_native_verification: false,
+        wrong_native_digest: false,
         transition_optional_view: false,
     };
     assert_eq!(
         admitted(&mut artifact_failure),
         Err(WorldReplayClosureErrorV1::AuthorityUnavailable)
+    );
+
+    let mut native_failure = Authority {
+        now: WallTime::from_micros(1),
+        missing: None,
+        fail_now: false,
+        fail_artifact: false,
+        fail_native_verification: true,
+        wrong_native_digest: false,
+        transition_optional_view: false,
+    };
+    assert_eq!(
+        admitted(&mut native_failure),
+        Err(WorldReplayClosureErrorV1::NativeVerificationUnavailable)
+    );
+
+    let mut wrong_native = Authority {
+        now: WallTime::from_micros(1),
+        missing: None,
+        fail_now: false,
+        fail_artifact: false,
+        fail_native_verification: false,
+        wrong_native_digest: true,
+        transition_optional_view: false,
+    };
+    assert_eq!(
+        admitted(&mut wrong_native),
+        Err(WorldReplayClosureErrorV1::NativeDigestMismatch)
     );
     Ok(())
 }
