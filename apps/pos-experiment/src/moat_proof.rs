@@ -681,6 +681,7 @@ fn register_plugins_for_profile(
     }
 }
 
+#[cfg(test)]
 fn register_plugins(
     experiment: &mut Experiment,
     topology: &ProofTopology,
@@ -742,11 +743,12 @@ fn build_registry_for_profile(
     }
 }
 
+#[cfg(test)]
 fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
     build_registry_for_profile(topology, "deterministic-local-v1")
 }
 
-fn execution_profile_id(mode: ExecutionModeV1) -> &'static str {
+const fn execution_profile_id(mode: ExecutionModeV1) -> &'static str {
     match mode {
         ExecutionModeV1::AirGapped => "deterministic-air-gapped-v1",
         ExecutionModeV1::Local | ExecutionModeV1::Replay | ExecutionModeV1::Fork => {
@@ -2745,7 +2747,7 @@ mod tests {
         assert_eq!(frontiers[0].earliest_tick, 1);
         assert_eq!(frontiers[0].cause_node_digests.len(), 1);
 
-        let failure = failure_probe("unknown", 3).test_ok();
+        let failure = failure_probe("unknown", 3, "deterministic-local-v1").test_ok();
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert!(!failure.committed);
     }
@@ -2868,7 +2870,7 @@ mod coverage_entrypoints {
         ));
 
         assert_eq!(GateStatus::from(false), GateStatus::Failed);
-        let failure = test_ok(failure_probe("unknown", 3));
+        let failure = test_ok(failure_probe("unknown", 3, "deterministic-local-v1"));
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert_eq!(suffix_audit(&[], &[], 0), (true, false));
         assert_eq!(suffix_audit(&[], &[], 0), (true, false));
