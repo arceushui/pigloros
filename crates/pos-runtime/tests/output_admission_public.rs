@@ -1,10 +1,10 @@
 use pos_core::{
     event::{CanonicalBytes, EventDraft, Kind},
-    Capability, Hash, Plugin, PluginId,
+    Capability, Plugin, PluginId,
 };
 use pos_runtime::{
     validate_output_policy_artifacts_v1, Driver, InstalledOutputPolicySourceV1, ObservationView,
-    OutputAdmissionErrorV1, OutputAdmissionV1, PluginRegistry, RuntimeError, StepOutput,
+    OutputAdmissionErrorV1, PluginRegistry, RuntimeError, StepOutput,
 };
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -171,7 +171,7 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
     ));
 
-    let oversized_policy = vec![0; pos_core::MAX_OUTPUT_POLICY_BYTES_V1 + 1];
+    let oversized_policy = vec![0; pos_core::output_policy::MAX_OUTPUT_POLICY_BYTES_V1 + 1];
     assert!(matches!(
         validate_output_policy_artifacts_v1(
             &oversized_policy,
