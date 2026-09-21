@@ -2602,21 +2602,22 @@ impl PluginRegistry {
         let context = self.registration_context(plugin)?;
         self.validate_registration_roles(&registration)?;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        let output_admission =
-            OutputAdmissionV1::try_new(plugin.id(), plugin.version(), policy, budget)
-                .expect("generated output binding must be admissible");
-        self.register_with_approver_slice(
-            plugin,
-            reducer,
-            driver,
-            approver,
-            &approver_event_types,
-            context,
-            RegistrationOptions {
-                registration: Some(registration),
-                output_admission: Some(output_admission),
-            },
-        )
+        OutputAdmissionV1::try_new(plugin.id(), plugin.version(), policy, budget)
+            .map(Some)
+            .and_then(|output_admission| {
+                self.register_with_approver_slice(
+                    plugin,
+                    reducer,
+                    driver,
+                    approver,
+                    &approver_event_types,
+                    context,
+                    RegistrationOptions {
+                        registration: Some(registration),
+                        output_admission,
+                    },
+                )
+            })
     }
 
     /// Register a plugin with a generated policy and action approver.
