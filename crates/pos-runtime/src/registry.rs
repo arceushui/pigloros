@@ -3122,6 +3122,7 @@ impl PluginRegistry {
 
     /// Return the action approver registered for the given event type, if any.
     #[must_use]
+    #[cfg(test)]
     fn approver_for(&self, event_type: &Kind) -> Option<&dyn ActionApprover> {
         self.approver_map
             .get(event_type)
