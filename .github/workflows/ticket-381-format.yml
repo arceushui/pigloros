@@ -15,7 +15,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all
+      - run: >-
+          rustfmt --edition 2021
+          apps/pos-sandboxd/src/system_bus.rs
+          apps/pos-sandboxd/tests/system_bus_start_public.rs
       - run: git diff --binary > ticket-381-format.patch
       - uses: actions/upload-artifact@v7
         with:
