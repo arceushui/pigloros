@@ -617,8 +617,11 @@ async fn run_tick_boundaries(
     })
     .test_ok()
     .map_err(|error| std::io::Error::other(format!("open pending store: {error}")))?;
+    // This direct adapter is separate from the host-owned Gateway adapter, so
+    // it needs its own test-only binding rather than consuming the host gate's
+    // one-shot store binding.
     pending_store
-        .bind_erasure_gate(scenario.erasure_gate.clone())
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok()
         .map_err(|error| std::io::Error::other(format!("bind pending gate: {error}")))?;
     let pending = pending_store
@@ -867,7 +870,7 @@ fn assert_replay(
     .test_ok()?;
     let mut first_store = first_store;
     first_store
-        .bind_erasure_gate(scenario.erasure_gate.clone())
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok()?;
     let stored = first_store
         .read(scenario.timeline, SeqRange::all())
@@ -888,7 +891,7 @@ fn assert_replay(
     .test_ok()?;
     let mut second_store = second_store;
     second_store
-        .bind_erasure_gate(scenario.erasure_gate.clone())
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok()?;
     let mut second_replay = replay_registry(scenario.erasure_gate.clone());
     let second_events = second_store
