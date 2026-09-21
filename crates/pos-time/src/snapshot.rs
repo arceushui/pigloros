@@ -67,6 +67,15 @@ fn snapshot_effect(
     registry: &mut ProjectionRegistry,
     closure: &WorldReplayClosureV1,
 ) -> Result<Snapshot, CoreError> {
+    snapshot_effect_with_rechecks(sender, timeline, registry, closure)
+}
+
+fn snapshot_effect_with_rechecks(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timeline: TimelineId,
+    registry: &mut ProjectionRegistry,
+    closure: &WorldReplayClosureV1,
+) -> Result<Snapshot, CoreError> {
     sender
         .admit_world_replay(closure)
         .map_err(crate::host_error_to_core)?
@@ -147,6 +156,15 @@ fn run_verification_fence(
 }
 
 fn verify_snapshot_effect(
+    sender: &mut ErasureReadSenderV1<'_>,
+    snap: &Snapshot,
+    registry: &mut ProjectionRegistry,
+    closure: &WorldReplayClosureV1,
+) -> Result<(), SnapshotError> {
+    verify_snapshot_effect_with_rechecks(sender, snap, registry, closure)
+}
+
+fn verify_snapshot_effect_with_rechecks(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
     registry: &mut ProjectionRegistry,
