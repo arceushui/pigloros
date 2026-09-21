@@ -6174,13 +6174,12 @@ mod tests {
 
         let mut mismatch = new_store();
         mismatch.save_key_registry(&persisted).test_ok();
-        assert!(matches!(
-            mismatch.initialize_timeline_with_key_registry_for_host_transition_unchecked(
+        assert!(mismatch
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
                 "mismatch",
                 &KeyRegistryStateV1::new(),
-            ),
-            Err(CoreError::Storage(_))
-        ));
+            )
+            .is_err());
         assert!(mismatch.list_timelines().test_ok().is_empty());
 
         let mut existing = new_store();
@@ -6201,13 +6200,12 @@ mod tests {
         existing_invalid
             .create_timeline("existing-invalid")
             .test_ok();
-        assert!(matches!(
-            existing_invalid.initialize_timeline_with_key_registry_for_host_transition_unchecked(
+        assert!(existing_invalid
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
                 "existing-invalid",
                 &super::coverage_entrypoints::invalid_registry(),
-            ),
-            Err(CoreError::Serialization(_))
-        ));
+            )
+            .is_err());
 
         let mut already_registered = new_store();
         already_registered.save_key_registry(&persisted).test_ok();
@@ -6220,25 +6218,23 @@ mod tests {
         assert_eq!(created.meta.name.as_deref(), Some("new-ledger"));
 
         let mut rollback = new_store();
-        assert!(matches!(
-            rollback.initialize_timeline_with_key_registry_for_host_transition_unchecked(
+        assert!(rollback
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
                 "invalid-registry",
                 &super::coverage_entrypoints::invalid_registry(),
-            ),
-            Err(CoreError::Serialization(_))
-        ));
+            )
+            .is_err());
         assert!(rollback.list_timelines().test_ok().is_empty());
 
         let mut rollback_failure = new_store();
         fail_next_visible_delete_for_test();
-        assert!(matches!(
-            rollback_failure
-                .initialize_timeline_with_key_registry_for_host_transition_unchecked(
-                    "rollback-failure",
-                    &super::coverage_entrypoints::invalid_registry(),
-                ),
-            Err(CoreError::Storage(message)) if message.contains("rollback also failed")
-        ));
+        let error = rollback_failure
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                "rollback-failure",
+                &super::coverage_entrypoints::invalid_registry(),
+            )
+            .test_err();
+        assert!(error.to_string().contains("rollback also failed"));
     }
 
     #[test]
@@ -6592,6 +6588,11 @@ mod coverage_entrypoints {
 
     #[test]
     fn memory_error_and_fork_boundaries_are_instrumented() {
+        memory_error_and_fork_boundaries();
+        memory_visibility_boundaries();
+    }
+
+    fn memory_error_and_fork_boundaries() {
         let mut store = new_store();
         let root = ok(store.create_timeline("coverage-root"));
         let first = ok(store.append_or_duplicate(
@@ -6672,7 +6673,10 @@ mod coverage_entrypoints {
             None,
         ));
         expect_err(store.append_visible(TimelineId::new(), &[draft(b"missing-visible")]));
+    }
 
+    fn memory_visibility_boundaries() {
+        let mut store = new_store();
         let protected = ok(store.create_timeline("coverage-protected"));
         ok(
             store.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(

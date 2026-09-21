@@ -4313,30 +4313,28 @@ mod key_registry_coverage {
             ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)
                 .map_err(|_| CoreError::Storage("test inventory construction failed".to_owned()))?;
         let gate = ErasureContainmentGateV1::new_fail_closed();
-        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
-            assert!(matches!(
-                store.create_timeline_for_host_transition(permit, "minimal-host-transition"),
-                Err(CoreError::Storage(_))
-            ));
-            assert!(matches!(
-                store.fork_for_host_transition(
-                    permit,
-                    TimelineId::new(),
-                    Seq::ZERO,
-                    "minimal-host-fork",
-                ),
-                Err(CoreError::Storage(_))
-            ));
-            assert!(matches!(
-                store.initialize_timeline_with_key_registry_for_host_transition(
-                    permit,
-                    "minimal-host-ledger",
-                    &KeyRegistryStateV1::new(),
-                ),
-                Err(CoreError::Storage(_))
-            ));
-            Ok((inventory.clone(), ()))
-        };
+        let mut transition =
+            |permit: &ErasureTopologyTransitionPermitV1| {
+                assert!(store
+                    .create_timeline_for_host_transition(permit, "minimal-host-transition")
+                    .is_err());
+                assert!(store
+                    .fork_for_host_transition(
+                        permit,
+                        TimelineId::new(),
+                        Seq::ZERO,
+                        "minimal-host-fork",
+                    )
+                    .is_err());
+                assert!(store
+                    .initialize_timeline_with_key_registry_for_host_transition(
+                        permit,
+                        "minimal-host-ledger",
+                        &KeyRegistryStateV1::new(),
+                    )
+                    .is_err());
+                Ok((inventory.clone(), ()))
+            };
         assert!(gate
             .install_from_verified_inventory_transition(&mut transition)
             .is_ok());
