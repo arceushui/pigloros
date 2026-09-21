@@ -6171,7 +6171,7 @@ mod tests {
             Err(ErasureHostErrorV1::StaleGeneration)
         );
         assert_eq!(
-            sender.commit_fork_admission(&batch),
+            sender.commit_fork_admission(batch),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
         assert_eq!(
