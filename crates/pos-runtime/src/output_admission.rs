@@ -73,7 +73,17 @@ pub struct OutputPolicyArtifactInputV1 {
 }
 
 impl OutputPolicyArtifactInputV1 {
-    fn from_slices(
+    /// Construct the bounded artifact view returned by a host-owned authority.
+    ///
+    /// The runtime still performs native decoding and identity checks when it
+    /// mints a closure.  This boundary only lets an authority copy its exact
+    /// installed leaves without exposing closure construction to callers.
+    ///
+    /// # Errors
+    /// Returns [`OutputAdmissionErrorV1::ArtifactInvalid`] when a leaf exceeds
+    /// its bounded host envelope.
+    #[doc(hidden)]
+    pub fn from_host_owned_artifacts(
         implementation_artifact: &[u8],
         configuration_artifact: &[u8],
         execution_profile_artifact: &[u8],
@@ -114,120 +124,36 @@ impl OutputPolicyArtifactInputV1 {
     }
 }
 
-/// Installed host authority that resolves one Plugin's exact artifacts.
-///
-/// Composition roots construct this authority from their installed module,
-/// configuration, execution-profile, and retention sources.  The runtime
-/// invokes it during registration and performs the final native validation and
-/// identity checks before minting an admission closure.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InstalledOutputPolicyAuthorityV1 {
-    plugin_name: String,
-    plugin_version: String,
-    artifacts: OutputPolicyArtifactInputV1,
-}
-
-impl InstalledOutputPolicyAuthorityV1 {
-    /// Build an installed authority from host-owned source artifacts.
-    ///
-    /// # Errors
-    /// Returns an artifact error before copying an oversized source.
-    pub fn try_new(
-        plugin: &dyn Plugin,
-        implementation_artifact: &[u8],
-        configuration_details: &[u8],
-        execution_profile_artifact: &[u8],
-        retention_policy_artifact: &[u8],
-    ) -> Result<Self, OutputAdmissionErrorV1> {
-        let configuration_artifact = crate::reviewed_policy::canonical_plugin_configuration_v1(
-            plugin,
-            configuration_details,
-        )
-        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
-            kind: "configuration",
-        })?;
-        let artifacts = OutputPolicyArtifactInputV1::from_slices(
-            implementation_artifact,
-            &configuration_artifact,
-            execution_profile_artifact,
-            retention_policy_artifact,
-        )?;
-        Ok(Self {
-            plugin_name: plugin.name().to_owned(),
-            plugin_version: plugin.version().to_owned(),
-            artifacts,
-        })
-    }
-
-    fn resolve(
-        &self,
-        plugin: &dyn Plugin,
-    ) -> Result<OutputPolicyArtifactInputV1, OutputAdmissionErrorV1> {
-        if plugin.name() != self.plugin_name {
-            return Err(OutputAdmissionErrorV1::ArtifactIdentityMismatch {
-                kind: "configuration",
-            });
-        }
-        if plugin.version() != self.plugin_version {
-            return Err(OutputAdmissionErrorV1::PluginVersionMismatch);
-        }
-        Ok(self.artifacts.clone())
-    }
-}
-
 /// Host capability used by the runtime to resolve exact policy artifacts.
 pub trait OutputPolicyAuthorityV1: Send + Sync {
-    /// Resolve artifacts for the requested policy and executable budget.
-    fn resolve(
-        &self,
-        plugin: &dyn Plugin,
-        policy: &OutputPolicyV1,
-        budget: &ExecutableBudgetPolicyV1,
-    ) -> Result<OutputPolicyArtifactInputV1, OutputAdmissionErrorV1>;
-}
+    /// Return the exact policy selected by the installed host owner.
+    fn policy(&self) -> &OutputPolicyV1;
 
-impl OutputPolicyAuthorityV1 for InstalledOutputPolicyAuthorityV1 {
+    /// Return the exact executable budget selected by the installed host owner.
+    fn budget(&self) -> &ExecutableBudgetPolicyV1;
+
+    /// Resolve artifacts for the registered Plugin.
     fn resolve(
         &self,
         plugin: &dyn Plugin,
-        _policy: &OutputPolicyV1,
-        _budget: &ExecutableBudgetPolicyV1,
-    ) -> Result<OutputPolicyArtifactInputV1, OutputAdmissionErrorV1> {
-        self.resolve(plugin)
-    }
+    ) -> Result<OutputPolicyArtifactInputV1, OutputAdmissionErrorV1>;
 }
 
 /// A policy and budget bound to an installed host authority.
 pub struct OutputPolicyBindingV1 {
-    policy: OutputPolicyV1,
-    budget: ExecutableBudgetPolicyV1,
     authority: Box<dyn OutputPolicyAuthorityV1>,
 }
 
 impl OutputPolicyBindingV1 {
-    /// Bind structural policy values to the authority that owns their source
-    /// artifacts.
+    /// Bind the exact policy, budget, and source artifacts owned by a host
+    /// authority.
     #[must_use]
-    pub fn new(
-        policy: OutputPolicyV1,
-        budget: ExecutableBudgetPolicyV1,
-        authority: Box<dyn OutputPolicyAuthorityV1>,
-    ) -> Self {
-        Self {
-            policy,
-            budget,
-            authority,
-        }
+    pub fn new(authority: Box<dyn OutputPolicyAuthorityV1>) -> Self {
+        Self { authority }
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        OutputPolicyV1,
-        ExecutableBudgetPolicyV1,
-        Box<dyn OutputPolicyAuthorityV1>,
-    ) {
-        (self.policy, self.budget, self.authority)
+    pub(crate) fn into_authority(self) -> Box<dyn OutputPolicyAuthorityV1> {
+        self.authority
     }
 }
 
@@ -251,75 +177,11 @@ pub struct OutputPolicyClosureV1 {
 }
 
 impl OutputPolicyClosureV1 {
-    /// Build a closure from the host's typed policy values and exact source
-    /// artifacts.  The configuration bytes are framed with the registered
-    /// Plugin's immutable name/version/capability descriptor before identity
-    /// verification.
-    ///
-    /// # Errors
-    /// Returns the same closed artifact or canonicality errors as
-    /// [`Self::from_artifacts`].
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn from_plugin_artifacts(
-        plugin: &dyn Plugin,
-        output_policy: &OutputPolicyV1,
-        executable_budget: &ExecutableBudgetPolicyV1,
-        implementation_artifact: &[u8],
-        configuration_details: &[u8],
-        execution_profile_artifact: &[u8],
-        retention_policy_artifact: &[u8],
-    ) -> Result<Self, OutputAdmissionErrorV1> {
-        if implementation_artifact.len()
-            > crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1
-        {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid {
-                kind: "implementation",
-            });
-        }
-        let configuration_artifact = crate::reviewed_policy::canonical_plugin_configuration_v1(
-            plugin,
-            configuration_details,
-        )
-        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
-            kind: "configuration",
-        })?;
-        Self::from_artifacts(
-            &output_policy.to_canonical_cbor(),
-            &executable_budget.to_canonical_cbor(),
-            implementation_artifact,
-            &configuration_artifact,
-            execution_profile_artifact,
-            retention_policy_artifact,
-        )
-    }
-
     /// Verify and retain a complete canonical policy closure.
     ///
     /// # Errors
     /// Returns a closed artifact or canonicality error when one referenced
     /// object is absent, malformed, or does not match its recorded identity.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn from_artifacts(
-        output_policy_bytes: &[u8],
-        executable_budget_bytes: &[u8],
-        implementation_artifact: &[u8],
-        configuration_artifact: &[u8],
-        execution_profile_artifact: &[u8],
-        retention_policy_artifact: &[u8],
-    ) -> Result<Self, OutputAdmissionErrorV1> {
-        Self::from_artifacts_inner(
-            output_policy_bytes,
-            executable_budget_bytes,
-            implementation_artifact,
-            configuration_artifact,
-            execution_profile_artifact,
-            retention_policy_artifact,
-        )
-    }
-
-    #[cfg(not(debug_assertions))]
     pub(crate) fn from_artifacts(
         output_policy_bytes: &[u8],
         executable_budget_bytes: &[u8],
@@ -594,6 +456,32 @@ impl OutputPolicyClosureV1 {
     }
 }
 
+/// Validate a complete host artifact set without minting an admission
+/// closure.  Closure construction remains private to registry registration;
+/// this read-only seam is useful to independent host preflight tooling.
+///
+/// # Errors
+/// Returns the closed artifact or identity error reported by the native
+/// policy, budget, profile, and retention decoders.
+pub fn validate_output_policy_artifacts_v1(
+    output_policy_bytes: &[u8],
+    executable_budget_bytes: &[u8],
+    implementation_artifact: &[u8],
+    configuration_artifact: &[u8],
+    execution_profile_artifact: &[u8],
+    retention_policy_artifact: &[u8],
+) -> Result<(), OutputAdmissionErrorV1> {
+    OutputPolicyClosureV1::from_artifacts_inner(
+        output_policy_bytes,
+        executable_budget_bytes,
+        implementation_artifact,
+        configuration_artifact,
+        execution_profile_artifact,
+        retention_policy_artifact,
+    )
+    .map(|_| ())
+}
+
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
@@ -698,17 +586,6 @@ impl OutputAdmissionV1 {
     /// # Errors
     /// Returns an identity, artifact, or budget error when the closure does
     /// not describe the registered Plugin and its executable reservation.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn try_new_verified(
-        plugin_id: PluginId,
-        plugin_version: &str,
-        closure: OutputPolicyClosureV1,
-    ) -> Result<Self, OutputAdmissionErrorV1> {
-        Self::try_new_verified_inner(plugin_id, plugin_version, closure)
-    }
-
-    #[cfg(not(debug_assertions))]
     pub(crate) fn try_new_verified(
         plugin_id: PluginId,
         plugin_version: &str,

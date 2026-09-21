@@ -142,6 +142,69 @@ const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
+/// Composition-root owner for the CLI's installed output artifacts.
+///
+/// The constructor is private to this binary.  Callers can request a binding
+/// through the CLI's host wiring, but cannot replace the implementation,
+/// profile, or retention leaves with an arbitrary runtime authority.
+struct InstalledCliOutputPolicyAuthority {
+    plugin_name: String,
+    plugin_version: String,
+    policy: OutputPolicyV1,
+    budget: ExecutableBudgetPolicyV1,
+    artifacts: pos_runtime::OutputPolicyArtifactInputV1,
+}
+
+impl InstalledCliOutputPolicyAuthority {
+    fn new(
+        plugin: &dyn Plugin,
+        policy: OutputPolicyV1,
+        budget: ExecutableBudgetPolicyV1,
+        implementation_artifact: &[u8],
+        configuration_artifact: &[u8],
+        execution_profile_artifact: &[u8],
+        retention_policy_artifact: &[u8],
+    ) -> Result<Self, pos_runtime::OutputAdmissionErrorV1> {
+        let artifacts = pos_runtime::OutputPolicyArtifactInputV1::from_host_owned_artifacts(
+            implementation_artifact,
+            configuration_artifact,
+            execution_profile_artifact,
+            retention_policy_artifact,
+        )?;
+        Ok(Self {
+            plugin_name: plugin.name().to_owned(),
+            plugin_version: plugin.version().to_owned(),
+            policy,
+            budget,
+            artifacts,
+        })
+    }
+}
+
+impl pos_runtime::OutputPolicyAuthorityV1 for InstalledCliOutputPolicyAuthority {
+    fn policy(&self) -> &OutputPolicyV1 {
+        &self.policy
+    }
+
+    fn budget(&self) -> &ExecutableBudgetPolicyV1 {
+        &self.budget
+    }
+
+    fn resolve(
+        &self,
+        plugin: &dyn Plugin,
+    ) -> Result<pos_runtime::OutputPolicyArtifactInputV1, pos_runtime::OutputAdmissionErrorV1>
+    {
+        if plugin.name() != self.plugin_name {
+            return Err(pos_runtime::OutputAdmissionErrorV1::PluginMismatch);
+        }
+        if plugin.version() != self.plugin_version {
+            return Err(pos_runtime::OutputAdmissionErrorV1::PluginVersionMismatch);
+        }
+        Ok(self.artifacts.clone())
+    }
+}
+
 fn builtin_output_binding(
     plugin: &dyn Plugin,
     event_type: &str,
@@ -230,18 +293,16 @@ fn builtin_output_binding_with_inputs(
         policy_revision: 1,
         output_declarations: vec![declaration],
     })?;
-    let authority = pos_runtime::InstalledOutputPolicyAuthorityV1::try_new(
+    let authority = InstalledCliOutputPolicyAuthority::new(
         plugin,
+        policy,
+        budget,
         implementation_artifact,
-        configuration_details,
+        &configuration_artifact,
         &profile_artifact,
         pos_runtime::reviewed_retention_policy_bytes_v1(),
     )?;
-    Ok(pos_runtime::OutputPolicyBindingV1::new(
-        policy,
-        budget,
-        Box::new(authority),
-    ))
+    Ok(pos_runtime::OutputPolicyBindingV1::new(Box::new(authority)))
 }
 
 struct OpenedCliStore {

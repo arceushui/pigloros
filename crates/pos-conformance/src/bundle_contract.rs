@@ -119,6 +119,64 @@ pub fn draft_execution_profile_bytes_v1(
     })
 }
 
+/// Resolve the EPF1 record owned by the installed execution-profile table.
+///
+/// This is the production composition boundary.  It does not consult the
+/// Draft authority builder; the native EPF1 decoder below remains the final
+/// verifier for the installed bytes.
+fn installed_execution_profile_bytes_v1(
+    profile_id: &str,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let declaration = INSTALLED_EXECUTION_PROFILES
+        .iter()
+        .find(|candidate| candidate.profile_id == profile_id)
+        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    let fields = vec![
+        Value::Text("EPF1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text(declaration.profile_id.to_owned()),
+        Value::Text(declaration.semantic_version.to_owned()),
+        Value::Array(
+            declaration
+                .reproducibility_classes
+                .iter()
+                .copied()
+                .map(|code| Value::Integer(code.into()))
+                .collect(),
+        ),
+        text_array(declaration.architecture_rules),
+        text_array(declaration.numeric_rules),
+        text_array(declaration.scheduler_driver_order),
+        Value::Text(declaration.tick_policy.to_owned()),
+        text_array(declaration.schemas_and_upcasters),
+        text_array(declaration.artifact_rules),
+        Value::Array(vec![
+            Value::Bool(declaration.network_allowed),
+            text_array(declaration.capability_ids),
+        ]),
+        Value::Array(
+            declaration
+                .deterministic_budgets
+                .into_iter()
+                .map(|limit| Value::Integer(limit.into()))
+                .collect(),
+        ),
+        text_array(declaration.allowed_operational_differences),
+        Value::Array(vec![
+            Value::Text(declaration.minimum_evaluator_version.to_owned()),
+            Value::Text(declaration.maximum_evaluator_version.to_owned()),
+        ]),
+        Value::Null,
+    ];
+    encode(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(
+            digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned).to_vec(),
+        ));
+        encode(&Value::Array(signed_fields))
+    })
+}
+
 /// Materialize and independently validate the immutable EPF1 authority member.
 ///
 /// Callers that activate a profile must use this checked boundary rather than
@@ -130,7 +188,7 @@ pub fn draft_execution_profile_bytes_v1(
 pub fn host_verified_execution_profile_bytes_v1(
     profile_id: &str,
 ) -> Result<Vec<u8>, BundleContractErrorV1> {
-    let bytes = draft_execution_profile_bytes_v1(profile_id)?;
+    let bytes = installed_execution_profile_bytes_v1(profile_id)?;
     let profile = crate::ExecutionProfileV1::from_canonical_cbor(&bytes)
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     if profile.profile_id == profile_id {

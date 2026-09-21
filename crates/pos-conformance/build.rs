@@ -1988,7 +1988,7 @@ fn emit_draft_execution_profiles(
 ) -> Result<(), std::fmt::Error> {
     if include_policy_constants {
         generated.push_str(
-            "struct DraftExecutionProfileSource {\n\
+            "struct InstalledExecutionProfileSource {\n\
                  profile_id: &'static str,\n\
                  semantic_version: &'static str,\n\
                  network_allowed: bool,\n\
@@ -2008,21 +2008,21 @@ fn emit_draft_execution_profiles(
         );
     } else {
         generated.push_str(
-            "struct DraftExecutionProfileSource {\n\
+            "struct InstalledExecutionProfileSource {\n\
                  profile_id: &'static str,\n\
              }\n",
         );
     }
     writeln!(
         generated,
-        "const DRAFT_EXECUTION_PROFILES: [DraftExecutionProfileSource; {}] = [",
+        "const INSTALLED_EXECUTION_PROFILES: [InstalledExecutionProfileSource; {}] = [",
         declaration.execution_profiles.len()
     )?;
     for profile in &declaration.execution_profiles {
         if !include_policy_constants {
             writeln!(
                 generated,
-                "    DraftExecutionProfileSource {{ profile_id: {:?} }},",
+                "    InstalledExecutionProfileSource {{ profile_id: {:?} }},",
                 profile.profile_id,
             )?;
             continue;
@@ -2050,7 +2050,7 @@ fn emit_draft_execution_profiles(
             .join(", ");
         writeln!(
             generated,
-            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: [{}], allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},",
+            "    InstalledExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: [{}], allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},",
             profile.profile_id,
             profile.semantic_version,
             profile.network_allowed,
@@ -2068,7 +2068,7 @@ fn emit_draft_execution_profiles(
             profile.maximum_evaluator_version,
         )?;
     }
-    generated.push_str("];\n");
+    generated.push_str("];\nconst DRAFT_EXECUTION_PROFILES: &[InstalledExecutionProfileSource] = &INSTALLED_EXECUTION_PROFILES;\n");
     Ok(())
 }
 

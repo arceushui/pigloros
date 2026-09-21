@@ -2791,8 +2791,10 @@ impl PluginRegistry {
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
-        let (output_policy, executable_budget, authority) = binding.into_parts();
-        let artifacts = authority.resolve(plugin, &output_policy, &executable_budget)?;
+        let authority = binding.into_authority();
+        let output_policy = authority.policy().clone();
+        let executable_budget = authority.budget().clone();
+        let artifacts = authority.resolve(plugin)?;
         let closure = OutputPolicyClosureV1::from_artifacts(
             &output_policy.to_canonical_cbor(),
             &executable_budget.to_canonical_cbor(),
