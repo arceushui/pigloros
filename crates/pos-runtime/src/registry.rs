@@ -2476,7 +2476,7 @@ impl PluginRegistry {
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
         plugin_version: &str,
-        budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+        mut budget_input: pos_core::ExecutableBudgetPolicyInputV1,
     ) -> Result<
         (
             pos_core::output_policy::OutputPolicyV1,
