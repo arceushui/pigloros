@@ -396,7 +396,7 @@ impl WorldReplayAdmissionV1 {
     /// Returns [`WorldReplayClosureErrorV1::ClaimUnavailable`] when expiry,
     /// erasure, or another required artifact state weakened the claim.
     pub const fn require_authoritative_use(&self) -> Result<(), WorldReplayClosureErrorV1> {
-        if self.evaluation.replay_claim() == ErasureReplayClaimV1::Exact {
+        if matches!(self.evaluation.replay_claim(), ErasureReplayClaimV1::Exact) {
             Ok(())
         } else {
             Err(WorldReplayClosureErrorV1::ClaimUnavailable)
@@ -423,7 +423,7 @@ impl WorldReplayAdmissionV1 {
             && requested_view_roots.iter().all(|root| {
                 self.optional_view_roots.contains(root)
                     && self.evaluation.artifacts().iter().any(|artifact| {
-                        artifact.artifact_digest().digest() == *root
+                        Hash::from_bytes(artifact.artifact_digest().digest()) == *root
                             && artifact.to() == ErasureReplayClaimV1::Exact
                             && artifact.authoritative_use_permitted()
                     })
