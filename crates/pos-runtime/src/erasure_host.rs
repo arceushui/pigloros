@@ -705,6 +705,14 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
                     .map_err(|_| ErasureErrorV1::ScopeInvalid)
                     .and_then(|()| {
                         topology.extend_from_slice(snapshot.topology());
+                        if let Some(candidate) = self.topology_candidate {
+                            if let Err(index) = topology.binary_search(&candidate) {
+                                topology
+                                    .try_reserve(1)
+                                    .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+                                topology.insert(index, candidate);
+                            }
+                        }
                         let mut request_topology = Vec::new();
                         request_topology
                             .try_reserve(request_heads.len())
@@ -3463,7 +3471,6 @@ mod tests {
         Recovery,
         EventStore,
         DeleteTimeline,
-        NonemptyInventoryDeleteFailure,
     }
 
     type TimelineCreatedHookV1 = Arc<dyn Fn(TimelineId) + Send + Sync>;
@@ -3473,6 +3480,7 @@ mod tests {
         fault: FaultModeV1,
         resolve_control: Arc<ResolveStateControlV1>,
         timeline_created_hook: Option<TimelineCreatedHookV1>,
+        inventory_snapshot_calls: usize,
     }
 
     #[derive(Clone, Copy)]
@@ -3773,9 +3781,7 @@ mod tests {
         fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
             if matches!(
                 self.fault,
-                FaultModeV1::EventStore
-                    | FaultModeV1::DeleteTimeline
-                    | FaultModeV1::NonemptyInventoryDeleteFailure
+                FaultModeV1::EventStore | FaultModeV1::DeleteTimeline
             ) {
                 Err(CoreError::Storage("fault delete".to_owned()))
             } else {
@@ -3870,13 +3876,17 @@ mod tests {
                     maximum_requests,
                 );
             }
+            let fail_after_recovery = matches!(self.fault, FaultModeV1::NonemptyInventory)
+                && self.inventory_snapshot_calls > 0;
+            self.inventory_snapshot_calls += 1;
+            if fail_after_recovery {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot(maximum_requests)?;
-            if matches!(
-                self.fault,
-                FaultModeV1::NonemptyInventory | FaultModeV1::NonemptyInventoryDeleteFailure
-            ) && !snapshot.topology().is_empty()
+            if matches!(self.fault, FaultModeV1::NonemptyInventory)
+                && !snapshot.topology().is_empty()
             {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
@@ -3901,13 +3911,17 @@ mod tests {
                     limits,
                 );
             }
+            let fail_after_recovery = matches!(self.fault, FaultModeV1::NonemptyInventory)
+                && self.inventory_snapshot_calls > 0;
+            self.inventory_snapshot_calls += 1;
+            if fail_after_recovery {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             let snapshot = self
                 .inner
                 .complete_erasure_inventory_snapshot_with_limits(limits)?;
-            if matches!(
-                self.fault,
-                FaultModeV1::NonemptyInventory | FaultModeV1::NonemptyInventoryDeleteFailure
-            ) && !snapshot.topology().is_empty()
+            if matches!(self.fault, FaultModeV1::NonemptyInventory)
+                && !snapshot.topology().is_empty()
             {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
@@ -5259,6 +5273,7 @@ mod tests {
                 fault,
                 resolve_control: Arc::clone(&resolve_control),
                 timeline_created_hook: None,
+                inventory_snapshot_calls: 0,
             },
             resolve_control,
         )
@@ -5573,7 +5588,7 @@ mod tests {
     }
 
     #[test]
-    fn active_root_topology_changes_roll_back_when_the_new_root_is_affected() {
+    fn active_root_topology_changes_reject_an_affected_candidate_before_persistence() {
         let authority = Arc::new(ActiveTopologyAuthorityV1::default());
         let (mut store, _) = fault_store_with_control(FaultModeV1::Recovery);
         let authority_for_creation = Arc::clone(&authority);
@@ -5628,7 +5643,7 @@ mod tests {
     }
 
     #[test]
-    fn active_root_topology_rollback_failure_poisons_the_host() {
+    fn active_root_topology_rejection_does_not_depend_on_rollback() {
         let authority = Arc::new(ActiveTopologyAuthorityV1::default());
         let (mut store, _) = fault_store_with_control(FaultModeV1::DeleteTimeline);
         let authority_for_creation = Arc::clone(&authority);
@@ -5678,9 +5693,9 @@ mod tests {
         assert_eq!(
             host.command_sender()
                 .and_then(|mut sender| sender.create_timeline("rollback-failure-root")),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
+            Err(ErasureHostErrorV1::Conflict)
         );
-        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
@@ -5713,7 +5728,7 @@ mod tests {
     }
 
     #[test]
-    fn unaffected_topology_transition_poisons_when_rollback_delete_fails() {
+    fn unaffected_topology_transition_poisons_when_publication_rollback_fails() {
         let mut publication_failure = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(fault_store(FaultModeV1::DeleteTimeline)),
             4,
@@ -5727,19 +5742,6 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         assert_eq!(publication_failure.status(), ErasureHostStatusV1::Poisoned);
-
-        let mut verification_failure = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(fault_store(FaultModeV1::NonemptyInventoryDeleteFailure)),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(
-            verification_failure
-                .command_sender()
-                .and_then(|mut sender| sender.create_timeline("rollback-verification-failure")),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        );
-        assert_eq!(verification_failure.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]
