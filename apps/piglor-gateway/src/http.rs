@@ -473,6 +473,7 @@ impl IntoResponse for GatewayError {
             Self::Store(error) => {
                 gateway_store_status(error).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
+            Self::ActionRegistry(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ActionAuthorizationUnavailable | Self::AuthorizationUnavailable => {
                 StatusCode::UNAUTHORIZED
             }
@@ -1713,6 +1714,11 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = GatewayError::AuthorizationDenied.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(
+            "world.unknown".into(),
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::LedgerUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::InvalidPrediction(
