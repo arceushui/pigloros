@@ -2760,11 +2760,17 @@ impl PluginRegistry {
         registration: Option<PluginRegistrationV1>,
     ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
+        if binding.owner_token() != plugin.installed_owner_token() {
+            return Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::PluginMismatch,
+            ));
+        }
         #[cfg(debug_assertions)]
         if let Some(registration) = registration.as_ref() {
             self.validate_registration_roles(registration)?;
         }
-        let (output_policy, executable_budget, artifacts) = binding.into_parts();
+        let (output_policy, executable_budget, artifacts, _source, owner_token) =
+            binding.into_parts();
         let closure = OutputPolicyClosureV1::from_artifacts(
             &output_policy.to_canonical_cbor(),
             &executable_budget.to_canonical_cbor(),
@@ -2794,8 +2800,13 @@ impl PluginRegistry {
                 ),
             });
         }
-        let admission =
-            OutputAdmissionV1::try_new_verified(plugin.id(), plugin.version(), closure)?;
+        let admission = OutputAdmissionV1::try_new_verified(
+            plugin.id(),
+            plugin.version(),
+            closure,
+            owner_token,
+        )?;
+        debug_assert_eq!(admission.owner_token(), Some(owner_token));
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
@@ -3074,7 +3085,7 @@ impl PluginRegistry {
                 name: driver.name().to_owned(),
             });
         }
-        let (policy, budget, artifacts) = binding.into_parts();
+        let (policy, budget, artifacts, _source, owner_token) = binding.into_parts();
         let closure = OutputPolicyClosureV1::from_artifacts(
             &policy.to_canonical_cbor(),
             &budget.to_canonical_cbor(),
@@ -3084,7 +3095,8 @@ impl PluginRegistry {
             artifacts.retention_policy_artifact(),
         )?;
         let plugin_version = closure.output_policy().fields().plugin_version.clone();
-        let admission = OutputAdmissionV1::try_new_verified(plugin_id, &plugin_version, closure)?;
+        let admission =
+            OutputAdmissionV1::try_new_verified(plugin_id, &plugin_version, closure, owner_token)?;
         let name = driver.name().to_owned();
         self.plugins.insert(
             plugin_id,

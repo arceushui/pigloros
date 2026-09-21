@@ -314,6 +314,30 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     Ok(())
 }
 
+#[test]
+fn verified_binding_rejects_a_foreign_plugin_instance() -> TestResult {
+    let plugin_id = PluginId::new();
+    let bound_plugin = FixturePlugin { id: plugin_id };
+    let foreign_plugin = FixturePlugin { id: plugin_id };
+    let source = verified_binding(&bound_plugin)?;
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+
+    assert!(matches!(
+        registry.register_with_verified_output_policy(
+            &foreign_plugin,
+            source.binding,
+            None,
+            Some(Box::new(FixtureDriver)),
+        ),
+        Err(RuntimeError::OutputAdmission(
+            OutputAdmissionErrorV1::PluginMismatch
+        ))
+    ));
+    Ok(())
+}
+
 fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {
     EventDraft::new(
         pos_core::EntityId::new(),

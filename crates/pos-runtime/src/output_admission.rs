@@ -6,7 +6,8 @@ use pos_core::{
     output_policy::{OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_POLICY_BYTES_V1},
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
     ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash, Plugin,
-    PluginCpuReservationV1, PluginId, WorkloadProfileV1, MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
+    PluginCpuReservationV1, PluginId, PluginOwnerTokenV1, WorkloadProfileV1,
+    MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
 };
 use std::sync::Mutex;
 
@@ -455,6 +456,8 @@ pub struct OutputPolicyBindingV1 {
     policy: OutputPolicyV1,
     budget: ExecutableBudgetPolicyV1,
     artifacts: OutputPolicyArtifactInputV1,
+    source: InstalledOutputPolicySourceV1,
+    owner_token: PluginOwnerTokenV1,
 }
 
 impl OutputPolicyBindingV1 {
@@ -535,6 +538,8 @@ impl OutputPolicyBindingV1 {
             policy,
             budget,
             artifacts,
+            source,
+            owner_token: plugin.installed_owner_token(),
         })
     }
 
@@ -544,8 +549,20 @@ impl OutputPolicyBindingV1 {
         OutputPolicyV1,
         ExecutableBudgetPolicyV1,
         OutputPolicyArtifactInputV1,
+        InstalledOutputPolicySourceV1,
+        PluginOwnerTokenV1,
     ) {
-        (self.policy, self.budget, self.artifacts)
+        (
+            self.policy,
+            self.budget,
+            self.artifacts,
+            self.source,
+            self.owner_token,
+        )
+    }
+
+    pub(crate) fn owner_token(&self) -> PluginOwnerTokenV1 {
+        self.owner_token
     }
 
     /// The host-owned structural EOP1 policy selected for this binding.
@@ -959,6 +976,7 @@ pub struct OutputAdmissionV1 {
     cpu_reservations_us: [u32; 3],
     usage: Mutex<AdmissionUsage>,
     closure: Option<OutputPolicyClosureV1>,
+    owner_token: Option<PluginOwnerTokenV1>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1006,6 +1024,7 @@ impl OutputAdmissionV1 {
             cpu_reservations_us,
             usage: Mutex::new(AdmissionUsage::default()),
             closure: None,
+            owner_token: None,
         })
     }
 
@@ -1018,8 +1037,12 @@ impl OutputAdmissionV1 {
         plugin_id: PluginId,
         plugin_version: &str,
         closure: OutputPolicyClosureV1,
+        owner_token: PluginOwnerTokenV1,
     ) -> Result<Self, OutputAdmissionErrorV1> {
-        Self::try_new_verified_inner(plugin_id, plugin_version, closure)
+        Self::try_new_verified_inner(plugin_id, plugin_version, closure).map(|mut admission| {
+            admission.owner_token = Some(owner_token);
+            admission
+        })
     }
 
     fn try_new_verified_inner(
@@ -1068,6 +1091,7 @@ impl OutputAdmissionV1 {
             cpu_reservations_us,
             usage: Mutex::new(AdmissionUsage::default()),
             closure: None,
+            owner_token: None,
         })
     }
 
@@ -1095,6 +1119,10 @@ impl OutputAdmissionV1 {
     #[must_use]
     pub const fn closure(&self) -> Option<&OutputPolicyClosureV1> {
         self.closure.as_ref()
+    }
+
+    pub(crate) const fn owner_token(&self) -> Option<PluginOwnerTokenV1> {
+        self.owner_token
     }
 
     pub(crate) fn reset_usage(&self) {
