@@ -1,8 +1,5 @@
 use pos_core::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, State, TimelineId,
+    Event, Reducer, State, TimelineId,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_state::ProjectionRegistry;
@@ -34,28 +31,6 @@ impl Reducer for NoopReducer {
     fn apply(&self, _: &mut State, _: &Event) {}
 }
 
-const SNAPSHOT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([51; 32]);
-
-fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
-    ReplayClaimEvaluatorV1::evaluate(
-        ErasureReplayClaimV1::Exact,
-        &[ArtifactClaimInputV1 {
-            registration: RegisteredArtifactV1::new(
-                ErasureArtifactClassV1::ForkOrSnapshot,
-                SNAPSHOT_DIGEST,
-                ArtifactDataClassV1::PrivateSubjectData,
-                Some(ErasureKeyRoleV1::DataEncryption),
-                ErasureReferenceV1::from_digest([52; 32]),
-                ArtifactOptionalityV1::Required,
-                ArtifactTransitionRuleV1::Remove,
-            ),
-            current_claim: ErasureReplayClaimV1::Exact,
-            state,
-        }],
-    )
-    .test_ok()
-}
-
 fn registry(gate: &Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistry {
     let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
     registry.register("noop", Box::new(NoopReducer));
@@ -63,7 +38,7 @@ fn registry(gate: &Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistr
 }
 
 #[test]
-fn snapshot_verification_requires_authoritative_artifact_evidence() {
+fn snapshot_verification_requires_installed_world_verifier() {
     let mut host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Memory,
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
@@ -76,58 +51,29 @@ fn snapshot_verification_requires_authoritative_artifact_evidence() {
         .create_timeline("artifact-snapshot")
         .test_ok();
     let mut reads = host.read_sender().test_ok();
-    for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
-        let mut rejected_registry = registry(&gate);
-        let result = snapshot(
-            &mut reads,
-            timeline.id(),
-            &mut rejected_registry,
-            SNAPSHOT_DIGEST,
-            &evaluation(state),
-        );
-        match result {
-            Err(pos_core::CoreError::ArtifactUnavailable) => {}
-            other => std::panic::resume_unwind(Box::new(format!(
-                "expected unavailable snapshot, got {other:?}"
-            ))),
-        }
-    }
     let mut capture_registry = registry(&gate);
-    let snapshot = snapshot(
+    let closure = pos_core::WorldReplayClosureV1::test_fixture();
+    let result = snapshot(
         &mut reads,
         timeline.id(),
         &mut capture_registry,
-        SNAPSHOT_DIGEST,
-        &evaluation(ArtifactStateV1::Retained),
-    )
-    .test_ok();
+        &closure,
+    );
+    assert!(matches!(result, Err(pos_core::CoreError::ArtifactUnavailable)));
 
-    let mut retained_registry = registry(&gate);
-    verify_snapshot_consistency(
+    let mut rejected_registry = registry(&gate);
+    let empty_snapshot = pos_time::Snapshot {
+        timeline: timeline.id(),
+        at_seq: pos_core::clock::Seq::ZERO,
+        registry: std::collections::HashMap::new(),
+    };
+    let result = verify_snapshot_consistency(
         &mut reads,
-        &snapshot,
-        &mut retained_registry,
-        SNAPSHOT_DIGEST,
-        &evaluation(ArtifactStateV1::Retained),
-    )
-    .test_ok();
-
-    for state in [ArtifactStateV1::Erased, ArtifactStateV1::Invalidated] {
-        let mut rejected_registry = registry(&gate);
-        let result = verify_snapshot_consistency(
-            &mut reads,
-            &snapshot,
-            &mut rejected_registry,
-            SNAPSHOT_DIGEST,
-            &evaluation(state),
-        );
-        match result {
-            Err(pos_time::SnapshotError::ArtifactUnavailable) => {}
-            other => std::panic::resume_unwind(Box::new(format!(
-                "expected unavailable snapshot verification, got {other:?}"
-            ))),
-        }
-    }
+        &empty_snapshot,
+        &mut rejected_registry,
+        &closure,
+    );
+    assert!(matches!(result, Err(pos_time::SnapshotError::ArtifactUnavailable)));
 }
 
 #[test]
@@ -146,8 +92,7 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         &mut reads,
         unknown_timeline,
         &mut snapshot_registry,
-        SNAPSHOT_DIGEST,
-        &evaluation(ArtifactStateV1::Retained),
+        &pos_core::WorldReplayClosureV1::test_fixture(),
     )
     .is_err());
 
@@ -161,8 +106,7 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         &mut reads,
         &unknown_snapshot,
         &mut verification_registry,
-        SNAPSHOT_DIGEST,
-        &evaluation(ArtifactStateV1::Retained),
+        &pos_core::WorldReplayClosureV1::test_fixture(),
     )
     .is_err());
 }

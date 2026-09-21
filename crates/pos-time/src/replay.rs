@@ -4,7 +4,7 @@
 //! authority, so replay cannot submit new human actions.
 
 use pos_core::store::{EventReadBounds, SeqRange};
-use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId};
+use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId, WorldReplayClosureV1};
 use pos_runtime::ErasureReadSenderV1;
 use pos_state::ProjectionRegistry;
 
@@ -22,17 +22,9 @@ pub fn replay(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
-    replay_range(
-        sender,
-        timeline,
-        SeqRange::all(),
-        registry,
-        artifact_digest,
-        evaluation,
-    )
+    replay_range(sender, timeline, SeqRange::all(), registry, closure)
 }
 
 /// Replay events up to and **including** `at_seq` on `timeline`.
@@ -47,18 +39,10 @@ pub fn replay_at(
     timeline: TimelineId,
     at_seq: Seq,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<(), CoreError> {
-    replay_range(
-        sender,
-        timeline,
-        SeqRange::bounded(Seq::ZERO, at_seq),
-        registry,
-        artifact_digest,
-        evaluation,
-    )
-    .map(|_| ())
+    replay_range(sender, timeline, SeqRange::bounded(Seq::ZERO, at_seq), registry, closure)
+        .map(|_| ())
 }
 
 fn replay_range(
@@ -66,16 +50,18 @@ fn replay_range(
     timeline: TimelineId,
     range: SeqRange,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = evaluation
-            .require_authoritative_use(
-                pos_core::ErasureArtifactClassV1::TimelineReplay,
-                artifact_digest,
-            )
+        outcome = sender
+            .admit_world_replay(closure)
+            .map_err(crate::host_error_to_core)
+            .and_then(|verified| {
+                verified
+                    .require_authoritative_use()
+                    .map_err(|_| CoreError::ArtifactUnavailable)
+            })
             .map_err(|_| CoreError::ArtifactUnavailable)
             .and_then(|()| {
                 sender
@@ -86,7 +72,18 @@ fn replay_range(
                     )
                     .map_err(crate::host_error_to_core)
             })
-            .inspect(|events| registry.fold_events(events));
+            .inspect(|events| registry.fold_events(events))
+            .and_then(|events| {
+                sender
+                    .admit_world_replay(closure)
+                    .map_err(crate::host_error_to_core)
+                    .and_then(|verified| {
+                        verified
+                            .require_authoritative_use()
+                            .map_err(|_| CoreError::ArtifactUnavailable)
+                    })
+                    .map(|()| events)
+            });
     };
     sender
         .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
@@ -243,55 +240,31 @@ mod tests {
     }
 
     #[test]
-    fn public_replay_commands_hold_the_host_generation_fence() {
+    fn public_replay_commands_fail_closed_without_installed_world_verifier() {
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gate = host.containment_gate();
-        let (timeline, entity, third_seq) = {
+        let timeline = {
             let mut commands = host.command_sender().test_ok();
             let timeline = commands.create_timeline("hosted-replay").test_ok();
             let entity = EntityId::new();
-            let events = commands
-                .append(
-                    timeline.id(),
-                    &[draft(entity), draft(entity), draft(entity)],
-                )
+            commands
+                .append(timeline.id(), &[draft(entity), draft(entity), draft(entity)])
                 .test_ok();
-            (timeline.id(), entity, events[2].seq)
+            timeline.id()
         };
 
-        let mut complete = ProjectionRegistry::new().with_erasure_gate(gate.clone());
-        complete.register("count", Box::new(CountReducer));
-        let mut partial = ProjectionRegistry::new().with_erasure_gate(gate);
-        partial.register("count", Box::new(CountReducer));
-        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
-        assert_eq!(
-            super::replay(
-                &mut reads,
-                timeline,
-                &mut complete,
-                REPLAY_DIGEST,
-                &evaluation,
-            )
-            .test_ok()
-            .len(),
-            3
-        );
-        super::replay_at(
-            &mut reads,
-            timeline,
-            third_seq,
-            &mut partial,
-            REPLAY_DIGEST,
-            &evaluation,
-        )
-        .test_ok();
-        assert_eq!(count_for(&complete, &entity), 3);
-        assert_eq!(count_for(&partial, &entity), 3);
+        let closure = pos_core::WorldReplayClosureV1::test_fixture();
+        assert!(matches!(
+            super::replay(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     struct ReadFailStore;
