@@ -2715,7 +2715,7 @@ impl MemoryStore {
         &mut self,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
-    ) -> Result<Timeline, CoreError> {
+    ) -> Result<(Timeline, bool), CoreError> {
         let persisted = self.load_key_registry()?;
         if persisted
             .as_ref()
@@ -2736,12 +2736,12 @@ impl MemoryStore {
             if persisted.is_none() {
                 self.save_key_registry_unchecked(expected_registry)?;
             }
-            return Ok(timeline);
+            return Ok((timeline, false));
         }
 
         let timeline = self.create_timeline(name)?;
         if persisted.is_some() {
-            return Ok(timeline);
+            return Ok((timeline, true));
         }
         if let Err(error) = self.save_key_registry_unchecked(expected_registry) {
             return match delete_visible_timeline(self, timeline.id()) {
@@ -2751,7 +2751,7 @@ impl MemoryStore {
                 ))),
             };
         }
-        Ok(timeline)
+        Ok((timeline, true))
     }
 
     fn save_key_registry_unchecked(
@@ -2848,7 +2848,7 @@ impl EventStore for MemoryStore {
         permit: &ErasureTopologyTransitionPermitV1,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
-    ) -> Result<Timeline, CoreError> {
+    ) -> Result<(Timeline, bool), CoreError> {
         self.ensure_host_transition_permit(permit)?;
         Self::initialize_timeline_with_key_registry_for_host_transition_unchecked(
             self,
