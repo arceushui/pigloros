@@ -5190,10 +5190,7 @@ fn sqlite_verify_recovered_fork_child(
     hasher: &dyn Hasher,
     recovered: &ErasureForkRecoveryV1,
 ) -> Result<(), ErasureErrorV1> {
-    let (parent, at_seq) = recovered
-        .child()
-        .fork_point
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let (parent, at_seq) = recovered.fork_point();
     let chain_head = SqliteStore::compute_chain_hash_at_unchecked_on(conn, hasher, parent, at_seq)
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     if !sqlite_timeline_is_exact(conn, recovered.child(), chain_head)? {

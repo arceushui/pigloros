@@ -5722,6 +5722,7 @@ pub struct ErasureForkRecoveryV1 {
     child_scope: ErasureReferenceV1,
     successor_generation: ErasureReferenceV1,
     child: crate::TimelineMeta,
+    fork_point: (TimelineId, Seq),
     receipt_digest: ErasureReferenceV1,
 }
 
@@ -5756,6 +5757,7 @@ impl ErasureForkRecoveryV1 {
             child_scope,
             successor_generation,
             child,
+            fork_point,
             receipt_digest,
         })
     }
@@ -5846,6 +5848,12 @@ impl ErasureForkRecoveryV1 {
     #[must_use]
     pub const fn child(&self) -> &crate::TimelineMeta {
         &self.child
+    }
+
+    /// Return the validated parent and sequence at which the child forked.
+    #[must_use]
+    pub const fn fork_point(&self) -> (TimelineId, Seq) {
+        self.fork_point
     }
 
     /// Return the content address of the minimized durable receipt.

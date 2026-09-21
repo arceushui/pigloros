@@ -1542,10 +1542,7 @@ impl MemoryStore {
         &self,
         result: &ErasureForkRecoveryV1,
     ) -> Result<(), ErasureErrorV1> {
-        let (parent, at_seq) = result
-            .child()
-            .fork_point
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let (parent, at_seq) = result.fork_point();
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent, at_seq)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
