@@ -237,6 +237,7 @@ impl OutputAdmissionV1 {
                 bytes,
             };
         }
+        drop(usage);
         Ok(())
     }
 }
