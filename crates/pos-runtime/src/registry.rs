@@ -3066,8 +3066,7 @@ impl PluginRegistry {
             return Err(ActionRejected::CapabilityNotGranted);
         }
 
-        let draft = self.approve_action_draft(proposal)?;
-        Ok(draft)
+        self.approve_action_draft(proposal)
     }
 
     fn approve_action_draft(
