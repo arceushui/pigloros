@@ -751,6 +751,7 @@ dependencies = [
  "blake3",
  "ciborium",
  "piglor-ledger",
+ "pos-conformance",
  "pos-core",
  "pos-plugin-geo",
  "pos-plugin-ledger",
@@ -807,6 +808,24 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "pos-conformance"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "ed25519-dalek",
+ "libc",
+ "pos-core",
+ "pos-crypto",
+ "pos-reference",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "pos-core"
