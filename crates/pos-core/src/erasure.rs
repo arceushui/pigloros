@@ -437,7 +437,10 @@ impl ErasureTopologyTransitionPermitV1 {
         gate: &ErasureContainmentGateV1,
         binding: &ErasureTopologyStoreBindingV1,
     ) -> bool {
-        if self.gate_id != gate.topology_binding_id || binding.gate_id != self.gate_id {
+        if self.gate_id != gate.topology_binding_id {
+            return false;
+        }
+        if binding.gate_id != gate.topology_binding_id {
             return false;
         }
         self.claimed_store_id.get().map_or_else(
