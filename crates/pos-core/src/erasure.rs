@@ -423,10 +423,11 @@ impl ErasureTopologyTransitionPermitV1 {
     /// successful call binds the permit to that adapter for the remainder of
     /// the fenced callback; later calls must name the same adapter.
     #[must_use]
-    pub fn claim_for_store(&self, gate: &ErasureContainmentGateV1, store_identity: usize) -> bool {
+    pub fn claim_for_store<T>(&self, gate: &ErasureContainmentGateV1, store: &T) -> bool {
         if self.gate_identity != std::ptr::from_ref(gate) as usize {
             return false;
         }
+        let store_identity = std::ptr::from_ref(store) as usize;
         self.claimed_store.get().map_or_else(
             || {
                 self.claimed_store.set(Some(store_identity));
@@ -7205,11 +7206,13 @@ mod coverage_paths {
         let foreign_gate = ErasureContainmentGateV1::new_test_open();
         let mut claims = None;
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let store = 1_u8;
+            let foreign_store = 2_u8;
             claims = Some((
-                permit.claim_for_store(&gate, 1),
-                permit.claim_for_store(&gate, 1),
-                permit.claim_for_store(&foreign_gate, 1),
-                permit.claim_for_store(&gate, 2),
+                permit.claim_for_store(&gate, &store),
+                permit.claim_for_store(&gate, &store),
+                permit.claim_for_store(&foreign_gate, &store),
+                permit.claim_for_store(&gate, &foreign_store),
             ));
             Ok((inventory.clone(), ()))
         };

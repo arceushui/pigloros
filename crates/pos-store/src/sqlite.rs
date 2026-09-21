@@ -3512,7 +3512,7 @@ impl SqliteStore {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
         permit
-            .claim_for_store(gate, std::ptr::from_ref(self) as usize)
+            .claim_for_store(gate, self)
             .then_some(())
             .ok_or(CoreError::ErasureContainmentUnavailable)
     }

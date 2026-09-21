@@ -2577,7 +2577,7 @@ impl MemoryStore {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
         permit
-            .claim_for_store(gate, std::ptr::from_ref(self) as usize)
+            .claim_for_store(gate, self)
             .then_some(())
             .ok_or(CoreError::ErasureContainmentUnavailable)
     }
@@ -6222,20 +6222,14 @@ mod tests {
         let mut mismatch = new_store();
         mismatch.save_key_registry(&persisted).test_ok();
         assert!(mismatch
-            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
-                "mismatch",
-                &KeyRegistryStateV1::new(),
-            )
+            .initialize_timeline_with_key_registry("mismatch", &KeyRegistryStateV1::new(),)
             .is_err());
         assert!(mismatch.list_timelines().test_ok().is_empty());
 
         let mut existing = new_store();
         let existing_timeline = existing.create_timeline("existing").test_ok();
         let reused = existing
-            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
-                "existing",
-                &KeyRegistryStateV1::new(),
-            )
+            .initialize_timeline_with_key_registry("existing", &KeyRegistryStateV1::new())
             .test_ok();
         assert_eq!(reused.id(), existing_timeline.id());
         assert_eq!(
@@ -6248,7 +6242,7 @@ mod tests {
             .create_timeline("existing-invalid")
             .test_ok();
         assert!(existing_invalid
-            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+            .initialize_timeline_with_key_registry(
                 "existing-invalid",
                 &super::coverage_entrypoints::invalid_registry(),
             )
@@ -6257,16 +6251,13 @@ mod tests {
         let mut already_registered = new_store();
         already_registered.save_key_registry(&persisted).test_ok();
         let created = already_registered
-            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
-                "new-ledger",
-                &persisted,
-            )
+            .initialize_timeline_with_key_registry("new-ledger", &persisted)
             .test_ok();
         assert_eq!(created.meta.name.as_deref(), Some("new-ledger"));
 
         let mut rollback = new_store();
         assert!(rollback
-            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+            .initialize_timeline_with_key_registry(
                 "invalid-registry",
                 &super::coverage_entrypoints::invalid_registry(),
             )
@@ -6276,7 +6267,7 @@ mod tests {
         let mut rollback_failure = new_store();
         fail_next_visible_delete_for_test();
         let error = rollback_failure
-            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+            .initialize_timeline_with_key_registry(
                 "rollback-failure",
                 &super::coverage_entrypoints::invalid_registry(),
             )
