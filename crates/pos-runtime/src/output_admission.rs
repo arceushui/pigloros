@@ -80,27 +80,12 @@ impl OutputPolicyArtifactInputV1 {
         execution_profile_artifact: &[u8],
         retention_policy_artifact: &[u8],
     ) -> Result<Self, OutputAdmissionErrorV1> {
-        if implementation_artifact.is_empty()
-            || implementation_artifact.len()
-                > crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1
-        {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid {
-                kind: "implementation",
-            });
-        }
-        if configuration_artifact.len()
-            > crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1
-        {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid {
-                kind: "configuration",
-            });
-        }
-        if execution_profile_artifact.len() > pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1 {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" });
-        }
-        if retention_policy_artifact.len() > MAX_WORLD_RETENTION_RECORD_BYTES_V1 {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" });
-        }
+        validate_leaf_lengths(
+            implementation_artifact,
+            configuration_artifact,
+            execution_profile_artifact,
+            retention_policy_artifact,
+        )?;
         Ok(Self {
             implementation_artifact: implementation_artifact.to_vec(),
             configuration_artifact: configuration_artifact.to_vec(),
@@ -368,27 +353,12 @@ impl OutputPolicyClosureV1 {
         if executable_budget_bytes.len() > MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1 {
             return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EBP1" });
         }
-        if implementation_artifact.is_empty()
-            || implementation_artifact.len()
-                > crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1
-        {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid {
-                kind: "implementation",
-            });
-        }
-        if configuration_artifact.len()
-            > crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1
-        {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid {
-                kind: "configuration",
-            });
-        }
-        if execution_profile_artifact.len() > pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1 {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" });
-        }
-        if retention_policy_artifact.len() > MAX_WORLD_RETENTION_RECORD_BYTES_V1 {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" });
-        }
+        validate_leaf_lengths(
+            implementation_artifact,
+            configuration_artifact,
+            execution_profile_artifact,
+            retention_policy_artifact,
+        )?;
         let output_policy = OutputPolicyV1::from_canonical_cbor(output_policy_bytes)
             .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EOP1" })?;
         let executable_budget =
@@ -623,6 +593,36 @@ impl OutputPolicyClosureV1 {
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
+}
+
+fn validate_leaf_lengths(
+    implementation_artifact: &[u8],
+    configuration_artifact: &[u8],
+    execution_profile_artifact: &[u8],
+    retention_policy_artifact: &[u8],
+) -> Result<(), OutputAdmissionErrorV1> {
+    if implementation_artifact.is_empty()
+        || implementation_artifact.len()
+            > crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1
+    {
+        return Err(OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "implementation",
+        });
+    }
+    if configuration_artifact.len()
+        > crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1
+    {
+        return Err(OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration",
+        });
+    }
+    if execution_profile_artifact.len() > pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1 {
+        return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" });
+    }
+    if retention_policy_artifact.len() > MAX_WORLD_RETENTION_RECORD_BYTES_V1 {
+        return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" });
+    }
+    Ok(())
 }
 
 /// Deterministic, host-side validation of one Plugin's complete output batch.
