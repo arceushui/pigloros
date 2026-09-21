@@ -68,19 +68,22 @@ const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
 fn builtin_output_binding(
-    plugin_id: PluginId,
-    plugin_version: &str,
+    plugin: &dyn Plugin,
     event_type: &str,
-    implementation_hash: Hash,
-    configuration_hash: Hash,
-    retention_hash: Hash,
-    execution_profile_hash: Hash,
+    cpu_reservations_us: [u32; 3],
+    implementation_artifact: &[u8],
+    configuration_details: &[u8],
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), Box<dyn std::error::Error>> {
+    let profile_artifact =
+        pos_conformance::draft_execution_profile_bytes_v1("deterministic-local-v1")?;
+    let execution_profile_hash = pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact);
+    let configuration_artifact =
+        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
+        workload_profile: WorkloadProfileV1::Research,
         cut_budget_family: 0,
-        max_event_bytes: 4_096,
+        max_event_bytes: 16_384,
         fidelity_budgets: [
             FidelityBudgetV1 {
                 level: 0,
@@ -105,8 +108,8 @@ fn builtin_output_binding(
             },
         ],
         plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
-            cpu_reservations_us: [10; 3],
+            plugin_id: plugin.id(),
+            cpu_reservations_us,
         }],
         accounting_semantics: 0,
         execution_profile_hash,
@@ -121,12 +124,15 @@ fn builtin_output_binding(
         None,
     )?;
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id,
-        plugin_version: plugin_version.to_owned(),
-        implementation_hash,
-        base_configuration_digest: configuration_hash,
+        plugin_id: plugin.id(),
+        plugin_version: plugin.version().to_owned(),
+        implementation_hash: pos_runtime::implementation_artifact_hash_v1(implementation_artifact),
+        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        ),
         executable_profile_hash: budget.digest(),
-        retention_policy_hash: retention_hash,
+        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
         output_declarations: vec![declaration],
     })?;
@@ -791,14 +797,13 @@ fn run_builtin_reference_experiment(
     // Register reference plugins
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
+    let agent_configuration = serde_json::to_vec(agent_plugin.actions())?;
     let (agent_policy, agent_budget) = builtin_output_binding(
-        agent_plugin.id(),
-        agent_plugin.version(),
+        &agent_plugin,
         pos_plugin_rule_agent::EVENT_TYPE_DECISION,
-        Hash::from_bytes([0x51; 32]),
-        Hash::from_bytes([0x52; 32]),
-        Hash::from_bytes([0x53; 32]),
-        Hash::from_bytes([0x54; 32]),
+        [300_000, 150_000, 30_000],
+        include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
+        &agent_configuration,
     )?;
     exp.register_with_output_policy(
         &agent_plugin,
@@ -813,14 +818,13 @@ fn run_builtin_reference_experiment(
 
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
+    let obs_configuration = 1.0_f64.to_be_bytes();
     let (obs_policy, obs_budget) = builtin_output_binding(
-        obs_plugin.id(),
-        obs_plugin.version(),
+        &obs_plugin,
         pos_plugin_synthetic_obs::EVENT_TYPE,
-        Hash::from_bytes([0x61; 32]),
-        Hash::from_bytes([0x62; 32]),
-        Hash::from_bytes([0x63; 32]),
-        Hash::from_bytes([0x64; 32]),
+        [200_000, 100_000, 20_000],
+        include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+        &obs_configuration,
     )?;
     exp.register_with_output_policy(
         &obs_plugin,

@@ -508,14 +508,24 @@ mod tests {
             executable_profile_hash: budget.digest(),
             retention_policy_hash: Hash::from_bytes([44; 32]),
             policy_revision: 1,
-            output_declarations: vec![OutputDeclarationV1::new(
-                EVENT_TYPE_ACTION.to_owned(),
-                OutputAuthorityV1::Authoritative,
-                OutputFidelityV1::L0,
-                4_096,
-                None,
-                None,
-            )?],
+            output_declarations: vec![
+                OutputDeclarationV1::new(
+                    EVENT_TYPE_ACTION.to_owned(),
+                    OutputAuthorityV1::Authoritative,
+                    OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )?,
+                OutputDeclarationV1::new(
+                    RECORDER_EVENT_TYPE.to_owned(),
+                    OutputAuthorityV1::Authoritative,
+                    OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )?,
+            ],
         })?;
         Ok((policy, budget))
     }

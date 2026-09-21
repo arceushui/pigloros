@@ -27,7 +27,6 @@ pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
 use pos_core::{
     clock::{Seq, WallTime},
-    crypto::Hash as CoreHash,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EntityId, EventId, PluginId, TimelineId},
@@ -66,9 +65,19 @@ use tokio::sync::broadcast;
 use ulid::Ulid;
 
 fn gateway_output_binding(
-    plugin_id: PluginId,
-    plugin_version: &str,
+    plugin: &dyn Plugin,
+    configuration_details: &[u8],
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), pos_runtime::RuntimeError> {
+    let plugin_name = plugin.name().to_owned();
+    let profile_artifact = pos_conformance::draft_execution_profile_bytes_v1(
+        "deterministic-local-v1",
+    )
+    .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
+        name: plugin_name.clone(),
+        reason: error.to_string(),
+    })?;
+    let configuration_artifact =
+        pos_runtime::canonical_plugin_configuration_v1(plugin, configuration_details);
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
         workload_profile: WorkloadProfileV1::Interactive,
@@ -98,15 +107,15 @@ fn gateway_output_binding(
             },
         ],
         plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
-            cpu_reservations_us: [10; 3],
+            plugin_id: plugin.id(),
+            cpu_reservations_us: [500_000, 250_000, 50_000],
         }],
         accounting_semantics: 0,
-        execution_profile_hash: CoreHash::from_bytes([0x74; 32]),
+        execution_profile_hash: pos_runtime::execution_profile_artifact_hash_v1(&profile_artifact),
         max_pass_wall_duration_us: 1_000,
     })
     .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: "gateway-world-actions".to_owned(),
+        name: plugin_name.clone(),
         reason: error.to_string(),
     })?;
     let declaration = OutputDeclarationV1::new(
@@ -118,21 +127,24 @@ fn gateway_output_binding(
         None,
     )
     .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: "gateway-world-actions".to_owned(),
+        name: plugin_name.clone(),
         reason: error.to_string(),
     })?;
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id,
-        plugin_version: plugin_version.to_owned(),
-        implementation_hash: CoreHash::from_bytes([0x71; 32]),
-        base_configuration_digest: CoreHash::from_bytes([0x72; 32]),
+        plugin_id: plugin.id(),
+        plugin_version: plugin.version().to_owned(),
+        implementation_hash: pos_runtime::implementation_artifact_hash_v1(include_bytes!("lib.rs")),
+        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        ),
         executable_profile_hash: budget.digest(),
-        retention_policy_hash: CoreHash::from_bytes([0x73; 32]),
+        retention_policy_hash: pos_runtime::reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
         output_declarations: vec![declaration],
     })
     .map_err(|error| pos_runtime::RuntimeError::CapabilityMismatch {
-        name: "gateway-world-actions".to_owned(),
+        name: plugin_name,
         reason: error.to_string(),
     })?;
     Ok((policy, budget))
@@ -745,22 +757,26 @@ fn gateway_action_registry_builder(
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
+    let mut bodies = bodies.into_iter().collect::<Vec<_>>();
+    bodies.sort_unstable();
+    bodies.dedup();
+    let mut configuration_details = Vec::with_capacity(bodies.len() * 16);
+    for body in &bodies {
+        configuration_details.extend_from_slice(&body.inner().to_bytes());
+    }
+    let world_plugin = WorldPlugin::new().with_bodies(bodies);
     drop(
-        gateway_output_binding(descriptor.id(), descriptor.version()).and_then(
-            |(policy, budget)| {
-                registry.register_with_output_policy_and_approver(
-                    &descriptor,
-                    policy,
-                    budget,
-                    None,
-                    None,
-                    Some(Box::new(GatewayWorldActionApprover(
-                        WorldPlugin::new().with_bodies(bodies),
-                    ))),
-                    [Kind::new(EVENT_TYPE_ACTION)],
-                )
-            },
-        ),
+        gateway_output_binding(&descriptor, &configuration_details).and_then(|(policy, budget)| {
+            registry.register_with_output_policy_and_approver(
+                &descriptor,
+                policy,
+                budget,
+                None,
+                None,
+                Some(Box::new(GatewayWorldActionApprover(world_plugin))),
+                [Kind::new(EVENT_TYPE_ACTION)],
+            )
+        }),
     );
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);

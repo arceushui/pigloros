@@ -31,6 +31,7 @@ pub mod error;
 pub mod output_admission;
 pub mod recorder;
 pub mod registry;
+pub mod reviewed_policy;
 pub mod scheduler;
 pub mod schema;
 
@@ -53,5 +54,9 @@ pub use error::{ActionSubmissionError, RuntimeError};
 pub use output_admission::{OutputAdmissionErrorV1, OutputAdmissionV1};
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
+pub use reviewed_policy::{
+    canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
+    implementation_artifact_hash_v1, reviewed_retention_policy_hash_v1,
+};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;

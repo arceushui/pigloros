@@ -20,7 +20,6 @@ use pos_conformance::{
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
 };
 use pos_core::{
-    crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
     output_policy::{
@@ -39,7 +38,9 @@ use pos_plugin_world::{
     EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1, SENSOR_MIN_RESOLUTION_MM,
 };
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
+    canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1,
+    implementation_artifact_hash_v1, reviewed_retention_policy_hash_v1, Driver,
+    DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -73,18 +74,25 @@ const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
 fn reviewed_output_binding(
-    name: &str,
-    plugin_id: PluginId,
-    plugin_version: &str,
+    plugin: &dyn Plugin,
     event_types: &[&str],
-    implementation_hash: Hash,
-    configuration_hash: Hash,
-    retention_hash: Hash,
-    execution_profile_hash: Hash,
+    profile_id: &str,
+    cpu_reservations_us: [u32; 3],
+    implementation_artifact: &[u8],
+    configuration_details: &[u8],
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    let name = plugin.name();
+    let profile_artifact =
+        pos_conformance::draft_execution_profile_bytes_v1(profile_id).map_err(|error| {
+            RuntimeError::CapabilityMismatch {
+                name: name.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+    let configuration_artifact = canonical_plugin_configuration_v1(plugin, configuration_details);
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
+        workload_profile: WorkloadProfileV1::Fork,
         cut_budget_family: 0,
         max_event_bytes: 4_096,
         fidelity_budgets: [
@@ -111,11 +119,11 @@ fn reviewed_output_binding(
             },
         ],
         plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
-            cpu_reservations_us: [10; 3],
+            plugin_id: plugin.id(),
+            cpu_reservations_us,
         }],
         accounting_semantics: 0,
-        execution_profile_hash,
+        execution_profile_hash: execution_profile_artifact_hash_v1(&profile_artifact),
         max_pass_wall_duration_us: 1_000,
     })
     .map_err(|error| RuntimeError::CapabilityMismatch {
@@ -140,12 +148,15 @@ fn reviewed_output_binding(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-        plugin_id,
-        plugin_version: plugin_version.to_owned(),
-        implementation_hash,
-        base_configuration_digest: configuration_hash,
+        plugin_id: plugin.id(),
+        plugin_version: plugin.version().to_owned(),
+        implementation_hash: implementation_artifact_hash_v1(implementation_artifact),
+        base_configuration_digest: pos_runtime::host_artifact_hash_v1(
+            b"pigloros.base-configuration.v1",
+            &configuration_artifact,
+        ),
         executable_profile_hash: budget.digest(),
-        retention_policy_hash: retention_hash,
+        retention_policy_hash: reviewed_retention_policy_hash_v1(),
         policy_revision: 1,
         output_declarations: declarations,
     })
@@ -158,11 +169,22 @@ fn reviewed_output_binding(
 
 fn world_output_binding(
     plugin: &WorldPlugin,
+    input: &MoatProofInputV1,
+    body: EntityId,
+    profile_id: &str,
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    let config = world_config(input);
+    let configuration_details =
+        config
+            .encode()
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+    let mut details = configuration_details.as_slice().to_vec();
+    details.extend_from_slice(&body.inner().to_bytes());
     reviewed_output_binding(
-        plugin.name(),
-        plugin.id(),
-        plugin.version(),
+        plugin,
         &[
             "world.action",
             EVENT_TYPE_ACTION_V1,
@@ -170,40 +192,44 @@ fn world_output_binding(
             "world.observation",
             EVENT_TYPE_OBSERVATION_V1,
         ],
-        Hash::from_bytes([0x11; 32]),
-        Hash::from_bytes([0x12; 32]),
-        Hash::from_bytes([0x13; 32]),
-        Hash::from_bytes([0x14; 32]),
+        profile_id,
+        [250_000, 125_000, 25_000],
+        include_bytes!("../../../plugins/world/src/lib.rs"),
+        &details,
     )
 }
 
 fn proof_agent_output_binding(
     plugin: &ProofAgentPlugin,
+    threshold: f64,
+    profile_id: &str,
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    let configuration_details = threshold.to_bits().to_be_bytes();
     reviewed_output_binding(
-        plugin.name(),
-        plugin.id(),
-        plugin.version(),
+        plugin,
         &[AGENT_EVENT_TYPE],
-        Hash::from_bytes([0x21; 32]),
-        Hash::from_bytes([0x22; 32]),
-        Hash::from_bytes([0x23; 32]),
-        Hash::from_bytes([0x24; 32]),
+        profile_id,
+        [150_000, 75_000, 15_000],
+        include_bytes!("moat_proof.rs"),
+        &configuration_details,
     )
 }
 
 fn proof_society_output_binding(
     plugin: &ProofSocietyPlugin,
+    profile_id: &str,
 ) -> Result<(OutputPolicyV1, ExecutableBudgetPolicyV1), RuntimeError> {
+    let configuration_details = SocietyDimension::all()
+        .iter()
+        .flat_map(|dimension| dimension.as_str().as_bytes().iter().copied().chain([0]))
+        .collect::<Vec<_>>();
     reviewed_output_binding(
-        plugin.name(),
-        plugin.id(),
-        plugin.version(),
+        plugin,
         &[pos_plugin_society::EVENT_TYPE_SIGNAL],
-        Hash::from_bytes([0x31; 32]),
-        Hash::from_bytes([0x32; 32]),
-        Hash::from_bytes([0x33; 32]),
-        Hash::from_bytes([0x34; 32]),
+        profile_id,
+        [100_000, 50_000, 10_000],
+        include_bytes!("../../../plugins/society/src/lib.rs"),
+        &configuration_details,
     )
 }
 
@@ -297,11 +323,12 @@ impl MoatProofRun {
         let input = self.input;
         let mode = self.mode;
         result_pipeline! {
-            failure_probes(input.resource_limit) => |failure_probes|;
+            let profile_id = execution_profile_id(mode);
+            failure_probes(input.resource_limit, profile_id) => |failure_probes|;
             ProofTopology::new(input.clone()).map_err(MoatProofError::from) => |topology|;
-            plugin_versions(&topology).map_err(MoatProofError::from) => |plugin_versions|;
+            plugin_versions_for_profile(&topology, profile_id).map_err(MoatProofError::from) => |plugin_versions|;
             let factory_topology = topology.clone();
-            let registry_factory = move || build_registry(&factory_topology);
+            let registry_factory = move || build_registry_for_profile(&factory_topology, profile_id);
             let mut experiment = Experiment::new(ExperimentConfig {
                 name: format!("wave8-{}", input.scenario_id),
                 stop: StopCondition::MaxTicks(input.ticks.saturating_add(1)),
@@ -309,7 +336,7 @@ impl MoatProofRun {
             })
             .with_fork_registry_factory(registry_factory)
             .with_resource_limit(input.resource_limit);
-            register_plugins(&mut experiment, &topology).map_err(MoatProofError::from) => |()|;
+            register_plugins_for_profile(&mut experiment, &topology, profile_id).map_err(MoatProofError::from) => |()|;
             experiment.start().map_err(MoatProofError::from) => |mut parent|;
             parent.step_tick().map_err(MoatProofError::from) => |_|;
             parent.source_events_with_control().map_err(MoatProofError::from) => |events|;
@@ -602,13 +629,24 @@ impl ProofTopology {
     }
 }
 
-fn register_plugins(
+fn register_plugins_for_profile(
     experiment: &mut Experiment,
     topology: &ProofTopology,
+    profile_id: &str,
 ) -> Result<(), RuntimeError> {
-    let (world_policy, world_budget) = world_output_binding(&topology.world_plugin)?;
-    let (agent_policy, agent_budget) = proof_agent_output_binding(&topology.agent_plugin)?;
-    let (society_policy, society_budget) = proof_society_output_binding(&topology.society_plugin)?;
+    let (world_policy, world_budget) = world_output_binding(
+        &topology.world_plugin,
+        &topology.input,
+        topology.body,
+        profile_id,
+    )?;
+    let (agent_policy, agent_budget) = proof_agent_output_binding(
+        &topology.agent_plugin,
+        topology.input.agent_response_threshold,
+        profile_id,
+    )?;
+    let (society_policy, society_budget) =
+        proof_society_output_binding(&topology.society_plugin, profile_id)?;
     result_pipeline! {
         experiment.register_with_output_policy_and_approver(
             &topology.world_plugin,
@@ -643,12 +681,32 @@ fn register_plugins(
     }
 }
 
-fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
+fn register_plugins(
+    experiment: &mut Experiment,
+    topology: &ProofTopology,
+) -> Result<(), RuntimeError> {
+    register_plugins_for_profile(experiment, topology, "deterministic-local-v1")
+}
+
+fn build_registry_for_profile(
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-    let (world_policy, world_budget) = world_output_binding(&topology.world_plugin)?;
-    let (agent_policy, agent_budget) = proof_agent_output_binding(&topology.agent_plugin)?;
-    let (society_policy, society_budget) = proof_society_output_binding(&topology.society_plugin)?;
+    let (world_policy, world_budget) = world_output_binding(
+        &topology.world_plugin,
+        &topology.input,
+        topology.body,
+        profile_id,
+    )?;
+    let (agent_policy, agent_budget) = proof_agent_output_binding(
+        &topology.agent_plugin,
+        topology.input.agent_response_threshold,
+        profile_id,
+    )?;
+    let (society_policy, society_budget) =
+        proof_society_output_binding(&topology.society_plugin, profile_id)?;
     result_pipeline! {
         registry.register_with_output_policy_and_approver(
             &topology.world_plugin,
@@ -684,6 +742,19 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
     }
 }
 
+fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
+    build_registry_for_profile(topology, "deterministic-local-v1")
+}
+
+fn execution_profile_id(mode: ExecutionModeV1) -> &'static str {
+    match mode {
+        ExecutionModeV1::AirGapped => "deterministic-air-gapped-v1",
+        ExecutionModeV1::Local | ExecutionModeV1::Replay | ExecutionModeV1::Fork => {
+            "deterministic-local-v1"
+        }
+    }
+}
+
 fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityId) -> WorldDriver {
     WorldDriver::new(
         vec![Body {
@@ -694,22 +765,26 @@ fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityI
             vy: input.initial_velocity[1],
         }],
         Box::new(SimpleKinematicBackend::new()),
-        WorldConfigV1 {
-            timestep_micros: 16_667,
-            coord_convention: COORD_CONVENTION_RIGHT_HANDED_Y_UP,
-            gravity_x: 0.0,
-            gravity_y: 0.0,
-            gravity_z: 0.0,
-            backend_id: "simple-kinematic".to_owned(),
-            backend_version: "1.0.0".to_owned(),
-            backend_content_hash: *blake3::hash(WORLD_BACKEND_CONTENT).as_bytes(),
-            action_schema_version: 1,
-            observation_schema_version: 1,
-            sensor_min_resolution_mm: SENSOR_MIN_RESOLUTION_MM,
-            actuator_catalogue_version: 1,
-        },
+        world_config(input),
     )
     .with_config_entity(config_entity)
+}
+
+fn world_config(_input: &MoatProofInputV1) -> WorldConfigV1 {
+    WorldConfigV1 {
+        timestep_micros: 16_667,
+        coord_convention: COORD_CONVENTION_RIGHT_HANDED_Y_UP,
+        gravity_x: 0.0,
+        gravity_y: 0.0,
+        gravity_z: 0.0,
+        backend_id: "simple-kinematic".to_owned(),
+        backend_version: "1.0.0".to_owned(),
+        backend_content_hash: *blake3::hash(WORLD_BACKEND_CONTENT).as_bytes(),
+        action_schema_version: 1,
+        observation_schema_version: 1,
+        sensor_min_resolution_mm: SENSOR_MIN_RESOLUTION_MM,
+        actuator_catalogue_version: 1,
+    }
 }
 
 fn payload_digest(event: &Event) -> [u8; 32] {
@@ -1585,8 +1660,11 @@ fn is_endogenous_event(event_type: &str) -> bool {
     )
 }
 
-fn plugin_versions(topology: &ProofTopology) -> Result<BTreeMap<String, String>, RuntimeError> {
-    build_registry(topology).map(|registry| {
+fn plugin_versions_for_profile(
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    build_registry_for_profile(topology, profile_id).map(|registry| {
         registry
             .plugin_versions()
             .map(|(name, version)| (name.to_owned(), version.to_owned()))
@@ -1661,16 +1739,20 @@ fn suffix_audit(baseline: &[Event], counterfactual: &[Event], fork_cut_seq: u64)
     )
 }
 
-fn failure_probes(resource_limit: u64) -> Result<Vec<PluginFailureV1>, MoatProofError> {
+fn failure_probes(
+    resource_limit: u64,
+    profile_id: &str,
+) -> Result<Vec<PluginFailureV1>, MoatProofError> {
     ["plugin_crash", "resource_exhaustion"]
         .into_iter()
-        .map(|class| failure_probe(class, resource_limit))
+        .map(|class| failure_probe(class, resource_limit, profile_id))
         .collect()
 }
 
 fn failure_probe(
     class: &'static str,
     resource_limit: u64,
+    profile_id: &str,
 ) -> Result<PluginFailureV1, MoatProofError> {
     let sibling_steps = Arc::new(AtomicU64::new(0));
     let sibling_plugin = SiblingProbePlugin {
@@ -1686,25 +1768,24 @@ fn failure_probe(
     })
     .with_resource_limit(resource_limit);
     let (sibling_policy, sibling_budget) = reviewed_output_binding(
-        sibling_plugin.name(),
-        sibling_plugin.id(),
-        sibling_plugin.version(),
+        &sibling_plugin,
         &["proof.failure.sibling"],
-        Hash::from_bytes([0x41; 32]),
-        Hash::from_bytes([0x42; 32]),
-        Hash::from_bytes([0x43; 32]),
-        Hash::from_bytes([0x44; 32]),
+        profile_id,
+        [300_000, 150_000, 30_000],
+        include_bytes!("moat_proof.rs"),
+        b"successful-sibling:v1",
     )
     .map_err(MoatProofError::from)?;
+    let mut failure_details = class.as_bytes().to_vec();
+    failure_details.push(0);
+    failure_details.extend_from_slice(&resource_limit.to_be_bytes());
     let (failure_policy, failure_budget) = reviewed_output_binding(
-        plugin.name(),
-        plugin.id(),
-        plugin.version(),
+        &plugin,
         &["proof.failure.probe"],
-        Hash::from_bytes([0x45; 32]),
-        Hash::from_bytes([0x46; 32]),
-        Hash::from_bytes([0x47; 32]),
-        Hash::from_bytes([0x48; 32]),
+        profile_id,
+        [200_000, 100_000, 20_000],
+        include_bytes!("moat_proof.rs"),
+        &failure_details,
     )
     .map_err(MoatProofError::from)?;
     result_pipeline! {
