@@ -202,11 +202,11 @@ pub trait ErasureCoordinatorAuthorityV1:
     /// Returns a closed topology, policy, trust, or provenance error.
     fn verified_topology_observation_for_candidate(
         &self,
-        request: ErasureReferenceV1,
-        manifest_digest: ErasureReferenceV1,
+        _request: ErasureReferenceV1,
+        _manifest_digest: ErasureReferenceV1,
         _candidate: TimelineId,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        self.verified_topology_observation(request, manifest_digest)
+        Err(ErasureErrorV1::ProvenanceMissing)
     }
 
     /// Authenticate a newly submitted erasure request.
@@ -4605,10 +4605,10 @@ mod tests {
     }
 
     #[test]
-    fn default_candidate_observation_delegates_to_the_legacy_method() {
+    fn default_candidate_observation_fails_closed() {
         assert_eq!(
             ErasureCoordinatorAuthorityV1::verified_topology_observation_for_candidate(
-                &ClosedErasureCoordinatorAuthorityV1,
+                &UnusedCoordinatorAuthorityV1::rejecting(),
                 reference(1),
                 reference(2),
                 TimelineId::new(),
