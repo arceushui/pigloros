@@ -106,6 +106,7 @@ struct TopologyTransitionResultV1 {
 enum TransitionFailureV1 {
     Host(ErasureHostErrorV1),
     Erasure(ErasureErrorV1),
+    ErasureBeforeCommit(ErasureErrorV1),
 }
 
 impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
@@ -1856,7 +1857,7 @@ impl ErasureExecutionHostV1 {
             .host_store()
             .get_timeline_for_host_transition(parent)
             .map_store_error()?
-            .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?
+            .ok_or(ErasureHostErrorV1::Conflict)?
             .meta
             .owner;
         let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
@@ -1892,7 +1893,7 @@ impl ErasureExecutionHostV1 {
                     self.run_identified_fork_transition(input, &mut transition_failure);
                 if let Err(error) = transition {
                     if transition_failure.is_none() {
-                        transition_failure = Some(TransitionFailureV1::Erasure(error));
+                        transition_failure = Some(TransitionFailureV1::ErasureBeforeCommit(error));
                     }
                 }
                 transition
@@ -2093,6 +2094,11 @@ impl ErasureExecutionHostV1 {
     ) -> bool {
         match transition_failure {
             Some(TransitionFailureV1::Host(ErasureHostErrorV1::StaleGeneration)) => true,
+            Some(TransitionFailureV1::ErasureBeforeCommit(error))
+                if is_non_poisoning_transition_error(error) =>
+            {
+                true
+            }
             Some(TransitionFailureV1::Erasure(error))
                 if is_non_poisoning_transition_error(error) =>
             {
@@ -3234,7 +3240,8 @@ const fn map_transition_failure(
 ) -> ErasureHostErrorV1 {
     match transition_failure {
         Some(TransitionFailureV1::Host(error)) => error,
-        Some(TransitionFailureV1::Erasure(error)) => map_erasure_error(error),
+        Some(TransitionFailureV1::Erasure(error))
+        | Some(TransitionFailureV1::ErasureBeforeCommit(error)) => map_erasure_error(error),
         None => publication_error,
     }
 }
