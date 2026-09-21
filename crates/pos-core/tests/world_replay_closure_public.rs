@@ -402,9 +402,18 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
         ArtifactOptionalityV1::Required,
         ArtifactTransitionRuleV1::PreserveExact,
     );
+    let duplicate_digest_closure =
+        WorldReplayClosureV1::new(duplicate_digest).expect("structural closure");
+    let mut authority = Authority {
+        now: WallTime::from_micros(1),
+        missing: None,
+        fail_now: false,
+        fail_artifact: false,
+        transition_optional_view: false,
+    };
     assert_eq!(
-        WorldReplayClosureV1::new(duplicate_digest),
-        Err(WorldReplayClosureErrorV1::DuplicateArtifact)
+        duplicate_digest_closure.admit(&mut authority),
+        Err(WorldReplayClosureErrorV1::EvaluationRejected)
     );
 
     let mut zero_length = base.clone();
