@@ -1,0 +1,23 @@
+name: debug-fuzz-lock
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: nightly-2026-07-01
+      - name: Generate isolated lockfile for inspection
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          cargo +nightly-2026-07-01 generate-lockfile
+          git diff -- Cargo.lock
