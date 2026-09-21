@@ -4332,7 +4332,6 @@ dependencies = [
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-runtime",
- "pos-state",
  "pos-store",
  "pos-time",
  "rusqlite",
