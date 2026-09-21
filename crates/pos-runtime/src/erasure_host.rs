@@ -141,6 +141,13 @@ trait ErasureHostStore:
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<TopologyTransitionResultV1, CoreError>;
+
+    fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<TopologyTransitionResultV1, CoreError>;
 }
 
 impl<T> ErasureHostStore for T
