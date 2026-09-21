@@ -6928,7 +6928,7 @@ mod coverage_entrypoints {
         );
         recovery_store.erasure_fork_admissions.insert(
             recovery_operation,
-            ErasureForkRecoveryV1::from_persisted(
+            ok(ErasureForkRecoveryV1::from_persisted(
                 recovery_operation,
                 recovery_binding,
                 recovery_generation,
@@ -6936,8 +6936,7 @@ mod coverage_entrypoints {
                 recovery_successor,
                 recovery_child,
                 recovery_receipt,
-            )
-            .test_ok(),
+            )),
         );
         fail_next_chain_hash_at_for_test();
         assert_eq!(
