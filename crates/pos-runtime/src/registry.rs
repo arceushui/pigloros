@@ -36,6 +36,7 @@ use crate::{
 };
 use std::{collections::HashSet, sync::Arc};
 
+#[cfg(debug_assertions)]
 fn generated_identity_hash(
     label: &[u8],
     plugin: &dyn Plugin,
@@ -2436,6 +2437,7 @@ impl PluginRegistry {
         self.register_with_output_policy(plugin, policy, budget, reducer, driver)
     }
 
+    #[cfg(debug_assertions)]
     fn generated_output_binding(
         plugin: &dyn Plugin,
     ) -> Result<
@@ -2492,6 +2494,7 @@ impl PluginRegistry {
         )
     }
 
+    #[cfg(debug_assertions)]
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -2756,6 +2759,7 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
+    #[cfg(debug_assertions)]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
