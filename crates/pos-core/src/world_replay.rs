@@ -286,7 +286,7 @@ impl WorldReplayClosureV1 {
     /// This helper is available only with the explicit `test-support` feature;
     /// production callers must obtain a closure from their recording owner.
     #[cfg(feature = "test-support")]
-    pub fn test_fixture() -> Self {
+    pub fn test_fixture() -> Result<Self, WorldReplayClosureErrorV1> {
         const DAY_MICROS: u64 = 86_400_000_000;
         let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
         let retention_policy = crate::retention::WorldRetentionPolicyV1::new(
@@ -299,7 +299,7 @@ impl WorldReplayClosureV1 {
                 maximum_total_days: 120,
             },
         )
-        .expect("test retention policy");
+        .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
         let retention_lease = crate::retention::WorldRetentionLeaseV1::new(
             &retention_policy,
             crate::retention::WorldRetentionLeaseInputV1 {
@@ -310,7 +310,7 @@ impl WorldReplayClosureV1 {
                 retention_deadline_micros: 120 * DAY_MICROS,
             },
         )
-        .expect("test retention lease");
+        .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
         let scope = Hash::from_bytes([9; 32]);
         let consumer_set =
             WorldConsumerSetV1::new(crate::world_consumer_set::WorldConsumerSetInputV1 {
@@ -321,15 +321,15 @@ impl WorldReplayClosureV1 {
                     Hash::from_bytes([41; 32]),
                     Hash::from_bytes([42; 32]),
                 )
-                .expect("test consumer")],
+                .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?],
                 producers: vec![crate::world_consumer_set::WorldProducerV1::new(
                     PluginId::from_ulid(Ulid::from(1_u128)),
                     Hash::from_bytes([43; 32]),
                 )
-                .expect("test producer")],
+                .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?],
                 optional_view_roots: vec![Hash::from_bytes([53; 32])],
             })
-            .expect("test consumer set");
+            .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
         let kinds = [
             (
                 WorldArtifactKindV1::OutputPolicy,
@@ -389,12 +389,14 @@ impl WorldReplayClosureV1 {
             .into_iter()
             .enumerate()
             .map(|(index, (kind, native_digest))| {
+                let owner_offset = u8::try_from(index)
+                    .map_err(|_| WorldReplayClosureErrorV1::ArtifactCountOutOfBounds)?;
                 WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
                     scope,
                     kind,
                     native_digest,
                     native_byte_length: 1,
-                    owner: [100 + u8::try_from(index).expect("fixture index"); 32],
+                    owner: [100 + owner_offset; 32],
                     data_class: crate::ArtifactDataClassV1::StructuralAuditMetadata,
                     optionality: if kind == WorldArtifactKindV1::OptionalView {
                         crate::ArtifactOptionalityV1::Optional
@@ -410,9 +412,9 @@ impl WorldReplayClosureV1 {
                     key_dependencies: Vec::new(),
                     child_node_hashes: Vec::new(),
                 })
-                .expect("test artifact leaf")
+                .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Self::new(WorldReplayClosureInputV1 {
             timeline_id,
             operation_identity: Hash::from_bytes([60; 32]),
@@ -423,7 +425,6 @@ impl WorldReplayClosureV1 {
             consumer_set,
             artifacts,
         })
-        .expect("test world replay closure")
     }
 
     /// Admit the closure against a host-owned clock and artifact authority.

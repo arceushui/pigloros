@@ -340,8 +340,8 @@ mod tests {
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
         registry_b.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
-        let closure_a = pos_core::WorldReplayClosureV1::test_fixture();
-        let closure_b = pos_core::WorldReplayClosureV1::test_fixture();
+        let closure_a = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
+        let closure_b = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
         let result = super::compare(
             &mut reads,
             [fork_a, fork_b],

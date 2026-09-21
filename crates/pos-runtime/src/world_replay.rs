@@ -77,22 +77,6 @@ impl VerifiedWorldReplayV1 {
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
         }
     }
-
-    /// Construct a result only inside the runtime verifier implementation.
-    #[allow(dead_code)]
-    pub(crate) fn from_verified_evidence(
-        closure: &WorldReplayClosureV1,
-        inventory_generation: ErasureReferenceV1,
-        replay_claim: ErasureReplayClaimV1,
-    ) -> Self {
-        Self {
-            closure_digest: closure.digest(),
-            timeline_id: closure.timeline_id(),
-            source_head: closure.source_head(),
-            inventory_generation,
-            replay_claim,
-        }
-    }
 }
 
 /// Installed native World Replay verifier.

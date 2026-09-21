@@ -50,7 +50,7 @@ fn snapshot_verification_requires_installed_world_verifier() {
         .test_ok();
     let mut reads = host.read_sender().test_ok();
     let mut capture_registry = registry(&gate);
-    let closure = pos_core::WorldReplayClosureV1::test_fixture();
+    let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
     let result = snapshot(&mut reads, timeline.id(), &mut capture_registry, &closure);
     assert!(matches!(
         result,
@@ -91,7 +91,7 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         &mut reads,
         unknown_timeline,
         &mut snapshot_registry,
-        &pos_core::WorldReplayClosureV1::test_fixture(),
+        &pos_core::WorldReplayClosureV1::test_fixture().test_ok(),
     )
     .is_err());
 
@@ -105,7 +105,7 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         &mut reads,
         &unknown_snapshot,
         &mut verification_registry,
-        &pos_core::WorldReplayClosureV1::test_fixture(),
+        &pos_core::WorldReplayClosureV1::test_fixture().test_ok(),
     )
     .is_err());
 }
