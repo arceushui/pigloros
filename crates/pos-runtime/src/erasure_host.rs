@@ -6123,7 +6123,7 @@ mod tests {
                 .command_sender()
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
             sender.generation = stale;
-            assert_stale_command_sender(&mut sender, &root, batch);
+            assert_stale_command_sender(&mut sender, &root, &batch);
         }
 
         let mut reader = host
@@ -6160,7 +6160,7 @@ mod tests {
     fn assert_stale_command_sender(
         sender: &mut ErasureCommandSenderV1<'_>,
         root: &Timeline,
-        batch: PreparedErasureForkBatchV1,
+        batch: &PreparedErasureForkBatchV1,
     ) {
         assert_eq!(
             sender.create_timeline("stale"),
