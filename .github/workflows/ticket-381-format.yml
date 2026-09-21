@@ -1,0 +1,23 @@
+name: ticket-381-format
+
+on:
+  push:
+    branches: [codex/ticket-381-systemd-start]
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all
+      - run: git diff --binary > ticket-381-format.patch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ticket-381-format-patch
+          path: ticket-381-format.patch
