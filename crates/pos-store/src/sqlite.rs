@@ -3661,7 +3661,7 @@ impl SqliteStore {
         conn: &Connection,
         meta: &TimelineMeta,
         chain_head: Hash,
-    ) -> Result<(), ErasureErrorV1> {
+    ) -> Result<(), CoreError> {
         let (parent_id, fork_seq) = meta.fork_point.map_or((None, None), |(parent, at_seq)| {
             (Some(parent.to_string()), Some(seq_as_i64(at_seq)))
         });
@@ -3677,13 +3677,13 @@ impl SqliteStore {
                 chain_head.as_bytes().as_slice(),
             ],
         )
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
         if let Some(owner) = meta.owner {
             conn.execute(
                 "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
                 params![meta.id.to_string(), owner.to_string()],
             )
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
         Ok(())
     }
@@ -3722,7 +3722,6 @@ impl SqliteStore {
         let timeline = Timeline::new(meta.clone());
         let insert = |connection: &Connection| {
             Self::insert_timeline_with_meta_on(connection, meta, chain_head)
-                .map_err(|_| CoreError::Storage("timeline insert failed".to_owned()))
         };
         if self.conn.is_autocommit() {
             let transaction = self
@@ -5184,7 +5183,8 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                 // before this fresh transaction.
                 let _outcome = apply_sqlite_erasure_cas(&self.conn, prepared.mutation())?;
             }
-            Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)?;
+            Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
             let recovery = admission.recovery_result()?;
             self.conn
                 .execute(
