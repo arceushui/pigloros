@@ -6640,7 +6640,7 @@ mod tests {
         };
         assert_eq!(
             gate.install_from_verified_inventory_transition(&mut transition),
-            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert_eq!(transition_failure, Some(ErasureErrorV1::PolicyConflict));
     }
