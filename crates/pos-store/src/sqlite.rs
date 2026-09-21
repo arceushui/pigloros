@@ -5274,14 +5274,15 @@ fn sqlite_timeline_is_exact(
         return Ok(false);
     }
 
-    let mut events = conn
+    let mut statement = conn
         .prepare(
             "SELECT seq, event_id, payload
              FROM events
              WHERE timeline_id=?1
              ORDER BY seq",
         )
-        .map_err(map_erasure_receipt_failure)?
+        .map_err(map_erasure_receipt_failure)?;
+    let mut events = statement
         .query(params![child.id.to_string()])
         .map_err(map_erasure_receipt_failure)?;
     let mut expected_head = 0_u64;
