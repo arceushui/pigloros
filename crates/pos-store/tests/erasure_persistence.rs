@@ -1710,9 +1710,7 @@ fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std
     for assignment in [
         "binding_digest='not-a-blob'",
         "expected_generation='not-a-blob'",
-        "expected_generation=X'00'",
         "child_scope='not-a-blob'",
-        "child_scope=X'00'",
         "child_id=X'00'",
         "child_name=X'00'",
         "child_mode=X'00'",
@@ -1744,6 +1742,11 @@ fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std
 fn sqlite_fork_retry_rejects_invalid_receipt_values() -> Result<(), Box<dyn std::error::Error>> {
     for (assignment, expected) in [
         ("binding_digest=X'00'", ErasureErrorV1::ProvenanceMissing),
+        (
+            "expected_generation=X'00'",
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+        ("child_scope=X'00'", ErasureErrorV1::ProvenanceMissing),
         (
             "successor_generation=X'00'",
             ErasureErrorV1::ProvenanceMissing,
