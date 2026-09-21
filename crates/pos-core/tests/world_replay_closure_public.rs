@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 use pos_core::retention::{
     WorldRetentionLeaseInputV1, WorldRetentionLeaseV1, WorldRetentionPolicyInputV1,
     WorldRetentionPolicyV1,

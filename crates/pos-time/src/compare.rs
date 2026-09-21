@@ -3,7 +3,10 @@
 use std::collections::HashSet;
 
 use pos_core::store::{EventReadBounds, SeqRange};
-use pos_core::{CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId};
+use pos_core::{
+    CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId,
+    WorldReplayClosureV1,
+};
 use pos_runtime::ErasureReadSenderV1;
 use pos_state::ProjectionRegistry;
 
@@ -42,8 +45,7 @@ pub fn compare(
     timelines: [TimelineId; 2],
     fork_seq: Seq,
     registries: [&mut ProjectionRegistry; 2],
-    artifact_digests: [pos_core::ErasureReferenceV1; 2],
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closures: [&WorldReplayClosureV1; 2],
 ) -> Result<ForkDiff, CoreError> {
     let [a, b] = timelines;
     let [registry_a, registry_b] = registries;
@@ -51,8 +53,11 @@ pub fn compare(
     let mut second_fence = Err(CoreError::ArtifactUnavailable);
     let mut first_effect = |sender: &mut ErasureReadSenderV1<'_>| {
         let mut second_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-            outcome = require_comparison_artifacts(artifact_digests, evaluation)
-                .and_then(|()| compare_with_sender(sender, a, b, fork_seq, registry_a, registry_b));
+            outcome = require_comparison_artifacts(sender, closures)
+                .and_then(|()| compare_with_sender(sender, a, b, fork_seq, registry_a, registry_b))
+                .and_then(|diff| {
+                    require_comparison_artifacts(sender, closures).map(|()| diff)
+                });
         };
         second_fence = sender
             .with_protected_effect_fence(b, ErasureProtectedOperationV1::Export, &mut second_effect)
@@ -66,12 +71,14 @@ pub fn compare(
 }
 
 fn require_comparison_artifacts(
-    artifact_digests: [pos_core::ErasureReferenceV1; 2],
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    sender: &mut ErasureReadSenderV1<'_>,
+    closures: [&WorldReplayClosureV1; 2],
 ) -> Result<(), CoreError> {
-    artifact_digests.into_iter().try_for_each(|digest| {
-        evaluation
-            .require_authoritative_use(pos_core::ErasureArtifactClassV1::ForkOrSnapshot, digest)
+    closures.into_iter().try_for_each(|closure| {
+        sender
+            .admit_world_replay(closure)
+            .map_err(crate::host_error_to_core)?
+            .require_authoritative_use()
             .map_err(|_| CoreError::ArtifactUnavailable)
     })
 }
@@ -331,45 +338,21 @@ mod tests {
             commands.append(fork_a.id(), &[draft(entity)]).test_ok();
             (fork_a.id(), fork_b.id(), fork_seq, entity)
         };
-        let digests = [
-            pos_core::ErasureReferenceV1::from_digest([40; 32]),
-            pos_core::ErasureReferenceV1::from_digest([41; 32]),
-        ];
-        let claims = digests.map(|digest| pos_core::ArtifactClaimInputV1 {
-            registration: pos_core::RegisteredArtifactV1::new(
-                pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-                digest,
-                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                None,
-                pos_core::ErasureReferenceV1::from_digest([42; 32]),
-                pos_core::ArtifactOptionalityV1::Required,
-                pos_core::ArtifactTransitionRuleV1::PreserveExact,
-            ),
-            current_claim: pos_core::ErasureReplayClaimV1::Exact,
-            state: pos_core::ArtifactStateV1::Retained,
-        });
-        let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
-            pos_core::ErasureReplayClaimV1::Exact,
-            &claims,
-        )
-        .test_ok();
         let mut registry_a = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
         registry_b.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
-        let diff = super::compare(
+        let closure_a = pos_core::WorldReplayClosureV1::test_fixture();
+        let closure_b = pos_core::WorldReplayClosureV1::test_fixture();
+        let result = super::compare(
             &mut reads,
             [fork_a, fork_b],
             fork_seq,
             [&mut registry_a, &mut registry_b],
-            digests,
-            &evaluation,
-        )
-        .test_ok();
-        assert_eq!(diff.only_in_a.len(), 1);
-        assert!(diff.only_in_b.is_empty());
-        assert!(diff.diverged_entities.contains(&entity));
+            [&closure_a, &closure_b],
+        );
+        assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
     }
 
     #[test]

@@ -7,12 +7,16 @@
 //! Replay claim can be used.
 
 use crate::retention::{WorldRetentionLeaseV1, WorldRetentionPolicyV1};
+use crate::{Hash, TimelineId, WorldArtifactKindV1, WorldArtifactLeafV1, WorldConsumerSetV1};
+
+#[cfg(feature = "test-support")]
 use crate::{
     ArtifactClaimInputV1, ArtifactStateV1, ErasureArtifactClassV1, ErasureErrorV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Hash, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, TimelineId, WallTime, WorldArtifactKindV1, WorldArtifactLeafV1,
-    WorldConsumerSetV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, PluginId, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, WallTime,
 };
+#[cfg(feature = "test-support")]
+use ulid::Ulid;
 
 /// Maximum number of native artifact leaves in one retained World closure.
 pub const MAX_WORLD_REPLAY_ARTIFACTS_V1: usize = 4096;
@@ -122,8 +126,10 @@ pub struct WorldReplayClosureV1 {
 impl WorldReplayClosureV1 {
     /// Validate identities, scope, required kinds, and consumer references.
     ///
-    /// This method only validates immutable structure. Current availability and
-    /// authorization are deliberately deferred to [`Self::admit`].
+    /// This method only validates immutable structure. Production availability
+    /// and authorization are owned by the runtime verifier; the old
+    /// test-support admission helper is intentionally unavailable to a normal
+    /// production dependency graph.
     ///
     /// # Errors
     /// Returns a closed error when the closure is empty or oversized, its
@@ -275,6 +281,152 @@ impl WorldReplayClosureV1 {
         &self.artifacts
     }
 
+    /// Build a deterministic complete closure for downstream seam tests.
+    ///
+    /// This helper is available only with the explicit `test-support` feature;
+    /// production callers must obtain a closure from their recording owner.
+    #[cfg(feature = "test-support")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub fn test_fixture() -> Self {
+        const DAY_MICROS: u64 = 86_400_000_000;
+        let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
+        let retention_policy = crate::retention::WorldRetentionPolicyV1::new(
+            crate::retention::WorldRetentionPolicyInputV1 {
+                policy_revision: 1,
+                purpose: "world-replay".to_owned(),
+                audience_policy_hash: Hash::from_bytes([10; 32]),
+                minimum_post_admission_days: 90,
+                maximum_active_days: 30,
+                maximum_total_days: 120,
+            },
+        )
+        .expect("test retention policy");
+        let retention_lease = crate::retention::WorldRetentionLeaseV1::new(
+            &retention_policy,
+            crate::retention::WorldRetentionLeaseInputV1 {
+                timeline_id,
+                policy_hash: retention_policy.digest(),
+                started_at_micros: 0,
+                admission_closes_at_micros: 30 * DAY_MICROS,
+                retention_deadline_micros: 120 * DAY_MICROS,
+            },
+        )
+        .expect("test retention lease");
+        let scope = Hash::from_bytes([9; 32]);
+        let consumer_set =
+            WorldConsumerSetV1::new(crate::world_consumer_set::WorldConsumerSetInputV1 {
+                scope,
+                consumers: vec![crate::world_consumer_set::WorldConsumerV1::new(
+                    "entity-state".to_owned(),
+                    Hash::from_bytes([40; 32]),
+                    Hash::from_bytes([41; 32]),
+                    Hash::from_bytes([42; 32]),
+                )
+                .expect("test consumer")],
+                producers: vec![crate::world_consumer_set::WorldProducerV1::new(
+                    PluginId::from_ulid(Ulid::from(1_u128)),
+                    Hash::from_bytes([43; 32]),
+                )
+                .expect("test producer")],
+                optional_view_roots: vec![Hash::from_bytes([53; 32])],
+            })
+            .expect("test consumer set");
+        let kinds = [
+            (
+                WorldArtifactKindV1::OutputPolicy,
+                Hash::from_bytes([43; 32]),
+            ),
+            (
+                WorldArtifactKindV1::ExecutableBudgetPolicy,
+                Hash::from_bytes([44; 32]),
+            ),
+            (
+                WorldArtifactKindV1::RetentionPolicy,
+                retention_policy.digest(),
+            ),
+            (
+                WorldArtifactKindV1::RetentionLease,
+                retention_lease.digest(),
+            ),
+            (
+                WorldArtifactKindV1::BaseConfiguration,
+                Hash::from_bytes([45; 32]),
+            ),
+            (
+                WorldArtifactKindV1::ExecutionProfile,
+                Hash::from_bytes([46; 32]),
+            ),
+            (
+                WorldArtifactKindV1::AudiencePolicy,
+                Hash::from_bytes([47; 32]),
+            ),
+            (WorldArtifactKindV1::Schema, Hash::from_bytes([41; 32])),
+            (
+                WorldArtifactKindV1::ReducerImplementation,
+                Hash::from_bytes([40; 32]),
+            ),
+            (
+                WorldArtifactKindV1::RuntimeIdentity,
+                Hash::from_bytes([42; 32]),
+            ),
+            (
+                WorldArtifactKindV1::PluginImplementationIdentity,
+                Hash::from_bytes([48; 32]),
+            ),
+            (
+                WorldArtifactKindV1::KeyDependencyEvidence,
+                Hash::from_bytes([49; 32]),
+            ),
+            (
+                WorldArtifactKindV1::TimelinePayload,
+                Hash::from_bytes([50; 32]),
+            ),
+            (
+                WorldArtifactKindV1::OptionalView,
+                Hash::from_bytes([53; 32]),
+            ),
+        ];
+        let artifacts = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(index, (kind, native_digest))| {
+                WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
+                    scope,
+                    kind,
+                    native_digest,
+                    native_byte_length: 1,
+                    owner: [100 + u8::try_from(index).expect("fixture index"); 32],
+                    data_class: crate::ArtifactDataClassV1::StructuralAuditMetadata,
+                    optionality: if kind == WorldArtifactKindV1::OptionalView {
+                        crate::ArtifactOptionalityV1::Optional
+                    } else {
+                        crate::ArtifactOptionalityV1::Required
+                    },
+                    transition: if kind == WorldArtifactKindV1::OptionalView {
+                        crate::ArtifactTransitionRuleV1::RedactViews
+                    } else {
+                        crate::ArtifactTransitionRuleV1::PreserveExact
+                    },
+                    source_lease_hash: retention_lease.digest(),
+                    key_dependencies: Vec::new(),
+                    child_node_hashes: Vec::new(),
+                })
+                .expect("test artifact leaf")
+            })
+            .collect();
+        Self::new(WorldReplayClosureInputV1 {
+            timeline_id,
+            operation_identity: Hash::from_bytes([60; 32]),
+            source_head: Hash::from_bytes([61; 32]),
+            inventory_generation: Hash::from_bytes([62; 32]),
+            retention_policy,
+            retention_lease,
+            consumer_set,
+            artifacts,
+        })
+        .expect("test world replay closure")
+    }
+
     /// Admit the closure against a host-owned clock and artifact authority.
     ///
     /// The authority is the only source of current time and artifact state.
@@ -284,6 +436,7 @@ impl WorldReplayClosureV1 {
     /// # Errors
     /// Returns a closed error when the authority cannot provide trusted time
     /// or artifact state, or when the evaluated closure is not admissible.
+    #[cfg(feature = "test-support")]
     pub fn admit(
         &self,
         authority: &mut dyn WorldReplayClosureAuthorityV1,
@@ -340,6 +493,7 @@ fn has_identity(
 }
 
 /// Host-owned source of current time and artifact availability.
+#[cfg(feature = "test-support")]
 pub trait WorldReplayClosureAuthorityV1 {
     /// Return the current trusted clock value.
     ///
@@ -371,12 +525,14 @@ pub trait WorldReplayClosureAuthorityV1 {
 
 /// An admitted closure and its monotonic Replay claim.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(feature = "test-support")]
 pub struct WorldReplayAdmissionV1 {
     closure_digest: Hash,
     evaluation: ReplayClaimEvaluationV1,
     optional_view_roots: Vec<Hash>,
 }
 
+#[cfg(feature = "test-support")]
 impl WorldReplayAdmissionV1 {
     /// Return the exact closure identity used for this admission.
     #[must_use]
@@ -418,7 +574,7 @@ impl WorldReplayAdmissionV1 {
             .artifacts()
             .iter()
             .filter(|artifact| artifact.optionality() == crate::ArtifactOptionalityV1::Required)
-            .all(|artifact| artifact.authoritative_use_permitted());
+            .all(crate::EvaluatedArtifactClaimV1::authoritative_use_permitted);
         if required_members_authorized
             && requested_view_roots.iter().all(|root| {
                 self.optional_view_roots.contains(root)

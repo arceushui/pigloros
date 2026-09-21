@@ -233,9 +233,11 @@ pub use world_recording_receipt::{
     MAX_WORLD_RECORDING_RECEIPT_BYTES_V1,
 };
 pub use world_replay::{
-    WorldReplayAdmissionV1, WorldReplayClosureAuthorityV1, WorldReplayClosureErrorV1,
-    WorldReplayClosureInputV1, WorldReplayClosureV1, MAX_WORLD_REPLAY_ARTIFACTS_V1,
+    WorldReplayClosureErrorV1, WorldReplayClosureInputV1, WorldReplayClosureV1,
+    MAX_WORLD_REPLAY_ARTIFACTS_V1,
 };
+#[cfg(feature = "test-support")]
+pub use world_replay::{WorldReplayAdmissionV1, WorldReplayClosureAuthorityV1};
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
     WorldOriginReferenceV1, WorldOriginRegistryV1, WorldOriginV1, WorldTransformError,

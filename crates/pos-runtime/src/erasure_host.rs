@@ -31,6 +31,11 @@ use pos_core::{
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
 
+use crate::{
+    VerifiedWorldReplayV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+};
+use pos_core::WorldReplayClosureV1;
+
 #[cfg(test)]
 use pos_core::PreparedErasureForkBatchV1;
 
@@ -404,6 +409,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 pub struct ErasureCoordinatorCompositionV1 {
     authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
     coordinator: ErasureReferenceV1,
+    world_replay_verifier: Option<Arc<dyn WorldReplayVerifierV1>>,
 }
 
 impl ErasureCoordinatorCompositionV1 {
@@ -422,7 +428,23 @@ impl ErasureCoordinatorCompositionV1 {
         Ok(Self {
             authority,
             coordinator,
+            world_replay_verifier: None,
         })
+    }
+
+    /// Install the native World Replay verifier for this composition root.
+    ///
+    /// The verifier is the only component allowed to mint the opaque
+    /// [`VerifiedWorldReplayV1`] capability.  A composition without one
+    /// remains intentionally closed for World Replay, even when its erasure
+    /// inventory is otherwise ready.
+    #[must_use]
+    pub fn with_world_replay_verifier(
+        mut self,
+        verifier: Arc<dyn WorldReplayVerifierV1>,
+    ) -> Self {
+        self.world_replay_verifier = Some(verifier);
+        self
     }
 
     /// Construct an explicitly closed composition for a deployment that has
@@ -436,11 +458,16 @@ impl ErasureCoordinatorCompositionV1 {
         Self {
             authority: Arc::new(ClosedErasureCoordinatorAuthorityV1),
             coordinator: ErasureReferenceV1::from_digest([0xee; 32]),
+            world_replay_verifier: None,
         }
     }
 
     const fn coordinator(&self) -> ErasureReferenceV1 {
         self.coordinator
+    }
+
+    fn world_replay_verifier(&self) -> Option<Arc<dyn WorldReplayVerifierV1>> {
+        self.world_replay_verifier.clone()
     }
 }
 
@@ -995,6 +1022,7 @@ pub struct ErasureExecutionHostV1 {
     gate: Arc<ErasureContainmentGateV1>,
     authority: Option<Arc<dyn ErasureCoordinatorAuthorityV1>>,
     coordinator: Option<ErasureReferenceV1>,
+    world_replay_verifier: Option<Arc<dyn WorldReplayVerifierV1>>,
     inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
     recovery_limits: ErasureRecoveryLimitsV1,
     state: HostStateV1,
@@ -1063,6 +1091,7 @@ impl ErasureExecutionHostV1 {
             gate,
             authority: None,
             coordinator: None,
+            world_replay_verifier: None,
             inventory: None,
             recovery_limits: ErasureRecoveryLimitsV1::compiled_maximum(),
             state: HostStateV1::Closed,
@@ -1132,6 +1161,7 @@ impl ErasureExecutionHostV1 {
         let mut host = Self::new_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
+        host.world_replay_verifier = composition.world_replay_verifier();
         host.install_inventory_from_coordinator_with_limits(limits)?;
         Ok(host)
     }
@@ -1193,6 +1223,7 @@ impl ErasureExecutionHostV1 {
         let mut host = Self::new_gateway_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
+        host.world_replay_verifier = composition.world_replay_verifier();
         host.install_inventory_from_coordinator_with_limits(limits)
             .map(|_| host)
     }
@@ -2497,6 +2528,40 @@ pub struct ErasureReadSenderV1<'host> {
 }
 
 impl ErasureReadSenderV1<'_> {
+    /// Verify one structural World Replay closure through the installed host
+    /// owner and bind the result to this sender's inventory generation.
+    ///
+    /// The caller supplies only structural input.  Exact native disposition,
+    /// dependency closure, source-head coverage, lease time, and owner
+    /// authority remain inside the installed verifier.  A closed composition
+    /// has no verifier and therefore cannot issue a protected-use result.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error when the verifier is absent, rejects
+    /// the closure, or observes a stale generation.
+    pub fn admit_world_replay(
+        &mut self,
+        closure: &WorldReplayClosureV1,
+    ) -> Result<VerifiedWorldReplayV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        let verifier = self
+            .host
+            .world_replay_verifier
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let verified = verifier
+            .verify(closure, self.generation)
+            .map_err(map_world_replay_verification_error)?;
+        if verified.closure_digest() != closure.digest()
+            || verified.timeline_id() != closure.timeline_id()
+            || verified.inventory_generation() != self.generation
+        {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        self.host.ensure_generation(self.generation)?;
+        Ok(verified)
+    }
+
     /// Recover one authoritative, payload-free ERS1 state through the
     /// coordinator that owns this host's installed generation.
     ///
@@ -2717,6 +2782,19 @@ impl ErasureReadSenderV1<'_> {
             OwnedErasureStoreV1::Gateway(store) => store.protected_logical_head(timeline),
         };
         result.map_store_error()
+    }
+}
+
+const fn map_world_replay_verification_error(
+    error: WorldReplayVerificationErrorV1,
+) -> ErasureHostErrorV1 {
+    match error {
+        WorldReplayVerificationErrorV1::StaleGeneration => ErasureHostErrorV1::StaleGeneration,
+        WorldReplayVerificationErrorV1::MissingVerifier
+        | WorldReplayVerificationErrorV1::EvidenceUnavailable
+        | WorldReplayVerificationErrorV1::ClaimUnavailable => {
+            ErasureHostErrorV1::AuthorizationDenied
+        }
     }
 }
 

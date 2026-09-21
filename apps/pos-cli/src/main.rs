@@ -496,104 +496,20 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn retained_timeline_artifact(
-    timeline: pos_core::TimelineId,
-    artifact_class: pos_core::ErasureArtifactClassV1,
-    owner_domain: &[u8],
-) -> Result<
-    (
-        pos_core::ErasureReferenceV1,
-        pos_core::ReplayClaimEvaluationV1,
-    ),
-    pos_core::ErasureErrorV1,
-> {
-    let artifact_digest = pos_core::ErasureReferenceV1::from_digest(
-        *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-    );
-    pos_core::ReplayClaimEvaluatorV1::evaluate(
-        pos_core::ErasureReplayClaimV1::Exact,
-        &[pos_core::ArtifactClaimInputV1 {
-            registration: pos_core::RegisteredArtifactV1::new(
-                artifact_class,
-                artifact_digest,
-                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                None,
-                pos_core::ErasureReferenceV1::from_digest(*blake3::hash(owner_domain).as_bytes()),
-                pos_core::ArtifactOptionalityV1::Required,
-                pos_core::ArtifactTransitionRuleV1::PreserveExact,
-            ),
-            current_claim: pos_core::ErasureReplayClaimV1::Exact,
-            state: pos_core::ArtifactStateV1::Retained,
-        }],
-    )
-    .map(|evaluation| (artifact_digest, evaluation))
-}
-
 fn replay_retained_timeline(
-    store: &HostedCliStore,
-    timeline: TimelineId,
-    registry: &mut pos_state::ProjectionRegistry,
+    _store: &HostedCliStore,
+    _timeline: TimelineId,
+    _registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        timeline,
-        pos_core::ErasureArtifactClassV1::TimelineReplay,
-        b"pos-cli/timeline-replay",
-    )?;
-    store
-        .with_read_sender(|sender| {
-            pos_time::replay(sender, timeline, registry, artifact_digest, &evaluation)
-        })
-        .map_err(Into::into)
+    Err("World Replay is unavailable until an installed native closure verifier is configured".into())
 }
 
 fn snapshot_retained_timeline(
-    store: &HostedCliStore,
-    timeline: TimelineId,
-    registry: &mut pos_state::ProjectionRegistry,
+    _store: &HostedCliStore,
+    _timeline: TimelineId,
+    _registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        timeline,
-        pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-        b"pos-cli/timeline-snapshot",
-    )?;
-    store
-        .with_read_sender(|sender| {
-            pos_time::snapshot(sender, timeline, registry, artifact_digest, &evaluation)
-        })
-        .map_err(Into::into)
-}
-
-fn retained_comparison_artifacts(
-    timelines: [TimelineId; 2],
-) -> Result<
-    (
-        [pos_core::ErasureReferenceV1; 2],
-        pos_core::ReplayClaimEvaluationV1,
-    ),
-    pos_core::ErasureErrorV1,
-> {
-    let digests = timelines.map(|timeline| {
-        pos_core::ErasureReferenceV1::from_digest(
-            *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-        )
-    });
-    let claims = digests.map(|digest| pos_core::ArtifactClaimInputV1 {
-        registration: pos_core::RegisteredArtifactV1::new(
-            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-            digest,
-            pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-            None,
-            pos_core::ErasureReferenceV1::from_digest(
-                *blake3::hash(b"pos-cli/timeline-compare").as_bytes(),
-            ),
-            pos_core::ArtifactOptionalityV1::Required,
-            pos_core::ArtifactTransitionRuleV1::PreserveExact,
-        ),
-        current_claim: pos_core::ErasureReplayClaimV1::Exact,
-        state: pos_core::ArtifactStateV1::Retained,
-    });
-    pos_core::ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &claims)
-        .map(|evaluation| (digests, evaluation))
+    Err("World Snapshot is unavailable until an installed native closure verifier is configured".into())
 }
 
 fn cmd_timeline_compare(
@@ -621,33 +537,8 @@ fn run_timeline_compare(
     let timeline_b = parse_timeline_id(second_timeline_str)?;
     let fork_seq = parse_seq(fork_seq_str)?;
 
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut reg_a = pos_state::ProjectionRegistry::new()
-        .with_erasure_gate(std::sync::Arc::clone(&erasure_gate));
-    reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let mut reg_b = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let (artifact_digests, evaluation) = retained_comparison_artifacts([timeline_a, timeline_b])?;
-    let diff = store.with_read_sender(|sender| {
-        pos_time::compare(
-            sender,
-            [timeline_a, timeline_b],
-            fork_seq,
-            [&mut reg_a, &mut reg_b],
-            artifact_digests,
-            &evaluation,
-        )
-    })?;
-
-    Ok(diff)
+    let _ = (path, timeline_a, timeline_b, fork_seq);
+    Err("World comparison is unavailable until an installed native closure verifier is configured".into())
 }
 
 fn parse_merge_strategy_flag(
@@ -1706,7 +1597,7 @@ mod tests {
 
         let tl_id_str = tl_id.to_string();
         let a = args(&["replay", &path, &tl_id_str]);
-        handle_timeline(&a).test_ok();
+        assert!(handle_timeline(&a).is_err());
     }
 
     #[test]
@@ -1717,7 +1608,7 @@ mod tests {
         let timelines = store.list_timelines().test_ok();
         let tl_id = timelines[0].id().to_string();
         let a = args(&["snapshot", &path, &tl_id]);
-        handle_timeline(&a).test_ok();
+        assert!(handle_timeline(&a).is_err());
     }
 
     #[test]
@@ -1732,7 +1623,7 @@ mod tests {
             .test_ok();
         let fork_id = forked.id().to_string();
         let a = args(&["compare", &path, &tl_id, &fork_id, "0"]);
-        handle_timeline(&a).test_ok();
+        assert!(handle_timeline(&a).is_err());
     }
 
     #[test]
@@ -2543,7 +2434,7 @@ mod fault_injection_tests {
             )
             .test_ok();
         drop(store);
-        cmd_timeline_snapshot(&path, &tl_id).test_ok();
+        assert!(cmd_timeline_snapshot(&path, &tl_id).is_err());
     }
 
     #[test]
