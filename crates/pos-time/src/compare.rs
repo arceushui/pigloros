@@ -354,6 +354,47 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_compare_uses_an_installed_world_verifier() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (fork_a, fork_b, fork_seq, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let parent = commands.create_timeline("verified-compare").test_ok();
+            let entity = EntityId::new();
+            let shared = commands.append(parent.id(), &[draft(entity)]).test_ok();
+            let fork_seq = shared[0].seq;
+            let fork_a = commands
+                .fork_timeline(parent.id(), fork_seq, "verified-a")
+                .test_ok();
+            let fork_b = commands
+                .fork_timeline(parent.id(), fork_seq, "verified-b")
+                .test_ok();
+            commands
+                .append(fork_a.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            (fork_a.id(), fork_b.id(), fork_seq, entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host);
+        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        registry_a.register("count", Box::new(CountReducer));
+        let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry_b.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let diff = super::compare(
+            &mut reads,
+            [fork_a, fork_b],
+            fork_seq,
+            [&mut registry_a, &mut registry_b],
+            [&closure, &closure],
+        )
+        .test_ok();
+        assert_eq!(diff.only_in_a.len(), 2);
+        assert!(diff.only_in_b.is_empty());
+        assert!(diff.diverged_entities.contains(&entity));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_diverged_timelines_detects_differences() {
         let mut store = open_test_store();
         let parent = store.create_timeline("parent").test_ok();

@@ -509,6 +509,36 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_snapshot_commands_use_an_installed_world_verifier() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("verified-snapshot").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(
+                    timeline.id(),
+                    &[draft(entity), draft(entity), draft(entity)],
+                )
+                .test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host);
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        projected.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let captured = super::snapshot(&mut reads, timeline, &mut projected, &closure).test_ok();
+        assert_eq!(count_in_snapshot(&captured, &entity), 3);
+
+        let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
+        verified.register("count", Box::new(CountReducer));
+        super::verify_snapshot_consistency(&mut reads, &captured, &mut verified, &closure)
+            .test_ok();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_snapshot_consistency_passes_on_fresh_store() {
         // No tail events: snapshot IS the full replay.
         let mut store = open_test_store();
