@@ -4170,7 +4170,6 @@ dependencies = [
  "blake3",
  "ciborium",
  "piglor-ledger",
- "pos-conformance",
  "pos-core",
  "pos-experiment",
  "pos-plugin-agent",
@@ -4328,7 +4327,6 @@ name = "pos-cli"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "pos-conformance",
  "pos-core",
  "pos-experiment",
  "pos-plugin-rule-agent",
