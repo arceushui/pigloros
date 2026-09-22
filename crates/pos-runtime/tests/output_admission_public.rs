@@ -278,6 +278,9 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     assert!(source.configuration_artifact.starts_with(b"CFG1"));
     assert!(!source.profile_artifact.is_empty());
     assert!(!source.retention_artifact.is_empty());
+    assert_artifact_shape_rejections(&source);
+    assert_artifact_size_rejections(&source);
+    assert_artifact_identity_rejections(&source)?;
     let expected_bytes = canonical_fixture_closure_bytes(&source);
     assert!(expected_bytes.starts_with(b"OPC1"));
     let fresh_plugin = FixturePlugin {
@@ -319,9 +322,6 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         fresh_registry.replay_policy_closure_identities().next()
     );
 
-    assert_artifact_shape_rejections(&source);
-    assert_artifact_size_rejections(&source);
-    assert_artifact_identity_rejections(&source)?;
     Ok(())
 }
 
