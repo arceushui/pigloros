@@ -1296,7 +1296,7 @@ mod tests {
             execution_profile_hash: Hash::from_bytes([7; 32]),
             max_pass_wall_duration_us: 1_000,
         })
-        .expect("fixture budget is valid")
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
     }
 
     fn policy(plugin_id: PluginId, budget: &ExecutableBudgetPolicyV1) -> OutputPolicyV1 {
@@ -1308,7 +1308,7 @@ mod tests {
             None,
             None,
         )
-        .expect("fixture declaration is valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         OutputPolicyV1::new(OutputPolicyInputV1 {
             plugin_id,
             plugin_version: "1.0.0".to_owned(),
@@ -1319,7 +1319,7 @@ mod tests {
             policy_revision: 1,
             output_declarations: vec![declaration],
         })
-        .expect("fixture policy is valid")
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
     }
 
     fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {
@@ -1336,10 +1336,10 @@ mod tests {
         let budget = budget(plugin_id, 16, 2, 32, 100, [10, 10, 10]);
         let admission =
             OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget), budget)
-                .expect("fixture admission is valid");
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         admission
             .validate_batch(&[draft("plugin.output", b"accepted")])
-            .expect("declared output is accepted");
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(matches!(
             admission.validate_batch(&[
                 draft("plugin.output", b"second"),
@@ -1360,7 +1360,7 @@ mod tests {
             policy(plugin_id, &budget),
             budget.clone(),
         )
-        .expect("fixture admission is valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(matches!(
             admission.validate_batch(&[draft("plugin.unknown", b"x")]),
             Err(OutputAdmissionErrorV1::MissingDeclaration { .. })
@@ -1390,7 +1390,7 @@ mod tests {
             policy(plugin_id, &bytes_budget),
             bytes_budget,
         )
-        .expect("fixture admission is valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(matches!(
             bytes_admission.validate_batch(&[draft("plugin.output", b"12345")]),
             Err(OutputAdmissionErrorV1::EventBytesExceeded { .. })
@@ -1403,7 +1403,7 @@ mod tests {
             policy(plugin_id, &batch_budget),
             batch_budget,
         )
-        .expect("fixture admission is valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(matches!(
             batch_admission
                 .validate_batch(&[draft("plugin.output", b"ab"), draft("plugin.output", b"cd")]),
@@ -1417,7 +1417,7 @@ mod tests {
             policy(plugin_id, &cpu_budget),
             cpu_budget,
         )
-        .expect("fixture admission is valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert!(matches!(
             cpu_admission
                 .validate_batch(&[draft("plugin.output", b"a"), draft("plugin.output", b"b")]),
