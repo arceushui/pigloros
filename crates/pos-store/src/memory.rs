@@ -1512,7 +1512,7 @@ impl MemoryStore {
 
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
             let exact_child = self.memory_fork_child_is_exact(&child, chain_head)?;
-            let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
+            let exact_manifest = self.erasure_fork_batch_is_exact(admission);
             let exact_proof = self.erasure_fork_recovery_proofs.get(&operation) == Some(&proof);
             return ((
                 stored_result.binding_digest(),
