@@ -3729,9 +3729,9 @@ impl SqliteStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
             insert(&transaction)?;
-            transaction
-                .commit()
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            transaction.commit().map_err(|error| {
+                CoreError::Storage(format!("transaction commit outcome uncertain: {error}"))
+            })?;
         } else {
             insert(&self.conn)?;
         }

@@ -94,6 +94,7 @@ enum UnaffectedTopologyTransitionError {
     Host(ErasureHostErrorV1),
     Erasure(ErasureErrorV1),
     RejectedAsAffected,
+    UncertainPersistence,
     #[cfg(test)]
     RollbackFailed,
 }
@@ -1690,9 +1691,17 @@ impl ErasureExecutionHostV1 {
                 Err(error) => return Err(UnaffectedTopologyTransitionError::Erasure(error)),
             }
         }
-        let transition = change(permit, self.store.host_store(), &candidate_timeline)
-            .map_store_error()
-            .map_err(UnaffectedTopologyTransitionError::Host)?;
+        let transition = match change(permit, self.store.host_store(), &candidate_timeline) {
+            Ok(transition) => transition,
+            Err(error) if is_uncertain_persistence_error(&error) => {
+                return Err(UnaffectedTopologyTransitionError::UncertainPersistence);
+            }
+            Err(error) => {
+                return Err(UnaffectedTopologyTransitionError::Host(map_store_error(
+                    &error,
+                )));
+            }
+        };
         #[cfg(test)]
         if self.fail_inventory_publication {
             self.rollback_unaffected_topology_timeline(&transition.timeline, transition.created)?;
@@ -1761,6 +1770,11 @@ impl ErasureExecutionHostV1 {
                         Some(UnaffectedTopologyTransitionError::RejectedAsAffected);
                     Err(ErasureErrorV1::PolicyConflict)
                 }
+                Err(UnaffectedTopologyTransitionError::UncertainPersistence) => {
+                    transition_failure =
+                        Some(UnaffectedTopologyTransitionError::UncertainPersistence);
+                    Err(ErasureErrorV1::ReceiptCommitFailed)
+                }
                 #[cfg(test)]
                 Err(UnaffectedTopologyTransitionError::RollbackFailed) => {
                     transition_failure = Some(UnaffectedTopologyTransitionError::RollbackFailed);
@@ -1785,6 +1799,10 @@ impl ErasureExecutionHostV1 {
                 Some(UnaffectedTopologyTransitionError::Host(error)) => Err(error),
                 Some(UnaffectedTopologyTransitionError::RejectedAsAffected) => {
                     Err(ErasureHostErrorV1::Conflict)
+                }
+                Some(UnaffectedTopologyTransitionError::UncertainPersistence) => {
+                    self.poison();
+                    Err(ErasureHostErrorV1::AdapterFailure)
                 }
                 #[cfg(test)]
                 Some(UnaffectedTopologyTransitionError::RollbackFailed) => {
@@ -2811,7 +2829,14 @@ impl ErasureCommandSenderV1<'_> {
             .host_store()
             .recover_fork_admission(operation)
         {
-            Ok(result) => Ok(result),
+            Ok(result)
+                if result.as_ref().is_none_or(|recovered| {
+                    recovered.successor_generation() == self.generation
+                }) =>
+            {
+                Ok(result)
+            }
+            Ok(_) => Err(ErasureHostErrorV1::StaleGeneration),
             Err(error) => {
                 self.host.poison();
                 Err(map_erasure_error(error))
@@ -3305,6 +3330,17 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
         CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
         _ => ErasureHostErrorV1::AdapterFailure,
     }
+}
+
+fn is_uncertain_persistence_error(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::Storage(message)
+            if message.contains("transaction commit failed")
+                || message.contains("transaction commit outcome uncertain")
+                || message.contains("rollback failed")
+                || message.contains("rollback also failed")
+    )
 }
 
 trait MapStoreErrorV1<T> {
@@ -5659,6 +5695,28 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_topology_persistence_poisons_the_host() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.apply_unaffected_topology_change(
+                None,
+                |_permit, _store| Ok(Timeline::new(TimelineMeta::root("uncertain"))),
+                |_permit, _store, _candidate| {
+                    Err(CoreError::Storage(
+                        "transaction commit outcome uncertain: disk failure".to_owned(),
+                    ))
+                },
+            ),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
     fn empty_topology_change_rejects_a_candidate_over_the_deployment_ceiling() {
         let mut store = MemoryStore::new().without_erasure_gate();
         store
@@ -7057,6 +7115,14 @@ mod tests {
                 .commit_fork_admission(&batch)
                 .map(|timeline| timeline.id()),
             Ok(child)
+        );
+        host.command_sender()
+            .and_then(|mut sender| sender.create_timeline("generation-advance"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.recover_fork_admission(operation)),
+            Err(ErasureHostErrorV1::StaleGeneration)
         );
     }
 
