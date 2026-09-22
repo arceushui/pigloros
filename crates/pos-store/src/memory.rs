@@ -310,6 +310,10 @@ fn delete_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreEr
 }
 
 fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+    delete_visible_timeline_impl(store, id)
+}
+
+fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
     #[cfg(test)]
     if FAIL_NEXT_VISIBLE_DELETE.with(|fail| fail.replace(false)) {
         return Err(CoreError::Storage(
@@ -1478,6 +1482,23 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.commit_fork_admission_impl(permit, admission)
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        self.recover_fork_admission_impl(operation)
+    }
+}
+
+impl MemoryStore {
+    fn commit_fork_admission_impl(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        admission: PreparedErasureForkBatchV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         self.ensure_host_transition_permit(permit)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         let binding = admission.binding_digest();
@@ -1542,7 +1563,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         Ok(ErasureCasOutcomeV1::Applied)
     }
 
-    fn recover_fork_admission(
+    fn recover_fork_admission_impl(
         &mut self,
         operation: ErasureReferenceV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
@@ -2699,6 +2720,14 @@ impl MemoryStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<Hash, CoreError> {
+        self.compute_chain_hash_at_unchecked_impl(timeline, at_seq)
+    }
+
+    fn compute_chain_hash_at_unchecked_impl(
+        &self,
+        timeline: TimelineId,
+        at_seq: Seq,
+    ) -> Result<Hash, CoreError> {
         #[cfg(test)]
         if FAIL_NEXT_CHAIN_HASH_AT.with(|fail| fail.replace(false)) {
             return Err(CoreError::Storage(
@@ -2835,8 +2864,11 @@ impl MemoryStore {
     }
 }
 
-impl EventStore for MemoryStore {
-    fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
+impl MemoryStore {
+    fn bind_erasure_gate_impl(
+        &mut self,
+        gate: Arc<ErasureContainmentGateV1>,
+    ) -> Result<(), CoreError> {
         if self.erasure_gate_bound {
             return Err(CoreError::Storage(
                 "erasure containment gate is already bound".to_owned(),
@@ -2849,6 +2881,12 @@ impl EventStore for MemoryStore {
         self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
         Ok(())
+    }
+}
+
+impl EventStore for MemoryStore {
+    fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
+        self.bind_erasure_gate_impl(gate)
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {

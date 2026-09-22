@@ -3555,6 +3555,24 @@ impl SqliteStore {
             .ok_or(CoreError::ErasureContainmentUnavailable)
     }
 
+    fn bind_erasure_gate_impl(
+        &mut self,
+        gate: Arc<ErasureContainmentGateV1>,
+    ) -> Result<(), CoreError> {
+        if self.erasure_gate_bound {
+            return Err(CoreError::Storage(
+                "erasure containment gate is already bound".to_owned(),
+            ));
+        }
+        let binding = gate
+            .issue_topology_store_binding()
+            .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
+        self.erasure_gate = Some(gate);
+        self.erasure_topology_store_binding = Some(binding);
+        self.erasure_gate_bound = true;
+        Ok(())
+    }
+
     fn timeline_owner(&self, timeline: TimelineId) -> Result<Option<EntityId>, CoreError> {
         self.conn
             .query_row(
@@ -3900,18 +3918,7 @@ impl SqliteStore {
 
 impl EventStore for SqliteStore {
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
-        if self.erasure_gate_bound {
-            return Err(CoreError::Storage(
-                "erasure containment gate is already bound".to_owned(),
-            ));
-        }
-        let binding = gate
-            .issue_topology_store_binding()
-            .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
-        self.erasure_gate = Some(gate);
-        self.erasure_topology_store_binding = Some(binding);
-        self.erasure_gate_bound = true;
-        Ok(())
+        self.bind_erasure_gate_impl(gate)
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
@@ -5166,6 +5173,23 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
         permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.commit_fork_admission_unchecked(permit, admission)
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        sqlite_recover_fork_admission(&self.conn, self.hasher.as_ref(), operation)
+    }
+}
+
+impl SqliteStore {
+    fn commit_fork_admission_unchecked(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        admission: PreparedErasureForkBatchV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         self.ensure_host_transition_permit(permit)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         self.conn
@@ -5263,13 +5287,6 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             Ok(ErasureCasOutcomeV1::Applied)
         })();
         finish_erasure_transaction(&self.conn, result)
-    }
-
-    fn recover_fork_admission(
-        &mut self,
-        operation: ErasureReferenceV1,
-    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-        sqlite_recover_fork_admission(&self.conn, self.hasher.as_ref(), operation)
     }
 }
 
@@ -5399,6 +5416,14 @@ fn sqlite_recover_fork_admission(
     hasher: &dyn Hasher,
     operation: ErasureReferenceV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+    sqlite_recover_fork_admission_impl(conn, hasher, operation)
+}
+
+fn sqlite_recover_fork_admission_impl(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    operation: ErasureReferenceV1,
+) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
     let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
         return Ok(None);
     };
@@ -5439,87 +5464,142 @@ fn sqlite_recovery_proof_is_exact(
     proof: &ErasureForkRecoveryProofV1,
 ) -> Result<(), ErasureErrorV1> {
     for mutation in proof.admissions() {
-        let manifest = conn
-            .query_row(
-                "SELECT manifest_digest, manifest_cbor FROM erasure_records
-                 WHERE request_digest=?1",
-                params![mutation.request().digest().as_slice()],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()
-            .map_err(map_erasure_receipt_failure)?
+        sqlite_recovery_proof_mutation_is_exact(conn, mutation)?;
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_mutation_is_exact(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<(), ErasureErrorV1> {
+    sqlite_recovery_proof_manifest_is_exact(conn, mutation)?;
+    sqlite_recovery_proof_objects_are_exact(conn, mutation)?;
+    sqlite_recovery_proof_states_are_exact(conn, mutation)?;
+    sqlite_recovery_proof_indexes_are_exact(conn, mutation)?;
+    sqlite_recovery_proof_effect_is_exact(conn, mutation)?;
+    sqlite_recovery_proof_subject_is_exact(conn, mutation)
+}
+
+fn sqlite_recovery_proof_manifest_is_exact(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<(), ErasureErrorV1> {
+    let manifest = conn
+        .query_row(
+            "SELECT manifest_digest, manifest_cbor FROM erasure_records
+             WHERE request_digest=?1",
+            params![mutation.request().digest().as_slice()],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(map_erasure_receipt_failure)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    if reference_from_sql(manifest.0)? != mutation.next_manifest()
+        || ErasureForkRecoveryProofV1::bytes_digest(&manifest.1) != mutation.next_manifest_bytes()
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_objects_are_exact(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<(), ErasureErrorV1> {
+    if !mutation
+        .objects()
+        .iter()
+        .any(|object| object.reference() == mutation.extension())
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    for object in mutation.objects() {
+        let bytes = load_sqlite_erasure_evidence(conn, object.reference())?;
+        if ErasureForkRecoveryProofV1::bytes_digest(&bytes) != object.bytes() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_states_are_exact(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<(), ErasureErrorV1> {
+    for state in mutation.states() {
+        let row = load_sqlite_erasure_state_row(conn, state.reference())?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if reference_from_sql(manifest.0)? != mutation.next_manifest()
-            || ErasureForkRecoveryProofV1::bytes_digest(&manifest.1)
-                != mutation.next_manifest_bytes()
+        if reference_from_sql(row.request_digest)? != mutation.request()
+            || ErasureForkRecoveryProofV1::bytes_digest(&row.state_cbor) != state.bytes()
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if !mutation
-            .objects()
-            .iter()
-            .any(|object| object.reference() == mutation.extension())
-        {
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_indexes_are_exact(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<(), ErasureErrorV1> {
+    for index in mutation.index_inserts() {
+        let (index, ordinal, reference) = match *index {
+            ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+                (SqliteErasureIndex::Attempt, ordinal, reference)
+            }
+            ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+                (SqliteErasureIndex::Scope, ordinal, reference)
+            }
+            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+                SqliteErasureIndex::AdministrativeResolution,
+                ordinal,
+                reference,
+            ),
+        };
+        if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        for object in mutation.objects() {
-            let bytes = load_sqlite_erasure_evidence(conn, object.reference())?;
-            if ErasureForkRecoveryProofV1::bytes_digest(&bytes) != object.bytes() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
-        for state in mutation.states() {
-            let row = load_sqlite_erasure_state_row(conn, state.reference())?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            if reference_from_sql(row.request_digest)? != mutation.request()
-                || ErasureForkRecoveryProofV1::bytes_digest(&row.state_cbor) != state.bytes()
-            {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
-        for index in mutation.index_inserts() {
-            let (index, ordinal, reference) = match *index {
-                ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
-                    (SqliteErasureIndex::Attempt, ordinal, reference)
-                }
-                ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
-                    (SqliteErasureIndex::Scope, ordinal, reference)
-                }
-                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
-                    SqliteErasureIndex::AdministrativeResolution,
-                    ordinal,
-                    reference,
-                ),
-            };
-            if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
-        let (effect_digest, effect_bytes, effect_subject) =
-            sqlite_erasure_effect_row(conn, mutation.next_manifest())?;
-        let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&effect_bytes)?;
-        if reference_from_sql(effect_digest)? != mutation.effect()
-            || effect.identity() != mutation.effect()
-            || ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes) != mutation.effect_bytes()
-            || effect_subject.map(reference_from_sql).transpose()? != mutation.effect_subject()
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        if let Some(subject) = mutation.effect_subject() {
-            let subject_manifest = conn
-                .query_row(
-                    "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
-                    params![subject.digest().as_slice()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-                .map_err(map_erasure_receipt_failure)?
-                .map(reference_from_sql)
-                .transpose()?;
-            if subject_manifest != Some(mutation.next_manifest()) {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_effect_is_exact(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<(), ErasureErrorV1> {
+    let (effect_digest, effect_bytes, effect_subject) =
+        sqlite_erasure_effect_row(conn, mutation.next_manifest())?;
+    let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&effect_bytes)?;
+    if reference_from_sql(effect_digest)? != mutation.effect()
+        || effect.identity() != mutation.effect()
+        || ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes) != mutation.effect_bytes()
+        || effect_subject.map(reference_from_sql).transpose()? != mutation.effect_subject()
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_subject_is_exact(
+    conn: &Connection,
+    mutation: &PreparedErasureCasV1,
+) -> Result<(), ErasureErrorV1> {
+    let Some(subject) = mutation.effect_subject() else {
+        return Ok(());
+    };
+    let subject_manifest = conn
+        .query_row(
+            "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
+            params![subject.digest().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(map_erasure_receipt_failure)?
+        .map(reference_from_sql)
+        .transpose()?;
+    if subject_manifest != Some(mutation.next_manifest()) {
+        return Err(ErasureErrorV1::ProvenanceMissing);
     }
     Ok(())
 }
@@ -5689,6 +5769,16 @@ fn sqlite_timeline_exact_metadata(
 }
 
 fn sqlite_fork_admission_is_exact(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    admission: &PreparedErasureForkBatchV1,
+    chain_head: Hash,
+    receipt: &SqliteForkAdmissionReceiptV1,
+) -> Result<bool, ErasureErrorV1> {
+    sqlite_fork_admission_is_exact_impl(conn, hasher, admission, chain_head, receipt)
+}
+
+fn sqlite_fork_admission_is_exact_impl(
     conn: &Connection,
     hasher: &dyn Hasher,
     admission: &PreparedErasureForkBatchV1,
