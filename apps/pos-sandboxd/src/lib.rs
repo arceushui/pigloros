@@ -6,7 +6,7 @@
 
 mod hardening;
 mod system_bus;
-pub(crate) mod transient_unit;
+mod transient_unit;
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
@@ -25,7 +25,7 @@ pub use transient_unit::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SystemdTransientUnitPropertyKind {
+enum SystemdTransientUnitPropertyKind {
     Hardening(SystemdHardeningProperty),
     RootDirectory,
     BindReadOnlyPaths,
@@ -36,7 +36,7 @@ pub(crate) enum SystemdTransientUnitPropertyKind {
 }
 
 impl SystemdTransientUnitPropertyKind {
-    pub(crate) const fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::Hardening(property) => property.name(),
             Self::RootDirectory => "RootDirectory",
@@ -47,6 +47,11 @@ impl SystemdTransientUnitPropertyKind {
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
         }
     }
+}
+
+trait SystemdTransientUnitPropertyAccess {
+    fn kind(&self) -> SystemdTransientUnitPropertyKind;
+    fn into_parts(self) -> (&'static str, SystemdTransientUnitValue);
 }
 
 use pos_reference::sandbox_provider_protocol::{

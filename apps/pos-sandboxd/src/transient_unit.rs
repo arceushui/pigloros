@@ -4,7 +4,8 @@ use zvariant::{Fd, OwnedFd};
 
 use crate::{
     SystemCallFilter, SystemdHardeningProperty, SystemdHardeningReadbackValue,
-    SystemdHardeningValue, SystemdTransientUnitPropertyKind, TransientUnitHardening,
+    SystemdHardeningValue, SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind,
+    TransientUnitHardening,
 };
 
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
@@ -194,19 +195,21 @@ impl SystemdTransientUnitProperty {
         &self.value
     }
 
-    pub(crate) const fn kind(&self) -> SystemdTransientUnitPropertyKind {
-        self.kind
-    }
-
-    pub(crate) fn into_parts(self) -> (&'static str, SystemdTransientUnitValue) {
-        (self.kind.name(), self.value)
-    }
-
     fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
         Ok(Self {
             kind: self.kind,
             value: self.value.try_clone_for_submission()?,
         })
+    }
+}
+
+impl SystemdTransientUnitPropertyAccess for SystemdTransientUnitProperty {
+    fn kind(&self) -> SystemdTransientUnitPropertyKind {
+        self.kind
+    }
+
+    fn into_parts(self) -> (&'static str, SystemdTransientUnitValue) {
+        (self.kind.name(), self.value)
     }
 }
 
