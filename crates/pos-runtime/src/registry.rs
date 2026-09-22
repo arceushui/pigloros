@@ -2441,7 +2441,20 @@ impl PluginRegistry {
     fn generated_output_binding(
         plugin: &dyn Plugin,
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
-        Self::generated_output_binding_with_configuration_details(plugin, &[])
+        let plugin_version = plugin.version().to_owned();
+        let (policy, budget) = Self::generated_output_binding_with_budget_input(
+            plugin,
+            &plugin_version,
+            Self::generated_budget_input(plugin),
+        )?;
+        Ok(OutputPolicyBindingV1::from_installed_source_with_policy(
+            plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )?)
     }
 
     #[cfg(debug_assertions)]
