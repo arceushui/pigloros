@@ -1,8 +1,10 @@
 //! Typed system-bus submission and requested-state verification.
 
-use futures_util::StreamExt;
+use std::future::Future;
+
+use futures_util::{Stream, StreamExt};
 use zbus::{zvariant::OwnedObjectPath, Connection};
-use zbus_systemd::systemd1::{ManagerProxy, ServiceProxy};
+use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
 use crate::{
@@ -103,6 +105,52 @@ impl SystemdJobFailure {
             "skipped" => Some(Self::Skipped),
             _ => Some(Self::Unknown(result)),
         }
+    }
+}
+
+struct SystemdJobCompletion {
+    job: OwnedObjectPath,
+    unit: String,
+    result: String,
+}
+
+fn decode_job_completion(
+    args: Result<JobRemovedArgs<'_>, zbus::Error>,
+) -> Result<SystemdJobCompletion, SystemdTransientUnitTransportError> {
+    let args = args.map_err(SystemdTransientUnitTransportError::JobSignal)?;
+    Ok(SystemdJobCompletion {
+        job: args.job().clone(),
+        unit: args.unit().clone(),
+        result: args.result().clone(),
+    })
+}
+
+async fn await_job_completion<S>(
+    completions: &mut S,
+    job: &SystemdStartJob,
+    submitted_name: String,
+) -> Result<(), SystemdTransientUnitTransportError>
+where
+    S: Stream<Item = Result<SystemdJobCompletion, SystemdTransientUnitTransportError>> + Unpin,
+{
+    loop {
+        let completion = completions
+            .next()
+            .await
+            .ok_or(SystemdTransientUnitTransportError::JobSignalEnded)??;
+        if completion.job.as_str() != job.as_str() {
+            continue;
+        }
+        if completion.unit != submitted_name {
+            return Err(SystemdTransientUnitTransportError::JobIdentityMismatch {
+                expected: submitted_name,
+                actual: completion.unit,
+            });
+        }
+        if let Some(failure) = SystemdJobFailure::from_result(completion.result) {
+            return Err(failure.into());
+        }
+        return Ok(());
     }
 }
 
@@ -211,7 +259,14 @@ impl SystemdTransientUnitTransport {
     /// Returns [`SystemdTransientUnitTransportError::Connect`] when the system bus is
     /// unavailable or rejects the connection.
     pub async fn connect_system() -> Result<Self, SystemdTransientUnitTransportError> {
-        let connection = Connection::system()
+        Self::connect_with(Connection::system()).await
+    }
+
+    async fn connect_with<F>(connection: F) -> Result<Self, SystemdTransientUnitTransportError>
+    where
+        F: Future<Output = Result<Connection, zbus::Error>>,
+    {
+        let connection = connection
             .await
             .map_err(SystemdTransientUnitTransportError::Connect)?;
         Self::from_connection(connection).await
@@ -220,14 +275,20 @@ impl SystemdTransientUnitTransport {
     async fn from_connection(
         connection: Connection,
     ) -> Result<Self, SystemdTransientUnitTransportError> {
-        let proxy = ManagerProxy::new(&connection)
-            .await
-            .map_err(SystemdTransientUnitTransportError::Proxy)?;
+        let subscribed = Self::subscribe_manager(ManagerProxy::new(&connection).await).await;
+        subscribed?;
+        Ok(Self { connection })
+    }
+
+    async fn subscribe_manager(
+        proxy: Result<ManagerProxy<'_>, zbus::Error>,
+    ) -> Result<(), SystemdTransientUnitTransportError> {
+        let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
         proxy
             .subscribe()
             .await
             .map_err(SystemdTransientUnitTransportError::ManagerSubscribe)?;
-        Ok(Self { connection })
+        Ok(())
     }
 
     /// Submit, await, and verify one complete compiled request.
@@ -245,13 +306,33 @@ impl SystemdTransientUnitTransport {
         unit_name: TransientServiceUnitName,
         request: TransientUnitRequest,
     ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
-        let proxy = ManagerProxy::new(&self.connection).await;
-        let properties = request
-            .requested_properties_for_submission()
+        let properties = request.requested_properties_for_submission();
+        self.start_with_prepared(unit_name, request, properties)
+            .await
+    }
+
+    async fn start_with_prepared(
+        &self,
+        unit_name: TransientServiceUnitName,
+        request: TransientUnitRequest,
+        properties: Result<Vec<SystemdTransientUnitProperty>, zvariant::Error>,
+    ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
+        let properties = properties
             .map_err(SystemdTransientUnitTransportError::Serialization)?
             .into_iter()
             .map(encode_property)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>();
+        self.start_with_encoded(unit_name, request, properties).await
+    }
+
+    async fn start_with_encoded(
+        &self,
+        unit_name: TransientServiceUnitName,
+        request: TransientUnitRequest,
+        properties: Result<Vec<(String, OwnedValue)>, SystemdTransientUnitTransportError>,
+    ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
+        let properties = properties?;
+        let proxy = ManagerProxy::new(&self.connection).await;
         submit_and_verify(proxy, properties, unit_name, &request, &self.connection).await
     }
 }
@@ -267,10 +348,29 @@ async fn submit_and_verify(
         Ok(proxy) => proxy,
         Err(error) => return Err(SystemdTransientUnitTransportError::Proxy(error)),
     };
-    let mut completions = proxy
-        .receive_job_removed()
-        .await
+    let completions = proxy.receive_job_removed().await;
+    submit_with_completions(
+        &proxy,
+        completions,
+        properties,
+        unit_name,
+        request,
+        connection,
+    )
+    .await
+}
+
+async fn submit_with_completions(
+    proxy: &ManagerProxy<'_>,
+    completions: Result<JobRemovedStream, zbus::Error>,
+    properties: Vec<(String, OwnedValue)>,
+    unit_name: TransientServiceUnitName,
+    request: &TransientUnitRequest,
+    connection: &Connection,
+) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
+    let completions = completions
         .map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?;
+    let mut completions = completions.map(|completion| decode_job_completion(completion.args()));
     let submitted_name = unit_name.0.clone();
     let job_path = match proxy
         .start_transient_unit(
@@ -285,28 +385,7 @@ async fn submit_and_verify(
         Err(error) => return Err(classify_call_error(error)),
     };
     let job = SystemdStartJob(job_path);
-    loop {
-        let completion = completions
-            .next()
-            .await
-            .ok_or(SystemdTransientUnitTransportError::JobSignalEnded)?;
-        let args = completion
-            .args()
-            .map_err(SystemdTransientUnitTransportError::JobSignal)?;
-        if args.job().as_str() != job.as_str() {
-            continue;
-        }
-        if args.unit() != &submitted_name {
-            return Err(SystemdTransientUnitTransportError::JobIdentityMismatch {
-                expected: submitted_name,
-                actual: args.unit().clone(),
-            });
-        }
-        if let Some(failure) = SystemdJobFailure::from_result(args.result().clone()) {
-            return Err(failure.into());
-        }
-        break;
-    }
+    await_job_completion(&mut completions, &job, submitted_name.clone()).await?;
     let unit_path = proxy
         .get_unit(submitted_name)
         .await
@@ -315,8 +394,18 @@ async fn submit_and_verify(
         .path(unit_path.clone())
         .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
         .build()
-        .await
-        .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
+        .await;
+    verify_service(service, unit_name, job, unit_path, request).await
+}
+
+async fn verify_service(
+    service: Result<ServiceProxy<'_>, zbus::Error>,
+    unit_name: TransientServiceUnitName,
+    job: SystemdStartJob,
+    unit_path: OwnedObjectPath,
+    request: &TransientUnitRequest,
+) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
+    let service = service.map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
     let requested_readback = read_requested_properties(&service, request).await?;
     request
         .verify_readback(&requested_readback)
