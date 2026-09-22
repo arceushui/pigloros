@@ -196,9 +196,16 @@ impl SystemdTransientUnitProperty {
     }
 
     fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
+        Self::from_cloned_value(self.kind, self.value.try_clone_for_submission())
+    }
+
+    fn from_cloned_value(
+        kind: SystemdTransientUnitPropertyKind,
+        value: Result<SystemdTransientUnitValue, zvariant::Error>,
+    ) -> Result<Self, zvariant::Error> {
         Ok(Self {
-            kind: self.kind,
-            value: self.value.try_clone_for_submission()?,
+            kind,
+            value: value?,
         })
     }
 }
@@ -503,4 +510,18 @@ fn is_normalized_absolute_path(path: &str) -> bool {
             .split('/')
             .skip(1)
             .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn property_clone_propagates_value_failure() {
+        let result = SystemdTransientUnitProperty::from_cloned_value(
+            SystemdTransientUnitPropertyKind::FileDescriptorStoreMax,
+            Err(zvariant::Error::IncorrectType),
+        );
+        assert!(matches!(result, Err(zvariant::Error::IncorrectType)));
+    }
 }

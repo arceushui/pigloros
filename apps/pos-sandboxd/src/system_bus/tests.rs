@@ -770,7 +770,8 @@ async fn transport(
     let (server, client) = tokio::join!(server, client);
     let server = server?;
     let client = client?;
-    let transport = SystemdTransientUnitTransport::from_connection(client).await?;
+    let transport =
+        SystemdTransientUnitTransport::connect_with(std::future::ready(Ok(client))).await?;
     Ok((transport, server))
 }
 
@@ -848,5 +849,145 @@ async fn manager_proxy_failure_is_classified() -> Result<(), Box<dyn Error>> {
         error.as_ref().err().map(ToString::to_string),
         Some("failed to construct the typed systemd manager proxy".to_owned())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn connection_and_manager_proxy_failures_are_classified() -> Result<(), Box<dyn Error>> {
+    let connection_error = SystemdTransientUnitTransport::connect_with(std::future::ready(Err(
+        zbus::Error::Failure("test connection failure".to_owned()),
+    )))
+    .await;
+    assert!(matches!(
+        connection_error,
+        Err(SystemdTransientUnitTransportError::Connect(_))
+    ));
+
+    let proxy_error = SystemdTransientUnitTransport::subscribe_manager(Err(
+        zbus::Error::Failure("test proxy failure".to_owned()),
+    ))
+    .await;
+    assert!(matches!(
+        proxy_error,
+        Err(SystemdTransientUnitTransportError::Proxy(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn preparation_and_encoding_failures_are_classified() -> Result<(), Box<dyn Error>> {
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let prepared_error = transport
+        .start_with_prepared(
+            TransientServiceUnitName("prepared.service".to_owned()),
+            request(LaunchMode::AirGapped)?,
+            Err(zvariant::Error::IncorrectType),
+        )
+        .await;
+    assert!(matches!(
+        prepared_error,
+        Err(SystemdTransientUnitTransportError::Serialization(_))
+    ));
+
+    let encoded_error = transport
+        .start_with_encoded(
+            TransientServiceUnitName("encoded.service".to_owned()),
+            request(LaunchMode::AirGapped)?,
+            Err(SystemdTransientUnitTransportError::Serialization(
+                zvariant::Error::IncorrectType,
+            )),
+        )
+        .await;
+    assert!(matches!(
+        encoded_error,
+        Err(SystemdTransientUnitTransportError::Serialization(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn signal_subscription_and_stream_failures_are_classified() -> Result<(), Box<dyn Error>> {
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let proxy = ManagerProxy::new(&transport.connection).await?;
+    let request = request(LaunchMode::AirGapped)?;
+    let subscription_error = submit_with_completions(
+        &proxy,
+        Err(zbus::Error::Failure(
+            "test signal subscription failure".to_owned(),
+        )),
+        Vec::new(),
+        TransientServiceUnitName("subscription.service".to_owned()),
+        &request,
+        &transport.connection,
+    )
+    .await;
+    assert!(matches!(
+        subscription_error,
+        Err(SystemdTransientUnitTransportError::JobSignalSubscribe(_))
+    ));
+
+    let job = SystemdStartJob(OwnedObjectPath::try_from(JOB_PATH)?);
+    let mut ended = futures_util::stream::empty::<
+        Result<SystemdJobCompletion, SystemdTransientUnitTransportError>,
+    >();
+    let ended_error = await_job_completion(&mut ended, &job, "ended.service".to_owned()).await;
+    assert!(matches!(
+        ended_error,
+        Err(SystemdTransientUnitTransportError::JobSignalEnded)
+    ));
+
+    let signal_error = SystemdTransientUnitTransportError::JobSignal(zbus::Error::Failure(
+        "test malformed signal".to_owned(),
+    ));
+    let mut malformed = futures_util::stream::once(std::future::ready(Err(signal_error)));
+    let malformed_error =
+        await_job_completion(&mut malformed, &job, "malformed.service".to_owned()).await;
+    assert!(matches!(
+        malformed_error,
+        Err(SystemdTransientUnitTransportError::JobSignal(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn malformed_signal_arguments_are_classified() {
+    let result = decode_job_completion(Err(zbus::Error::Failure(
+        "test malformed arguments".to_owned(),
+    )));
+    assert!(matches!(
+        result,
+        Err(SystemdTransientUnitTransportError::JobSignal(_))
+    ));
+}
+
+#[tokio::test]
+async fn service_proxy_build_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let request = request(LaunchMode::AirGapped)?;
+    let result = verify_service(
+        Err(zbus::Error::Failure(
+            "test service proxy failure".to_owned(),
+        )),
+        TransientServiceUnitName("service-proxy.service".to_owned()),
+        SystemdStartJob(OwnedObjectPath::try_from(JOB_PATH)?),
+        OwnedObjectPath::try_from(UNIT_PATH)?,
+        &request,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SystemdTransientUnitTransportError::ServiceProxy(_))
+    ));
     Ok(())
 }
