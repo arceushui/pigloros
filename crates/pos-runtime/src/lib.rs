@@ -69,5 +69,5 @@ pub use reviewed_policy::{
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
 pub use world_replay::{
-    VerifiedWorldReplayV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
 };

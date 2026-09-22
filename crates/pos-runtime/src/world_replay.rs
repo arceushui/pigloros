@@ -5,12 +5,18 @@
 //! The runtime owns the installed verifier boundary and the opaque verified
 //! result used by protected Replay, Snapshot, and comparison operations.
 
-use pos_core::{ErasureReferenceV1, ErasureReplayClaimV1, Hash, TimelineId, WorldReplayClosureV1};
+use pos_core::{
+    store::SeqRange, ErasureProtectedOperationV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
+    TimelineId, WorldReplayClosureV1,
+};
 
 /// Closed reasons why an installed World Replay verifier could not issue a
 /// protected-use capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorldReplayVerificationErrorV1 {
+    /// The requested operation is not covered by the structural closure.
+    #[error("World Replay request is not covered by the closure")]
+    RequestMismatch,
     /// No host-installed verifier was configured for this composition.
     #[error("World Replay verifier is not installed")]
     MissingVerifier,
@@ -25,6 +31,84 @@ pub enum WorldReplayVerificationErrorV1 {
     ClaimUnavailable,
 }
 
+/// Exact protected use presented to the installed World Replay verifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldReplayUseV1 {
+    timeline_id: TimelineId,
+    operation: ErasureProtectedOperationV1,
+    range: SeqRange,
+    consumer_ids: Vec<String>,
+}
+
+impl WorldReplayUseV1 {
+    /// Construct a bounded request with a canonical consumer selection.
+    ///
+    /// # Errors
+    /// Returns [`WorldReplayVerificationErrorV1::RequestMismatch`] for an
+    /// empty, duplicate, oversized, or malformed consumer selection.
+    pub fn new(
+        timeline_id: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        range: SeqRange,
+        mut consumer_ids: Vec<String>,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        consumer_ids.sort_unstable();
+        let invalid = range.to.is_some_and(|to| to < range.from)
+            || consumer_ids.is_empty()
+            || consumer_ids.len() > pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_CONSUMERS
+            || consumer_ids.iter().any(|id| {
+                id.is_empty()
+                    || id.len()
+                        > pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES
+            })
+            || consumer_ids.windows(2).any(|pair| pair[0] == pair[1]);
+        if invalid {
+            return Err(WorldReplayVerificationErrorV1::RequestMismatch);
+        }
+        Ok(Self {
+            timeline_id,
+            operation,
+            range,
+            consumer_ids,
+        })
+    }
+
+    /// Return the requested Timeline.
+    #[must_use]
+    pub const fn timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
+    /// Return the requested protected operation.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureProtectedOperationV1 {
+        self.operation
+    }
+
+    /// Return the exact requested source range.
+    #[must_use]
+    pub const fn range(&self) -> SeqRange {
+        self.range
+    }
+
+    /// Return the canonical requested consumer identifiers.
+    #[must_use]
+    pub fn consumer_ids(&self) -> &[String] {
+        &self.consumer_ids
+    }
+
+    pub(crate) fn is_covered_by(&self, closure: &WorldReplayClosureV1) -> bool {
+        self.timeline_id == closure.timeline_id()
+            && self.consumer_ids.iter().all(|requested| {
+                closure
+                    .consumer_set()
+                    .consumers()
+                    .iter()
+                    .any(|recorded| recorded.consumer_id() == requested)
+            })
+    }
+}
+
 /// An opaque host-issued World Replay result.
 ///
 /// The fields are private and there is no public constructor.  A caller may
@@ -37,6 +121,7 @@ pub struct VerifiedWorldReplayV1 {
     source_head: Hash,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
+    requested_use: WorldReplayUseV1,
 }
 
 impl VerifiedWorldReplayV1 {
@@ -68,14 +153,22 @@ impl VerifiedWorldReplayV1 {
     ///
     /// # Errors
     /// Returns [`WorldReplayVerificationErrorV1::ClaimUnavailable`] when the
-    /// installed owner reports an expired, erased, redacted, or otherwise
-    /// non-authoritative result.
+    /// installed owner reports an expired, erased, structurally limited, or
+    /// otherwise non-authoritative result. Optional-view redaction remains an
+    /// authoritative claim under ADR-060.
     pub const fn require_authoritative_use(&self) -> Result<(), WorldReplayVerificationErrorV1> {
-        if matches!(self.replay_claim, ErasureReplayClaimV1::Exact) {
+        if matches!(
+            self.replay_claim,
+            ErasureReplayClaimV1::Exact | ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        ) {
             Ok(())
         } else {
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
         }
+    }
+
+    pub(crate) const fn requested_use(&self) -> &WorldReplayUseV1 {
+        &self.requested_use
     }
 }
 
@@ -88,6 +181,7 @@ impl VerifiedWorldReplayV1 {
 #[must_use]
 pub fn test_verified_world_replay(
     closure: &WorldReplayClosureV1,
+    requested_use: &WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
 ) -> VerifiedWorldReplayV1 {
@@ -95,6 +189,7 @@ pub fn test_verified_world_replay(
         closure.digest(),
         closure.timeline_id(),
         closure.source_head(),
+        requested_use.clone(),
         inventory_generation,
         replay_claim,
     )
@@ -110,6 +205,7 @@ pub const fn test_verified_world_replay_with_fields(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
+    requested_use: WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
 ) -> VerifiedWorldReplayV1 {
@@ -117,6 +213,7 @@ pub const fn test_verified_world_replay_with_fields(
         closure_digest,
         timeline_id,
         source_head,
+        requested_use,
         inventory_generation,
         replay_claim,
     }
@@ -138,6 +235,7 @@ pub trait WorldReplayVerifierV1: Send + Sync {
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,
+        requested_use: &WorldReplayUseV1,
         inventory_generation: ErasureReferenceV1,
     ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1>;
 }
@@ -165,23 +263,76 @@ mod tests {
     fn verified_result_exposes_bindings_and_requires_an_exact_claim() {
         let closure = WorldReplayClosureV1::test_fixture().test_ok();
         let generation = ErasureReferenceV1::from_digest([63; 32]);
-        let exact = test_verified_world_replay(&closure, generation, ErasureReplayClaimV1::Exact);
+        let requested_use = WorldReplayUseV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            SeqRange::all(),
+            vec!["count".to_owned()],
+        )
+        .test_ok();
+        let exact = test_verified_world_replay(
+            &closure,
+            &requested_use,
+            generation,
+            ErasureReplayClaimV1::Exact,
+        );
         assert_eq!(exact.closure_digest(), closure.digest());
         assert_eq!(exact.timeline_id(), closure.timeline_id());
         assert_eq!(exact.source_head(), closure.source_head());
         assert_eq!(exact.inventory_generation(), generation);
+        assert_eq!(exact.requested_use(), &requested_use);
         assert_eq!(exact.require_authoritative_use(), Ok(()));
+
+        let redacted = test_verified_world_replay(
+            &closure,
+            &requested_use,
+            generation,
+            ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+        );
+        assert_eq!(redacted.require_authoritative_use(), Ok(()));
 
         let structural = test_verified_world_replay_with_fields(
             closure.digest(),
             closure.timeline_id(),
             closure.source_head(),
+            requested_use,
             generation,
             ErasureReplayClaimV1::StructuralOnly,
         );
         assert_eq!(
             structural.require_authoritative_use(),
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
+        );
+    }
+
+    #[test]
+    fn requested_use_rejects_invalid_consumer_selections() {
+        let timeline = TimelineId::from_ulid(ulid::Ulid::from(1_u128));
+        for consumers in [
+            Vec::new(),
+            vec!["count".to_owned(), "count".to_owned()],
+            vec!["x".repeat(
+                pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES + 1,
+            )],
+        ] {
+            assert_eq!(
+                WorldReplayUseV1::new(
+                    timeline,
+                    ErasureProtectedOperationV1::Read,
+                    SeqRange::all(),
+                    consumers,
+                ),
+                Err(WorldReplayVerificationErrorV1::RequestMismatch)
+            );
+        }
+        assert_eq!(
+            WorldReplayUseV1::new(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                SeqRange::bounded(pos_core::Seq::from_u64(2), pos_core::Seq::from_u64(1)),
+                vec!["count".to_owned()],
+            ),
+            Err(WorldReplayVerificationErrorV1::RequestMismatch)
         );
     }
 }

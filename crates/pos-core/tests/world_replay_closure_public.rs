@@ -451,6 +451,15 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
 }
 
 #[test]
+fn structural_validation_allows_no_key_dependencies() {
+    let mut keyless = closure_input();
+    keyless
+        .artifacts
+        .retain(|leaf| leaf.as_input().kind != WorldArtifactKindV1::KeyDependencyEvidence);
+    assert!(WorldReplayClosureV1::new(keyless).is_ok());
+}
+
+#[test]
 fn structural_validation_rejects_duplicate_digest_and_zero_length() {
     let base = closure_input();
     let mut duplicate = base.clone();

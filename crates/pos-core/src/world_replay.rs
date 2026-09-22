@@ -21,7 +21,7 @@ use ulid::Ulid;
 /// Maximum number of native artifact leaves in one retained World closure.
 pub const MAX_WORLD_REPLAY_ARTIFACTS_V1: usize = 4096;
 
-const REQUIRED_KINDS: [WorldArtifactKindV1; 13] = [
+const REQUIRED_KINDS: [WorldArtifactKindV1; 12] = [
     WorldArtifactKindV1::OutputPolicy,
     WorldArtifactKindV1::ExecutableBudgetPolicy,
     WorldArtifactKindV1::RetentionPolicy,
@@ -33,7 +33,6 @@ const REQUIRED_KINDS: [WorldArtifactKindV1; 13] = [
     WorldArtifactKindV1::ReducerImplementation,
     WorldArtifactKindV1::RuntimeIdentity,
     WorldArtifactKindV1::PluginImplementationIdentity,
-    WorldArtifactKindV1::KeyDependencyEvidence,
     WorldArtifactKindV1::TimelinePayload,
 ];
 
@@ -351,6 +350,12 @@ impl WorldReplayClosureV1 {
         self.inventory_generation
     }
 
+    /// Return the immutable consumer and producer selection bound to this closure.
+    #[must_use]
+    pub const fn consumer_set(&self) -> &WorldConsumerSetV1 {
+        &self.consumer_set
+    }
+
     /// Return the canonical closure identity used in Replay receipts.
     #[must_use]
     pub fn digest(&self) -> Hash {
@@ -402,8 +407,25 @@ impl WorldReplayClosureV1 {
     pub fn test_fixture_with_inventory_generation(
         inventory_generation: Hash,
     ) -> Result<Self, WorldReplayClosureErrorV1> {
+        Self::test_fixture_for_timeline_with_inventory_generation(
+            TimelineId::from_ulid(Ulid::from(1_u128)),
+            inventory_generation,
+        )
+    }
+
+    /// Build the deterministic seam fixture for one Timeline and inventory generation.
+    ///
+    /// # Errors
+    /// Returns a closed fixture-construction error if the deterministic test
+    /// records fail their own public validation.
+    #[cfg(feature = "test-support")]
+    pub fn test_fixture_for_timeline_with_inventory_generation(
+        timeline_id: TimelineId,
+        inventory_generation: Hash,
+    ) -> Result<Self, WorldReplayClosureErrorV1> {
         const DAY_MICROS: u64 = 86_400_000_000;
         build_test_fixture(
+            timeline_id,
             inventory_generation,
             || {
                 crate::retention::WorldRetentionPolicyV1::new(
@@ -434,7 +456,7 @@ impl WorldReplayClosureV1 {
                     scope,
                     || {
                         crate::world_consumer_set::WorldConsumerV1::new(
-                            "entity-state".to_owned(),
+                            "count".to_owned(),
                             Hash::from_bytes([40; 32]),
                             Hash::from_bytes([41; 32]),
                             Hash::from_bytes([42; 32]),
@@ -539,6 +561,7 @@ fn build_test_fixture<
     ConsumerError,
     ArtifactError,
 >(
+    timeline_id: TimelineId,
     inventory_generation: Hash,
     make_policy: PolicyFactory,
     make_lease: LeaseFactory,
@@ -556,7 +579,6 @@ where
         &WorldRetentionLeaseV1,
     ) -> Result<Vec<WorldArtifactLeafV1>, ArtifactError>,
 {
-    let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
     let retention_policy =
         make_policy().map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
     let retention_lease = make_lease(&retention_policy, timeline_id)
@@ -742,7 +764,9 @@ mod tests {
 
     #[test]
     fn fixture_builder_closes_factory_failures() -> Result<(), Box<dyn std::error::Error>> {
+        let timeline_id = TimelineId::from_ulid(Ulid::from(1_u128));
         let policy_failure = build_test_fixture(
+            timeline_id,
             Hash::from_bytes([62; 32]),
             || Err::<WorldRetentionPolicyV1, _>(()),
             |_, _| Err::<WorldRetentionLeaseV1, _>(()),
@@ -756,6 +780,7 @@ mod tests {
 
         let policy = valid_policy()?;
         let lease_failure = build_test_fixture(
+            timeline_id,
             Hash::from_bytes([62; 32]),
             move || Ok::<_, ()>(policy),
             |_, _| Err::<WorldRetentionLeaseV1, _>(()),
@@ -769,6 +794,7 @@ mod tests {
 
         let policy = valid_policy()?;
         let consumer_failure = build_test_fixture(
+            timeline_id,
             Hash::from_bytes([62; 32]),
             move || Ok::<_, ()>(policy),
             valid_lease,
@@ -783,6 +809,7 @@ mod tests {
         let policy = valid_policy()?;
         let consumer_set = valid_consumer_set()?;
         let artifact_failure = build_test_fixture(
+            timeline_id,
             Hash::from_bytes([62; 32]),
             move || Ok::<_, ()>(policy),
             valid_lease,
@@ -797,6 +824,7 @@ mod tests {
         let policy = valid_policy()?;
         let consumer_set = valid_consumer_set()?;
         let invalid_closure = build_test_fixture(
+            timeline_id,
             Hash::zero(),
             move || Ok::<_, ()>(policy),
             valid_lease,
