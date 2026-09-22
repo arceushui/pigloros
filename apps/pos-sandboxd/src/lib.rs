@@ -24,6 +24,31 @@ pub use transient_unit::{
     TransientUnitRequest, TransientUnitRequestError,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SystemdTransientUnitPropertyKind {
+    Hardening(SystemdHardeningProperty),
+    RootDirectory,
+    BindReadOnlyPaths,
+    SystemCallFilter,
+    RestrictAddressFamilies,
+    FileDescriptorStoreMax,
+    ExtraFileDescriptors,
+}
+
+impl SystemdTransientUnitPropertyKind {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Hardening(property) => property.name(),
+            Self::RootDirectory => "RootDirectory",
+            Self::BindReadOnlyPaths => "BindReadOnlyPaths",
+            Self::SystemCallFilter => "SystemCallFilter",
+            Self::RestrictAddressFamilies => "RestrictAddressFamilies",
+            Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
+            Self::ExtraFileDescriptors => "ExtraFileDescriptors",
+        }
+    }
+}
+
 use pos_reference::sandbox_provider_protocol::{
     SandboxArchitecture, SandboxProviderProtocolError, SandboxSyscallSet,
 };

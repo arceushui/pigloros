@@ -6,9 +6,9 @@ use zbus_systemd::systemd1::{ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
 use crate::{
-    transient_unit::SystemdTransientUnitPropertyKind, SystemdHardeningProperty,
-    SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
-    SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
+    SystemdHardeningProperty, SystemdHardeningReadbackValue, SystemdHardeningValue,
+    SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty,
+    SystemdTransientUnitPropertyKind, SystemdTransientUnitReadback,
     SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitRequest,
     TransientUnitRequestError,
 };
