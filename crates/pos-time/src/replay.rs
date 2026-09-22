@@ -72,23 +72,13 @@ fn replay_range(
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
         outcome = registry.try_with_state_transaction(|candidate| {
-            let verified = sender
-                .admit_world_replay(closure, &requested_use)
-                .map_err(crate::host_error_to_core)?;
-            verified
-                .require_authoritative_use()
-                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            let read_bounds = crate::require_world_replay(sender, closure, &requested_use)?;
             let events = sender
-                .read_bounded(timeline, range, verified.read_bounds())
+                .read_bounded(timeline, range, read_bounds)
                 .map_err(crate::host_error_to_core)?;
             candidate.fold_events(&events);
-            let final_verification = sender
-                .admit_world_replay(closure, &requested_use)
-                .map_err(crate::host_error_to_core)?;
-            final_verification
-                .require_authoritative_use()
-                .map_err(|_| CoreError::ArtifactUnavailable)?;
-            if final_verification.read_bounds() != verified.read_bounds() {
+            let final_bounds = crate::require_world_replay(sender, closure, &requested_use)?;
+            if final_bounds != read_bounds {
                 return Err(CoreError::ArtifactUnavailable);
             }
             Ok(events)

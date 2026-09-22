@@ -41,6 +41,20 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
     }
 }
 
+fn require_world_replay(
+    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
+    closure: &pos_core::WorldReplayClosureV1,
+    requested_use: &pos_runtime::WorldReplayUseV1,
+) -> Result<pos_core::EventReadBounds, pos_core::CoreError> {
+    let verified = sender
+        .admit_world_replay(closure, requested_use)
+        .map_err(host_error_to_core)?;
+    verified
+        .require_authoritative_use()
+        .map_err(|_| pos_core::CoreError::ArtifactUnavailable)?;
+    Ok(verified.read_bounds())
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
