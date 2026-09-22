@@ -2,7 +2,10 @@ use std::{
     error::Error,
     fs::File,
     os::fd::OwnedFd as StdOwnedFd,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use pos_conformance::SandboxSyscallSetV1;
@@ -79,6 +82,7 @@ struct ObservedStart {
 
 struct RecordingManager {
     observed: Arc<Mutex<Option<ObservedStart>>>,
+    subscribed: Arc<AtomicBool>,
     behavior: ManagerBehavior,
 }
 
@@ -105,6 +109,11 @@ impl Default for ManagerBehavior {
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl RecordingManager {
+    #[zbus(name = "Subscribe")]
+    fn subscribe(&self) {
+        self.subscribed.store(true, Ordering::SeqCst);
+    }
+
     #[zbus(name = "StartTransientUnit")]
     async fn start_transient_unit(
         &self,
@@ -114,6 +123,11 @@ impl RecordingManager {
         auxiliary: Vec<(String, Vec<(String, OwnedValue)>)>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
+        if !self.subscribed.load(Ordering::SeqCst) {
+            return Err(fdo::Error::Failed(
+                "StartTransientUnit arrived before Subscribe".to_owned(),
+            ));
+        }
         if self.behavior.reject {
             return Err(fdo::Error::AccessDenied("test rejection".to_owned()));
         }
@@ -490,8 +504,7 @@ async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Err
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
-    let (transport, _server) =
-        transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let result = transport
         .start(
             TransientServiceUnitName::from_attempt_id([0x01; 16])?,
@@ -525,8 +538,7 @@ async fn every_non_successful_job_result_fails_closed() -> Result<(), Box<dyn Er
             ..ManagerBehavior::default()
         };
         let service = RecordingService::exact(expected_system_call_filter()?);
-        let (transport, _server) =
-            transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+        let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
         let error = transport
             .start(
                 TransientServiceUnitName::from_attempt_id([0x02; 16])?,
@@ -550,8 +562,7 @@ async fn matching_job_path_cannot_substitute_the_unit_name() -> Result<(), Box<d
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
-    let (transport, _server) =
-        transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let expected = TransientServiceUnitName::from_attempt_id([0x03; 16])?;
     let error = transport
         .start(expected.clone(), request(LaunchMode::AirGapped)?)
@@ -631,9 +642,17 @@ async fn transport(
 ) -> Result<(SystemdTransientUnitTransport, zbus::Connection), Box<dyn Error>> {
     let guid = Guid::generate();
     let (server_socket, client_socket) = Channel::pair();
+    let subscribed = Arc::new(AtomicBool::new(false));
     let server = Builder::authenticated_socket(server_socket, guid.clone())?
         .p2p()
-        .serve_at(MANAGER_PATH, RecordingManager { observed, behavior })?
+        .serve_at(
+            MANAGER_PATH,
+            RecordingManager {
+                observed,
+                subscribed,
+                behavior,
+            },
+        )?
         .serve_at(UNIT_PATH, service)?
         .build();
     let client = Builder::authenticated_socket(client_socket, guid)?
@@ -643,7 +662,7 @@ async fn transport(
     let server = server?;
     let client = client?;
     Ok((
-        SystemdTransientUnitTransport::from_connection(client),
+        SystemdTransientUnitTransport::from_connection(client).await?,
         server,
     ))
 }

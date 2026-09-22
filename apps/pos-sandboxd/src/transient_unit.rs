@@ -200,10 +200,7 @@ pub struct SystemdTransientUnitProperty {
 }
 
 impl SystemdTransientUnitProperty {
-    const fn new(
-        kind: SystemdTransientUnitPropertyKind,
-        value: SystemdTransientUnitValue,
-    ) -> Self {
+    const fn new(kind: SystemdTransientUnitPropertyKind, value: SystemdTransientUnitValue) -> Self {
         Self { kind, value }
     }
 
