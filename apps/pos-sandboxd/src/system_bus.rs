@@ -406,7 +406,9 @@ async fn read_hardening(
             service.private_devices().await.map(bool_readback)
         }
         SystemdHardeningProperty::PrivateIpc => service.private_ipc().await.map(bool_readback),
-        SystemdHardeningProperty::PrivateMounts => service.private_mounts().await.map(bool_readback),
+        SystemdHardeningProperty::PrivateMounts => {
+            service.private_mounts().await.map(bool_readback)
+        }
         SystemdHardeningProperty::PrivateNetwork => {
             service.private_network().await.map(bool_readback)
         }
@@ -424,9 +426,10 @@ async fn read_hardening(
             service.protect_system().await.map(string_readback)
         }
         SystemdHardeningProperty::ProtectHome => service.protect_home().await.map(string_readback),
-        SystemdHardeningProperty::ProtectControlGroupsEx => {
-            service.protect_control_groups_ex().await.map(string_readback)
-        }
+        SystemdHardeningProperty::ProtectControlGroupsEx => service
+            .protect_control_groups_ex()
+            .await
+            .map(string_readback),
         SystemdHardeningProperty::ProtectKernelTunables => {
             service.protect_kernel_tunables().await.map(bool_readback)
         }
