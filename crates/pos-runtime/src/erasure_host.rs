@@ -4891,6 +4891,20 @@ mod tests {
     }
 
     #[test]
+    fn hosted_coordinator_port_rejects_mismatched_request_topology_cardinality() {
+        let authority = RejectedCoordinatorAuthorityV1 {
+            unaffected: std::sync::Mutex::new(vec![TimelineId::new()]),
+            ..Default::default()
+        };
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        let port = HostedCoordinatorPortV1::new(&mut store, &authority);
+        assert_eq!(
+            port.complete_erasure_inventory_observation(4),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
     fn hosted_coordinator_port_rejects_missing_candidate_observation() {
         let authority = RejectedCoordinatorAuthorityV1::default();
         authority
