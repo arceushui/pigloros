@@ -4,7 +4,7 @@ use zvariant::{Fd, OwnedFd};
 
 use crate::{
     SystemCallFilter, SystemdHardeningProperty, SystemdHardeningReadbackValue,
-    SystemdHardeningValue, TransientUnitHardening,
+    SystemdHardeningValue, SystemdTransientUnitPropertyKind, TransientUnitHardening,
 };
 
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
@@ -166,31 +166,6 @@ impl SystemdTransientUnitValue {
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(Self::ExtraFileDescriptors),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SystemdTransientUnitPropertyKind {
-    Hardening(SystemdHardeningProperty),
-    RootDirectory,
-    BindReadOnlyPaths,
-    SystemCallFilter,
-    RestrictAddressFamilies,
-    FileDescriptorStoreMax,
-    ExtraFileDescriptors,
-}
-
-impl SystemdTransientUnitPropertyKind {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Hardening(property) => property.name(),
-            Self::RootDirectory => "RootDirectory",
-            Self::BindReadOnlyPaths => "BindReadOnlyPaths",
-            Self::SystemCallFilter => "SystemCallFilter",
-            Self::RestrictAddressFamilies => "RestrictAddressFamilies",
-            Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
-            Self::ExtraFileDescriptors => "ExtraFileDescriptors",
         }
     }
 }
