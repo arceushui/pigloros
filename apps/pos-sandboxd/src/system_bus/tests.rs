@@ -88,21 +88,35 @@ struct RecordingManager {
 
 #[derive(Clone)]
 struct ManagerBehavior {
-    reject_subscribe: bool,
+    subscription: SubscriptionBehavior,
     reject: bool,
-    reject_unit_lookup: bool,
+    unit_lookup: UnitLookupBehavior,
     result: String,
     emit_unrelated: bool,
     completion_unit: Option<String>,
     emit_completion: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+enum SubscriptionBehavior {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Clone, Copy, Default)]
+enum UnitLookupBehavior {
+    #[default]
+    Resolve,
+    Reject,
+}
+
 impl Default for ManagerBehavior {
     fn default() -> Self {
         Self {
-            reject_subscribe: false,
+            subscription: SubscriptionBehavior::default(),
             reject: false,
-            reject_unit_lookup: false,
+            unit_lookup: UnitLookupBehavior::default(),
             result: "done".to_owned(),
             emit_unrelated: false,
             completion_unit: None,
@@ -115,7 +129,7 @@ impl Default for ManagerBehavior {
 impl RecordingManager {
     #[zbus(name = "Subscribe")]
     fn subscribe(&self) -> fdo::Result<()> {
-        if self.behavior.reject_subscribe {
+        if matches!(self.behavior.subscription, SubscriptionBehavior::Reject) {
             return Err(fdo::Error::AccessDenied(
                 "test subscription rejection".to_owned(),
             ));
@@ -206,7 +220,7 @@ impl RecordingManager {
     #[zbus(name = "GetUnit")]
     fn get_unit(&self, name: String) -> fdo::Result<OwnedObjectPath> {
         let _ = (&self.observed, name);
-        if self.behavior.reject_unit_lookup {
+        if matches!(self.behavior.unit_lookup, UnitLookupBehavior::Reject) {
             return Err(fdo::Error::Failed("test lookup rejection".to_owned()));
         }
         OwnedObjectPath::try_from(UNIT_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
@@ -549,7 +563,7 @@ async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Err
 #[tokio::test]
 async fn manager_subscription_rejection_is_classified() -> Result<(), Box<dyn Error>> {
     let behavior = ManagerBehavior {
-        reject_subscribe: true,
+        subscription: SubscriptionBehavior::Reject,
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
@@ -567,7 +581,7 @@ async fn manager_subscription_rejection_is_classified() -> Result<(), Box<dyn Er
 #[tokio::test]
 async fn completed_unit_lookup_failure_is_classified() -> Result<(), Box<dyn Error>> {
     let behavior = ManagerBehavior {
-        reject_unit_lookup: true,
+        unit_lookup: UnitLookupBehavior::Reject,
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
@@ -716,7 +730,9 @@ async fn manager_only_property_read_failure_is_classified() -> Result<(), Box<dy
     let error = transport
         .start(
             TransientServiceUnitName::from_attempt_id([0x07; 16])?,
-            request(LaunchMode::AirGapped)?,
+            request(LaunchMode::Local {
+                host_service: descriptor()?,
+            })?,
         )
         .await
         .err()
