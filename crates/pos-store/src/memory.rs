@@ -1514,7 +1514,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
-        self.commit_fork_admission_impl(permit, admission)
+        self.commit_fork_admission_impl(permit, &admission)
     }
 
     fn recover_fork_admission(
@@ -1529,7 +1529,7 @@ impl MemoryStore {
     fn commit_fork_admission_impl(
         &mut self,
         permit: &ErasureTopologyTransitionPermitV1,
-        admission: PreparedErasureForkBatchV1,
+        admission: &PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         self.ensure_host_transition_permit(permit)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
@@ -1596,7 +1596,7 @@ impl MemoryStore {
     }
 
     fn recover_fork_admission_impl(
-        &mut self,
+        &self,
         operation: ErasureReferenceV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
