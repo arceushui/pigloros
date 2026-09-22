@@ -6754,6 +6754,37 @@ mod tests {
     }
 
     #[test]
+    fn host_transition_meta_creation_reports_an_uncertain_commit() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing sqlite test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        store.conn.commit_hook(Some(|| true)).test_ok();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let error = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("uncertain-commit"),
+                )
+                .test_err();
+            assert!(matches!(
+                error,
+                CoreError::Storage(message)
+                    if message.contains("transaction commit outcome uncertain")
+            ));
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+        store.conn.commit_hook::<fn() -> bool>(None).test_ok();
+    }
+
+    #[test]
     fn rejoin_adapter_rejects_missing_corrupt_and_remapped_evidence() {
         let proof = crate::test_rejoin_proof();
         let mut store = new_store();

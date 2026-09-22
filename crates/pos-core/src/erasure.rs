@@ -7283,6 +7283,13 @@ mod coverage_paths {
             claims = Some((
                 permit.claim_for_store(&gate, &store_binding),
                 permit.claim_for_store(&gate, &store_binding),
+                permit.claim_for_store(
+                    &gate,
+                    &ErasureTopologyStoreBindingV1 {
+                        gate_identity: Arc::clone(&gate.topology_binding_id),
+                        store_identity: Arc::new(()),
+                    },
+                ),
                 permit.claim_for_store(&foreign_gate, &store_binding),
                 permit.claim_for_store(&gate, &foreign_store_binding),
             ));
@@ -7294,7 +7301,7 @@ mod coverage_paths {
                 .map(|(inventory, ())| inventory.generation()),
             Ok(generation)
         );
-        assert_eq!(claims, Some((true, true, false, false)));
+        assert_eq!(claims, Some((true, true, false, false, false)));
         Ok(())
     }
 

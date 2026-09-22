@@ -5717,6 +5717,26 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_persistence_errors_are_classified_without_poisoning_ordinary_failures() {
+        for message in [
+            "transaction commit failed: disk failure",
+            "transaction commit outcome uncertain: disk failure",
+            "operation failed; rollback failed: disk failure",
+            "ledger initialization failed; Timeline rollback also failed: disk failure",
+        ] {
+            assert!(is_uncertain_persistence_error(&CoreError::Storage(
+                message.to_owned(),
+            )));
+        }
+        assert!(!is_uncertain_persistence_error(&CoreError::Storage(
+            "ordinary adapter failure".to_owned(),
+        )));
+        assert!(!is_uncertain_persistence_error(&CoreError::Serialization(
+            "ordinary serialization failure".to_owned(),
+        )));
+    }
+
+    #[test]
     fn empty_topology_change_rejects_a_candidate_over_the_deployment_ceiling() {
         let mut store = MemoryStore::new().without_erasure_gate();
         store
