@@ -275,9 +275,9 @@ impl SystemdTransientUnitTransport {
     async fn from_connection(
         connection: Connection,
     ) -> Result<Self, SystemdTransientUnitTransportError> {
-        let subscribed = Self::subscribe_manager(ManagerProxy::new(&connection).await).await;
-        subscribed?;
-        Ok(Self { connection })
+        let subscription = Self::subscribe_manager(ManagerProxy::new(&connection).await).await;
+        let result = subscription.map(|()| Self { connection });
+        result
     }
 
     async fn subscribe_manager(
