@@ -563,6 +563,7 @@ jobs:
           --exclude 'examples/**'
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
+          --exclude 'src/system_bus/tests.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -576,6 +577,7 @@ jobs:
           --exclude 'examples/**'
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
+          --exclude 'src/system_bus/tests.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
