@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use pos_core::store::{EventReadBounds, SeqRange};
+use pos_core::store::SeqRange;
 use pos_core::{
     CoreError, EntityId, ErasureProtectedOperationV1, Seq, StateRegistry, TimelineId,
     WorldReplayClosureV1,
@@ -55,22 +55,13 @@ fn run_snapshot_fence(
         snapshot_use(timeline, registry).map_err(|_| CoreError::ArtifactUnavailable)?;
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = snapshot_effect(sender, timeline, registry, closure, &requested_use);
+        outcome =
+            snapshot_effect_with_rechecks(sender, timeline, registry, closure, &requested_use);
     };
     sender
         .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut effect)
         .map_err(crate::host_error_to_core)?;
     outcome
-}
-
-fn snapshot_effect(
-    sender: &mut ErasureReadSenderV1<'_>,
-    timeline: TimelineId,
-    registry: &mut ProjectionRegistry,
-    closure: &WorldReplayClosureV1,
-    requested_use: &WorldReplayUseV1,
-) -> Result<Snapshot, CoreError> {
-    snapshot_effect_with_rechecks(sender, timeline, registry, closure, requested_use)
 }
 
 fn snapshot_effect_with_rechecks(
@@ -81,20 +72,25 @@ fn snapshot_effect_with_rechecks(
     requested_use: &WorldReplayUseV1,
 ) -> Result<Snapshot, CoreError> {
     registry.try_with_state_transaction(|candidate| {
-        sender
+        let verified = sender
             .admit_world_replay(closure, requested_use)
-            .map_err(crate::host_error_to_core)?
+            .map_err(crate::host_error_to_core)?;
+        verified
             .require_authoritative_use()
             .map_err(|_| CoreError::ArtifactUnavailable)?;
         let events = sender
-            .read_bounded(timeline, SeqRange::all(), unbounded_snapshot_read())
+            .read_bounded(timeline, SeqRange::all(), verified.read_bounds())
             .map_err(crate::host_error_to_core)?;
         let snapshot = snapshot_from_events(timeline, candidate, &events)?;
-        sender
+        let final_verification = sender
             .admit_world_replay(closure, requested_use)
-            .map_err(crate::host_error_to_core)?
+            .map_err(crate::host_error_to_core)?;
+        final_verification
             .require_authoritative_use()
             .map_err(|_| CoreError::ArtifactUnavailable)?;
+        if final_verification.read_bounds() != verified.read_bounds() {
+            return Err(CoreError::ArtifactUnavailable);
+        }
         Ok(snapshot)
     })
 }
@@ -150,7 +146,8 @@ fn run_verification_fence(
         snapshot_use(snap.timeline, registry).map_err(|_| SnapshotError::ArtifactUnavailable)?;
     let mut outcome = Err(SnapshotError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = verify_snapshot_effect(sender, snap, registry, closure, &requested_use);
+        outcome =
+            verify_snapshot_effect_with_rechecks(sender, snap, registry, closure, &requested_use);
     };
     sender
         .with_protected_effect_fence(
@@ -163,16 +160,6 @@ fn run_verification_fence(
     outcome
 }
 
-fn verify_snapshot_effect(
-    sender: &mut ErasureReadSenderV1<'_>,
-    snap: &Snapshot,
-    registry: &mut ProjectionRegistry,
-    closure: &WorldReplayClosureV1,
-    requested_use: &WorldReplayUseV1,
-) -> Result<(), SnapshotError> {
-    verify_snapshot_effect_with_rechecks(sender, snap, registry, closure, requested_use)
-}
-
 fn verify_snapshot_effect_with_rechecks(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
@@ -181,27 +168,27 @@ fn verify_snapshot_effect_with_rechecks(
     requested_use: &WorldReplayUseV1,
 ) -> Result<(), SnapshotError> {
     registry.try_with_state_transaction(|candidate| {
-        sender
+        let verified = sender
             .admit_world_replay(closure, requested_use)
-            .map_err(|_| SnapshotError::ArtifactUnavailable)?
+            .map_err(|_| SnapshotError::ArtifactUnavailable)?;
+        verified
             .require_authoritative_use()
             .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-        let tail_events = sender
-            .read_bounded(
-                snap.timeline,
-                SeqRange::from_seq(snap.at_seq.next()),
-                unbounded_snapshot_read(),
-            )
-            .map_err(crate::host_error_to_core)?;
         let all_events = sender
-            .read_bounded(snap.timeline, SeqRange::all(), unbounded_snapshot_read())
+            .read_bounded(snap.timeline, SeqRange::all(), verified.read_bounds())
             .map_err(crate::host_error_to_core)?;
-        verify_snapshot_event_sets(snap, candidate, &tail_events, &all_events)?;
-        sender
+        let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
+        verify_snapshot_event_sets(snap, candidate, &all_events[tail_start..], &all_events)?;
+        let final_verification = sender
             .admit_world_replay(closure, requested_use)
-            .map_err(|_| SnapshotError::ArtifactUnavailable)?
+            .map_err(|_| SnapshotError::ArtifactUnavailable)?;
+        final_verification
             .require_authoritative_use()
-            .map_err(|_| SnapshotError::ArtifactUnavailable)
+            .map_err(|_| SnapshotError::ArtifactUnavailable)?;
+        if final_verification.read_bounds() != verified.read_bounds() {
+            return Err(SnapshotError::ArtifactUnavailable);
+        }
+        Ok(())
     })
 }
 
@@ -219,10 +206,6 @@ fn snapshot_use(
             .map(str::to_owned)
             .collect(),
     )
-}
-
-const fn unbounded_snapshot_read() -> EventReadBounds {
-    EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX)
 }
 
 fn snapshot_from_events(

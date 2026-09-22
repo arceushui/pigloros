@@ -10,6 +10,17 @@ fn run_pos(args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
         .output()?)
 }
 
+fn assert_world_operation_unavailable(
+    args: &[&str],
+    expected_error: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output = run_pos(args)?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8(output.stderr)?, expected_error);
+    Ok(())
+}
+
 fn initialized_store() -> Result<(tempfile::TempDir, String), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("store.db");
@@ -97,4 +108,33 @@ fn corrupt_timeline_events_fail_without_partial_stdout() -> Result<(), Box<dyn s
     assert!(!stderr.contains("serialization"));
     assert!(!stderr.contains("hash"));
     Ok(())
+}
+
+#[test]
+fn timeline_replay_fails_closed_without_native_verifier() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_world_operation_unavailable(
+        &["timeline", "replay", "unused", "unused"],
+        "Error: World Replay is unavailable until an installed native closure verifier is configured\n",
+    )
+}
+
+#[test]
+fn timeline_snapshot_fails_closed_without_native_verifier() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_world_operation_unavailable(
+        &["timeline", "snapshot", "unused", "unused"],
+        "Error: World Snapshot is unavailable until an installed native closure verifier is configured\n",
+    )
+}
+
+#[test]
+fn timeline_compare_fails_closed_without_native_verifier() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_world_operation_unavailable(
+        &[
+            "timeline", "compare", "unused", "unused", "unused", "unused",
+        ],
+        "Error: World comparison is unavailable until an installed native closure verifier is configured\n",
+    )
 }
