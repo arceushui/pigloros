@@ -171,7 +171,7 @@ impl SystemdTransientUnitValue {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SystemdTransientUnitPropertyKind {
+pub enum SystemdTransientUnitPropertyKind {
     Hardening(SystemdHardeningProperty),
     RootDirectory,
     BindReadOnlyPaths,
@@ -182,7 +182,7 @@ pub(crate) enum SystemdTransientUnitPropertyKind {
 }
 
 impl SystemdTransientUnitPropertyKind {
-    pub(crate) const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Hardening(property) => property.name(),
             Self::RootDirectory => "RootDirectory",
