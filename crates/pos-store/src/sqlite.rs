@@ -47,8 +47,8 @@ use pos_core::{
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
     ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
-    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
-    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate,
+    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
     ErasureTopologyTransitionPermitV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
@@ -5471,7 +5471,7 @@ fn sqlite_recovery_proof_is_exact(
 
 fn sqlite_recovery_proof_mutation_is_exact(
     conn: &Connection,
-    mutation: &PreparedErasureCasV1,
+    mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     sqlite_recovery_proof_manifest_is_exact(conn, mutation)?;
     sqlite_recovery_proof_objects_are_exact(conn, mutation)?;
@@ -5483,7 +5483,7 @@ fn sqlite_recovery_proof_mutation_is_exact(
 
 fn sqlite_recovery_proof_manifest_is_exact(
     conn: &Connection,
-    mutation: &PreparedErasureCasV1,
+    mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     let manifest = conn
         .query_row(
@@ -5505,7 +5505,7 @@ fn sqlite_recovery_proof_manifest_is_exact(
 
 fn sqlite_recovery_proof_objects_are_exact(
     conn: &Connection,
-    mutation: &PreparedErasureCasV1,
+    mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     if !mutation
         .objects()
@@ -5525,7 +5525,7 @@ fn sqlite_recovery_proof_objects_are_exact(
 
 fn sqlite_recovery_proof_states_are_exact(
     conn: &Connection,
-    mutation: &PreparedErasureCasV1,
+    mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     for state in mutation.states() {
         let row = load_sqlite_erasure_state_row(conn, state.reference())?
@@ -5541,7 +5541,7 @@ fn sqlite_recovery_proof_states_are_exact(
 
 fn sqlite_recovery_proof_indexes_are_exact(
     conn: &Connection,
-    mutation: &PreparedErasureCasV1,
+    mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     for index in mutation.index_inserts() {
         let (index, ordinal, reference) = match *index {
@@ -5566,7 +5566,7 @@ fn sqlite_recovery_proof_indexes_are_exact(
 
 fn sqlite_recovery_proof_effect_is_exact(
     conn: &Connection,
-    mutation: &PreparedErasureCasV1,
+    mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     let (effect_digest, effect_bytes, effect_subject) =
         sqlite_erasure_effect_row(conn, mutation.next_manifest())?;
@@ -5583,7 +5583,7 @@ fn sqlite_recovery_proof_effect_is_exact(
 
 fn sqlite_recovery_proof_subject_is_exact(
     conn: &Connection,
-    mutation: &PreparedErasureCasV1,
+    mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     let Some(subject) = mutation.effect_subject() else {
         return Ok(());
