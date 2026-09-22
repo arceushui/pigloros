@@ -5173,7 +5173,7 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
         permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
-        self.commit_fork_admission_unchecked(permit, admission)
+        self.commit_fork_admission_unchecked(permit, &admission)
     }
 
     fn recover_fork_admission(
@@ -5186,9 +5186,9 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
 
 impl SqliteStore {
     fn commit_fork_admission_unchecked(
-        &mut self,
+        &self,
         permit: &ErasureTopologyTransitionPermitV1,
-        admission: PreparedErasureForkBatchV1,
+        admission: &PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         self.ensure_host_transition_permit(permit)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
