@@ -58,59 +58,7 @@ fn canonical_fixture_closure_bytes(source: &FixtureBinding) -> Vec<u8> {
     bytes
 }
 
-#[test]
-fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult {
-    let plugin = FixturePlugin {
-        id: PluginId::new(),
-    };
-    let source = verified_binding(&plugin)?;
-    assert!(!source.output_policy_bytes.is_empty());
-    assert!(!source.executable_budget_bytes.is_empty());
-    assert!(!source.implementation_artifact.is_empty());
-    assert!(source.configuration_artifact.starts_with(b"CFG1"));
-    assert!(!source.profile_artifact.is_empty());
-    assert!(!source.retention_artifact.is_empty());
-    let expected_bytes = canonical_fixture_closure_bytes(&source);
-    assert!(expected_bytes.starts_with(b"OPC1"));
-    let fresh_plugin = FixturePlugin {
-        id: PluginId::new(),
-    };
-
-    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
-        pos_core::ErasureContainmentGateV1::new_test_open(),
-    ));
-    registry.register_with_verified_output_policy(
-        &plugin,
-        source.binding,
-        None,
-        Some(Box::new(FixtureDriver)),
-    )?;
-    let (_, retained) = registry
-        .replay_policy_closures()
-        .next()
-        .ok_or_else(|| std::io::Error::other("verified closure was not retained"))?;
-    assert_eq!(retained, expected_bytes);
-
-    let fresh_source = verified_binding(&fresh_plugin)?;
-    let mut fresh_registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
-        pos_core::ErasureContainmentGateV1::new_test_open(),
-    ));
-    fresh_registry.register_with_verified_output_policy(
-        &fresh_plugin,
-        fresh_source.binding,
-        None,
-        Some(Box::new(FixtureDriver)),
-    )?;
-    let (_, fresh_retained) = fresh_registry
-        .replay_policy_closures()
-        .next()
-        .ok_or_else(|| std::io::Error::other("fresh closure was not retained"))?;
-    assert_ne!(retained, fresh_retained);
-    assert_eq!(
-        registry.replay_policy_closure_identities().next(),
-        fresh_registry.replay_policy_closure_identities().next()
-    );
-
+fn assert_artifact_shape_rejections(source: &FixtureBinding) {
     assert!(matches!(
         validate_output_policy_artifacts_v1(
             &[0],
@@ -170,7 +118,9 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         ),
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
     ));
+}
 
+fn assert_artifact_size_rejections(source: &FixtureBinding) {
     let oversized_policy = vec![0; pos_core::output_policy::MAX_OUTPUT_POLICY_BYTES_V1 + 1];
     assert!(matches!(
         validate_output_policy_artifacts_v1(
@@ -249,7 +199,9 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         ),
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
     ));
+}
 
+fn assert_artifact_identity_rejections(source: &FixtureBinding) -> TestResult {
     let mut implementation = source.implementation_artifact.clone();
     implementation.push(0);
     assert!(matches!(
@@ -311,6 +263,65 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         ),
         Err(OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind: "RTP1" })
     ));
+    Ok(())
+}
+
+#[test]
+fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let source = verified_binding(&plugin)?;
+    assert!(!source.output_policy_bytes.is_empty());
+    assert!(!source.executable_budget_bytes.is_empty());
+    assert!(!source.implementation_artifact.is_empty());
+    assert!(source.configuration_artifact.starts_with(b"CFG1"));
+    assert!(!source.profile_artifact.is_empty());
+    assert!(!source.retention_artifact.is_empty());
+    let expected_bytes = canonical_fixture_closure_bytes(&source);
+    assert!(expected_bytes.starts_with(b"OPC1"));
+    let fresh_plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_with_verified_output_policy(
+        &plugin,
+        source.binding,
+        None,
+        Some(Box::new(FixtureDriver)),
+    )?;
+    let (_, retained) = registry
+        .replay_policy_closures()
+        .next()
+        .ok_or_else(|| std::io::Error::other("verified closure was not retained"))?;
+    assert_eq!(retained, expected_bytes);
+
+    let fresh_source = verified_binding(&fresh_plugin)?;
+    let mut fresh_registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    fresh_registry.register_with_verified_output_policy(
+        &fresh_plugin,
+        fresh_source.binding,
+        None,
+        Some(Box::new(FixtureDriver)),
+    )?;
+    let (_, fresh_retained) = fresh_registry
+        .replay_policy_closures()
+        .next()
+        .ok_or_else(|| std::io::Error::other("fresh closure was not retained"))?;
+    assert_ne!(retained, fresh_retained);
+    assert_eq!(
+        registry.replay_policy_closure_identities().next(),
+        fresh_registry.replay_policy_closure_identities().next()
+    );
+
+    assert_artifact_shape_rejections(&source);
+    assert_artifact_size_rejections(&source);
+    assert_artifact_identity_rejections(&source)?;
     Ok(())
 }
 
@@ -491,7 +502,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
 }
 
 #[test]
-fn public_binding_rejects_foreign_capability_name() -> TestResult {
+fn public_binding_rejects_foreign_capability_name() {
     let plugin = ForeignCapabilityPlugin {
         id: PluginId::new(),
     };
@@ -504,11 +515,10 @@ fn public_binding_rejects_foreign_capability_name() -> TestResult {
         ),
         Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
-    Ok(())
 }
 
 #[test]
-fn public_binding_rejects_name_only_installed_source_claims() -> TestResult {
+fn public_binding_rejects_name_only_installed_source_claims() {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -521,7 +531,6 @@ fn public_binding_rejects_name_only_installed_source_claims() -> TestResult {
         ),
         Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
-    Ok(())
 }
 
 #[test]
@@ -666,7 +675,7 @@ fn generated_registration_rejects_invalid_owned_event_declaration() {
 }
 
 #[test]
-fn explicit_registration_rejects_unowned_installed_source() -> TestResult {
+fn explicit_registration_rejects_unowned_installed_source() {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -688,11 +697,10 @@ fn explicit_registration_rejects_unowned_installed_source() -> TestResult {
         ),
         Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
-    Ok(())
 }
 
 #[test]
-fn explicit_registration_rejects_name_only_source_even_with_configuration() -> TestResult {
+fn explicit_registration_rejects_name_only_source_even_with_configuration() {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -705,7 +713,6 @@ fn explicit_registration_rejects_name_only_source_even_with_configuration() -> T
         ),
         Err(OutputAdmissionErrorV1::PluginMismatch)
     ));
-    Ok(())
 }
 
 impl Plugin for DuplicateFixturePlugin {
