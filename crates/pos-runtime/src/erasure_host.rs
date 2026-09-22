@@ -547,6 +547,71 @@ impl<'host> HostedCoordinatorPortV1<'host> {
         self.topology_candidate = Some(candidate);
         self
     }
+
+    fn complete_erasure_inventory_observation_with_limits_impl(
+        &self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
+        let snapshot = self
+            .store
+            .borrow_mut()
+            .complete_erasure_inventory_snapshot_with_limits(limits)?;
+        let mut request_heads = Vec::new();
+        request_heads
+            .try_reserve(snapshot.request_heads().len())
+            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+            .and_then(|()| {
+                request_heads.extend_from_slice(snapshot.request_heads());
+                let mut topology = Vec::new();
+                topology
+                    .try_reserve(snapshot.topology().len())
+                    .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                    .and_then(|()| {
+                        topology.extend_from_slice(snapshot.topology());
+                        if let Some(candidate) = self.topology_candidate {
+                            if let Err(index) = topology.binary_search(&candidate) {
+                                topology
+                                    .try_reserve(1)
+                                    .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+                                topology.insert(index, candidate);
+                            }
+                        }
+                        let mut request_topology = Vec::new();
+                        request_topology
+                            .try_reserve(request_heads.len())
+                            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                            .and_then(|()| {
+                                for (request, manifest) in &request_heads {
+                                    let topology_observation = match self.topology_candidate {
+                                        Some(candidate) => self
+                                            .authority
+                                            .verified_topology_observation_for_candidate(
+                                                *request, *manifest, candidate,
+                                            )?,
+                                        None => self
+                                            .authority
+                                            .verified_topology_observation(*request, *manifest)?,
+                                    }
+                                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                                    if topology_observation
+                                        .bindings()
+                                        .len()
+                                        .checked_add(topology_observation.unaffected().len())
+                                        != Some(topology.len())
+                                    {
+                                        return Err(ErasureErrorV1::ProvenanceMissing);
+                                    }
+                                    request_topology.push((*request, topology_observation));
+                                }
+                                Ok(ErasureInventoryObservationV1::new(
+                                    request_heads,
+                                    topology,
+                                    request_topology,
+                                ))
+                            })
+                    })
+            })
+    }
 }
 
 impl ErasureStateResolverV1 for HostedCoordinatorPortV1<'_> {
@@ -690,65 +755,7 @@ impl ErasureCoordinatorPortV1 for HostedCoordinatorPortV1<'_> {
         &self,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureInventoryObservationV1, ErasureErrorV1> {
-        let snapshot = self
-            .store
-            .borrow_mut()
-            .complete_erasure_inventory_snapshot_with_limits(limits)?;
-        let mut request_heads = Vec::new();
-        request_heads
-            .try_reserve(snapshot.request_heads().len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)
-            .and_then(|()| {
-                request_heads.extend_from_slice(snapshot.request_heads());
-                let mut topology = Vec::new();
-                topology
-                    .try_reserve(snapshot.topology().len())
-                    .map_err(|_| ErasureErrorV1::ScopeInvalid)
-                    .and_then(|()| {
-                        topology.extend_from_slice(snapshot.topology());
-                        if let Some(candidate) = self.topology_candidate {
-                            if let Err(index) = topology.binary_search(&candidate) {
-                                topology
-                                    .try_reserve(1)
-                                    .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-                                topology.insert(index, candidate);
-                            }
-                        }
-                        let mut request_topology = Vec::new();
-                        request_topology
-                            .try_reserve(request_heads.len())
-                            .map_err(|_| ErasureErrorV1::ScopeInvalid)
-                            .and_then(|()| {
-                                for (request, manifest) in &request_heads {
-                                    let topology_observation = match self.topology_candidate {
-                                        Some(candidate) => self
-                                            .authority
-                                            .verified_topology_observation_for_candidate(
-                                                *request, *manifest, candidate,
-                                            )?,
-                                        None => self
-                                            .authority
-                                            .verified_topology_observation(*request, *manifest)?,
-                                    }
-                                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-                                    if topology_observation
-                                        .bindings()
-                                        .len()
-                                        .checked_add(topology_observation.unaffected().len())
-                                        != Some(topology.len())
-                                    {
-                                        return Err(ErasureErrorV1::ProvenanceMissing);
-                                    }
-                                    request_topology.push((*request, topology_observation));
-                                }
-                                Ok(ErasureInventoryObservationV1::new(
-                                    request_heads,
-                                    topology,
-                                    request_topology,
-                                ))
-                            })
-                    })
-            })
+        self.complete_erasure_inventory_observation_with_limits_impl(limits)
     }
 
     fn verified_topology_observation(
@@ -2613,6 +2620,14 @@ impl ErasureCommandSenderV1<'_> {
         &mut self,
         admission: &PreparedErasureForkBatchV1,
     ) -> Result<Timeline, ErasureHostErrorV1> {
+        self.commit_fork_admission_impl(admission)
+    }
+
+    #[cfg(test)]
+    fn commit_fork_admission_impl(
+        &mut self,
+        admission: &PreparedErasureForkBatchV1,
+    ) -> Result<Timeline, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
         let gate = Arc::clone(&self.host.gate);
         let mut transition_failure = None;
@@ -2819,6 +2834,13 @@ impl ErasureCommandSenderV1<'_> {
     /// Returns only payload-free host errors for stale sender state, corrupt
     /// durable evidence, or an unavailable adapter.
     pub fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureHostErrorV1> {
+        self.recover_fork_admission_impl(operation)
+    }
+
+    fn recover_fork_admission_impl(
         &mut self,
         operation: ErasureReferenceV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureHostErrorV1> {
