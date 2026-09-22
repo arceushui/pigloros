@@ -863,9 +863,9 @@ async fn connection_and_manager_proxy_failures_are_classified() -> Result<(), Bo
         Err(SystemdTransientUnitTransportError::Connect(_))
     ));
 
-    let proxy_error = SystemdTransientUnitTransport::subscribe_manager(Err(
-        zbus::Error::Failure("test proxy failure".to_owned()),
-    ))
+    let proxy_error = SystemdTransientUnitTransport::subscribe_manager(Err(zbus::Error::Failure(
+        "test proxy failure".to_owned(),
+    )))
     .await;
     assert!(matches!(
         proxy_error,
