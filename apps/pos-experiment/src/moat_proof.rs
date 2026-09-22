@@ -175,14 +175,13 @@ fn proof_society_output_binding(
         .iter()
         .flat_map(|dimension| dimension.as_str().as_bytes().iter().copied().chain([0]))
         .collect::<Vec<_>>();
-    reviewed_output_binding(
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
-        &[pos_plugin_society::EVENT_TYPE_SIGNAL],
-        profile_id,
-        [100_000, 50_000, 10_000],
-        include_bytes!("../../../plugins/society/src/lib.rs"),
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
         &configuration_details,
+        profile_id,
     )
+    .map_err(Into::into)
 }
 
 /// Result of one Local or Air-Gapped proof execution.

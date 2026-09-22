@@ -148,7 +148,11 @@ impl InstalledOutputPolicySourceV1 {
             Self::Society => plugin.name() == "society",
             Self::Experiment => matches!(
                 plugin.name(),
-                "proof-agent" | "proof-society" | "successful-sibling" | "failure-probe"
+                "proof-agent"
+                    | "proof-society"
+                    | "society"
+                    | "successful-sibling"
+                    | "failure-probe"
             ),
         };
         if !name_matches {
@@ -298,7 +302,7 @@ impl InstalledOutputPolicySourceV1 {
             Self::Society => vec!["society.signal".to_owned()],
             Self::Experiment => match plugin.name() {
                 "proof-agent" => vec!["proof.agent.reaction.v1".to_owned()],
-                "proof-society" => vec!["society.signal".to_owned()],
+                "proof-society" | "society" => vec!["society.signal".to_owned()],
                 "successful-sibling" => vec!["proof.failure.sibling".to_owned()],
                 "failure-probe" => vec!["proof.failure.probe".to_owned()],
                 _ => Vec::new(),
