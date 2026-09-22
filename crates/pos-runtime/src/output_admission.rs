@@ -1398,7 +1398,10 @@ mod tests {
             revision: 1,
             workload_profile,
             cut_budget_family: 0,
-            max_event_bytes: 4_096,
+            max_event_bytes: match workload_profile {
+                WorkloadProfileV1::Research => 16_384,
+                WorkloadProfileV1::Interactive | WorkloadProfileV1::Fork => 4_096,
+            },
             fidelity_budgets: [
                 FidelityBudgetV1 {
                     level: 0,
@@ -1511,16 +1514,19 @@ mod tests {
             assert!(!source.implementation_artifact(&plugin).is_empty());
             let _ = source.event_types(&plugin);
             let _ = source.workload_profile();
-            assert!(!source.accepts_plugin(&plugin));
+            let accepts_plugin = source.accepts_plugin(&plugin);
             let budget = source
                 .build_budget(plugin.id, Hash::from_bytes([9; 32]))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
             if matches!(source, InstalledOutputPolicySourceV1::Generated) {
+                assert!(accepts_plugin);
                 source
                     .build_policy(&plugin, Hash::from_bytes([8; 32]), &budget)
                     .unwrap_or_else(|error| {
                         std::panic::resume_unwind(Box::new(format!("{error:?}")))
                     });
+            } else {
+                assert!(!accepts_plugin);
             }
         }
 
@@ -1719,7 +1725,12 @@ mod tests {
         let other_id = PluginId::new();
         let other_budget = budget(other_id, 16, 2, 32, 100, [10, 10, 10]);
         assert!(matches!(
-            OutputAdmissionV1::try_new_core(plugin_id, "1.0.0", policy_a, other_budget),
+            OutputAdmissionV1::try_new_core(
+                plugin_id,
+                "1.0.0",
+                policy(plugin_id, &other_budget),
+                other_budget,
+            ),
             Err(OutputAdmissionErrorV1::MissingCpuReservation)
         ));
         let closure = closure_for(plugin_id, WorkloadProfileV1::Interactive);
