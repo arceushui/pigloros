@@ -362,7 +362,7 @@ impl InstalledOutputPolicySourceV1 {
             ],
             plugin_cpu_reservations: vec![PluginCpuReservationV1 {
                 plugin_id,
-                cpu_reservations_us: [500_000, 250_000, 50_000],
+                cpu_reservations_us: [250_000, 125_000, 25_000],
             }],
             accounting_semantics: 0,
             execution_profile_hash,
