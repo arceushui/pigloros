@@ -46,8 +46,9 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
-    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
+    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
     ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
@@ -200,6 +201,8 @@ pub struct MemoryStore {
     erasure_recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
     /// Stable Fork operation identity to complete prepared-admission binding.
     erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryV1>,
+    /// Complete prepared Fork proof retained for exact post-commit recovery.
+    erasure_fork_recovery_proofs: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryProofV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -528,6 +531,7 @@ impl MemoryStore {
             erasure_effect_subjects: BTreeMap::new(),
             erasure_recovery_errors: BTreeMap::new(),
             erasure_fork_admissions: BTreeMap::new(),
+            erasure_fork_recovery_proofs: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1478,6 +1482,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         let binding = admission.binding_digest();
         let operation = admission.operation();
+        let proof = admission.recovery_proof()?;
         let child = admission.child().clone();
         let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
         let chain_head = self
@@ -1487,8 +1492,13 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
             let exact_child = self.memory_fork_child_is_exact(&child, chain_head)?;
             let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
-            return ((stored_result.binding_digest(), exact_child, exact_manifest)
-                == (binding, true, true))
+            let exact_proof = self.erasure_fork_recovery_proofs.get(&operation) == Some(&proof);
+            return ((
+                stored_result.binding_digest(),
+                exact_child,
+                exact_manifest,
+                exact_proof,
+            ) == (binding, true, true, true))
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
         }
@@ -1527,6 +1537,7 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         self.timelines
             .insert(timeline.id(), TimelineState::new(timeline, chain_head));
         let result = admission.recovery_result()?;
+        self.erasure_fork_recovery_proofs.insert(operation, proof);
         self.erasure_fork_admissions.insert(operation, result);
         Ok(ErasureCasOutcomeV1::Applied)
     }
@@ -1538,8 +1549,14 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
             return Ok(None);
         };
-        self.verify_memory_fork_child(&result)
-            .map(|()| Some(result))
+        self.verify_memory_fork_child(&result)?;
+        let proof = self
+            .erasure_fork_recovery_proofs
+            .get(&operation)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        proof.validate(&result)?;
+        self.memory_fork_recovery_proof_is_exact(proof)?;
+        Ok(Some(result))
     }
 }
 
@@ -1590,6 +1607,80 @@ impl MemoryStore {
                 })
                 && memory_mutation_is_exact(self, mutation)
         })
+    }
+
+    fn memory_fork_recovery_proof_is_exact(
+        &self,
+        proof: &ErasureForkRecoveryProofV1,
+    ) -> Result<(), ErasureErrorV1> {
+        for mutation in proof.admissions() {
+            let Some((manifest, bytes)) = self.erasure_records.get(&mutation.request()) else {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            };
+            if *manifest != mutation.next_manifest()
+                || ErasureForkRecoveryProofV1::bytes_digest(bytes) != mutation.next_manifest_bytes()
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            if !mutation
+                .objects()
+                .iter()
+                .any(|object| object.reference() == mutation.extension())
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            for object in mutation.objects() {
+                let Some(bytes) = self.erasure_evidence.get(&object.reference()) else {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                };
+                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != object.bytes() {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+            }
+            for state in mutation.states() {
+                let Some(bytes) = self.erasure_states.get(&state.reference()) else {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                };
+                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != state.bytes() {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+            }
+            for index in mutation.index_inserts() {
+                let (stored, reference) = match *index {
+                    ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (
+                        self.erasure_attempt_pages
+                            .get(&(mutation.request(), ordinal)),
+                        reference,
+                    ),
+                    ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (
+                        self.erasure_scope_nodes.get(&(mutation.request(), ordinal)),
+                        reference,
+                    ),
+                    ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+                        self.erasure_administrative_resolutions
+                            .get(&(mutation.request(), ordinal)),
+                        reference,
+                    ),
+                };
+                if stored != Some(&reference) {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+            }
+            let Some((effect, bytes)) = self.erasure_effects.get(&mutation.next_manifest()) else {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            };
+            if *effect != mutation.effect()
+                || ErasureForkRecoveryProofV1::bytes_digest(bytes) != mutation.effect_bytes()
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            if mutation.effect_subject().is_some_and(|subject| {
+                self.erasure_effect_subjects.get(&subject) != Some(&mutation.next_manifest())
+            }) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2719,7 +2810,7 @@ impl MemoryStore {
         if let Err(error) = self.save_key_registry_unchecked(expected_registry) {
             return match delete_visible_timeline(self, timeline.id()) {
                 Ok(()) => Err(error),
-                Err(rollback_error) => Err(CoreError::Storage(format!(
+                Err(rollback_error) => Err(CoreError::StorageOutcomeUnknown(format!(
                     "ledger initialization failed ({error}); Timeline rollback also failed ({rollback_error})"
                 ))),
             };

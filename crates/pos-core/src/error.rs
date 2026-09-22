@@ -28,6 +28,9 @@ pub enum CoreError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    #[error("storage outcome is unknown: {0}")]
+    StorageOutcomeUnknown(String),
+
     #[error("artifact is unavailable for authoritative use")]
     ArtifactUnavailable,
 

@@ -961,6 +961,21 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         Vec::new(),
     )?;
     assert!(batch.recovery_result().is_ok());
+    let proof = batch.recovery_proof()?;
+    let proof_bytes = proof.to_canonical_cbor()?;
+    assert_eq!(
+        ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes)?,
+        proof
+    );
+    assert_eq!(proof.validate(&batch.recovery_result()?), Ok(()));
+    assert_eq!(
+        proof.content_digest()?,
+        ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes)?.content_digest()?
+    );
+    assert_eq!(
+        ErasureForkRecoveryProofV1::bytes_digest(b"proof"),
+        ErasureForkRecoveryProofV1::bytes_digest(b"proof")
+    );
     Ok(())
 }
 

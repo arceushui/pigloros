@@ -3333,14 +3333,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
 }
 
 fn is_uncertain_persistence_error(error: &CoreError) -> bool {
-    matches!(
-        error,
-        CoreError::Storage(message)
-            if message.contains("transaction commit failed")
-                || message.contains("transaction commit outcome uncertain")
-                || message.contains("rollback failed")
-                || message.contains("rollback also failed")
-    )
+    matches!(error, CoreError::StorageOutcomeUnknown(_))
 }
 
 trait MapStoreErrorV1<T> {
@@ -5706,7 +5699,7 @@ mod tests {
                 None,
                 |_permit, _store| Ok(Timeline::new(TimelineMeta::root("uncertain"))),
                 |_permit, _store, _candidate| {
-                    Err(CoreError::Storage(
+                    Err(CoreError::StorageOutcomeUnknown(
                         "transaction commit outcome uncertain: disk failure".to_owned(),
                     ))
                 },
@@ -5718,16 +5711,22 @@ mod tests {
 
     #[test]
     fn uncertain_persistence_errors_are_classified_without_poisoning_ordinary_failures() {
-        for message in [
-            "transaction commit failed: disk failure",
-            "transaction commit outcome uncertain: disk failure",
-            "operation failed; rollback failed: disk failure",
-            "ledger initialization failed; Timeline rollback also failed: disk failure",
-        ] {
-            assert!(is_uncertain_persistence_error(&CoreError::Storage(
-                message.to_owned(),
-            )));
-        }
+        assert!(is_uncertain_persistence_error(
+            &CoreError::StorageOutcomeUnknown(
+                "transaction commit outcome uncertain: disk failure".to_owned(),
+            )
+        ));
+        assert!(is_uncertain_persistence_error(
+            &CoreError::StorageOutcomeUnknown(
+                "operation failed; rollback failed: disk failure".to_owned(),
+            )
+        ));
+        assert!(!is_uncertain_persistence_error(&CoreError::Storage(
+            "transaction commit failed: disk failure".to_owned(),
+        )));
+        assert!(!is_uncertain_persistence_error(&CoreError::Storage(
+            "ledger initialization failed; Timeline rollback also failed: disk failure".to_owned(),
+        )));
         assert!(!is_uncertain_persistence_error(&CoreError::Storage(
             "ordinary adapter failure".to_owned(),
         )));

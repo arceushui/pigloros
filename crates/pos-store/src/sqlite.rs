@@ -46,15 +46,15 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
-    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
-    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
-    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureStateResolverV1,
-    ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
+    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
+    ErasureTopologyTransitionPermitV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -278,6 +278,35 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(successor_generation) = 32)",
             "CHECK (length(receipt_digest) = 32)",
             "CHECK (fork_seq >= 0)",
+        ],
+    },
+    ErasureSchemaTable {
+        name: "erasure_fork_recovery_proofs",
+        columns_query: "PRAGMA table_info(erasure_fork_recovery_proofs)",
+        columns: &[
+            ErasureSchemaColumn {
+                name: "operation_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            ErasureSchemaColumn {
+                name: "proof_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "proof_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(operation_digest) = 32)",
+            "CHECK (length(proof_digest) = 32)",
+            "CHECK (length(proof_cbor) <= 16777216)",
         ],
     },
     ErasureSchemaTable {
@@ -3730,7 +3759,9 @@ impl SqliteStore {
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
             insert(&transaction)?;
             transaction.commit().map_err(|error| {
-                CoreError::Storage(format!("transaction commit outcome uncertain: {error}"))
+                CoreError::StorageOutcomeUnknown(format!(
+                    "transaction commit outcome uncertain: {error}"
+                ))
             })?;
         } else {
             insert(&self.conn)?;
@@ -5140,6 +5171,9 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             .execute_batch(begin_immediate_sql())
             .map_err(map_erasure_receipt_failure)?;
         let result = (|| {
+            let recovery_proof = admission.recovery_proof()?;
+            let recovery_proof_cbor = recovery_proof.to_canonical_cbor()?;
+            let recovery_proof_digest = recovery_proof.content_digest()?;
             let child = admission.child();
             let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
             let chain_head = Self::compute_chain_hash_at_unchecked_on(
@@ -5210,6 +5244,18 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                             .digest()
                             .as_slice(),
                         recovery.receipt_digest().digest().as_slice(),
+                    ],
+                )
+                .map_err(map_erasure_receipt_failure)?;
+            self.conn
+                .execute(
+                    "INSERT INTO erasure_fork_recovery_proofs
+                     (operation_digest, proof_digest, proof_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        admission.operation().digest().as_slice(),
+                        recovery_proof_digest.digest().as_slice(),
+                        recovery_proof_cbor,
                     ],
                 )
                 .map_err(map_erasure_receipt_failure)?;
@@ -5356,8 +5402,146 @@ fn sqlite_recover_fork_admission(
         return Ok(None);
     };
     let recovered = receipt.recover(operation)?;
+    let proof = sqlite_fork_recovery_proof(conn, operation, &recovered)?;
+    sqlite_recovery_proof_is_exact(conn, &proof)?;
     sqlite_verify_recovered_fork_child(conn, hasher, &recovered)?;
     Ok(Some(recovered))
+}
+
+fn sqlite_fork_recovery_proof(
+    conn: &Connection,
+    operation: ErasureReferenceV1,
+    recovered: &ErasureForkRecoveryV1,
+) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
+    let (proof_digest, proof_cbor) = conn
+        .query_row(
+            "SELECT proof_digest, proof_cbor
+             FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+            params![operation.digest().as_slice()],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(map_erasure_receipt_failure)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let proof_digest = reference_from_sql(proof_digest)?;
+    let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_cbor)?;
+    let canonical = proof.to_canonical_cbor()?;
+    if canonical.as_slice() != proof_cbor.as_slice() || proof.content_digest()? != proof_digest {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    proof.validate(recovered)?;
+    Ok(proof)
+}
+
+fn sqlite_recovery_proof_is_exact(
+    conn: &Connection,
+    proof: &ErasureForkRecoveryProofV1,
+) -> Result<(), ErasureErrorV1> {
+    for mutation in proof.admissions() {
+        let manifest = conn
+            .query_row(
+                "SELECT manifest_digest, manifest_cbor FROM erasure_records
+                 WHERE request_digest=?1",
+                params![mutation.request().digest().as_slice()],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(map_erasure_receipt_failure)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if reference_from_sql(manifest.0)? != mutation.next_manifest()
+            || ErasureForkRecoveryProofV1::bytes_digest(&manifest.1)
+                != mutation.next_manifest_bytes()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if !mutation
+            .objects()
+            .iter()
+            .any(|object| object.reference() == mutation.extension())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        for object in mutation.objects() {
+            let bytes = load_sqlite_erasure_evidence(conn, object.reference())?;
+            if ErasureForkRecoveryProofV1::bytes_digest(&bytes) != object.bytes() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        for state in mutation.states() {
+            let row = load_sqlite_erasure_state_row(conn, state.reference())?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            if reference_from_sql(row.request_digest)? != mutation.request()
+                || ErasureForkRecoveryProofV1::bytes_digest(&row.state_cbor) != state.bytes()
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        for index in mutation.index_inserts() {
+            let (index, ordinal, reference) = match *index {
+                ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+                    (SqliteErasureIndex::Attempt, ordinal, reference)
+                }
+                ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+                    (SqliteErasureIndex::Scope, ordinal, reference)
+                }
+                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+                    SqliteErasureIndex::AdministrativeResolution,
+                    ordinal,
+                    reference,
+                ),
+            };
+            if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        let (effect_digest, effect_bytes, effect_subject) =
+            sqlite_erasure_effect_row(conn, mutation.next_manifest())?;
+        let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&effect_bytes)?;
+        if reference_from_sql(effect_digest)? != mutation.effect()
+            || effect.identity() != mutation.effect()
+            || ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes) != mutation.effect_bytes()
+            || effect_subject.map(reference_from_sql).transpose()? != mutation.effect_subject()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if let Some(subject) = mutation.effect_subject() {
+            let subject_manifest = conn
+                .query_row(
+                    "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
+                    params![subject.digest().as_slice()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(map_erasure_receipt_failure)?
+                .map(reference_from_sql)
+                .transpose()?;
+            if subject_manifest != Some(mutation.next_manifest()) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_erasure_effect_row(
+    conn: &Connection,
+    manifest: ErasureReferenceV1,
+) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>), ErasureErrorV1> {
+    conn.query_row(
+        "SELECT effect_digest, effect_cbor, subject_digest
+         FROM erasure_effects WHERE manifest_digest=?1",
+        params![manifest.digest().as_slice()],
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(map_erasure_receipt_failure)?
+    .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
 fn sqlite_verify_recovered_fork_child(
@@ -5515,6 +5699,16 @@ fn sqlite_fork_admission_is_exact(
         return Ok(false);
     };
     if recovered != admission.recovery_result()? {
+        return Ok(false);
+    }
+    let Ok(stored_proof) = sqlite_fork_recovery_proof(conn, admission.operation(), &recovered)
+    else {
+        return Ok(false);
+    };
+    if stored_proof != admission.recovery_proof()? {
+        return Ok(false);
+    }
+    if sqlite_recovery_proof_is_exact(conn, &stored_proof).is_err() {
         return Ok(false);
     }
     if !sqlite_timeline_is_exact(conn, hasher, child, chain_head)? {
@@ -6128,14 +6322,14 @@ fn finish_immediate_transaction<T>(
             rollback_error.map_or_else(
                 || CoreError::Storage(format!("transaction commit failed: {commit_error}")),
                 |rollback_error| {
-                    CoreError::Storage(format!(
+                    CoreError::StorageOutcomeUnknown(format!(
                         "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
                     ))
                 },
             )
         },
         |error, rollback_error| {
-            CoreError::Storage(format!("{error}; rollback failed: {rollback_error}"))
+            CoreError::StorageOutcomeUnknown(format!("{error}; rollback failed: {rollback_error}"))
         },
     )
 }
@@ -6774,7 +6968,7 @@ mod tests {
                 .test_err();
             assert!(matches!(
                 error,
-                CoreError::Storage(message)
+                CoreError::StorageOutcomeUnknown(message)
                     if message.contains("transaction commit outcome uncertain")
             ));
             Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
@@ -12802,7 +12996,10 @@ mod tests {
             .test_ok();
         rollback_conn.commit_hook(Some(|| true)).test_ok();
         let rollback_error = finish_immediate_transaction::<()>(&rollback_conn, Ok(())).test_err();
-        assert!(matches!(rollback_error, CoreError::Storage(_)));
+        assert!(matches!(
+            rollback_error,
+            CoreError::StorageOutcomeUnknown(_)
+        ));
         assert!(rollback_error
             .to_string()
             .contains("transaction commit failed"));
@@ -12814,7 +13011,10 @@ mod tests {
             Err(CoreError::Storage("operation failed".to_owned())),
         )
         .test_err();
-        assert!(matches!(error_rollback, CoreError::Storage(_)));
+        assert!(matches!(
+            error_rollback,
+            CoreError::StorageOutcomeUnknown(_)
+        ));
         assert!(error_rollback.to_string().contains("rollback failed"));
     }
 
