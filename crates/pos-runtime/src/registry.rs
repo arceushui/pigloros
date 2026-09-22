@@ -2441,55 +2441,71 @@ impl PluginRegistry {
     fn generated_output_binding(
         plugin: &dyn Plugin,
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
+        Self::generated_output_binding_with_configuration_details(plugin, &[])
+    }
+
+    #[cfg(debug_assertions)]
+    fn generated_output_binding_with_configuration_details(
+        plugin: &dyn Plugin,
+        configuration_details: &[u8],
+    ) -> Result<OutputPolicyBindingV1, RuntimeError> {
         let plugin_version = plugin.version().to_owned();
-        let (policy, budget) = Self::generated_output_binding_with_budget_input(
-            plugin,
-            &plugin_version,
-            pos_core::ExecutableBudgetPolicyInputV1 {
-                revision: 1,
-                workload_profile: pos_core::WorkloadProfileV1::Interactive,
-                cut_budget_family: 0,
-                max_event_bytes: 4_096,
-                fidelity_budgets: [
-                    pos_core::FidelityBudgetV1 {
-                        level: 0,
-                        max_events: 1_000,
-                        max_bytes: 64 * 1024 * 1024,
-                        max_cpu_us: 500_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    pos_core::FidelityBudgetV1 {
-                        level: 1,
-                        max_events: 1_000,
-                        max_bytes: 64 * 1024 * 1024,
-                        max_cpu_us: 250_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    pos_core::FidelityBudgetV1 {
-                        level: 2,
-                        max_events: 1_000,
-                        max_bytes: 16 * 1024 * 1024,
-                        max_cpu_us: 50_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                ],
-                plugin_cpu_reservations: vec![pos_core::PluginCpuReservationV1 {
-                    plugin_id: plugin.id(),
-                    cpu_reservations_us: [10; 3],
-                }],
-                accounting_semantics: 0,
-                execution_profile_hash: pos_core::Hash::zero(),
-                max_pass_wall_duration_us: 1_000,
-            },
-        )?;
+        let (policy, budget) =
+            Self::generated_output_binding_with_budget_input_for_profile_with_details(
+                plugin,
+                &plugin_version,
+                Self::generated_budget_input(plugin),
+                "deterministic-local-v1",
+                configuration_details,
+            )?;
         Ok(OutputPolicyBindingV1::from_installed_source_with_policy(
             plugin,
             InstalledOutputPolicySourceV1::Generated,
             policy,
             budget,
-            &[],
+            configuration_details,
             "deterministic-local-v1",
         )?)
+    }
+
+    #[cfg(debug_assertions)]
+    fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
+        pos_core::ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: pos_core::WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                pos_core::FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                pos_core::FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                pos_core::FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![pos_core::PluginCpuReservationV1 {
+                plugin_id: plugin.id(),
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: pos_core::Hash::zero(),
+            max_pass_wall_duration_us: 1_000,
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -2516,8 +2532,31 @@ impl PluginRegistry {
     fn generated_output_binding_with_budget_input_for_profile(
         plugin: &dyn Plugin,
         plugin_version: &str,
+        budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+        profile_id: &str,
+    ) -> Result<
+        (
+            pos_core::output_policy::OutputPolicyV1,
+            pos_core::ExecutableBudgetPolicyV1,
+        ),
+        RuntimeError,
+    > {
+        Self::generated_output_binding_with_budget_input_for_profile_with_details(
+            plugin,
+            plugin_version,
+            budget_input,
+            profile_id,
+            &[],
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    fn generated_output_binding_with_budget_input_for_profile_with_details(
+        plugin: &dyn Plugin,
+        plugin_version: &str,
         mut budget_input: pos_core::ExecutableBudgetPolicyInputV1,
         profile_id: &str,
+        configuration_details: &[u8],
     ) -> Result<
         (
             pos_core::output_policy::OutputPolicyV1,
@@ -2540,11 +2579,13 @@ impl PluginRegistry {
                 reason: error.to_string(),
             }
         })?;
-        let configuration_artifact = crate::canonical_plugin_configuration_v1(plugin, &[])
-            .map_err(|error| RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: error.to_string(),
-            })?;
+        let configuration_artifact =
+            crate::canonical_plugin_configuration_v1(plugin, configuration_details).map_err(
+                |error| RuntimeError::CapabilityMismatch {
+                    name: plugin.name().to_owned(),
+                    reason: error.to_string(),
+                },
+            )?;
         let source = InstalledOutputPolicySourceV1::Generated;
         let mut declarations = plugin
             .capability()
@@ -3068,12 +3109,25 @@ impl PluginRegistry {
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {
+        self.register_test_driver_with_configuration_details(driver, &[]);
+    }
+
+    #[cfg(debug_assertions)]
+    fn register_test_driver_with_configuration_details(
+        &mut self,
+        driver: Box<dyn Driver>,
+        configuration_details: &[u8],
+    ) {
         let plugin_id = pos_core::ids::PluginId::new();
         let plugin = GeneratedDriverPlugin {
             id: plugin_id,
             name: driver.name(),
         };
-        let binding = Self::generated_output_binding(&plugin).unwrap_or_else(|error| {
+        let binding = Self::generated_output_binding_with_configuration_details(
+            &plugin,
+            configuration_details,
+        )
+        .unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!(
                 "generated test-driver binding failed: {error}"
             )))
@@ -3726,17 +3780,13 @@ mod tests {
         );
         assert!(mismatch.is_err());
 
-        let huge_name: &'static str = Box::leak(
-            String::from_utf8(vec![
-                b'x';
-                crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1
-                    + 1
-            ])
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-            .into_boxed_str(),
-        );
+        let oversized_configuration =
+            vec![b'x'; crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 + 1];
         let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            registry.register_test_driver(Box::new(NamedNoopDriver(huge_name)));
+            registry.register_test_driver_with_configuration_details(
+                Box::new(NamedNoopDriver("oversized-configuration")),
+                &oversized_configuration,
+            );
         }));
         assert!(failure.is_err());
     }

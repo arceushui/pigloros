@@ -1559,7 +1559,7 @@ mod tests {
         assert!(InstalledOutputPolicySourceV1::Generated
             .build_policy(&empty, Hash::from_bytes([8; 32]), &budget)
             .is_err());
-        let long_version: &'static str = Box::leak("v".repeat(65).into_boxed_str());
+        let long_version = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
         let long_version_plugin = LongVersionPlugin {
             version: long_version,
         };
