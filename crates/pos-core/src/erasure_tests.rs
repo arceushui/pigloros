@@ -942,6 +942,11 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     assert_fork_retry_rejects_child_corruption(&inventory, parent, child)?;
     assert_fork_retry_rejects_included_excluded_child(excluded, parent, child)?;
 
+    assert_empty_fork_batch_proof_round_trip(parent)?;
+    Ok(())
+}
+
+fn assert_empty_fork_batch_proof_round_trip(parent: TimelineId) -> Result<(), ErasureErrorV1> {
     let empty = ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
     let empty_generation = empty.generation();
     let child_without_name = crate::TimelineMeta {

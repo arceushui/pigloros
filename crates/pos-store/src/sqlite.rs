@@ -2046,6 +2046,7 @@ struct ForkChainRow {
 /// non-root entries carry their validated fork sequence.
 type ForkChain = Vec<(TimelineId, Seq)>;
 type ForkChainWithLeafHead = (ForkChain, u64);
+type SqliteErasureEffectRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
 
 #[derive(Debug)]
 enum DecodedForkChainRow {
@@ -5526,7 +5527,7 @@ fn sqlite_recovery_proof_is_exact(
 fn sqlite_erasure_effect_row(
     conn: &Connection,
     manifest: ErasureReferenceV1,
-) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>), ErasureErrorV1> {
+) -> Result<SqliteErasureEffectRow, ErasureErrorV1> {
     conn.query_row(
         "SELECT effect_digest, effect_cbor, subject_digest
          FROM erasure_effects WHERE manifest_digest=?1",
