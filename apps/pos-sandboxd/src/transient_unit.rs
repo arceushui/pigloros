@@ -1,6 +1,6 @@
 //! Typed dynamic systemd transient-unit launch properties.
 
-use zvariant::OwnedFd;
+use zvariant::{Fd, OwnedFd};
 
 use crate::{
     SystemCallFilter, SystemdHardeningProperty, SystemdHardeningReadbackValue,
@@ -160,7 +160,10 @@ impl SystemdTransientUnitValue {
             Self::FileDescriptorStoreMax(value) => Ok(Self::FileDescriptorStoreMax(*value)),
             Self::ExtraFileDescriptors(value) => value
                 .iter()
-                .map(|(descriptor, name)| Ok((descriptor.try_clone()?, name.clone())))
+                .map(|(descriptor, name)| {
+                    let descriptor = Fd::from(descriptor).try_to_owned().map(OwnedFd::from)?;
+                    Ok((descriptor, name.clone()))
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map(Self::ExtraFileDescriptors),
         }
