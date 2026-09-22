@@ -654,6 +654,26 @@ impl ProjectionRegistry {
         }
     }
 
+    /// Apply a state mutation transactionally, restoring every reducer state
+    /// when the operation fails.
+    ///
+    /// This keeps protected Replay and Snapshot candidates private until their
+    /// final authorization check succeeds. Reducer registrations and policies
+    /// remain installed; only accumulated state is rolled back.
+    pub fn try_with_state_transaction<T, E>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let before = self.snapshot_unfenced();
+        match operation(self) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.restore_from_snapshot(&before);
+                Err(error)
+            }
+        }
+    }
+
     /// Retain only one subject's accumulated state in every reducer.
     pub fn retain_subject(&mut self, subject: &EntityId) {
         for (_, slot) in &mut self.slots {

@@ -52,7 +52,7 @@ pub mod test_support {
     };
     use pos_runtime::{
         ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
-        WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+        WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
     };
     use pos_store::StoreConfig;
 
@@ -62,10 +62,12 @@ pub mod test_support {
         fn verify(
             &self,
             closure: &WorldReplayClosureV1,
+            requested_use: &WorldReplayUseV1,
             inventory_generation: ErasureReferenceV1,
         ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
             Ok(pos_runtime::world_replay::test_verified_world_replay(
                 closure,
+                requested_use,
                 inventory_generation,
                 ErasureReplayClaimV1::Exact,
             ))
@@ -82,12 +84,16 @@ pub mod test_support {
         ))
     }
 
-    pub(crate) fn closure_for_host(host: &ErasureExecutionHostV1) -> WorldReplayClosureV1 {
+    pub(crate) fn closure_for_host(
+        host: &ErasureExecutionHostV1,
+        timeline: pos_core::TimelineId,
+    ) -> WorldReplayClosureV1 {
         let generation = test_ok(host.containment_gate().inventory_generation());
         test_ok(
-            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
-                generation.digest(),
-            )),
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                timeline,
+                Hash::from_bytes(generation.digest()),
+            ),
         )
     }
 

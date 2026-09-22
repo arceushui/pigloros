@@ -5,7 +5,7 @@
 
 use pos_core::store::{EventReadBounds, SeqRange};
 use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId, WorldReplayClosureV1};
-use pos_runtime::ErasureReadSenderV1;
+use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
 use pos_state::ProjectionRegistry;
 
 /// Replay **all** events on `timeline` through every reducer in `registry`.
@@ -58,38 +58,47 @@ fn replay_range(
     registry: &mut ProjectionRegistry,
     closure: &WorldReplayClosureV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
+    let requested_use = WorldReplayUseV1::new(
+        timeline,
+        ErasureProtectedOperationV1::Read,
+        range,
+        registry
+            .reducer_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    )
+    .map_err(|_| CoreError::ArtifactUnavailable)?;
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = sender
-            .admit_world_replay(closure)
-            .map_err(crate::host_error_to_core)
-            .and_then(|verified| {
-                verified
-                    .require_authoritative_use()
-                    .map_err(|_| CoreError::ArtifactUnavailable)
-            })
-            .map_err(|_| CoreError::ArtifactUnavailable)
-            .and_then(|()| {
-                sender
-                    .read_bounded(
-                        timeline,
-                        range,
-                        EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
-                    )
-                    .map_err(crate::host_error_to_core)
-            })
-            .inspect(|events| registry.fold_events(events))
-            .and_then(|events| {
-                sender
-                    .admit_world_replay(closure)
-                    .map_err(crate::host_error_to_core)
-                    .and_then(|verified| {
-                        verified
-                            .require_authoritative_use()
-                            .map_err(|_| CoreError::ArtifactUnavailable)
-                    })
-                    .map(|()| events)
-            });
+        outcome = registry.try_with_state_transaction(|candidate| {
+            sender
+                .admit_world_replay(closure, &requested_use)
+                .map_err(crate::host_error_to_core)
+                .and_then(|verified| {
+                    verified
+                        .require_authoritative_use()
+                        .map_err(|_| CoreError::ArtifactUnavailable)
+                })
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            let events = sender
+                .read_bounded(
+                    timeline,
+                    range,
+                    EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                )
+                .map_err(crate::host_error_to_core)?;
+            candidate.fold_events(&events);
+            sender
+                .admit_world_replay(closure, &requested_use)
+                .map_err(crate::host_error_to_core)
+                .and_then(|verified| {
+                    verified
+                        .require_authoritative_use()
+                        .map_err(|_| CoreError::ArtifactUnavailable)
+                })
+                .map(|()| events)
+        });
     };
     sender
         .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
@@ -153,7 +162,10 @@ mod tests {
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([43; 32]);
@@ -570,7 +582,7 @@ mod tests {
                 .test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host);
+        let closure = crate::test_support::closure_for_host(&host, timeline);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -589,6 +601,60 @@ mod tests {
         )
         .test_ok();
         assert_eq!(count_for(&bounded_registry, &entity), 2);
+    }
+
+    #[test]
+    fn public_replay_rejects_cross_timeline_closures() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (authorized, requested) = {
+            let mut commands = host.command_sender().test_ok();
+            let authorized = commands.create_timeline("authorized-replay").test_ok();
+            let requested = commands.create_timeline("requested-replay").test_ok();
+            commands
+                .append(requested.id(), &[draft(EntityId::new())])
+                .test_ok();
+            (authorized.id(), requested.id())
+        };
+        let closure = crate::test_support::closure_for_host(&host, authorized);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::replay(&mut reads, requested, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+    }
+
+    #[test]
+    fn public_replay_rolls_back_when_final_verification_fails() {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(RejectSecondVerification {
+                calls: AtomicUsize::new(0),
+            }));
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("rollback-replay").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::replay(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(registry.state_for_reducer("count", &entity), None);
     }
 
     struct ReadFailStore;
@@ -636,6 +702,31 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     struct CountReducer;
+
+    struct RejectSecondVerification {
+        calls: AtomicUsize,
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for RejectSecondVerification {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(pos_runtime::world_replay::test_verified_world_replay(
+                    closure,
+                    requested_use,
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                ))
+            } else {
+                Err(pos_runtime::WorldReplayVerificationErrorV1::EvidenceUnavailable)
+            }
+        }
+    }
 
     impl Reducer for CountReducer {
         fn initial(&self) -> State {
