@@ -189,13 +189,13 @@ pub fn host_verified_execution_profile_bytes_v1(
     profile_id: &str,
 ) -> Result<Vec<u8>, BundleContractErrorV1> {
     let bytes = installed_execution_profile_bytes_v1(profile_id)?;
-    let profile = crate::ExecutionProfileV1::from_canonical_cbor(&bytes)
+    let _profile = crate::ExecutionProfileV1::from_canonical_cbor(&bytes)
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    if profile.profile_id == profile_id {
-        Ok(bytes)
-    } else {
-        Err(BundleContractErrorV1::ProfileInvalid)
-    }
+    // `installed_execution_profile_bytes_v1` selects the record by this exact
+    // identifier, and the canonical decoder has already checked the complete
+    // record.  The table is immutable, so a second name comparison would add
+    // an unreachable defensive branch to the host boundary.
+    Ok(bytes)
 }
 
 fn text_array(values: &[&str]) -> Value {

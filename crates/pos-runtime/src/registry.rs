@@ -2497,7 +2497,28 @@ impl PluginRegistry {
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
         plugin_version: &str,
+        budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+    ) -> Result<
+        (
+            pos_core::output_policy::OutputPolicyV1,
+            pos_core::ExecutableBudgetPolicyV1,
+        ),
+        RuntimeError,
+    > {
+        Self::generated_output_binding_with_budget_input_for_profile(
+            plugin,
+            plugin_version,
+            budget_input,
+            "deterministic-local-v1",
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    fn generated_output_binding_with_budget_input_for_profile(
+        plugin: &dyn Plugin,
+        plugin_version: &str,
         mut budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+        profile_id: &str,
     ) -> Result<
         (
             pos_core::output_policy::OutputPolicyV1,
@@ -2506,7 +2527,7 @@ impl PluginRegistry {
         RuntimeError,
     > {
         let profile_artifact =
-            pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")
+            pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
                 .map_err(|error| RuntimeError::CapabilityMismatch {
                     name: plugin.name().to_owned(),
                     reason: error.to_string(),
@@ -3665,6 +3686,340 @@ mod tests {
         registry
             .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
             .test_ok();
+    }
+
+    struct NamedNoopDriver(&'static str);
+
+    impl Driver for NamedNoopDriver {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+    }
+
+    #[test]
+    fn debug_test_driver_helpers_cover_success_and_failure_boundaries() {
+        let mut registry = gated_registry();
+        registry.register_test_driver(Box::new(NoopDriver));
+        assert_eq!(registry.driver_count(), 1);
+
+        let plugin = simple_plugin("fixture-driver", &["fixture.output"]);
+        let binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let wrong_id = PluginId::new();
+        let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.register_test_driver_with_verified_output_policy(
+                wrong_id,
+                binding,
+                Box::new(NoopDriver),
+            );
+        }));
+        assert!(mismatch.is_err());
+
+        let huge_name: &'static str = Box::leak(
+            String::from_utf8(vec![
+                b'x';
+                crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 + 1
+            ])
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+            .into_boxed_str(),
+        );
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.register_test_driver(Box::new(NamedNoopDriver(huge_name)));
+        }));
+        assert!(failure.is_err());
+    }
+
+    #[test]
+    fn generated_binding_reports_unknown_execution_profile() {
+        let plugin = simple_plugin("profile-fixture", &["profile.output"]);
+        let result = PluginRegistry::generated_output_binding_with_budget_input_for_profile(
+            &plugin,
+            plugin.version(),
+            ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile: WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 4_096,
+                fidelity_budgets: [
+                    FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                    plugin_id: plugin.id,
+                    cpu_reservations_us: [10, 20, 30],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: Hash::zero(),
+                max_pass_wall_duration_us: 1_000,
+            },
+            "missing-profile",
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_identity_hash_covers_declaration_and_budget_variants() {
+        for workload_profile in [
+            WorkloadProfileV1::Interactive,
+            WorkloadProfileV1::Fork,
+            WorkloadProfileV1::Research,
+        ] {
+            let mut registry = gated_registry();
+            let plugin_id = PluginId::new();
+            let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile,
+                cut_budget_family: 0,
+                max_event_bytes: 4_096,
+                fidelity_budgets: [
+                    FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                    plugin_id,
+                    cpu_reservations_us: [10, 20, 30],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: Hash::from_bytes([0x41; 32]),
+                max_pass_wall_duration_us: 1_000,
+            })
+            .test_ok();
+            let declarations = vec![
+                OutputDeclarationV1::new(
+                    "a.authoritative".to_owned(),
+                    OutputAuthorityV1::Authoritative,
+                    OutputFidelityV1::L0,
+                    64,
+                    None,
+                    None,
+                )
+                .test_ok(),
+                OutputDeclarationV1::new(
+                    "b.derived".to_owned(),
+                    OutputAuthorityV1::ReproducibleDerived,
+                    OutputFidelityV1::L1,
+                    64,
+                    Some(2),
+                    None,
+                )
+                .test_ok(),
+                OutputDeclarationV1::new(
+                    "c.ephemeral".to_owned(),
+                    OutputAuthorityV1::Ephemeral,
+                    OutputFidelityV1::L2,
+                    64,
+                    None,
+                    Some(10),
+                )
+                .test_ok(),
+            ];
+            let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+                plugin_id,
+                plugin_version: "test".to_owned(),
+                implementation_hash: Hash::from_bytes([0x42; 32]),
+                base_configuration_digest: Hash::from_bytes([0x43; 32]),
+                executable_profile_hash: budget.digest(),
+                retention_policy_hash: Hash::from_bytes([0x44; 32]),
+                policy_revision: 1,
+                output_declarations: declarations,
+            })
+            .test_ok();
+            registry
+                .register_test_driver_with_output_policy(
+                    plugin_id,
+                    "test",
+                    policy,
+                    budget,
+                    Box::new(NoopDriver),
+                )
+                .test_ok();
+            assert!(registry.replay_policy_identities().next().is_some());
+        }
+    }
+
+    #[test]
+    fn output_validation_and_action_lookup_fail_closed_without_admission() {
+        let entry = PluginEntry {
+            name: "missing-admission".to_owned(),
+            version: "test".to_owned(),
+            owned_event_types: vec![Kind::new("missing.output")],
+            driver: None,
+            approver: None,
+            last_tick: None,
+            event_cursor: Seq::ZERO,
+            registration: None,
+            output_admission: None,
+        };
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("missing.output"),
+            CanonicalBytes::from_static(b"payload"),
+        );
+        assert!(matches!(
+            validate_plugin_output(&entry, &[draft]),
+            Err(RuntimeError::OutputAdmission(
+                OutputAdmissionErrorV1::MissingDeclaration { .. }
+            ))
+        ));
+
+        let mut registry = gated_registry();
+        let missing_id = PluginId::new();
+        registry
+            .approver_map
+            .insert(Kind::new("missing.approver"), missing_id);
+        assert!(matches!(
+            registry.action_approver_and_admission(&Kind::new("missing.approver")),
+            Err(ActionRejected::UnknownEventType)
+        ));
+        let no_approver_id = PluginId::new();
+        registry.plugins.insert(
+            no_approver_id,
+            PluginEntry {
+                name: "no-approver".to_owned(),
+                version: "test".to_owned(),
+                owned_event_types: Vec::new(),
+                driver: None,
+                approver: None,
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: None,
+            },
+        );
+        registry
+            .approver_map
+            .insert(Kind::new("no.approver"), no_approver_id);
+        assert!(matches!(
+            registry.action_approver_and_admission(&Kind::new("no.approver")),
+            Err(ActionRejected::UnknownEventType)
+        ));
+        let missing_policy_id = PluginId::new();
+        registry.plugins.insert(
+            missing_policy_id,
+            PluginEntry {
+                name: "missing-policy".to_owned(),
+                version: "test".to_owned(),
+                owned_event_types: Vec::new(),
+                driver: None,
+                approver: Some(Box::new(MockActionApprover)),
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: None,
+            },
+        );
+        registry
+            .approver_map
+            .insert(Kind::new("missing.policy"), missing_policy_id);
+        assert!(matches!(
+            registry.action_approver_and_admission(&Kind::new("missing.policy")),
+            Err(ActionRejected::DomainValidationFailed(message))
+                if message == "action approver has no bound output policy"
+        ));
+
+        let plugin = simple_plugin("foreign-policy", &["owned.output"]);
+        let valid_binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let (valid_policy, budget, _, _, _) = valid_binding.into_parts();
+        let fields = valid_policy.fields();
+        let foreign_declaration = OutputDeclarationV1::new(
+            "foreign.output".to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            4_096,
+            None,
+            None,
+        )
+        .test_ok();
+        let foreign_policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id: fields.plugin_id,
+            plugin_version: fields.plugin_version.clone(),
+            implementation_hash: fields.implementation_hash,
+            base_configuration_digest: fields.base_configuration_digest,
+            executable_profile_hash: fields.executable_profile_hash,
+            retention_policy_hash: fields.retention_policy_hash,
+            policy_revision: fields.policy_revision,
+            output_declarations: vec![foreign_declaration],
+        })
+        .test_ok();
+        let foreign_binding = OutputPolicyBindingV1::from_installed_source_with_policy(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            foreign_policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_with_output_policy(
+                &plugin,
+                foreign_binding,
+                None,
+                Some(Box::new(NoopDriver)),
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
     }
 
     #[test]

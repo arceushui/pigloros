@@ -6804,6 +6804,50 @@ mod coverage_entrypoints {
         }
     }
 
+    struct OwnedUnknownDraftDriver;
+
+    impl Driver for OwnedUnknownDraftDriver {
+        fn name(&self) -> &'static str {
+            "coverage-owned-unknown-draft-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput {
+                drafts: vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("coverage.unknown"),
+                    pos_core::CanonicalBytes::from_static(b"unknown"),
+                )],
+            })
+        }
+    }
+
+    struct OwnedSchemaPlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for OwnedSchemaPlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-owned-schema-plugin"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new("coverage.unknown")],
+                has_driver: true,
+                ..Capability::default()
+            }
+        }
+    }
+
     fn register_schema_failure_driver(registry: &mut PluginRegistry) {
         let plugin_id = PluginId::new();
         let binding_plugin = CoveragePlugin { id: plugin_id };
@@ -6819,6 +6863,25 @@ mod coverage_entrypoints {
                 plugin_id,
                 binding,
                 Box::new(UnknownDraftDriver),
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+    }
+
+    fn register_owned_schema_failure_driver(registry: &mut PluginRegistry) {
+        let plugin_id = PluginId::new();
+        let binding_plugin = OwnedSchemaPlugin { id: plugin_id };
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &binding_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .register_test_driver_with_verified_output_policy(
+                plugin_id,
+                binding,
+                Box::new(OwnedUnknownDraftDriver),
             )
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
     }
@@ -7010,6 +7073,32 @@ mod coverage_entrypoints {
             reason: "coverage-runtime",
         });
         assert!(matches!(generic, ExperimentError::Runtime(_)));
+    }
+
+    #[test]
+    fn debug_approver_registration_wrapper_reaches_registry_seam() {
+        let plugin = CoveragePlugin {
+            id: PluginId::new(),
+        };
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        let mut experiment = Experiment::new(config(
+            "coverage-approver-wrapper",
+            StopCondition::MaxTicks(1),
+        ));
+        ok(experiment.register_with_output_policy_and_approver(
+            &plugin,
+            binding,
+            None,
+            None,
+            None,
+            std::iter::empty(),
+        ));
     }
 
     #[test]
@@ -7413,6 +7502,35 @@ mod coverage_entrypoints {
             session.step_tick(),
             Err(ExperimentError::Runtime(_))
         ));
+    }
+
+    #[test]
+    fn session_step_boundary_aborts_after_owned_schema_failure() {
+        let mut session = ok(Experiment::new(config(
+            "coverage-owned-session-schema-failure",
+            StopCondition::MaxTicks(1),
+        ))
+        .start());
+        register_owned_schema_failure_driver(&mut session.registry);
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(_))
+        ));
+    }
+
+    #[test]
+    fn append_driver_drafts_aborts_after_owned_schema_failure() {
+        let mut store = test_memory_store();
+        let timeline = ok(store.create_timeline("coverage-owned-schema-failure"));
+        let mut registry = test_registry();
+        register_owned_schema_failure_driver(&mut registry);
+        assert!(append_driver_drafts(
+            &mut store,
+            timeline.id(),
+            &mut registry,
+            pos_core::clock::Seq::ZERO,
+        )
+        .is_err());
     }
 
     #[test]

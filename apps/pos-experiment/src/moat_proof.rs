@@ -125,7 +125,15 @@ fn world_output_binding(
     body: EntityId,
     profile_id: &str,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
-    let config = world_config(input);
+    world_output_binding_with_config(plugin, world_config(input), body, profile_id)
+}
+
+fn world_output_binding_with_config(
+    plugin: &WorldPlugin,
+    config: WorldConfigV1,
+    body: EntityId,
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
     let configuration_details =
         config
             .encode()
@@ -2369,6 +2377,22 @@ mod tests {
             4_096,
         )
         .is_err());
+    }
+
+    #[test]
+    fn world_output_binding_reports_invalid_configuration_encoding() {
+        let plugin = WorldPlugin::new();
+        let mut config = world_config(&input());
+        config.coord_convention = u8::MAX;
+        assert!(matches!(
+            world_output_binding_with_config(
+                &plugin,
+                config,
+                EntityId::new(),
+                "deterministic-local-v1",
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
     }
 
     #[test]

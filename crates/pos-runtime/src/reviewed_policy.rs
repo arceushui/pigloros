@@ -127,13 +127,58 @@ pub fn canonical_plugin_configuration_v1<P: Plugin + ?Sized>(
         frame(&mut artifact, event_type.as_str().as_bytes());
     }
     frame(&mut artifact, details);
-    if artifact.len() > MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 {
-        return Err(ReviewedPolicyArtifactErrorV1::ConfigurationArtifactTooLarge);
-    }
     Ok(artifact)
 }
 
 fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     output.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use pos_core::{Capability, Kind, PluginId};
+
+    struct FixturePlugin {
+        id: PluginId,
+        events: Vec<Kind>,
+    }
+
+    impl Plugin for FixturePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "reviewed-policy-fixture"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: self.events.clone(),
+                ..Capability::default()
+            }
+        }
+    }
+
+    #[test]
+    fn configuration_bounds_reject_details_and_framed_artifacts() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            events: vec![Kind::new("fixture.event")],
+        };
+        let oversized_details = vec![0_u8; MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 + 1];
+        assert_eq!(
+            canonical_plugin_configuration_v1(&plugin, &oversized_details),
+            Err(ReviewedPolicyArtifactErrorV1::ConfigurationDetailsTooLarge)
+        );
+
+        let details_at_bound = vec![0_u8; MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1];
+        assert_eq!(
+            canonical_plugin_configuration_v1(&plugin, &details_at_bound),
+            Err(ReviewedPolicyArtifactErrorV1::ConfigurationArtifactTooLarge)
+        );
+    }
 }

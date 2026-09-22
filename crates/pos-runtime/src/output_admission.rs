@@ -1336,6 +1336,405 @@ mod tests {
         )
     }
 
+    #[derive(Clone)]
+    struct FixturePlugin {
+        id: PluginId,
+        name: &'static str,
+        events: Vec<Kind>,
+    }
+
+    impl Plugin for FixturePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability {
+                owned_event_types: self.events.clone(),
+                has_driver: true,
+                ..pos_core::Capability::default()
+            }
+        }
+    }
+
+    struct LongVersionPlugin {
+        version: &'static str,
+    }
+
+    impl Plugin for LongVersionPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "long-version"
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability {
+                owned_event_types: vec![Kind::new("version.output")],
+                ..pos_core::Capability::default()
+            }
+        }
+
+        fn version(&self) -> &'static str {
+            self.version
+        }
+    }
+
+    fn closure_for(
+        plugin_id: PluginId,
+        workload_profile: WorkloadProfileV1,
+    ) -> OutputPolicyClosureV1 {
+        let profile =
+            pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let profile_hash = crate::reviewed_policy::execution_profile_artifact_hash_v1(&profile);
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 100,
+                    max_bytes: 100_000,
+                    max_cpu_us: 100_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 100,
+                    max_bytes: 100_000,
+                    max_cpu_us: 100_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 100,
+                    max_bytes: 100_000,
+                    max_cpu_us: 100_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10, 20, 30],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: profile_hash,
+            max_pass_wall_duration_us: 1_000,
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let implementation = b"fixture-implementation";
+        let configuration = b"CFG1fixture";
+        let declarations = vec![
+            OutputDeclarationV1::new(
+                "a.authoritative".to_owned(),
+                OutputAuthorityV1::Authoritative,
+                OutputFidelityV1::L0,
+                64,
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            OutputDeclarationV1::new(
+                "b.derived".to_owned(),
+                OutputAuthorityV1::ReproducibleDerived,
+                OutputFidelityV1::L1,
+                64,
+                Some(2),
+                None,
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            OutputDeclarationV1::new(
+                "c.ephemeral".to_owned(),
+                OutputAuthorityV1::Ephemeral,
+                OutputFidelityV1::L2,
+                64,
+                None,
+                Some(10),
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+        ];
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "1.0.0".to_owned(),
+            implementation_hash: crate::reviewed_policy::implementation_artifact_hash_v1(
+                implementation,
+            ),
+            base_configuration_digest: crate::reviewed_policy::host_artifact_hash_v1(
+                b"pigloros.base-configuration.v1",
+                configuration,
+            ),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: crate::reviewed_policy::reviewed_retention_policy_hash_v1(),
+            policy_revision: 1,
+            output_declarations: declarations,
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        OutputPolicyClosureV1::from_artifacts(
+            &policy.to_canonical_cbor(),
+            &budget.to_canonical_cbor(),
+            implementation,
+            configuration,
+            &profile,
+            crate::reviewed_policy::reviewed_retention_policy_bytes_v1(),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    }
+
+    #[test]
+    fn installed_sources_exercise_names_artifacts_and_policy_builders() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "fixture",
+            events: vec![Kind::new("fixture.output")],
+        };
+        let sources = [
+            InstalledOutputPolicySourceV1::Generated,
+            InstalledOutputPolicySourceV1::Gateway,
+            InstalledOutputPolicySourceV1::World,
+            InstalledOutputPolicySourceV1::RuleAgent,
+            InstalledOutputPolicySourceV1::Agent,
+            InstalledOutputPolicySourceV1::SyntheticObservation,
+            InstalledOutputPolicySourceV1::Society,
+            InstalledOutputPolicySourceV1::Experiment,
+        ];
+        for source in sources {
+            let _ = source.native_plugin_type_names();
+            assert!(!source.implementation_artifact(&plugin).is_empty());
+            let _ = source.event_types(&plugin);
+            let _ = source.workload_profile();
+            assert!(!source.accepts_plugin(&plugin));
+            let budget = source
+                .build_budget(plugin.id, Hash::from_bytes([9; 32]))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            if matches!(source, InstalledOutputPolicySourceV1::Generated) {
+                let _ = source.build_policy(&plugin, Hash::from_bytes([8; 32]), &budget);
+            }
+        }
+
+        for name in [
+            "proof-agent",
+            "proof-society",
+            "society",
+            "successful-sibling",
+            "failure-probe",
+            "unknown-experiment",
+        ] {
+            let named = FixturePlugin {
+                id: PluginId::new(),
+                name,
+                events: vec![Kind::new("fixture.output")],
+            };
+            let _ = InstalledOutputPolicySourceV1::Experiment.event_types(&named);
+            let _ = InstalledOutputPolicySourceV1::Experiment.accepts_plugin(&named);
+        }
+        let empty = FixturePlugin {
+            id: PluginId::new(),
+            name: "empty",
+            events: vec![Kind::new("")],
+        };
+        let budget = InstalledOutputPolicySourceV1::Generated
+            .build_budget(empty.id, Hash::from_bytes([9; 32]))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(InstalledOutputPolicySourceV1::Generated
+            .build_policy(&empty, Hash::from_bytes([8; 32]), &budget)
+            .is_err());
+        let long_version: &'static str = Box::leak("v".repeat(65).into_boxed_str());
+        let long_version_plugin = LongVersionPlugin {
+            version: long_version,
+        };
+        let budget = InstalledOutputPolicySourceV1::Generated
+            .build_budget(long_version_plugin.id(), Hash::from_bytes([9; 32]))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(InstalledOutputPolicySourceV1::Generated
+            .build_policy(&long_version_plugin, Hash::from_bytes([8; 32]), &budget)
+            .is_err());
+    }
+
+    #[test]
+    fn binding_leaf_and_profile_errors_are_closed() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "fixture",
+            events: vec![Kind::new("fixture.output")],
+        };
+        let too_large =
+            vec![0_u8; crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1 + 1];
+        assert!(matches!(
+            OutputPolicyArtifactInputV1::from_slices(&too_large, b"CFG1", b"profile", b"retention",),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid {
+                kind: "implementation"
+            })
+        ));
+        let too_large =
+            vec![0_u8; crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 + 1];
+        assert!(matches!(
+            OutputPolicyArtifactInputV1::from_slices(
+                b"implementation",
+                &too_large,
+                b"profile",
+                b"retention",
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid {
+                kind: "configuration"
+            })
+        ));
+        let too_large = vec![0_u8; pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1 + 1];
+        assert!(matches!(
+            OutputPolicyArtifactInputV1::from_slices(
+                b"implementation",
+                b"CFG1",
+                &too_large,
+                b"retention",
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+        ));
+        let too_large = vec![0_u8; MAX_WORLD_RETENTION_RECORD_BYTES_V1 + 1];
+        assert!(matches!(
+            OutputPolicyArtifactInputV1::from_slices(
+                b"implementation",
+                b"CFG1",
+                b"profile",
+                &too_large,
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
+        ));
+        let details =
+            vec![0_u8; crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 + 1];
+        assert!(matches!(
+            OutputPolicyBindingV1::from_installed_source(
+                &plugin,
+                InstalledOutputPolicySourceV1::Generated,
+                &details,
+                "deterministic-local-v1",
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid {
+                kind: "configuration"
+            })
+        ));
+        assert!(matches!(
+            OutputPolicyBindingV1::from_installed_source(
+                &plugin,
+                InstalledOutputPolicySourceV1::Generated,
+                &[],
+                "missing-profile",
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+        ));
+        let budget = budget(plugin.id, 16, 2, 32, 100, [10, 10, 10]);
+        let policy = policy(plugin.id, &budget);
+        assert!(matches!(
+            OutputPolicyBindingV1::from_installed_source_with_policy(
+                &plugin,
+                InstalledOutputPolicySourceV1::Generated,
+                policy.clone(),
+                budget.clone(),
+                &details,
+                "deterministic-local-v1",
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid {
+                kind: "configuration"
+            })
+        ));
+        assert!(matches!(
+            OutputPolicyBindingV1::from_installed_source_with_policy(
+                &plugin,
+                InstalledOutputPolicySourceV1::Generated,
+                policy,
+                budget,
+                &[],
+                "missing-profile",
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+        ));
+    }
+
+    #[test]
+    fn closure_digests_cover_all_declared_identity_variants() {
+        for workload in [
+            WorkloadProfileV1::Interactive,
+            WorkloadProfileV1::Fork,
+            WorkloadProfileV1::Research,
+        ] {
+            let closure = closure_for(PluginId::new(), workload);
+            assert_ne!(closure.digest(), Hash::zero());
+            assert_ne!(closure.replay_identity_digest(), Hash::zero());
+            assert!(!closure.output_policy_bytes().is_empty());
+            assert!(!closure.executable_budget_bytes().is_empty());
+            assert_eq!(closure.implementation_artifact(), b"fixture-implementation");
+            assert_eq!(closure.configuration_artifact(), b"CFG1fixture");
+            assert!(!closure.execution_profile_artifact().is_empty());
+            assert!(!closure.retention_policy_artifact().is_empty());
+            assert!(!closure.to_canonical_bytes().is_empty());
+        }
+    }
+
+    #[test]
+    fn admission_core_identity_and_accessors_are_exercised() {
+        let plugin_id = PluginId::new();
+        let budget_a = budget(plugin_id, 16, 2, 32, 100, [10, 10, 10]);
+        let policy_a = policy(plugin_id, &budget_a);
+        let admission =
+            OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy_a.clone(), budget_a.clone())
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(admission.plugin_id(), plugin_id);
+        assert_eq!(admission.policy(), &policy_a);
+        assert_eq!(admission.budget(), &budget_a);
+        assert!(admission.closure().is_none());
+        assert!(admission.owner_token().is_none());
+        let budget_b = budget(plugin_id, 15, 2, 32, 100, [10, 10, 10]);
+        assert!(matches!(
+            OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy_a.clone(), budget_b.clone()),
+            Err(OutputAdmissionErrorV1::PolicyIdentityMismatch)
+        ));
+        assert!(matches!(
+            OutputAdmissionV1::try_new_core(
+                PluginId::new(),
+                "1.0.0",
+                policy_a.clone(),
+                budget_a.clone(),
+            ),
+            Err(OutputAdmissionErrorV1::PluginMismatch)
+        ));
+        assert!(matches!(
+            OutputAdmissionV1::try_new_core(plugin_id, "2.0.0", policy_a.clone(), budget_a.clone()),
+            Err(OutputAdmissionErrorV1::PluginVersionMismatch)
+        ));
+        assert!(matches!(
+            OutputAdmissionV1::try_new_core(plugin_id, "1.0.0", policy_a.clone(), budget_b),
+            Err(OutputAdmissionErrorV1::PolicyIdentityMismatch)
+        ));
+        let other_id = PluginId::new();
+        let other_budget = budget(other_id, 16, 2, 32, 100, [10, 10, 10]);
+        assert!(matches!(
+            OutputAdmissionV1::try_new_core(plugin_id, "1.0.0", policy_a, other_budget),
+            Err(OutputAdmissionErrorV1::MissingCpuReservation)
+        ));
+        let closure = closure_for(plugin_id, WorkloadProfileV1::Interactive);
+        let verified = OutputAdmissionV1::try_new_verified(
+            plugin_id,
+            "1.0.0",
+            closure,
+            FixturePlugin {
+                id: plugin_id,
+                name: "fixture",
+                events: vec![Kind::new("fixture.output")],
+            }
+            .installed_owner_token(),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(verified.closure().is_some());
+        assert!(verified.owner_token().is_some());
+    }
+
     #[test]
     fn accepts_declared_output_and_tracks_identity() {
         let plugin_id = PluginId::new();
