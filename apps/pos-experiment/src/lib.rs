@@ -7095,7 +7095,7 @@ mod coverage_entrypoints {
             &plugin,
             binding,
             None,
-            None,
+            Some(Box::new(UnknownDraftDriver)),
             None,
             std::iter::empty(),
         ));
