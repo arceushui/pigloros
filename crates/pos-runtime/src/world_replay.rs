@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn requested_use_rejects_invalid_consumer_selections() {
-        let timeline = TimelineId::from_ulid(ulid::Ulid::from(1_u128));
+        let timeline = TimelineId::new();
         for consumers in [
             Vec::new(),
             vec!["count".to_owned(), "count".to_owned()],
