@@ -660,6 +660,11 @@ impl ProjectionRegistry {
     /// This keeps protected Replay and Snapshot candidates private until their
     /// final authorization check succeeds. Reducer registrations and policies
     /// remain installed; only accumulated state is rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error produced by `operation` after restoring the original
+    /// accumulated state.
     pub fn try_with_state_transaction<T, E>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, E>,
