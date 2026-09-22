@@ -192,7 +192,7 @@ pub enum SystemdTransientUnitTransportError {
     PropertyReadback {
         property: &'static str,
         #[source]
-        source: zbus::Error,
+        source: Box<zbus::Error>,
     },
     /// The complete typed property readback differed from the compiled request.
     #[error("systemd transient-unit requested-state verification failed")]
@@ -238,7 +238,8 @@ impl SystemdTransientUnitTransport {
     /// release, image admission, or kernel enforcement.
     ///
     /// # Errors
-    /// Returns a classified proxy, serialization, or manager-call failure.
+    /// Returns a classified connection, submission, job-completion, typed
+    /// property-readback, or requested-state verification failure.
     pub async fn start(
         &self,
         unit_name: TransientServiceUnitName,
@@ -323,7 +324,7 @@ async fn submit_and_verify(
     let root_image_policy = service.root_image_policy().await.map_err(|source| {
         SystemdTransientUnitTransportError::PropertyReadback {
             property: SystemdManagerReadbackOnlyProperty::RootImagePolicy.name(),
-            source,
+            source: Box::new(source),
         }
     })?;
     Ok(SystemdVerifiedStart {
@@ -348,7 +349,7 @@ async fn read_requested_properties(
         let value = read_property(service, kind).await.map_err(|source| {
             SystemdTransientUnitTransportError::PropertyReadback {
                 property: kind.name(),
-                source,
+                source: Box::new(source),
             }
         })?;
         readback.push(SystemdTransientUnitReadback::new(property.name(), value));
@@ -396,123 +397,87 @@ async fn read_hardening(
     property: SystemdHardeningProperty,
 ) -> Result<SystemdHardeningReadbackValue, zbus::Error> {
     match property {
-        SystemdHardeningProperty::TypeExec => service
-            .type_property()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::DynamicUser => service
-            .dynamic_user()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::NoNewPrivileges => service
-            .no_new_privileges()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::PrivateDevices => service
-            .private_devices()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::PrivateIpc => service
-            .private_ipc()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::PrivateMounts => service
-            .private_mounts()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::PrivateNetwork => service
-            .private_network()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::PrivatePids => service
-            .private_pi_ds()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::PrivateUsersEx => service
-            .private_users_ex()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::CapabilityBoundingSet => service
-            .capability_bounding_set()
-            .await
-            .map(SystemdHardeningReadbackValue::U64),
-        SystemdHardeningProperty::AmbientCapabilities => service
-            .ambient_capabilities()
-            .await
-            .map(SystemdHardeningReadbackValue::U64),
-        SystemdHardeningProperty::ProtectSystem => service
-            .protect_system()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::ProtectHome => service
-            .protect_home()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::ProtectControlGroupsEx => service
-            .protect_control_groups_ex()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::ProtectKernelTunables => service
-            .protect_kernel_tunables()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::ProtectKernelModules => service
-            .protect_kernel_modules()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::ProtectKernelLogs => service
-            .protect_kernel_logs()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::ProtectClock => service
-            .protect_clock()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::ProtectHostname => service
-            .protect_hostname()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::ProtectProc => service
-            .protect_proc()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::ProcSubset => service
-            .proc_subset()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::RestrictNamespaces => service
-            .restrict_namespaces()
-            .await
-            .map(SystemdHardeningReadbackValue::U64),
-        SystemdHardeningProperty::RestrictSuidSgid => service
-            .restrict_suidsgid()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::RestrictRealtime => service
-            .restrict_realtime()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
-        SystemdHardeningProperty::LockPersonality => service
-            .lock_personality()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
+        SystemdHardeningProperty::TypeExec => service.type_property().await.map(string_readback),
+        SystemdHardeningProperty::DynamicUser => service.dynamic_user().await.map(bool_readback),
+        SystemdHardeningProperty::NoNewPrivileges => {
+            service.no_new_privileges().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::PrivateDevices => {
+            service.private_devices().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::PrivateIpc => service.private_ipc().await.map(bool_readback),
+        SystemdHardeningProperty::PrivateMounts => service.private_mounts().await.map(bool_readback),
+        SystemdHardeningProperty::PrivateNetwork => {
+            service.private_network().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::PrivatePids => service.private_pi_ds().await.map(string_readback),
+        SystemdHardeningProperty::PrivateUsersEx => {
+            service.private_users_ex().await.map(string_readback)
+        }
+        SystemdHardeningProperty::CapabilityBoundingSet => {
+            service.capability_bounding_set().await.map(u64_readback)
+        }
+        SystemdHardeningProperty::AmbientCapabilities => {
+            service.ambient_capabilities().await.map(u64_readback)
+        }
+        SystemdHardeningProperty::ProtectSystem => {
+            service.protect_system().await.map(string_readback)
+        }
+        SystemdHardeningProperty::ProtectHome => service.protect_home().await.map(string_readback),
+        SystemdHardeningProperty::ProtectControlGroupsEx => {
+            service.protect_control_groups_ex().await.map(string_readback)
+        }
+        SystemdHardeningProperty::ProtectKernelTunables => {
+            service.protect_kernel_tunables().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::ProtectKernelModules => {
+            service.protect_kernel_modules().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::ProtectKernelLogs => {
+            service.protect_kernel_logs().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::ProtectClock => service.protect_clock().await.map(bool_readback),
+        SystemdHardeningProperty::ProtectHostname => {
+            service.protect_hostname().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::ProtectProc => service.protect_proc().await.map(string_readback),
+        SystemdHardeningProperty::ProcSubset => service.proc_subset().await.map(string_readback),
+        SystemdHardeningProperty::RestrictNamespaces => {
+            service.restrict_namespaces().await.map(u64_readback)
+        }
+        SystemdHardeningProperty::RestrictSuidSgid => {
+            service.restrict_suidsgid().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::RestrictRealtime => {
+            service.restrict_realtime().await.map(bool_readback)
+        }
+        SystemdHardeningProperty::LockPersonality => {
+            service.lock_personality().await.map(bool_readback)
+        }
         SystemdHardeningProperty::SystemCallArchitectures => service
             .system_call_architectures()
             .await
             .map(SystemdHardeningReadbackValue::StringArray),
-        SystemdHardeningProperty::UMask => service
-            .u_mask()
-            .await
-            .map(SystemdHardeningReadbackValue::U32),
-        SystemdHardeningProperty::KillMode => service
-            .kill_mode()
-            .await
-            .map(SystemdHardeningReadbackValue::String),
-        SystemdHardeningProperty::SendSigKill => service
-            .send_sigkill()
-            .await
-            .map(SystemdHardeningReadbackValue::Bool),
+        SystemdHardeningProperty::UMask => service.u_mask().await.map(u32_readback),
+        SystemdHardeningProperty::KillMode => service.kill_mode().await.map(string_readback),
+        SystemdHardeningProperty::SendSigKill => service.send_sigkill().await.map(bool_readback),
     }
+}
+
+const fn bool_readback(value: bool) -> SystemdHardeningReadbackValue {
+    SystemdHardeningReadbackValue::Bool(value)
+}
+
+const fn string_readback(value: String) -> SystemdHardeningReadbackValue {
+    SystemdHardeningReadbackValue::String(value)
+}
+
+const fn u64_readback(value: u64) -> SystemdHardeningReadbackValue {
+    SystemdHardeningReadbackValue::U64(value)
+}
+
+const fn u32_readback(value: u32) -> SystemdHardeningReadbackValue {
+    SystemdHardeningReadbackValue::U32(value)
 }
 
 fn encode_property(

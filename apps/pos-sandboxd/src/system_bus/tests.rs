@@ -150,7 +150,7 @@ impl RecordingManager {
         // The generated D-Bus interface owns every decoded wire argument.
         drop(auxiliary);
         let call = ObservedStart {
-            unit_name: name,
+            unit_name: name.clone(),
             mode,
             property_names,
             property_signatures,
@@ -661,10 +661,8 @@ async fn transport(
     let (server, client) = tokio::join!(server, client);
     let server = server?;
     let client = client?;
-    Ok((
-        SystemdTransientUnitTransport::from_connection(client).await?,
-        server,
-    ))
+    let transport = SystemdTransientUnitTransport::from_connection(client).await?;
+    Ok((transport, server))
 }
 
 fn expected_system_call_filter() -> Result<Vec<String>, Box<dyn Error>> {
