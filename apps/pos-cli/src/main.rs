@@ -30,6 +30,7 @@ macro_rules! result_pipeline {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
 
