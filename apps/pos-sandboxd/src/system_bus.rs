@@ -8,9 +8,9 @@ use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 use crate::{
     transient_unit::SystemdTransientUnitPropertyKind, SystemdHardeningProperty,
     SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
-    SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty,
-    SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
-    TransientUnitRequest, TransientUnitRequestError,
+    SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
+    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitRequest,
+    TransientUnitRequestError,
 };
 
 const JOB_MODE: &str = "fail";
@@ -157,6 +157,9 @@ pub enum SystemdTransientUnitTransportError {
     /// The generated systemd manager proxy could not be constructed.
     #[error("failed to construct the typed systemd manager proxy")]
     Proxy(#[source] zbus::Error),
+    /// The systemd manager rejected signal subscription for this connection.
+    #[error("failed to subscribe the systemd manager connection")]
+    ManagerSubscribe(#[source] zbus::Error),
     /// One closed request value could not be serialized for D-Bus.
     #[error("failed to serialize the typed transient-unit request")]
     Serialization(#[source] zvariant::Error),
@@ -208,14 +211,23 @@ impl SystemdTransientUnitTransport {
     /// Returns [`SystemdTransientUnitTransportError::Connect`] when the system bus is
     /// unavailable or rejects the connection.
     pub async fn connect_system() -> Result<Self, SystemdTransientUnitTransportError> {
-        Connection::system()
+        let connection = Connection::system()
             .await
-            .map(Self::from_connection)
-            .map_err(SystemdTransientUnitTransportError::Connect)
+            .map_err(SystemdTransientUnitTransportError::Connect)?;
+        Self::from_connection(connection).await
     }
 
-    const fn from_connection(connection: Connection) -> Self {
-        Self { connection }
+    async fn from_connection(
+        connection: Connection,
+    ) -> Result<Self, SystemdTransientUnitTransportError> {
+        let proxy = ManagerProxy::new(&connection)
+            .await
+            .map_err(SystemdTransientUnitTransportError::Proxy)?;
+        proxy
+            .subscribe()
+            .await
+            .map_err(SystemdTransientUnitTransportError::ManagerSubscribe)?;
+        Ok(Self { connection })
     }
 
     /// Submit, await, and verify one complete compiled request.
