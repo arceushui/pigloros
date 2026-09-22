@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use ciborium::value::Value;
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
@@ -12,7 +13,7 @@ use pos_core::{
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
     ErasureContainmentGateV1, ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
-    ErasureForkPersistencePortV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureForkPersistencePortV1, ErasureForkRecoveryProofV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
     ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryObservationV1,
     ErasureInventoryPersistencePortV1, ErasureInventoryResultV1, ErasureLifecycleV1,
@@ -1434,6 +1435,30 @@ fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_recovery_rejects_a_missing_events_table() -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, batch) = prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
+    let operation = batch.operation();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("DROP TABLE events")?;
+    drop(connection);
+    assert_eq!(
+        store.borrow_mut().recover_fork_admission(operation),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn std::error::Error>>
 {
     let database = tempfile::NamedTempFile::new()?;
@@ -1576,13 +1601,40 @@ fn assert_sqlite_fork_recovery_corruption_error(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
-    drop(store);
     let connection = rusqlite::Connection::open(path)?;
     assert_eq!(corrupt(&connection, &prepared)?, 1);
     drop(connection);
-    let mut reopened = SqliteStore::open(path)?;
     assert_eq!(
-        reopened.recover_fork_admission(prepared.operation()),
+        store
+            .borrow_mut()
+            .recover_fork_admission(prepared.operation()),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_sql_error(
+    sql: &str,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch(sql)?;
+    drop(connection);
+    assert_eq!(
+        store
+            .borrow_mut()
+            .recover_fork_admission(prepared.operation()),
         Err(expected)
     );
     Ok(())
@@ -1617,6 +1669,109 @@ fn only_fork_mutation(
     prepared: &pos_core::PreparedErasureForkBatchV1,
 ) -> &pos_core::PreparedErasureCasV1 {
     prepared.admissions()[0].mutation()
+}
+
+#[cfg(feature = "sqlite")]
+fn recovery_proof_mutation_fields(value: &mut Value) -> Result<&mut Vec<Value>, ErasureErrorV1> {
+    let Value::Array(fields) = value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Some(Value::Array(admissions)) = fields.get_mut(7) else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Some(Value::Array(mutation)) = admissions.get_mut(0) else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    Ok(mutation)
+}
+
+#[cfg(feature = "sqlite")]
+fn digest_value(reference: ErasureReferenceV1) -> Value {
+    Value::Bytes(reference.digest().to_vec())
+}
+
+#[cfg(feature = "sqlite")]
+fn rewrite_sqlite_recovery_proof(
+    connection: &rusqlite::Connection,
+    prepared: &pos_core::PreparedErasureForkBatchV1,
+    mutate: impl FnOnce(&mut Value) -> Result<(), ErasureErrorV1>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let proof_cbor: Vec<u8> = connection.query_row(
+        "SELECT proof_cbor FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+        rusqlite::params![prepared.operation().digest().as_slice()],
+        |row| row.get(0),
+    )?;
+    let mut value: Value = ciborium::from_reader(proof_cbor.as_slice())?;
+    mutate(&mut value)?;
+    let mut modified = Vec::new();
+    ciborium::into_writer(&value, &mut modified)?;
+    let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&modified)?;
+    let proof_cbor = proof.to_canonical_cbor()?;
+    let proof_digest = proof.content_digest()?;
+    connection.execute(
+        "UPDATE erasure_fork_recovery_proofs
+         SET proof_digest=?1, proof_cbor=?2 WHERE operation_digest=?3",
+        rusqlite::params![
+            proof_digest.digest().as_slice(),
+            proof_cbor,
+            prepared.operation().digest().as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_proof_rewrite_error(
+    mutate: impl FnOnce(&mut Value) -> Result<(), ErasureErrorV1>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    rewrite_sqlite_recovery_proof(&connection, &prepared, mutate)?;
+    drop(connection);
+    assert_eq!(
+        SqliteStore::open(path)?.recover_fork_admission(prepared.operation()),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_rewritten_proof_error(
+    mutate: impl FnOnce(&mut Value) -> Result<(), ErasureErrorV1>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    rewrite_sqlite_recovery_proof(&connection, &prepared, mutate)?;
+    drop(connection);
+    let mut reopened = SqliteStore::open(path)?;
+    let reopened_gate = bind_test_gate(&mut reopened)?;
+    assert_eq!(
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared),
+        Err(expected)
+    );
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]
@@ -1962,9 +2117,115 @@ fn sqlite_fork_retry_rejects_corrupted_child() -> Result<(), Box<dyn std::error:
 }
 
 #[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_malformed_timeline_metadata(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for mode in ["live", "future", "unknown"] {
+        assert_sqlite_fork_recovery_corruption_error(
+            |connection, prepared| {
+                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                connection.execute(
+                    "UPDATE timelines SET mode=?1 WHERE id=?2",
+                    rusqlite::params![mode, prepared.child().id.to_string()],
+                )
+            },
+            ErasureErrorV1::ProvenanceMissing,
+        )?;
+    }
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE timelines SET parent_id='not-a-timeline-id' WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET fork_seq=-1 WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET parent_id=NULL WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET fork_seq=NULL WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET parent_id=NULL, fork_seq=NULL WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE timeline_owners SET owner_id='not-an-entity-id' WHERE timeline_id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET head_seq=-1 WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_a_missing_parent() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            let parent = prepared
+                .child()
+                .fork_point
+                .map_or_else(TimelineId::new, |(parent, _)| parent);
+            connection.execute(
+                "DELETE FROM timelines WHERE id=?1",
+                rusqlite::params![parent.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_recovery_rejects_a_missing_parent_or_mismatched_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_rejects_malformed_timeline_metadata()?;
+    assert_sqlite_fork_recovery_rejects_a_missing_parent()?;
     assert_sqlite_fork_recovery_corruption_error(
         |connection, prepared| {
             let mut altered_child = prepared.child().clone();
@@ -2001,6 +2262,61 @@ fn sqlite_fork_recovery_rejects_a_missing_parent_or_mismatched_child(
             )
         },
         ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_malformed_child_event_rows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "INSERT INTO events
+                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                  schema_version, payload_hash)
+                 VALUES (?1, -1, ?2, ?3, 'test.fork.corrupt', X'00', 0, 1, zeroblob(32))",
+                rusqlite::params![
+                    prepared.child().id.to_string(),
+                    pos_core::EventId::new().to_string(),
+                    pos_core::EntityId::new().to_string(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "INSERT INTO events
+                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                  schema_version, payload_hash)
+                 VALUES (?1, 1, 'not-an-event-id', ?2, 'test.fork.corrupt', X'00', 0, 1,
+                         zeroblob(32))",
+                rusqlite::params![
+                    prepared.child().id.to_string(),
+                    pos_core::EntityId::new().to_string(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "INSERT INTO events
+                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                  schema_version, payload_hash)
+                 VALUES (?1, 1, ?2, ?3, 'test.fork.corrupt', 'not-a-blob', 0, 1,
+                         zeroblob(32))",
+                rusqlite::params![
+                    prepared.child().id.to_string(),
+                    pos_core::EventId::new().to_string(),
+                    pos_core::EntityId::new().to_string(),
+                ],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
     )
 }
 
@@ -2110,6 +2426,16 @@ fn sqlite_fresh_fork_rejects_adapter_failures() -> Result<(), Box<dyn std::error
             )
         },
         ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_first_commit_failure(
+        |connection, _| {
+            connection.execute_batch(
+                "CREATE TRIGGER reject_fork_recovery_proof
+                 BEFORE INSERT ON erasure_fork_recovery_proofs
+                 BEGIN SELECT RAISE(ABORT, 'proof rejected'); END;",
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
     )
 }
 
@@ -2208,6 +2534,17 @@ fn sqlite_fork_recovery_rejects_missing_or_corrupt_recovery_proof(
     )?;
     assert_sqlite_fork_recovery_corruption_error(
         |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=zeroblob(31)
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
             connection.execute(
                 "UPDATE erasure_fork_recovery_proofs SET proof_cbor=X'00'
                  WHERE operation_digest=?1",
@@ -2215,7 +2552,426 @@ fn sqlite_fork_recovery_rejects_missing_or_corrupt_recovery_proof(
             )
         },
         ErasureErrorV1::InvalidEncoding,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=1
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_cbor=1
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
     )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_proof_checks_all_index_kinds_and_subject(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    let request = only_fork_mutation(&prepared).request();
+    let manifest = only_fork_mutation(&prepared).next_manifest().digest();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "INSERT INTO erasure_attempt_pages(request_digest, ordinal, reference_digest)
+         VALUES(?1, ?2, ?3)",
+        rusqlite::params![
+            request.digest().as_slice(),
+            1_i64,
+            reference(230).digest().as_slice()
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO erasure_administrative_resolutions(request_digest, ordinal, reference_digest)
+         VALUES(?1, ?2, ?3)",
+        rusqlite::params![
+            request.digest().as_slice(),
+            2_i64,
+            reference(231).digest().as_slice()
+        ],
+    )?;
+    connection.execute(
+        "UPDATE erasure_effects SET subject_digest=?1 WHERE manifest_digest=?2",
+        rusqlite::params![
+            reference(232).digest().as_slice(),
+            manifest.digest().as_slice()
+        ],
+    )?;
+    rewrite_sqlite_recovery_proof(&connection, &prepared, |value| {
+        let mutation = recovery_proof_mutation_fields(value)?;
+        let Some(Value::Array(indexes)) = mutation.get_mut(10) else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        indexes.push(Value::Array(vec![
+            Value::Integer(0.into()),
+            Value::Integer(1.into()),
+            digest_value(reference(230)),
+        ]));
+        indexes.push(Value::Array(vec![
+            Value::Integer(2.into()),
+            Value::Integer(2.into()),
+            digest_value(reference(231)),
+        ]));
+        let Some(effect_subject) = mutation.get_mut(13) else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        *effect_subject = digest_value(reference(232));
+        Ok(())
+    })?;
+    drop(connection);
+    assert!(SqliteStore::open(path)?
+        .recover_fork_admission(operation)?
+        .is_some());
+    let connection = rusqlite::Connection::open(path)?;
+    corrupt_sqlite_subject_manifest(&connection, &prepared, manifest)?;
+    drop(connection);
+
+    assert_eq!(
+        SqliteStore::open(path)?.recover_fork_admission(operation),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE erasure_effects SET manifest_digest=zeroblob(32) WHERE subject_digest=?1",
+        rusqlite::params![reference(235).digest().as_slice()],
+    )?;
+    drop(connection);
+    assert_eq!(
+        SqliteStore::open(path)?.recover_fork_admission(operation),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn corrupt_sqlite_subject_manifest(
+    connection: &rusqlite::Connection,
+    prepared: &pos_core::PreparedErasureForkBatchV1,
+    manifest: ErasureReferenceV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+    let (effect_digest, effect_cbor): (Vec<u8>, Vec<u8>) = connection.query_row(
+        "SELECT effect_digest, effect_cbor FROM erasure_effects WHERE manifest_digest=?1",
+        rusqlite::params![manifest.digest().as_slice()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    connection.execute(
+        "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
+         VALUES(?1,?2,?3,?4)",
+        rusqlite::params![
+            [0_u8].as_slice(),
+            effect_digest,
+            reference(235).digest().as_slice(),
+            effect_cbor,
+        ],
+    )?;
+    rewrite_sqlite_recovery_proof(connection, prepared, |value| {
+        let mutation = recovery_proof_mutation_fields(value)?;
+        let Some(effect_subject) = mutation.get_mut(13) else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        *effect_subject = digest_value(reference(235));
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_proof_corruption_errors() -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(effect_bytes) = mutation.get_mut(12) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *effect_bytes = digest_value(reference(233));
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(objects) = mutation.get_mut(8) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *objects = Value::Array(Vec::new());
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_persisted_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_evidence SET object_cbor=X'00' WHERE reference_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_objects()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_states SET request_digest=zeroblob(32) WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_states SET request_digest=X'00' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_states SET state_cbor=X'00' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_states SET request_digest='not-a-blob' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_states SET state_cbor='not-a-blob' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_scope_nodes SET reference_digest=zeroblob(32)
+                 WHERE request_digest=?1 AND ordinal=0",
+                rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_scope_nodes SET reference_digest=X'00'
+                 WHERE request_digest=?1 AND ordinal=0",
+                rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_effect_digests(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_effects SET effect_digest=zeroblob(32) WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_digest=X'00' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_digest='not-a-blob' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_effect() -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_rejects_corrupt_effect_digests()?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_effects SET subject_digest=zeroblob(32) WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET subject_digest=X'00' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_cbor=X'00' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::InvalidEncoding,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_cbor='not-a-blob' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET subject_digest='not-a-blob' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_effect_tables(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_sql_error(
+        "DROP TABLE erasure_states",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_sql_error(
+        "DROP TABLE erasure_effects",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_proof_rejects_corrupt_persisted_sides(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_rejects_corrupt_persisted_state()?;
+    assert_sqlite_fork_recovery_rejects_corrupt_effect()?;
+    assert_sqlite_fork_recovery_rejects_corrupt_effect_tables()?;
+    assert_sqlite_fork_recovery_proof_corruption_errors()
 }
 
 #[cfg(feature = "sqlite")]
@@ -2281,6 +3037,17 @@ fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn
                 .as_slice()],
         )
     })?;
+    assert_sqlite_fork_retry_rewritten_proof_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(objects) = mutation.get_mut(8) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *objects = Value::Array(Vec::new());
+            Ok(())
+        },
+        ErasureErrorV1::PolicyConflict,
+    )?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",

@@ -6581,6 +6581,15 @@ mod tests {
             ))
             .test_ok();
 
+        let mut missing_parent = new_store();
+        let orphan = TimelineMeta::forked_from(TimelineId::new(), Seq::ZERO, "orphan");
+        assert!(missing_parent
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                &orphan,
+                &KeyRegistryStateV1::new(),
+            )
+            .is_err());
+
         let mut mismatch = new_store();
         mismatch.save_key_registry(&persisted).test_ok();
         assert!(mismatch
@@ -6792,8 +6801,8 @@ mod coverage_entrypoints {
     use super::tests::new_store;
     use super::*;
     use pos_core::{
-        ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey,
-        ERASURE_MAX_INVENTORY_TIMELINES,
+        ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+        KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey, ERASURE_MAX_INVENTORY_TIMELINES,
     };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -6878,6 +6887,309 @@ mod coverage_entrypoints {
             AppendDedupKey::from_keyed_hash([key; 32]),
             AppendDedupScope::from_keyed_hash([scope; 32]),
         )
+    }
+
+    fn memory_recovery_proof_fixture(
+        extension: u8,
+        object_reference: u8,
+    ) -> (MemoryStore, ErasureForkRecoveryProofV1) {
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let digest_value =
+            |value| ciborium::value::Value::Bytes(reference(value).digest().to_vec());
+        let manifest_bytes = vec![0xA1, 0xB2];
+        let object_bytes = vec![0xC3, 0xD4];
+        let state_bytes = vec![0xE5, 0xF6];
+        let effect_bytes = vec![0x17, 0x28];
+        let proof_value = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+            ciborium::value::Value::Integer(1.into()),
+            digest_value(1),
+            digest_value(2),
+            digest_value(3),
+            digest_value(4),
+            digest_value(5),
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                digest_value(1),
+                digest_value(3),
+                digest_value(4),
+                digest_value(extension),
+                digest_value(7),
+                digest_value(8),
+                digest_value(9),
+                ciborium::value::Value::Bytes(
+                    ErasureForkRecoveryProofV1::bytes_digest(&manifest_bytes)
+                        .digest()
+                        .to_vec(),
+                ),
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                    digest_value(object_reference),
+                    ciborium::value::Value::Bytes(
+                        ErasureForkRecoveryProofV1::bytes_digest(&object_bytes)
+                            .digest()
+                            .to_vec(),
+                    ),
+                ])]),
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                    digest_value(11),
+                    ciborium::value::Value::Bytes(
+                        ErasureForkRecoveryProofV1::bytes_digest(&state_bytes)
+                            .digest()
+                            .to_vec(),
+                    ),
+                ])]),
+                ciborium::value::Value::Array(vec![
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(0.into()),
+                        ciborium::value::Value::Integer(0.into()),
+                        digest_value(15),
+                    ]),
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(1.into()),
+                        ciborium::value::Value::Integer(1.into()),
+                        digest_value(16),
+                    ]),
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(2.into()),
+                        ciborium::value::Value::Integer(2.into()),
+                        digest_value(17),
+                    ]),
+                ]),
+                digest_value(12),
+                ciborium::value::Value::Bytes(
+                    ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)
+                        .digest()
+                        .to_vec(),
+                ),
+                digest_value(13),
+                digest_value(14),
+            ])]),
+        ]);
+        let mut encoded = Vec::new();
+        ok(ciborium::into_writer(&proof_value, &mut encoded));
+        let proof = ok(ErasureForkRecoveryProofV1::from_canonical_cbor(&encoded));
+
+        let mut store = new_store();
+        store
+            .erasure_records
+            .insert(reference(7), (reference(9), manifest_bytes));
+        store
+            .erasure_evidence
+            .insert(reference(object_reference), object_bytes);
+        store.erasure_states.insert(reference(11), state_bytes);
+        store
+            .erasure_attempt_pages
+            .insert((reference(7), 0), reference(15));
+        store
+            .erasure_scope_nodes
+            .insert((reference(7), 1), reference(16));
+        store
+            .erasure_administrative_resolutions
+            .insert((reference(7), 2), reference(17));
+        store
+            .erasure_effects
+            .insert(reference(9), (reference(12), effect_bytes));
+        store
+            .erasure_effect_subjects
+            .insert(reference(13), reference(9));
+        (store, proof)
+    }
+
+    fn assert_memory_recovery_proof_error(
+        extension: u8,
+        object_reference: u8,
+        mutate: impl FnOnce(&mut MemoryStore),
+    ) {
+        let (mut store, proof) = memory_recovery_proof_fixture(extension, object_reference);
+        mutate(&mut store);
+        assert_eq!(
+            store.memory_fork_recovery_proof_is_exact(&proof),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    fn memory_recovery_proof_checks_manifest_and_state() {
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_records
+                .remove(&ErasureReferenceV1::from_digest([7; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_records.insert(
+                ErasureReferenceV1::from_digest([7; 32]),
+                (ErasureReferenceV1::from_digest([18; 32]), vec![0xA1, 0xB2]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_records.insert(
+                ErasureReferenceV1::from_digest([7; 32]),
+                (ErasureReferenceV1::from_digest([9; 32]), vec![0xBA, 0xDB]),
+            );
+        });
+        assert_memory_recovery_proof_error(99, 10, |_| {});
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_evidence
+                .remove(&ErasureReferenceV1::from_digest([10; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_evidence
+                .insert(ErasureReferenceV1::from_digest([10; 32]), vec![0xBA, 0xDB]);
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_states
+                .remove(&ErasureReferenceV1::from_digest([11; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_states
+                .insert(ErasureReferenceV1::from_digest([11; 32]), vec![0xBA, 0xDB]);
+        });
+    }
+
+    fn memory_recovery_proof_checks_indexes_and_effects() {
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_attempt_pages
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 0));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_attempt_pages.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 0),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_scope_nodes
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 1));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_scope_nodes.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 1),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_administrative_resolutions
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 2));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_administrative_resolutions.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 2),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_effects
+                .remove(&ErasureReferenceV1::from_digest([9; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_effects.insert(
+                ErasureReferenceV1::from_digest([9; 32]),
+                (ErasureReferenceV1::from_digest([18; 32]), vec![0x17, 0x28]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_effects.insert(
+                ErasureReferenceV1::from_digest([9; 32]),
+                (ErasureReferenceV1::from_digest([12; 32]), vec![0xBA, 0xDB]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_effect_subjects
+                .remove(&ErasureReferenceV1::from_digest([13; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_effect_subjects.insert(
+                ErasureReferenceV1::from_digest([13; 32]),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+    }
+
+    #[test]
+    fn memory_fork_recovery_proof_checks_every_persisted_side() {
+        let (store, proof) = memory_recovery_proof_fixture(10, 10);
+        assert_eq!(store.memory_fork_recovery_proof_is_exact(&proof), Ok(()));
+        memory_recovery_proof_checks_manifest_and_state();
+        memory_recovery_proof_checks_indexes_and_effects();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_fork_recovery_rejects_missing_or_mismatched_proof() {
+        let mut store = new_store();
+        let parent = ok(store.create_timeline("recovery-proof-parent"));
+        let snapshot =
+            ok(store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS));
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = ok(query.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS));
+        let operation = ErasureReferenceV1::from_digest([246; 32]);
+        let first_input = pos_core::ErasureForkAdmissionInputV1 {
+            operation,
+            expected_inventory_generation: inventory.generation(),
+            child_scope: ErasureReferenceV1::from_digest([247; 32]),
+            child: TimelineMeta {
+                id: TimelineId::new(),
+                mode: pos_core::timeline::TimelineMode::Historical,
+                name: Some("recovery-proof-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent.id(), Seq::ZERO)),
+            },
+        };
+        let second_input = pos_core::ErasureForkAdmissionInputV1 {
+            child_scope: ErasureReferenceV1::from_digest([248; 32]),
+            child: TimelineMeta {
+                id: TimelineId::new(),
+                mode: pos_core::timeline::TimelineMode::Historical,
+                name: Some("different-recovery-proof-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent.id(), Seq::ZERO)),
+            },
+            ..first_input
+        };
+        let first = ok(inventory
+            .clone()
+            .prepare_fork_batch(first_input, Vec::new()));
+        let second = ok(inventory.prepare_fork_batch(second_input, Vec::new()));
+        let expected = ok(first.recovery_result());
+        let proof = ok(first.recovery_proof());
+        let gate = Arc::clone(
+            store
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing recovery gate"))),
+        );
+        let candidate = first.successor_inventory().clone();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let outcome = ok(store.commit_fork_admission(permit, first.clone()));
+            Ok::<_, ErasureErrorV1>((candidate.clone(), outcome))
+        };
+        ok(gate.install_from_verified_inventory_transition(&mut transition));
+
+        assert_eq!(
+            ok(store.recover_fork_admission(operation)),
+            Some(expected.clone())
+        );
+        store.erasure_fork_recovery_proofs.remove(&operation);
+        assert_eq!(
+            store.recover_fork_admission(operation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .erasure_fork_recovery_proofs
+            .insert(operation, ok(second.recovery_proof()));
+        assert_eq!(
+            store.recover_fork_admission(operation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store.erasure_fork_recovery_proofs.insert(operation, proof);
+        assert_eq!(ok(store.recover_fork_admission(operation)), Some(expected));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

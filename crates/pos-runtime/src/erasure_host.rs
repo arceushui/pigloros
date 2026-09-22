@@ -3451,6 +3451,7 @@ mod tests {
         Recovery,
         EventStore,
         DeleteTimeline,
+        TransitionLookup,
         Passthrough,
     }
 
@@ -3788,7 +3789,10 @@ mod tests {
             permit: &ErasureTopologyTransitionPermitV1,
             id: TimelineId,
         ) -> Result<Option<Timeline>, CoreError> {
-            if self.fault == FaultModeV1::EventStore {
+            if matches!(
+                self.fault,
+                FaultModeV1::EventStore | FaultModeV1::TransitionLookup
+            ) {
                 Err(CoreError::Storage(
                     "fault transition timeline lookup".to_owned(),
                 ))
@@ -3802,6 +3806,11 @@ mod tests {
             permit: &ErasureTopologyTransitionPermitV1,
             name: &str,
         ) -> Result<Option<Timeline>, CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                return Err(CoreError::Storage(
+                    "fault transition name lookup".to_owned(),
+                ));
+            }
             self.inner
                 .find_timeline_by_name_for_host_transition(permit, name)
         }
@@ -4898,6 +4907,27 @@ mod tests {
                     ),
                 )],
             )
+        );
+    }
+
+    #[test]
+    fn hosted_coordinator_port_inserts_a_candidate_into_existing_topology() {
+        let authority = RejectedCoordinatorAuthorityV1::default();
+        let mut store = MemoryStore::new().without_erasure_gate();
+        let existing = store
+            .create_timeline("existing-topology")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let candidate = TimelineId::new();
+        let mut expected = vec![existing.id(), candidate];
+        expected.sort_unstable();
+        let port =
+            HostedCoordinatorPortV1::new(&mut store, &authority).with_topology_candidate(candidate);
+        let observation = port
+            .complete_erasure_inventory_observation(4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            observation,
+            ErasureInventoryObservationV1::new(Vec::new(), expected, Vec::new())
         );
     }
 
@@ -7077,6 +7107,44 @@ mod tests {
     }
 
     #[test]
+    fn identified_fork_recovery_reports_closed_state_when_parent_is_missing() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("missing-recovery-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.store
+            .host_store()
+            .delete_timeline(parent.id())
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let candidate = host.inventory.as_ref().map_or_else(
+            || std::panic::resume_unwind(Box::new("missing empty inventory")),
+            |inventory| (**inventory).clone(),
+        );
+        host.state = HostStateV1::Closed;
+        let gate = Arc::clone(&host.gate);
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert_eq!(
+                host.recover_identified_fork_child(
+                    permit,
+                    reference(250),
+                    parent.id(),
+                    Seq::ZERO,
+                    "missing-recovery-child",
+                ),
+                Err(ErasureHostErrorV1::RecoveryUnavailable)
+            );
+            Ok::<_, ErasureErrorV1>((candidate.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+    }
+
+    #[test]
     fn identified_fork_rejects_an_initial_exact_retry_as_an_uncertain_commit() {
         let (mut host, _, parent) =
             active_identified_fork_host(FaultModeV1::MisreportInitialExactRetry)
@@ -7302,6 +7370,13 @@ mod tests {
             );
             assert_eq!(
                 command.fork_timeline(timeline, Seq::ZERO, "fault"),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(
+                command.initialize_timeline_with_key_registry(
+                    "fault-ledger",
+                    &KeyRegistryStateV1::new(),
+                ),
                 Err(ErasureHostErrorV1::AdapterFailure)
             );
             assert_eq!(
@@ -7590,6 +7665,26 @@ mod tests {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn ordinary_fork_maps_a_transition_timeline_lookup_failure() {
+        let (mut store, _) = fault_store_with_control(FaultModeV1::TransitionLookup);
+        let parent = store
+            .inner
+            .create_timeline("transition-lookup-parent")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline(
+                    parent.id(),
+                    Seq::ZERO,
+                    "transition-lookup-child",
+                )),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
     }
 
     #[test]
