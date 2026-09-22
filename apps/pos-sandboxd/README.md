@@ -18,5 +18,11 @@ runtime admission shortcut is supplied by this slice.
 
 `SystemdTransientUnitTransport` consumes that closed property bundle and calls
 the generated systemd `StartTransientUnit` proxy with the fixed `fail` job mode
-and no auxiliary units. Its returned job path proves submission only; later
-slices own property readback, launcher readiness, release, and lifecycle proof.
+and no auxiliary units. It subscribes to `JobRemoved` before submission, accepts
+only the matching unit/job pair with result `done`, resolves the unit object,
+and reads every requested property through the generated typed service proxy.
+The existing request verifier rejects any unequal complete readback. The
+effective `RootImagePolicy` is recorded separately because it is manager-owned
+state, not requested configuration or signature-admission evidence. The typed
+result proves requested-state verification only; later slices own launcher
+readiness, release, image admission, kernel observation, and lifecycle proof.
