@@ -2612,7 +2612,6 @@ impl PluginRegistry {
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
         let binding = Self::generated_output_binding(plugin)?;
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,
@@ -2639,7 +2638,6 @@ impl PluginRegistry {
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
         let binding = Self::generated_output_binding(plugin)?;
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_verified_output_policy_and_approver(
             plugin,
             binding,
