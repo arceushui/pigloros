@@ -5270,7 +5270,7 @@ impl SqliteStore {
                 return sqlite_fork_admission_is_exact(
                     &self.conn,
                     self.hasher.as_ref(),
-                    &admission,
+                    admission,
                     chain_head,
                     &receipt,
                 )?
