@@ -1421,7 +1421,7 @@ mod tests {
                     level: 2,
                     max_events: 100,
                     max_bytes: 100_000,
-                    max_cpu_us: 100_000,
+                    max_cpu_us: 50_000,
                     shared_host_cpu_reservation_us: 0,
                 },
             ],
