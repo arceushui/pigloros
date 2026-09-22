@@ -3451,6 +3451,7 @@ mod tests {
         Recovery,
         EventStore,
         DeleteTimeline,
+        TransitionLookup,
         Passthrough,
     }
 
@@ -3788,7 +3789,10 @@ mod tests {
             permit: &ErasureTopologyTransitionPermitV1,
             id: TimelineId,
         ) -> Result<Option<Timeline>, CoreError> {
-            if self.fault == FaultModeV1::EventStore {
+            if matches!(
+                self.fault,
+                FaultModeV1::EventStore | FaultModeV1::TransitionLookup
+            ) {
                 Err(CoreError::Storage(
                     "fault transition timeline lookup".to_owned(),
                 ))
@@ -3802,6 +3806,11 @@ mod tests {
             permit: &ErasureTopologyTransitionPermitV1,
             name: &str,
         ) -> Result<Option<Timeline>, CoreError> {
+            if self.fault == FaultModeV1::EventStore {
+                return Err(CoreError::Storage(
+                    "fault transition name lookup".to_owned(),
+                ));
+            }
             self.inner
                 .find_timeline_by_name_for_host_transition(permit, name)
         }
@@ -7305,6 +7314,13 @@ mod tests {
                 Err(ErasureHostErrorV1::AdapterFailure)
             );
             assert_eq!(
+                command.initialize_timeline_with_key_registry(
+                    "fault-ledger",
+                    &KeyRegistryStateV1::new(),
+                ),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(
                 command.append(
                     timeline,
                     &[EventDraft::new(
@@ -7590,6 +7606,26 @@ mod tests {
             Err(ErasureHostErrorV1::AuthorizationDenied)
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn ordinary_fork_maps_a_transition_timeline_lookup_failure() {
+        let (mut store, _) = fault_store_with_control(FaultModeV1::TransitionLookup);
+        let parent = store
+            .inner
+            .create_timeline("transition-lookup-parent")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline(
+                    parent.id(),
+                    Seq::ZERO,
+                    "transition-lookup-child",
+                )),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
     }
 
     #[test]

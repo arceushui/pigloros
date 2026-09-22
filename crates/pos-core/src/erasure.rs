@@ -8931,6 +8931,316 @@ mod coverage_paths {
         );
     }
 
+    fn assert_recovery_proof_accessors(
+        proof: &ErasureForkRecoveryProofV1,
+        result: &ErasureForkRecoveryV1,
+        expected_state_reference: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        assert_eq!(proof.operation(), reference(180));
+        assert_eq!(proof.binding_digest(), result.binding_digest());
+        assert_eq!(proof.expected_inventory_generation(), reference(181));
+        assert_eq!(proof.child_scope(), reference(182));
+        assert_eq!(proof.successor_generation(), result.successor_generation());
+        assert_eq!(proof.admissions().len(), 1);
+        let admission = &proof.admissions()[0];
+        assert_eq!(
+            admission.binding_digest(),
+            fork_admission_binding_digest(
+                reference(180),
+                reference(181),
+                reference(182),
+                admission.extension(),
+                reference(183),
+                reference(189),
+                reference(190),
+                result.child(),
+            )
+        );
+        assert_eq!(admission.request(), reference(183));
+        assert_ne!(admission.extension(), reference_zero());
+        assert_eq!(admission.predecessor(), Some(reference(189)));
+        assert_eq!(admission.next_manifest(), reference(190));
+        assert_eq!(
+            admission.next_manifest_bytes(),
+            ErasureForkRecoveryProofV1::bytes_digest(&[1, 2, 3])
+        );
+        assert_eq!(admission.objects().len(), 1);
+        assert_eq!(admission.objects()[0].reference(), reference(191));
+        assert_eq!(
+            admission.objects()[0].bytes(),
+            ErasureForkRecoveryProofV1::bytes_digest(&[4, 5])
+        );
+        assert_eq!(admission.states().len(), 1);
+        assert_eq!(admission.states()[0].reference(), expected_state_reference);
+        assert_eq!(admission.index_inserts().len(), 3);
+        assert_eq!(admission.effect(), ErasureCasEffectV1::None.identity());
+        assert_eq!(
+            admission.effect_bytes(),
+            ErasureForkRecoveryProofV1::bytes_digest(
+                &ErasureCasEffectV1::None.to_canonical_cbor()?
+            )
+        );
+        assert_eq!(admission.effect_subject(), None);
+        assert_eq!(
+            admission.binding_digest(),
+            fork_admission_binding_digest(
+                reference(180),
+                reference(181),
+                reference(182),
+                admission.extension(),
+                reference(183),
+                reference(189),
+                reference(190),
+                result.child(),
+            )
+        );
+
+        let root = crate::TimelineMeta::root("proof-root");
+        assert_eq!(
+            fork_admission_binding_digest(
+                reference(1),
+                reference(2),
+                reference(3),
+                reference(4),
+                reference(5),
+                reference(6),
+                reference(7),
+                &root,
+            ),
+            reference_zero()
+        );
+        assert_eq!(
+            fork_batch_binding_digest(
+                reference(1),
+                reference(2),
+                reference(3),
+                reference(4),
+                &root,
+                &[],
+            ),
+            reference_zero()
+        );
+        Ok(())
+    }
+
+    fn assert_recovery_proof_rejects_binding_changes(
+        proof: &ErasureForkRecoveryProofV1,
+        result: &ErasureForkRecoveryV1,
+    ) {
+        let mut changed_binding = proof.clone();
+        changed_binding.admissions[0].binding_digest = reference(195);
+        assert_eq!(
+            changed_binding.validate(result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut changed_header = proof.clone();
+        changed_header.operation = reference(196);
+        assert_eq!(
+            changed_header.validate(result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut missing_predecessor = proof.clone();
+        missing_predecessor.admissions[0].predecessor = None;
+        assert_eq!(
+            missing_predecessor.validate(result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut mismatched_admission = proof.clone();
+        mismatched_admission.admissions[0].operation = reference(197);
+        assert_eq!(
+            mismatched_admission.validate(result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    fn encode_recovery_value(value: &Value) -> Result<Vec<u8>, ErasureErrorV1> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        Ok(bytes)
+    }
+
+    fn assert_recovery_proof_rejects_malformed_headers(
+        proof: &ErasureForkRecoveryProofV1,
+    ) -> Result<(), ErasureErrorV1> {
+        for field in 0..=6 {
+            let mut malformed = recovery_proof_value(proof);
+            let Value::Array(fields) = &mut malformed else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            fields[field] = Value::Text("wrong-proof-field".to_owned());
+            assert!(matches!(
+                ErasureForkRecoveryProofV1::from_canonical_cbor(&encode_recovery_value(
+                    &malformed
+                )?),
+                Err(ErasureErrorV1::InvalidEncoding)
+            ));
+        }
+        let mut malformed_admission = recovery_proof_value(proof);
+        let Value::Array(fields) = &mut malformed_admission else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        fields[7] = Value::Array(vec![Value::Text("wrong-admission".to_owned())]);
+        assert!(matches!(
+            ErasureForkRecoveryProofV1::from_canonical_cbor(&encode_recovery_value(
+                &malformed_admission,
+            )?),
+            Err(ErasureErrorV1::InvalidEncoding)
+        ));
+        Ok(())
+    }
+
+    fn assert_recovery_mutation_rejects_malformed_fields(mutation: &ErasureForkRecoveryMutationV1) {
+        let malformed_mutation = |field: usize, replacement: Value| {
+            let mut value = recovery_mutation_value(mutation);
+            let Value::Array(fields) = &mut value else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            fields[field] = replacement;
+            recovery_mutation_from_value(&value)
+        };
+        assert!(recovery_mutation_from_value(&Value::Text("wrong-mutation".to_owned())).is_err());
+        for field in [8, 9, 10] {
+            assert!(malformed_mutation(field, Value::Text("wrong-list".to_owned())).is_err());
+        }
+        let oversized_objects = Value::Array(vec![
+            recovery_object_value(&mutation.objects[0]);
+            ERASURE_MAX_REFERENCES + 1
+        ]);
+        assert_eq!(
+            malformed_mutation(8, oversized_objects),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert!(malformed_mutation(
+            8,
+            Value::Array(vec![Value::Text("wrong-object".to_owned())])
+        )
+        .is_err());
+        assert!(
+            malformed_mutation(9, Value::Array(vec![Value::Text("wrong-state".to_owned())]))
+                .is_err()
+        );
+        assert!(malformed_mutation(
+            10,
+            Value::Array(vec![Value::Text("wrong-index".to_owned())])
+        )
+        .is_err());
+        for field in [0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14] {
+            assert!(malformed_mutation(field, Value::Text("wrong-digest".to_owned())).is_err());
+        }
+    }
+
+    fn assert_recovery_objects_and_indexes_reject_malformed_fields(
+        mutation: &ErasureForkRecoveryMutationV1,
+    ) -> Result<(), ErasureErrorV1> {
+        assert!(recovery_object_from_value(&Value::Text("wrong-object".to_owned())).is_err());
+        let object = &mutation.objects[0];
+        for field in 0..=1 {
+            let mut value = recovery_object_value(object);
+            let Value::Array(fields) = &mut value else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            fields[field] = Value::Text("wrong-object-field".to_owned());
+            assert!(recovery_object_from_value(&value).is_err());
+        }
+
+        let mut index = recovery_index_value(&mutation.index_inserts[0]);
+        {
+            let Value::Array(index_fields) = &mut index else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            index_fields[1] = Value::Text("wrong-ordinal".to_owned());
+        }
+        assert!(recovery_index_from_value(&index).is_err());
+        {
+            let Value::Array(index_fields) = &mut index else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            index_fields[1] = uint(0);
+            index_fields[2] = Value::Text("wrong-reference".to_owned());
+        }
+        assert!(recovery_index_from_value(&index).is_err());
+        {
+            let Value::Array(index_fields) = &mut index else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            index_fields[2] = digest(reference(192));
+            index_fields[0] = uint(9);
+        }
+        assert_eq!(
+            recovery_index_from_value(&index),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        {
+            let Value::Array(index_fields) = &mut index else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            index_fields[0] = Value::Text("wrong-kind".to_owned());
+        }
+        assert_eq!(
+            recovery_index_from_value(&index),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    fn assert_recovery_proof_rejects_oversized_admissions(
+        proof: &ErasureForkRecoveryProofV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut oversized = proof.clone();
+        oversized.admissions =
+            vec![proof.admissions[0].clone(); ERASURE_MAX_INVENTORY_REQUESTS + 1];
+        let oversized_bytes = oversized.to_canonical_cbor()?;
+        assert_eq!(
+            ErasureForkRecoveryProofV1::from_canonical_cbor(&oversized_bytes),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    fn assert_recovery_proof_rejects_oversized_effect(
+        input: &ErasureForkAdmissionInputV1,
+        extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let Some((parent, _)) = input.child.fork_point else {
+            return Err(ErasureErrorV1::PolicyConflict);
+        };
+        let command = ErasureDestructionCommandV1 {
+            obligation: reference(198),
+            category: ErasureInventoryCategoryV1::Artifact,
+            target: ErasureRequiredTargetV1 {
+                artifact_class: ErasureArtifactClassV1::TimelineReplay,
+                artifact_digest: reference(199),
+                key_role: ErasureKeyRoleV1::DataEncryption,
+                key_digest: reference(200),
+                replica_set: reference(201),
+                replica_id: reference(202),
+            },
+            owner: reference(203),
+            command: reference(204),
+            provenance: reference(205),
+        };
+        let oversized_effect = ErasureCasEffectV1::AttemptAdmission {
+            reservation: ErasureAttemptQuotaReservationV1::new(reference(206), reference(207)),
+            commands: vec![command; 100_000],
+        };
+        let mutation = PreparedErasureCasV1::new(
+            reference(183),
+            Some(reference(189)),
+            StoredErasureManifestV1::from_stored(reference(190), vec![1, 2, 3]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            oversized_effect,
+        );
+        let admission =
+            PreparedErasureForkAdmissionV1::new(input.clone(), extension.clone(), mutation)?;
+        let successor =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
+        let batch = PreparedErasureForkBatchV1::new(input.clone(), vec![admission], successor)?;
+        assert_eq!(batch.recovery_proof(), Err(ErasureErrorV1::ScopeInvalid));
+        Ok(())
+    }
+
     #[test]
     fn fork_recovery_proof_round_trips_and_rejects_binding_or_shape_changes(
     ) -> Result<(), ErasureErrorV1> {
@@ -8982,10 +9292,11 @@ mod coverage_paths {
             ],
             ErasureCasEffectV1::None,
         );
-        let admission = PreparedErasureForkAdmissionV1::new(input.clone(), extension, mutation)?;
+        let admission =
+            PreparedErasureForkAdmissionV1::new(input.clone(), extension.clone(), mutation)?;
         let successor =
             ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
-        let batch = PreparedErasureForkBatchV1::new(input, vec![admission], successor)?;
+        let batch = PreparedErasureForkBatchV1::new(input.clone(), vec![admission], successor)?;
         let result = batch.recovery_result()?;
         let proof = batch.recovery_proof()?;
         let encoded = proof.to_canonical_cbor()?;
@@ -8994,25 +9305,8 @@ mod coverage_paths {
             proof
         );
         assert_eq!(proof.validate(&result), Ok(()));
-
-        let mut changed_binding = proof.clone();
-        changed_binding.admissions[0].binding_digest = reference(195);
-        assert_eq!(
-            changed_binding.validate(&result),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        let mut changed_header = proof.clone();
-        changed_header.operation = reference(196);
-        assert_eq!(
-            changed_header.validate(&result),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        let mut missing_predecessor = proof.clone();
-        missing_predecessor.admissions[0].predecessor = None;
-        assert_eq!(
-            missing_predecessor.validate(&result),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
+        assert_recovery_proof_accessors(&proof, &result, state.state_digest())?;
+        assert_recovery_proof_rejects_binding_changes(&proof, &result);
 
         let mut value: Value = ciborium::from_reader(encoded.as_slice())
             .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
@@ -9027,15 +9321,12 @@ mod coverage_paths {
             ErasureForkRecoveryProofV1::from_canonical_cbor(&malformed),
             Err(ErasureErrorV1::InvalidEncoding)
         );
-
-        let mut oversized = proof.clone();
-        oversized.admissions =
-            vec![proof.admissions[0].clone(); ERASURE_MAX_INVENTORY_REQUESTS + 1];
-        let oversized_bytes = oversized.to_canonical_cbor()?;
-        assert_eq!(
-            ErasureForkRecoveryProofV1::from_canonical_cbor(&oversized_bytes),
-            Err(ErasureErrorV1::InvalidEncoding)
-        );
+        let mutation = &proof.admissions[0];
+        assert_recovery_proof_rejects_malformed_headers(&proof)?;
+        assert_recovery_mutation_rejects_malformed_fields(mutation);
+        assert_recovery_objects_and_indexes_reject_malformed_fields(mutation)?;
+        assert_recovery_proof_rejects_oversized_admissions(&proof)?;
+        assert_recovery_proof_rejects_oversized_effect(&input, &extension)?;
         Ok(())
     }
 }

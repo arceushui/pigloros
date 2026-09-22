@@ -6880,6 +6880,237 @@ mod coverage_entrypoints {
         )
     }
 
+    fn memory_recovery_proof_fixture(
+        extension: u8,
+        object_reference: u8,
+    ) -> (MemoryStore, ErasureForkRecoveryProofV1) {
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let digest_value =
+            |value| ciborium::value::Value::Bytes(reference(value).digest().to_vec());
+        let manifest_bytes = vec![0xA1, 0xB2];
+        let object_bytes = vec![0xC3, 0xD4];
+        let state_bytes = vec![0xE5, 0xF6];
+        let effect_bytes = vec![0x17, 0x28];
+        let proof_value = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+            ciborium::value::Value::Integer(1.into()),
+            digest_value(1),
+            digest_value(2),
+            digest_value(3),
+            digest_value(4),
+            digest_value(5),
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                digest_value(1),
+                digest_value(3),
+                digest_value(4),
+                digest_value(extension),
+                digest_value(7),
+                digest_value(8),
+                digest_value(9),
+                ciborium::value::Value::Bytes(
+                    ErasureForkRecoveryProofV1::bytes_digest(&manifest_bytes)
+                        .digest()
+                        .to_vec(),
+                ),
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                    digest_value(object_reference),
+                    ciborium::value::Value::Bytes(
+                        ErasureForkRecoveryProofV1::bytes_digest(&object_bytes)
+                            .digest()
+                            .to_vec(),
+                    ),
+                ])]),
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                    digest_value(11),
+                    ciborium::value::Value::Bytes(
+                        ErasureForkRecoveryProofV1::bytes_digest(&state_bytes)
+                            .digest()
+                            .to_vec(),
+                    ),
+                ])]),
+                ciborium::value::Value::Array(vec![
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(0.into()),
+                        ciborium::value::Value::Integer(0.into()),
+                        digest_value(15),
+                    ]),
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(1.into()),
+                        ciborium::value::Value::Integer(1.into()),
+                        digest_value(16),
+                    ]),
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(2.into()),
+                        ciborium::value::Value::Integer(2.into()),
+                        digest_value(17),
+                    ]),
+                ]),
+                digest_value(12),
+                ciborium::value::Value::Bytes(
+                    ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)
+                        .digest()
+                        .to_vec(),
+                ),
+                digest_value(13),
+                digest_value(14),
+            ])]),
+        ]);
+        let mut encoded = Vec::new();
+        ok(ciborium::into_writer(&proof_value, &mut encoded));
+        let proof = ok(ErasureForkRecoveryProofV1::from_canonical_cbor(&encoded));
+
+        let mut store = new_store();
+        store
+            .erasure_records
+            .insert(reference(7), (reference(9), manifest_bytes));
+        store
+            .erasure_evidence
+            .insert(reference(object_reference), object_bytes);
+        store.erasure_states.insert(reference(11), state_bytes);
+        store
+            .erasure_attempt_pages
+            .insert((reference(7), 0), reference(15));
+        store
+            .erasure_scope_nodes
+            .insert((reference(7), 1), reference(16));
+        store
+            .erasure_administrative_resolutions
+            .insert((reference(7), 2), reference(17));
+        store
+            .erasure_effects
+            .insert(reference(9), (reference(12), effect_bytes));
+        store
+            .erasure_effect_subjects
+            .insert(reference(13), reference(9));
+        (store, proof)
+    }
+
+    fn assert_memory_recovery_proof_error(
+        extension: u8,
+        object_reference: u8,
+        mutate: impl FnOnce(&mut MemoryStore),
+    ) {
+        let (mut store, proof) = memory_recovery_proof_fixture(extension, object_reference);
+        mutate(&mut store);
+        assert_eq!(
+            store.memory_fork_recovery_proof_is_exact(&proof),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    fn memory_recovery_proof_checks_manifest_and_state() {
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_records
+                .remove(&ErasureReferenceV1::from_digest([7; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_records.insert(
+                ErasureReferenceV1::from_digest([7; 32]),
+                (ErasureReferenceV1::from_digest([18; 32]), vec![0xA1, 0xB2]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_records.insert(
+                ErasureReferenceV1::from_digest([7; 32]),
+                (ErasureReferenceV1::from_digest([9; 32]), vec![0xBA, 0xDB]),
+            );
+        });
+        assert_memory_recovery_proof_error(99, 10, |_| {});
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_evidence
+                .remove(&ErasureReferenceV1::from_digest([10; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_evidence
+                .insert(ErasureReferenceV1::from_digest([10; 32]), vec![0xBA, 0xDB]);
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_states
+                .remove(&ErasureReferenceV1::from_digest([11; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_states
+                .insert(ErasureReferenceV1::from_digest([11; 32]), vec![0xBA, 0xDB]);
+        });
+    }
+
+    fn memory_recovery_proof_checks_indexes_and_effects() {
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_attempt_pages
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 0));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_attempt_pages.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 0),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_scope_nodes
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 1));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_scope_nodes.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 1),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_administrative_resolutions
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 2));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_administrative_resolutions.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 2),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_effects
+                .remove(&ErasureReferenceV1::from_digest([9; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_effects.insert(
+                ErasureReferenceV1::from_digest([9; 32]),
+                (ErasureReferenceV1::from_digest([18; 32]), vec![0x17, 0x28]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_effects.insert(
+                ErasureReferenceV1::from_digest([9; 32]),
+                (ErasureReferenceV1::from_digest([12; 32]), vec![0xBA, 0xDB]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_effect_subjects
+                .remove(&ErasureReferenceV1::from_digest([13; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_effect_subjects.insert(
+                ErasureReferenceV1::from_digest([13; 32]),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+    }
+
+    #[test]
+    fn memory_fork_recovery_proof_checks_every_persisted_side() {
+        let (store, proof) = memory_recovery_proof_fixture(10, 10);
+        assert_eq!(store.memory_fork_recovery_proof_is_exact(&proof), Ok(()));
+        memory_recovery_proof_checks_manifest_and_state();
+        memory_recovery_proof_checks_indexes_and_effects();
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn invalid_registry() -> KeyRegistryStateV1 {
         fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
