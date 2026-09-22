@@ -194,7 +194,8 @@ impl RecordingManager {
     }
 
     #[zbus(name = "GetUnit")]
-    fn get_unit(&self, _name: String) -> fdo::Result<OwnedObjectPath> {
+    fn get_unit(&self, name: String) -> fdo::Result<OwnedObjectPath> {
+        let _ = (&self.observed, name);
         OwnedObjectPath::try_from(UNIT_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
 
@@ -222,13 +223,18 @@ impl RecordingService {
             fail_root_directory: false,
         }
     }
+
+    fn fixed<T>(&self, value: T) -> T {
+        let _ = self.fail_root_directory;
+        value
+    }
 }
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
 impl RecordingService {
     #[zbus(property, name = "Type")]
-    fn type_property(&self) -> &str {
-        "exec"
+    fn type_property(&self) -> &'static str {
+        self.fixed("exec")
     }
 
     #[zbus(property, name = "RootDirectory")]
@@ -242,137 +248,137 @@ impl RecordingService {
 
     #[zbus(property, name = "BindReadOnlyPaths")]
     fn bind_read_only_paths(&self) -> Vec<(String, String, bool, u64)> {
-        vec![(
+        self.fixed(vec![(
             "/usr/lib/pigloros/release-launcher".to_owned(),
             "/.pigloros/release-launcher".to_owned(),
             false,
             0,
-        )]
+        )])
     }
 
     #[zbus(property, name = "DynamicUser")]
-    const fn dynamic_user(&self) -> bool {
-        true
+    fn dynamic_user(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "NoNewPrivileges")]
-    const fn no_new_privileges(&self) -> bool {
-        true
+    fn no_new_privileges(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "PrivateDevices")]
-    const fn private_devices(&self) -> bool {
-        true
+    fn private_devices(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "PrivateIPC")]
-    const fn private_ipc(&self) -> bool {
-        true
+    fn private_ipc(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "PrivateMounts")]
-    const fn private_mounts(&self) -> bool {
-        true
+    fn private_mounts(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "PrivateNetwork")]
-    const fn private_network(&self) -> bool {
-        true
+    fn private_network(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "PrivatePIDs")]
-    fn private_pi_ds(&self) -> &str {
-        "yes"
+    fn private_pi_ds(&self) -> &'static str {
+        self.fixed("yes")
     }
 
     #[zbus(property, name = "PrivateUsersEx")]
-    fn private_users_ex(&self) -> &str {
-        "self"
+    fn private_users_ex(&self) -> &'static str {
+        self.fixed("self")
     }
 
     #[zbus(property, name = "CapabilityBoundingSet")]
-    const fn capability_bounding_set(&self) -> u64 {
-        0
+    fn capability_bounding_set(&self) -> u64 {
+        self.fixed(0)
     }
 
     #[zbus(property, name = "AmbientCapabilities")]
-    const fn ambient_capabilities(&self) -> u64 {
-        0
+    fn ambient_capabilities(&self) -> u64 {
+        self.fixed(0)
     }
 
     #[zbus(property, name = "ProtectSystem")]
-    fn protect_system(&self) -> &str {
-        "strict"
+    fn protect_system(&self) -> &'static str {
+        self.fixed("strict")
     }
 
     #[zbus(property, name = "ProtectHome")]
-    fn protect_home(&self) -> &str {
-        "yes"
+    fn protect_home(&self) -> &'static str {
+        self.fixed("yes")
     }
 
     #[zbus(property, name = "ProtectControlGroupsEx")]
-    fn protect_control_groups_ex(&self) -> &str {
-        "strict"
+    fn protect_control_groups_ex(&self) -> &'static str {
+        self.fixed("strict")
     }
 
     #[zbus(property, name = "ProtectKernelTunables")]
-    const fn protect_kernel_tunables(&self) -> bool {
-        true
+    fn protect_kernel_tunables(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "ProtectKernelModules")]
-    const fn protect_kernel_modules(&self) -> bool {
-        true
+    fn protect_kernel_modules(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "ProtectKernelLogs")]
-    const fn protect_kernel_logs(&self) -> bool {
-        true
+    fn protect_kernel_logs(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "ProtectClock")]
-    const fn protect_clock(&self) -> bool {
-        true
+    fn protect_clock(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "ProtectHostname")]
-    const fn protect_hostname(&self) -> bool {
-        true
+    fn protect_hostname(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "ProtectProc")]
-    fn protect_proc(&self) -> &str {
-        "invisible"
+    fn protect_proc(&self) -> &'static str {
+        self.fixed("invisible")
     }
 
     #[zbus(property, name = "ProcSubset")]
-    fn proc_subset(&self) -> &str {
-        "pid"
+    fn proc_subset(&self) -> &'static str {
+        self.fixed("pid")
     }
 
     #[zbus(property, name = "RestrictNamespaces")]
-    const fn restrict_namespaces(&self) -> u64 {
-        0x7e02_0080
+    fn restrict_namespaces(&self) -> u64 {
+        self.fixed(0x7e02_0080)
     }
 
     #[zbus(property, name = "RestrictSUIDSGID")]
-    const fn restrict_suidsgid(&self) -> bool {
-        true
+    fn restrict_suidsgid(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "RestrictRealtime")]
-    const fn restrict_realtime(&self) -> bool {
-        true
+    fn restrict_realtime(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "LockPersonality")]
-    const fn lock_personality(&self) -> bool {
-        true
+    fn lock_personality(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "SystemCallArchitectures")]
     fn system_call_architectures(&self) -> Vec<String> {
-        vec!["native".to_owned()]
+        self.fixed(vec!["native".to_owned()])
     }
 
     #[zbus(property, name = "SystemCallFilter")]
@@ -382,40 +388,40 @@ impl RecordingService {
 
     #[zbus(property, name = "RestrictAddressFamilies")]
     fn restrict_address_families(&self) -> (bool, Vec<String>) {
-        (true, vec!["AF_UNIX".to_owned()])
+        self.fixed((true, vec!["AF_UNIX".to_owned()]))
     }
 
     #[zbus(property, name = "UMask")]
-    const fn u_mask(&self) -> u32 {
-        0o077
+    fn u_mask(&self) -> u32 {
+        self.fixed(0o077)
     }
 
     #[zbus(property, name = "KillMode")]
-    fn kill_mode(&self) -> &str {
-        "control-group"
+    fn kill_mode(&self) -> &'static str {
+        self.fixed("control-group")
     }
 
     #[zbus(property, name = "SendSIGKILL")]
-    const fn send_sigkill(&self) -> bool {
-        true
+    fn send_sigkill(&self) -> bool {
+        self.fixed(true)
     }
 
     #[zbus(property, name = "FileDescriptorStoreMax")]
-    const fn file_descriptor_store_max(&self) -> u32 {
-        0
+    fn file_descriptor_store_max(&self) -> u32 {
+        self.fixed(0)
     }
 
     #[zbus(property, name = "ExtraFileDescriptorNames")]
     fn extra_file_descriptor_names(&self) -> Vec<String> {
-        vec![
+        self.fixed(vec![
             "piglor-host-service-v1".to_owned(),
             "piglor-release-v1".to_owned(),
-        ]
+        ])
     }
 
     #[zbus(property, name = "RootImagePolicy")]
-    fn root_image_policy(&self) -> &str {
-        ROOT_IMAGE_POLICY
+    fn root_image_policy(&self) -> &'static str {
+        self.fixed(ROOT_IMAGE_POLICY)
     }
 }
 
@@ -439,8 +445,10 @@ fn descriptor_names(value: OwnedValue) -> fdo::Result<Vec<String>> {
 #[tokio::test]
 async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dyn Error>> {
     let observed = Arc::new(Mutex::new(None));
-    let mut behavior = ManagerBehavior::default();
-    behavior.emit_unrelated = true;
+    let behavior = ManagerBehavior {
+        emit_unrelated: true,
+        ..ManagerBehavior::default()
+    };
     let service = RecordingService::exact(expected_system_call_filter()?);
     let (transport, _server) = transport(Arc::clone(&observed), behavior, service).await?;
     let name = TransientServiceUnitName::from_attempt_id([0xab; 16])?;
