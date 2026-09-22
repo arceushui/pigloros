@@ -764,7 +764,6 @@ dependencies = [
  "blake3",
  "ciborium",
  "piglor-ledger",
- "pos-conformance",
  "pos-core",
  "pos-plugin-geo",
  "pos-plugin-ledger",
