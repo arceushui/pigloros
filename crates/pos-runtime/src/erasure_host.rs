@@ -3332,7 +3332,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     }
 }
 
-fn is_uncertain_persistence_error(error: &CoreError) -> bool {
+const fn is_uncertain_persistence_error(error: &CoreError) -> bool {
     matches!(error, CoreError::StorageOutcomeUnknown(_))
 }
 
