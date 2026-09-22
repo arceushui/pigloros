@@ -2013,7 +2013,7 @@ fn emit_draft_execution_profiles(
         );
     } else {
         generated.push_str(
-            "struct InstalledExecutionProfileSource {\n\
+            "struct DraftExecutionProfileSource {\n\
                  profile_id: &'static str,\n\
              }\n",
         );
