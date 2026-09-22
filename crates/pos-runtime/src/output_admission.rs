@@ -281,7 +281,7 @@ impl InstalledOutputPolicySourceV1 {
                 .into_iter()
                 .map(|kind| kind.as_str().to_owned())
                 .collect::<Vec<_>>(),
-            Self::Gateway => vec!["world.action".to_owned()],
+            Self::Gateway => vec!["world.action.v1".to_owned()],
             Self::World => vec![
                 "world.observation".to_owned(),
                 "world.action".to_owned(),
