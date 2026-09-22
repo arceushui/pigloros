@@ -436,17 +436,11 @@ fn cmd_timeline_fork(
 }
 
 fn cmd_timeline_replay(_path: &str, _tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    Err(
-        "World Replay is unavailable until an installed native closure verifier is configured"
-            .into(),
-    )
+    Err(world_operation_unavailable("Replay"))
 }
 
 fn cmd_timeline_snapshot(_path: &str, _tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    Err(
-        "World Snapshot is unavailable until an installed native closure verifier is configured"
-            .into(),
-    )
+    Err(world_operation_unavailable("Snapshot"))
 }
 
 fn cmd_timeline_compare(
@@ -455,10 +449,14 @@ fn cmd_timeline_compare(
     _second_timeline_str: &str,
     _fork_seq_str: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    Err(
-        "World comparison is unavailable until an installed native closure verifier is configured"
-            .into(),
+    Err(world_operation_unavailable("comparison"))
+}
+
+fn world_operation_unavailable(operation: &str) -> Box<dyn std::error::Error> {
+    format!(
+        "World {operation} is unavailable until an installed native closure verifier is configured"
     )
+    .into()
 }
 
 fn parse_merge_strategy_flag(

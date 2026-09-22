@@ -51,11 +51,11 @@ pub fn compare(
     let requested_a = comparison_use(a, fork_seq, registry_a)?;
     let requested_b = comparison_use(b, fork_seq, registry_b)?;
     let requested_uses = [&requested_a, &requested_b];
-    let mut outcome = Err(CoreError::ArtifactUnavailable);
-    let mut second_fence = Err(CoreError::ArtifactUnavailable);
-    let mut first_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        let mut second_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-            outcome = registry_a.try_with_state_transaction(|candidate_a| {
+    let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
+    let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
+    let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
+        let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
+            comparison_outcome = registry_a.try_with_state_transaction(|candidate_a| {
                 registry_b.try_with_state_transaction(|candidate_b| {
                     let read_bounds =
                         require_comparison_artifacts(sender, closures, requested_uses)?;
@@ -77,15 +77,23 @@ pub fn compare(
                 })
             });
         };
-        second_fence = sender
-            .with_protected_effect_fence(b, ErasureProtectedOperationV1::Export, &mut second_effect)
+        second_timeline_fence_result = sender
+            .with_protected_effect_fence(
+                b,
+                ErasureProtectedOperationV1::Export,
+                &mut second_timeline_effect,
+            )
             .map_err(crate::host_error_to_core);
     };
     sender
-        .with_protected_effect_fence(a, ErasureProtectedOperationV1::Export, &mut first_effect)
+        .with_protected_effect_fence(
+            a,
+            ErasureProtectedOperationV1::Export,
+            &mut first_timeline_effect,
+        )
         .map_err(crate::host_error_to_core)?;
-    second_fence?;
-    outcome
+    second_timeline_fence_result?;
+    comparison_outcome
 }
 
 fn require_comparison_artifacts(
@@ -96,23 +104,9 @@ fn require_comparison_artifacts(
     let [closure_a, closure_b] = closures;
     let [requested_a, requested_b] = requested_uses;
     Ok([
-        require_comparison_artifact(sender, closure_a, requested_a)?,
-        require_comparison_artifact(sender, closure_b, requested_b)?,
+        crate::require_world_replay(sender, closure_a, requested_a)?,
+        crate::require_world_replay(sender, closure_b, requested_b)?,
     ])
-}
-
-fn require_comparison_artifact(
-    sender: &mut ErasureReadSenderV1<'_>,
-    closure: &WorldReplayClosureV1,
-    requested_use: &WorldReplayUseV1,
-) -> Result<EventReadBounds, CoreError> {
-    let verified = sender
-        .admit_world_replay(closure, requested_use)
-        .map_err(crate::host_error_to_core)?;
-    verified
-        .require_authoritative_use()
-        .map_err(|_| CoreError::ArtifactUnavailable)?;
-    Ok(verified.read_bounds())
 }
 
 fn comparison_use(
