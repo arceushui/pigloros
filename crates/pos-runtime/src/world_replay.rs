@@ -267,9 +267,9 @@ pub const fn test_verified_world_replay_with_fields_and_bounds(
         closure_digest,
         timeline_id,
         source_head,
-        requested_use,
         inventory_generation,
         replay_claim,
+        requested_use,
         read_bounds,
     }
 }
