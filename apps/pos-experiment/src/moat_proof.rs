@@ -125,12 +125,13 @@ fn world_output_binding(
     body: EntityId,
     profile_id: &str,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
-    world_output_binding_with_config(plugin, world_config(input), body, profile_id)
+    let config = world_config(input);
+    world_output_binding_with_config(plugin, &config, body, profile_id)
 }
 
 fn world_output_binding_with_config(
     plugin: &WorldPlugin,
-    config: WorldConfigV1,
+    config: &WorldConfigV1,
     body: EntityId,
     profile_id: &str,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
@@ -2387,7 +2388,7 @@ mod tests {
         assert!(matches!(
             world_output_binding_with_config(
                 &plugin,
-                config,
+                &config,
                 EntityId::new(),
                 "deterministic-local-v1",
             ),

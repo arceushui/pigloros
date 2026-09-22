@@ -3914,7 +3914,7 @@ mod tests {
         assert!(matches!(
             validate_plugin_output(&entry, &[draft]),
             Err(RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::MissingDeclaration { .. }
+                crate::OutputAdmissionErrorV1::MissingDeclaration { .. }
             ))
         ));
 
