@@ -322,7 +322,8 @@ impl SystemdTransientUnitTransport {
             .into_iter()
             .map(encode_property)
             .collect::<Result<Vec<_>, _>>();
-        self.start_with_encoded(unit_name, request, properties).await
+        self.start_with_encoded(unit_name, request, properties)
+            .await
     }
 
     async fn start_with_encoded(
@@ -368,8 +369,8 @@ async fn submit_with_completions(
     request: &TransientUnitRequest,
     connection: &Connection,
 ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
-    let completions = completions
-        .map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?;
+    let completions =
+        completions.map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?;
     let mut completions = completions.map(|completion| decode_job_completion(completion.args()));
     let submitted_name = unit_name.0.clone();
     let job_path = match proxy
