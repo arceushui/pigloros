@@ -3970,7 +3970,10 @@ mod tests {
             Err(ActionRejected::DomainValidationFailed(message))
                 if message == "action approver has no bound output policy"
         ));
+    }
 
+    #[test]
+    fn foreign_policy_declaration_is_rejected() {
         let plugin = simple_plugin("foreign-policy", &["owned.output"]);
         let valid_binding = OutputPolicyBindingV1::from_installed_source(
             &plugin,

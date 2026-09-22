@@ -1516,7 +1516,11 @@ mod tests {
                 .build_budget(plugin.id, Hash::from_bytes([9; 32]))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
             if matches!(source, InstalledOutputPolicySourceV1::Generated) {
-                let _ = source.build_policy(&plugin, Hash::from_bytes([8; 32]), &budget);
+                source
+                    .build_policy(&plugin, Hash::from_bytes([8; 32]), &budget)
+                    .unwrap_or_else(|error| {
+                        std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                    });
             }
         }
 
@@ -1705,7 +1709,7 @@ mod tests {
             Err(OutputAdmissionErrorV1::PluginMismatch)
         ));
         assert!(matches!(
-            OutputAdmissionV1::try_new_core(plugin_id, "2.0.0", policy_a.clone(), budget_a.clone()),
+            OutputAdmissionV1::try_new_core(plugin_id, "2.0.0", policy_a.clone(), budget_a),
             Err(OutputAdmissionErrorV1::PluginVersionMismatch)
         ));
         assert!(matches!(
