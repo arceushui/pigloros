@@ -1719,7 +1719,7 @@ mod tests {
             Err(OutputAdmissionErrorV1::PluginVersionMismatch)
         ));
         assert!(matches!(
-            OutputAdmissionV1::try_new_core(plugin_id, "1.0.0", policy_a.clone(), budget_b),
+            OutputAdmissionV1::try_new_core(plugin_id, "1.0.0", policy_a, budget_b),
             Err(OutputAdmissionErrorV1::PolicyIdentityMismatch)
         ));
         let other_id = PluginId::new();
