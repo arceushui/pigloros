@@ -1245,7 +1245,8 @@ impl OutputAdmissionV1 {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
+#[cfg(debug_assertions)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
