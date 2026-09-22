@@ -219,7 +219,7 @@ async fn transport(
     let (server, client) = tokio::join!(server, client);
     let server = server?;
     let client = client?;
-    Ok((SystemdTransientUnitTransport { connection: client }, server))
+    Ok((SystemdTransientUnitTransport::from_connection(client), server))
 }
 
 fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {

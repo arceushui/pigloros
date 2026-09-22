@@ -95,8 +95,12 @@ impl SystemdTransientUnitTransport {
     pub async fn connect_system() -> Result<Self, SystemdTransientUnitTransportError> {
         Connection::system()
             .await
-            .map(|connection| Self { connection })
+            .map(Self::from_connection)
             .map_err(SystemdTransientUnitTransportError::Connect)
+    }
+
+    const fn from_connection(connection: Connection) -> Self {
+        Self { connection }
     }
 
     /// Submit one complete compiled request through generated systemd bindings.
