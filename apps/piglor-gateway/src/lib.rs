@@ -78,7 +78,15 @@ fn gateway_output_binding_with_inputs<P: Plugin + ?Sized>(
         configuration_details,
         profile_id,
     )
-    .map_err(Into::into)
+    .map_err(|error| match error {
+        error @ pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" } => {
+            pos_runtime::RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            }
+        }
+        error => error.into(),
+    })
 }
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).
