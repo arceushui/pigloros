@@ -16,8 +16,7 @@ use zbus::{
 
 use super::*;
 use crate::{
-    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter,
-    TransientUnitLaunchInputs,
+    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter, TransientUnitLaunchInputs,
 };
 
 const X86_64: &[u8] = include_bytes!(
