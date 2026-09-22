@@ -6,7 +6,7 @@
 
 mod hardening;
 mod system_bus;
-mod transient_unit;
+pub(crate) mod transient_unit;
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
