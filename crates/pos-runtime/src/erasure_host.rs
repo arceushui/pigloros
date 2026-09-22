@@ -2562,6 +2562,7 @@ impl ErasureReadSenderV1<'_> {
             || capability.source_head() != closure.source_head()
             || capability.inventory_generation() != self.generation
             || capability.requested_use() != requested_use
+            || !capability.has_finite_read_bounds()
         {
             return Err(ErasureHostErrorV1::Conflict);
         }
@@ -2907,6 +2908,7 @@ mod tests {
         WrongSourceHead,
         WrongGeneration,
         WrongUse,
+        UnboundedRead,
     }
 
     impl WorldReplayVerifierV1 for WorldReplayVerifierModeV1 {
@@ -2978,6 +2980,17 @@ mod tests {
                         pos_core::ErasureReplayClaimV1::Exact,
                     ))
                 }
+                Self::UnboundedRead => Ok(
+                    crate::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                        closure.digest(),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        requested_use.clone(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                        EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                    ),
+                ),
             }
         }
     }
@@ -3111,6 +3124,7 @@ mod tests {
             WorldReplayVerifierModeV1::WrongSourceHead,
             WorldReplayVerifierModeV1::WrongGeneration,
             WorldReplayVerifierModeV1::WrongUse,
+            WorldReplayVerifierModeV1::UnboundedRead,
         ] {
             let (mut host, closure) = world_replay_host(mode);
             let mut reads = test_ok(host.read_sender());

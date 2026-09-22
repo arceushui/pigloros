@@ -57,14 +57,23 @@ pub fn compare(
         let mut second_effect = |sender: &mut ErasureReadSenderV1<'_>| {
             outcome = registry_a.try_with_state_transaction(|candidate_a| {
                 registry_b.try_with_state_transaction(|candidate_b| {
-                    require_comparison_artifacts(sender, closures, requested_uses)
-                        .and_then(|()| {
-                            compare_with_sender(sender, a, b, fork_seq, candidate_a, candidate_b)
-                        })
-                        .and_then(|diff| {
-                            require_comparison_artifacts(sender, closures, requested_uses)
-                                .map(|()| diff)
-                        })
+                    let read_bounds =
+                        require_comparison_artifacts(sender, closures, requested_uses)?;
+                    let diff = compare_with_sender(
+                        sender,
+                        a,
+                        b,
+                        fork_seq,
+                        candidate_a,
+                        candidate_b,
+                        read_bounds,
+                    )?;
+                    let final_bounds =
+                        require_comparison_artifacts(sender, closures, requested_uses)?;
+                    if final_bounds != read_bounds {
+                        return Err(CoreError::ArtifactUnavailable);
+                    }
+                    Ok(diff)
                 })
             });
         };
@@ -83,17 +92,27 @@ fn require_comparison_artifacts(
     sender: &mut ErasureReadSenderV1<'_>,
     closures: [&WorldReplayClosureV1; 2],
     requested_uses: [&WorldReplayUseV1; 2],
-) -> Result<(), CoreError> {
-    closures
-        .into_iter()
-        .zip(requested_uses)
-        .try_for_each(|(closure, requested_use)| {
-            sender
-                .admit_world_replay(closure, requested_use)
-                .map_err(crate::host_error_to_core)?
-                .require_authoritative_use()
-                .map_err(|_| CoreError::ArtifactUnavailable)
-        })
+) -> Result<[EventReadBounds; 2], CoreError> {
+    let [closure_a, closure_b] = closures;
+    let [requested_a, requested_b] = requested_uses;
+    Ok([
+        require_comparison_artifact(sender, closure_a, requested_a)?,
+        require_comparison_artifact(sender, closure_b, requested_b)?,
+    ])
+}
+
+fn require_comparison_artifact(
+    sender: &mut ErasureReadSenderV1<'_>,
+    closure: &WorldReplayClosureV1,
+    requested_use: &WorldReplayUseV1,
+) -> Result<EventReadBounds, CoreError> {
+    let verified = sender
+        .admit_world_replay(closure, requested_use)
+        .map_err(crate::host_error_to_core)?;
+    verified
+        .require_authoritative_use()
+        .map_err(|_| CoreError::ArtifactUnavailable)?;
+    Ok(verified.read_bounds())
 }
 
 fn comparison_use(
@@ -121,14 +140,14 @@ fn compare_with_sender(
     fork_seq: Seq,
     registry_a: &mut ProjectionRegistry,
     registry_b: &mut ProjectionRegistry,
+    read_bounds: [EventReadBounds; 2],
 ) -> Result<ForkDiff, CoreError> {
     let post_fork_range = SeqRange::from_seq(fork_seq.next());
-    let bounds = EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX);
     let events_a = sender
-        .read_bounded(a, post_fork_range, bounds)
+        .read_bounded(a, post_fork_range, read_bounds[0])
         .map_err(crate::host_error_to_core)?;
     let events_b = sender
-        .read_bounded(b, post_fork_range, bounds)
+        .read_bounded(b, post_fork_range, read_bounds[1])
         .map_err(crate::host_error_to_core)?;
     compare_events(a, b, fork_seq, registry_a, registry_b, events_a, events_b)
 }

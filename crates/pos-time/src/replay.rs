@@ -3,7 +3,7 @@
 //! Replay is projection-only. It has no `PluginRegistry` or action-approval
 //! authority, so replay cannot submit new human actions.
 
-use pos_core::store::{EventReadBounds, SeqRange};
+use pos_core::store::SeqRange;
 use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId, WorldReplayClosureV1};
 use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
 use pos_state::ProjectionRegistry;
@@ -72,32 +72,26 @@ fn replay_range(
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
         outcome = registry.try_with_state_transaction(|candidate| {
-            sender
+            let verified = sender
                 .admit_world_replay(closure, &requested_use)
-                .map_err(crate::host_error_to_core)
-                .and_then(|verified| {
-                    verified
-                        .require_authoritative_use()
-                        .map_err(|_| CoreError::ArtifactUnavailable)
-                })
+                .map_err(crate::host_error_to_core)?;
+            verified
+                .require_authoritative_use()
                 .map_err(|_| CoreError::ArtifactUnavailable)?;
             let events = sender
-                .read_bounded(
-                    timeline,
-                    range,
-                    EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
-                )
+                .read_bounded(timeline, range, verified.read_bounds())
                 .map_err(crate::host_error_to_core)?;
             candidate.fold_events(&events);
-            sender
+            let final_verification = sender
                 .admit_world_replay(closure, &requested_use)
-                .map_err(crate::host_error_to_core)
-                .and_then(|verified| {
-                    verified
-                        .require_authoritative_use()
-                        .map_err(|_| CoreError::ArtifactUnavailable)
-                })
-                .map(|()| events)
+                .map_err(crate::host_error_to_core)?;
+            final_verification
+                .require_authoritative_use()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            if final_verification.read_bounds() != verified.read_bounds() {
+                return Err(CoreError::ArtifactUnavailable);
+            }
+            Ok(events)
         });
     };
     sender
@@ -169,6 +163,10 @@ mod tests {
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([43; 32]);
+    const ONE_EVENT_READ_BOUNDS: pos_core::store::EventReadBounds =
+        pos_core::store::EventReadBounds::new_with_total_bytes_and_elapsed(
+            65_536, 128, 8, 1, 65_536, 30_000_000,
+        );
 
     fn replay_evaluation(state: pos_core::ArtifactStateV1) -> pos_core::ReplayClaimEvaluationV1 {
         pos_core::ReplayClaimEvaluatorV1::evaluate(
@@ -629,7 +627,7 @@ mod tests {
     #[test]
     fn public_replay_rolls_back_when_final_verification_fails() {
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
-            .with_world_replay_verifier(Arc::new(RejectSecondVerification {
+            .with_world_replay_verifier(Arc::new(ChangeBoundsOnSecondVerification {
                 calls: AtomicUsize::new(0),
             }));
         let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
@@ -650,6 +648,38 @@ mod tests {
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::replay(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(registry.state_for_reducer("count", &entity), None);
+    }
+
+    #[test]
+    fn public_replay_enforces_verified_read_bounds() {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(OneEventWorldReplayVerifier));
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("bounded-replay").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(timeline.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+
         assert!(matches!(
             super::replay(&mut reads, timeline, &mut registry, &closure),
             Err(CoreError::ArtifactUnavailable)
@@ -703,11 +733,35 @@ mod tests {
 
     struct CountReducer;
 
-    struct RejectSecondVerification {
+    struct ChangeBoundsOnSecondVerification {
         calls: AtomicUsize,
     }
 
-    impl pos_runtime::WorldReplayVerifierV1 for RejectSecondVerification {
+    struct OneEventWorldReplayVerifier;
+
+    impl pos_runtime::WorldReplayVerifierV1 for OneEventWorldReplayVerifier {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            Ok(
+                pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                    closure.digest(),
+                    closure.timeline_id(),
+                    closure.source_head(),
+                    requested_use.clone(),
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                    ONE_EVENT_READ_BOUNDS,
+                ),
+            )
+        }
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for ChangeBoundsOnSecondVerification {
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -723,7 +777,17 @@ mod tests {
                     pos_core::ErasureReplayClaimV1::Exact,
                 ))
             } else {
-                Err(pos_runtime::WorldReplayVerificationErrorV1::EvidenceUnavailable)
+                Ok(
+                    pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                        closure.digest(),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        requested_use.clone(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                        ONE_EVENT_READ_BOUNDS,
+                    ),
+                )
             }
         }
     }

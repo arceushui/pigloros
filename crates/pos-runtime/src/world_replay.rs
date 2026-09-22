@@ -6,9 +6,16 @@
 //! result used by protected Replay, Snapshot, and comparison operations.
 
 use pos_core::{
-    store::SeqRange, ErasureProtectedOperationV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
-    TimelineId, WorldReplayClosureV1,
+    store::{EventReadBounds, SeqRange},
+    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash, TimelineId,
+    WorldReplayClosureV1,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+const TEST_WORLD_REPLAY_READ_BOUNDS: EventReadBounds =
+    EventReadBounds::new_with_total_bytes_and_elapsed(
+        65_536, 128, 8, 65_536, 67_108_864, 30_000_000,
+    );
 
 /// Closed reasons why an installed World Replay verifier could not issue a
 /// protected-use capability.
@@ -122,6 +129,7 @@ pub struct VerifiedWorldReplayV1 {
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
     requested_use: WorldReplayUseV1,
+    read_bounds: EventReadBounds,
 }
 
 impl VerifiedWorldReplayV1 {
@@ -149,6 +157,23 @@ impl VerifiedWorldReplayV1 {
         self.inventory_generation
     }
 
+    /// Return the finite owner-verified bounds for materializing this use.
+    #[must_use]
+    pub const fn read_bounds(&self) -> EventReadBounds {
+        self.read_bounds
+    }
+
+    pub(crate) const fn has_finite_read_bounds(&self) -> bool {
+        let bounds = self.read_bounds;
+        finite_usize(bounds.max_payload_bytes())
+            && finite_usize(bounds.max_event_type_bytes())
+            && finite_usize(bounds.max_fork_depth())
+            && finite_usize(bounds.max_events())
+            && finite_usize(bounds.max_total_bytes())
+            && bounds.max_elapsed_micros() != 0
+            && bounds.max_elapsed_micros() != u64::MAX
+    }
+
     /// Require an Exact claim before protected materialization.
     ///
     /// # Errors
@@ -172,6 +197,10 @@ impl VerifiedWorldReplayV1 {
     }
 }
 
+const fn finite_usize(value: usize) -> bool {
+    value != 0 && value != usize::MAX
+}
+
 /// Construct a verified result for an explicitly enabled downstream seam
 /// test.
 ///
@@ -185,13 +214,14 @@ pub fn test_verified_world_replay(
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
 ) -> VerifiedWorldReplayV1 {
-    test_verified_world_replay_with_fields(
+    test_verified_world_replay_with_fields_and_bounds(
         closure.digest(),
         closure.timeline_id(),
         closure.source_head(),
         requested_use.clone(),
         inventory_generation,
         replay_claim,
+        TEST_WORLD_REPLAY_READ_BOUNDS,
     )
 }
 
@@ -209,6 +239,30 @@ pub const fn test_verified_world_replay_with_fields(
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
 ) -> VerifiedWorldReplayV1 {
+    test_verified_world_replay_with_fields_and_bounds(
+        closure_digest,
+        timeline_id,
+        source_head,
+        requested_use,
+        inventory_generation,
+        replay_claim,
+        TEST_WORLD_REPLAY_READ_BOUNDS,
+    )
+}
+
+/// Construct a verifier result with explicit bindings and read bounds for
+/// downstream seam tests.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub const fn test_verified_world_replay_with_fields_and_bounds(
+    closure_digest: Hash,
+    timeline_id: TimelineId,
+    source_head: Hash,
+    requested_use: WorldReplayUseV1,
+    inventory_generation: ErasureReferenceV1,
+    replay_claim: ErasureReplayClaimV1,
+    read_bounds: EventReadBounds,
+) -> VerifiedWorldReplayV1 {
     VerifiedWorldReplayV1 {
         closure_digest,
         timeline_id,
@@ -216,6 +270,7 @@ pub const fn test_verified_world_replay_with_fields(
         requested_use,
         inventory_generation,
         replay_claim,
+        read_bounds,
     }
 }
 
@@ -281,6 +336,8 @@ mod tests {
         assert_eq!(exact.source_head(), closure.source_head());
         assert_eq!(exact.inventory_generation(), generation);
         assert_eq!(exact.requested_use(), &requested_use);
+        assert_eq!(exact.read_bounds(), TEST_WORLD_REPLAY_READ_BOUNDS);
+        assert!(exact.has_finite_read_bounds());
         assert_eq!(exact.require_authoritative_use(), Ok(()));
 
         let redacted = test_verified_world_replay(

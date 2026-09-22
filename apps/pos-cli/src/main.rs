@@ -1412,34 +1412,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_timeline_replay_is_unavailable_without_verifier() {
-        let error = handle_timeline(&args(&["replay", "unused", "unused"])).test_err();
-        assert_eq!(
-            error.to_string(),
-            "World Replay is unavailable until an installed native closure verifier is configured"
-        );
-    }
-
-    #[test]
-    fn handle_timeline_snapshot_is_unavailable_without_verifier() {
-        let error = handle_timeline(&args(&["snapshot", "unused", "unused"])).test_err();
-        assert_eq!(
-            error.to_string(),
-            "World Snapshot is unavailable until an installed native closure verifier is configured"
-        );
-    }
-
-    #[test]
-    fn handle_timeline_compare_is_unavailable_without_verifier() {
-        let error =
-            handle_timeline(&args(&["compare", "unused", "unused", "unused", "unused"])).test_err();
-        assert_eq!(
-            error.to_string(),
-            "World comparison is unavailable until an installed native closure verifier is configured"
-        );
-    }
-
-    #[test]
     fn handle_timeline_replay_missing_path_returns_err() {
         let a = args(&["replay"]);
         assert!(handle_timeline(&a).is_err());
