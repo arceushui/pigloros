@@ -3720,13 +3720,11 @@ mod tests {
         )
         .test_ok();
         let wrong_id = PluginId::new();
-        let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            registry.register_test_driver_with_verified_output_policy(
-                wrong_id,
-                binding,
-                Box::new(NoopDriver),
-            );
-        }));
+        let mismatch = registry.register_test_driver_with_verified_output_policy(
+            wrong_id,
+            binding,
+            Box::new(NoopDriver),
+        );
         assert!(mismatch.is_err());
 
         let huge_name: &'static str = Box::leak(
