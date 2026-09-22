@@ -250,6 +250,10 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         host_service: descriptor()?,
     })?;
     let readback = exact_readback(&request, &authority.expected_effective_names);
+    assert!(matches!(
+        readback[0].value(),
+        SystemdTransientUnitReadbackValue::Static(_)
+    ));
     assert_eq!(request.verify_readback(&readback), Ok(()));
 
     let mut missing = readback.clone();

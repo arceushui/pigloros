@@ -88,7 +88,9 @@ struct RecordingManager {
 
 #[derive(Clone)]
 struct ManagerBehavior {
+    reject_subscribe: bool,
     reject: bool,
+    reject_unit_lookup: bool,
     result: String,
     emit_unrelated: bool,
     completion_unit: Option<String>,
@@ -98,7 +100,9 @@ struct ManagerBehavior {
 impl Default for ManagerBehavior {
     fn default() -> Self {
         Self {
+            reject_subscribe: false,
             reject: false,
+            reject_unit_lookup: false,
             result: "done".to_owned(),
             emit_unrelated: false,
             completion_unit: None,
@@ -110,8 +114,14 @@ impl Default for ManagerBehavior {
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl RecordingManager {
     #[zbus(name = "Subscribe")]
-    fn subscribe(&self) {
+    fn subscribe(&self) -> fdo::Result<()> {
+        if self.behavior.reject_subscribe {
+            return Err(fdo::Error::AccessDenied(
+                "test subscription rejection".to_owned(),
+            ));
+        }
         self.subscribed.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     #[zbus(name = "StartTransientUnit")]
@@ -196,6 +206,9 @@ impl RecordingManager {
     #[zbus(name = "GetUnit")]
     fn get_unit(&self, name: String) -> fdo::Result<OwnedObjectPath> {
         let _ = (&self.observed, name);
+        if self.behavior.reject_unit_lookup {
+            return Err(fdo::Error::Failed("test lookup rejection".to_owned()));
+        }
         OwnedObjectPath::try_from(UNIT_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
 
@@ -213,6 +226,7 @@ struct RecordingService {
     system_call_filter: Vec<String>,
     root_directory: String,
     fail_root_directory: bool,
+    fail_root_image_policy: bool,
 }
 
 impl RecordingService {
@@ -221,6 +235,7 @@ impl RecordingService {
             system_call_filter,
             root_directory: ROOT_DIRECTORY.to_owned(),
             fail_root_directory: false,
+            fail_root_image_policy: false,
         }
     }
 
@@ -420,8 +435,12 @@ impl RecordingService {
     }
 
     #[zbus(property, name = "RootImagePolicy")]
-    fn root_image_policy(&self) -> &'static str {
-        self.fixed(ROOT_IMAGE_POLICY)
+    fn root_image_policy(&self) -> fdo::Result<&'static str> {
+        if self.fail_root_image_policy {
+            Err(fdo::Error::Failed("test readback failure".to_owned()))
+        } else {
+            Ok(self.fixed(ROOT_IMAGE_POLICY))
+        }
     }
 }
 
@@ -524,6 +543,47 @@ async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Err
     let SystemdTransientUnitTransportError::ManagerCall(_) = error else {
         return Err("manager rejection had the wrong error class".into());
     };
+    Ok(())
+}
+
+#[tokio::test]
+async fn manager_subscription_rejection_is_classified() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        reject_subscribe: true,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let error = transport(Arc::new(Mutex::new(None)), behavior, service)
+        .await
+        .err()
+        .ok_or("manager subscription rejection was accepted")?;
+    assert_eq!(
+        error.to_string(),
+        "failed to subscribe the systemd manager connection"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_unit_lookup_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        reject_unit_lookup: true,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x06; 16])?,
+            request(LaunchMode::AirGapped)?,
+        )
+        .await
+        .err()
+        .ok_or("failed completed-unit lookup was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::UnitLookup(_)
+    ));
     Ok(())
 }
 
@@ -640,6 +700,31 @@ async fn typed_property_read_failure_is_classified() -> Result<(), Box<dyn Error
         return Err("failed property read had the wrong error class".into());
     };
     assert_eq!(property, "RootDirectory");
+    Ok(())
+}
+
+#[tokio::test]
+async fn manager_only_property_read_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    service.fail_root_image_policy = true;
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x07; 16])?,
+            request(LaunchMode::AirGapped)?,
+        )
+        .await
+        .err()
+        .ok_or("failed manager-only property read was accepted")?;
+    let SystemdTransientUnitTransportError::PropertyReadback { property, .. } = error else {
+        return Err("failed manager-only property read had the wrong error class".into());
+    };
+    assert_eq!(property, "RootImagePolicy");
     Ok(())
 }
 
