@@ -2505,12 +2505,6 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
-        if plugin.version() != plugin_version {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: "generated policy version does not match the Plugin".to_owned(),
-            });
-        }
         let profile_artifact =
             pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")
                 .map_err(|error| RuntimeError::CapabilityMismatch {
