@@ -3,7 +3,7 @@ use std::{
     fs::File,
     os::fd::OwnedFd as StdOwnedFd,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -239,6 +239,7 @@ impl RecordingManager {
 struct RecordingService {
     system_call_filter: Vec<String>,
     root_directory: String,
+    property_reads: Arc<AtomicUsize>,
     fail_root_directory: bool,
     fail_root_image_policy: bool,
 }
@@ -248,14 +249,19 @@ impl RecordingService {
         Self {
             system_call_filter,
             root_directory: ROOT_DIRECTORY.to_owned(),
+            property_reads: Arc::new(AtomicUsize::new(0)),
             fail_root_directory: false,
             fail_root_image_policy: false,
         }
     }
 
     fn fixed<T>(&self, value: T) -> T {
-        let _ = self.fail_root_directory;
+        self.record_read();
         value
+    }
+
+    fn record_read(&self) {
+        self.property_reads.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -268,6 +274,7 @@ impl RecordingService {
 
     #[zbus(property, name = "RootDirectory")]
     fn root_directory(&self) -> fdo::Result<&str> {
+        self.record_read();
         if self.fail_root_directory {
             Err(fdo::Error::Failed("test readback failure".to_owned()))
         } else {
@@ -412,6 +419,7 @@ impl RecordingService {
 
     #[zbus(property, name = "SystemCallFilter")]
     fn system_call_filter(&self) -> (bool, Vec<String>) {
+        self.record_read();
         (true, self.system_call_filter.clone())
     }
 
@@ -450,10 +458,11 @@ impl RecordingService {
 
     #[zbus(property, name = "RootImagePolicy")]
     fn root_image_policy(&self) -> fdo::Result<&'static str> {
+        self.record_read();
         if self.fail_root_image_policy {
             Err(fdo::Error::Failed("test readback failure".to_owned()))
         } else {
-            Ok(self.fixed(ROOT_IMAGE_POLICY))
+            Ok(ROOT_IMAGE_POLICY)
         }
     }
 }
@@ -620,6 +629,7 @@ async fn every_non_successful_job_result_fails_closed() -> Result<(), Box<dyn Er
             ..ManagerBehavior::default()
         };
         let service = RecordingService::exact(expected_system_call_filter()?);
+        let property_reads = Arc::clone(&service.property_reads);
         let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
         let error = transport
             .start(
@@ -633,6 +643,7 @@ async fn every_non_successful_job_result_fails_closed() -> Result<(), Box<dyn Er
             return Err("failed job result had the wrong error class".into());
         };
         assert_eq!(actual, expected);
+        assert_eq!(property_reads.load(Ordering::SeqCst), 0);
     }
     Ok(())
 }
