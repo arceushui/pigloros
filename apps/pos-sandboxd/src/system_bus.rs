@@ -206,4 +206,5 @@ fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'s
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/system_bus.rs"]
 mod tests;

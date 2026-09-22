@@ -1,3 +1,5 @@
+//! Crate-internal system D-Bus transport contract tests.
+
 use std::{
     error::Error,
     fs::File,
