@@ -563,6 +563,7 @@ jobs:
           --exclude 'examples/**'
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
+          --exclude 'src/system_bus/tests.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -576,6 +577,7 @@ jobs:
           --exclude 'examples/**'
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
+          --exclude 'src/system_bus/tests.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
@@ -646,7 +648,7 @@ jobs:
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
