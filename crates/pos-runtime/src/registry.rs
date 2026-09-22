@@ -2526,12 +2526,13 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
-        let profile_artifact =
-            pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
-                .map_err(|error| RuntimeError::CapabilityMismatch {
-                    name: plugin.name().to_owned(),
-                    reason: error.to_string(),
-                })?;
+        let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(
+            profile_id,
+        )
+        .map_err(|error| RuntimeError::CapabilityMismatch {
+            name: plugin.name().to_owned(),
+            reason: error.to_string(),
+        })?;
         budget_input.execution_profile_hash =
             crate::execution_profile_artifact_hash_v1(&profile_artifact);
         let budget = pos_core::ExecutableBudgetPolicyV1::new(budget_input).map_err(|error| {
@@ -3731,7 +3732,8 @@ mod tests {
         let huge_name: &'static str = Box::leak(
             String::from_utf8(vec![
                 b'x';
-                crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 + 1
+                crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1
+                    + 1
             ])
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
             .into_boxed_str(),
