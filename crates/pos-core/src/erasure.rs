@@ -6280,6 +6280,10 @@ impl PreparedErasureForkBatchV1 {
     /// recovery. The proof contains digests of every prepared persistence
     /// side, so recovery can compare the original transaction with storage
     /// without reconstructing an opaque capability from adapter bytes.
+    ///
+    /// # Errors
+    /// Returns a closed encoding or size-bound error if the prepared mutation
+    /// cannot be represented by the bounded durable proof.
     pub fn recovery_proof(&self) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
         ErasureForkRecoveryProofV1::from_prepared(self)
     }
@@ -8931,9 +8935,9 @@ mod coverage_paths {
     fn fork_recovery_proof_round_trips_and_rejects_binding_or_shape_changes(
     ) -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
-        let child = TimelineMeta {
+        let child = crate::TimelineMeta {
             id: TimelineId::new(),
-            mode: TimelineMode::Historical,
+            mode: crate::TimelineMode::Historical,
             name: Some("proof-child".to_owned()),
             owner: None,
             fork_point: Some((parent, Seq::ZERO)),
