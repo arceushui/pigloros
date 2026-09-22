@@ -103,7 +103,9 @@ jobs:
           components: rustfmt
       - name: Produce hosted rustfmt patch for #382
         run: |
-          cargo fmt --all
+          rustfmt --edition 2021 \
+            apps/pos-sandboxd/src/system_bus.rs \
+            apps/pos-sandboxd/src/system_bus/tests.rs
           git diff --binary > /tmp/rustfmt-382.patch
       - name: Upload hosted rustfmt patch for #382
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
