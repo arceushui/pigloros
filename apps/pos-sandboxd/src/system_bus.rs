@@ -8,9 +8,9 @@ use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 use crate::{
     SystemdHardeningProperty, SystemdHardeningReadbackValue, SystemdHardeningValue,
     SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty,
-    SystemdTransientUnitPropertyKind, SystemdTransientUnitReadback,
-    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitRequest,
-    TransientUnitRequestError,
+    SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind,
+    SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
+    TransientUnitRequest, TransientUnitRequestError,
 };
 
 const JOB_MODE: &str = "fail";
