@@ -95,17 +95,8 @@ impl SystemdTransientUnitTransport {
     pub async fn connect_system() -> Result<Self, SystemdTransientUnitTransportError> {
         Connection::system()
             .await
-            .map(Self::from_connection)
+            .map(|connection| Self { connection })
             .map_err(SystemdTransientUnitTransportError::Connect)
-    }
-
-    /// Bind an already authenticated D-Bus connection.
-    ///
-    /// This preserves the connection's existing destination and authentication
-    /// semantics; production obtains it from [`Self::connect_system`].
-    #[must_use]
-    pub const fn from_connection(connection: Connection) -> Self {
-        Self { connection }
     }
 
     /// Submit one complete compiled request through generated systemd bindings.
@@ -211,51 +202,4 @@ fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'s
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn value() -> SystemdTransientUnitValue {
-        SystemdTransientUnitValue::FileDescriptorStoreMax(1)
-    }
-
-    #[test]
-    fn owned_value_failure_is_classified() {
-        let error = encode_property_with("TestProperty", value(), |_| {
-            Err(zvariant::Error::IncorrectType)
-        });
-        assert_eq!(
-            error.as_ref().err().map(ToString::to_string),
-            Some("failed to serialize the typed transient-unit request".to_owned())
-        );
-    }
-
-    #[test]
-    fn call_serialization_failure_is_classified() {
-        let error = classify_call_error(zbus::Error::Variant(zvariant::Error::IncorrectType));
-        assert_eq!(
-            error.to_string(),
-            "failed to serialize the typed transient-unit request"
-        );
-    }
-
-    #[tokio::test]
-    async fn pre_submission_failures_are_classified() {
-        let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
-        let property_error =
-            SystemdTransientUnitTransportError::Serialization(zvariant::Error::IncorrectType);
-        let name = TransientServiceUnitName("test.service".to_owned());
-        let error = submit(Err(proxy_error), Err(property_error), name).await;
-        assert_eq!(
-            error.as_ref().err().map(ToString::to_string),
-            Some("failed to serialize the typed transient-unit request".to_owned())
-        );
-
-        let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
-        let name = TransientServiceUnitName("test.service".to_owned());
-        let error = submit(Err(proxy_error), Ok(Vec::new()), name).await;
-        assert_eq!(
-            error.as_ref().err().map(ToString::to_string),
-            Some("failed to construct the typed systemd manager proxy".to_owned())
-        );
-    }
-}
+mod tests;

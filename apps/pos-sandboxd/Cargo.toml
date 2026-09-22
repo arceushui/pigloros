@@ -10,7 +10,6 @@ publish.workspace = true
 pos-reference = { path = "../../crates/pos-reference" }
 thiserror = { workspace = true }
 zbus = { version = "=5.19.0", default-features = false, features = [
-  "p2p",
   "tokio",
 ] }
 zbus_systemd = { version = "=0.26100.0", default-features = false, features = [
@@ -22,6 +21,10 @@ zvariant = "=5.15.0"
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }
 tokio = { workspace = true }
+zbus = { version = "=5.19.0", default-features = false, features = [
+  "p2p",
+  "tokio",
+] }
 
 [lints]
 workspace = true
