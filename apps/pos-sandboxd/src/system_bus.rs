@@ -350,7 +350,7 @@ async fn submit_and_verify(
         Err(error) => return Err(SystemdTransientUnitTransportError::Proxy(error)),
     };
     let completions = proxy.receive_job_removed().await;
-    submit_with_completions(
+    let result = submit_with_completions(
         &proxy,
         completions,
         properties,
@@ -358,7 +358,8 @@ async fn submit_and_verify(
         request,
         connection,
     )
-    .await
+    .await;
+    result
 }
 
 async fn submit_with_completions(
@@ -396,7 +397,8 @@ async fn submit_with_completions(
         .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
         .build()
         .await;
-    verify_service(service, unit_name, job, unit_path, request).await
+    let result = verify_service(service, unit_name, job, unit_path, request).await;
+    result
 }
 
 async fn verify_service(
