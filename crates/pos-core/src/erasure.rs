@@ -6870,7 +6870,7 @@ mod coverage_paths {
         let oversized_bytes = oversized.to_canonical_cbor()?;
         assert_eq!(
             ErasureForkRecoveryProofV1::from_canonical_cbor(&oversized_bytes),
-            Err(ErasureErrorV1::ScopeInvalid)
+            Err(ErasureErrorV1::InvalidEncoding)
         );
         Ok(())
     }
