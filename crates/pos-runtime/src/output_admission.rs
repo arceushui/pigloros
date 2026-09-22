@@ -187,10 +187,10 @@ impl InstalledOutputPolicySourceV1 {
         }
     }
 
-    fn implementation_artifact<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<u8> {
+    fn implementation_artifact<P: Plugin + ?Sized>(self, _plugin: &P) -> Vec<u8> {
         match self {
             #[cfg(debug_assertions)]
-            Self::Generated => generated_implementation_artifact_v1(plugin),
+            Self::Generated => generated_implementation_artifact_v1(_plugin),
             Self::Gateway => source_artifact_bundle(&[
                 (
                     "src/lib.rs",

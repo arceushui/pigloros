@@ -18,6 +18,8 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
+#[cfg(debug_assertions)]
+use crate::output_admission::InstalledOutputPolicySourceV1;
 use crate::{
     composition::{
         PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
@@ -30,10 +32,7 @@ use crate::{
         StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::{
-        InstalledOutputPolicySourceV1, OutputAdmissionV1, OutputPolicyBindingV1,
-        OutputPolicyClosureV1,
-    },
+    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
