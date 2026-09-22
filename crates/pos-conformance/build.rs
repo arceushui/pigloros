@@ -2359,6 +2359,8 @@ struct BuildInputs {
     draft_authority_key: [u8; 32],
 }
 
+type DiscoveredBuildData = (SourceSnapshots, Vec<ProfilePaths>, [u8; 32]);
+
 fn manifest_catalog_root() -> Result<CatalogRoot, Box<dyn Error>> {
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR")
@@ -2367,9 +2369,7 @@ fn manifest_catalog_root() -> Result<CatalogRoot, Box<dyn Error>> {
     Ok(catalog_root(&manifest_dir)?)
 }
 
-fn discover_build_data(
-    root: &CatalogRoot,
-) -> Result<(SourceSnapshots, Vec<ProfilePaths>, [u8; 32]), Box<dyn Error>> {
+fn discover_build_data(root: &CatalogRoot) -> Result<DiscoveredBuildData, Box<dyn Error>> {
     let snapshots = source_snapshots(root)?;
     let profiles = discover_profiles(root, &snapshots)?;
     let source_inventory_digest = verify_source_inventory(&snapshots, &profiles)?;
