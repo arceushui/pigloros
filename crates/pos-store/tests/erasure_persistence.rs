@@ -2185,6 +2185,41 @@ fn sqlite_fork_recovery_rejects_negative_persisted_sequence(
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_recovery_rejects_missing_or_corrupt_recovery_proof(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=zeroblob(32)
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_cbor=X'00'
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::InvalidEncoding,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn std::error::Error>>
 {
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
@@ -2244,6 +2279,12 @@ fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn
                 .digest()
                 .digest()
                 .as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
         )
     })
 }
