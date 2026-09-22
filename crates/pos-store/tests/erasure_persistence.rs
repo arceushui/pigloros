@@ -2053,7 +2053,7 @@ fn sqlite_fork_retry_rejects_mistyped_manifest_fields() -> Result<(), Box<dyn st
                     rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
                 )
             },
-            ErasureErrorV1::ReceiptCommitFailed,
+            ErasureErrorV1::PolicyConflict,
         )?;
     }
     Ok(())
