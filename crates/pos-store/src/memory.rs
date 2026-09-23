@@ -1643,14 +1643,10 @@ impl MemoryStore {
         proof: &ErasureForkRecoveryProofV1,
     ) -> Result<(), ErasureErrorV1> {
         for mutation in proof.admissions() {
-            let Some((manifest, bytes)) = self.erasure_records.get(&mutation.request()) else {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            };
-            if *manifest != mutation.next_manifest()
-                || ErasureForkRecoveryProofV1::bytes_digest(bytes) != mutation.next_manifest_bytes()
-            {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
+            // `erasure_records` is the mutable current head and may have
+            // advanced through a later Fork. The immutable effect below
+            // proves this admission was committed; the verified inventory
+            // separately proves its extension remains in the current chain.
             if !mutation
                 .objects()
                 .iter()

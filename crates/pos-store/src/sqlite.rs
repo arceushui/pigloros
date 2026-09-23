@@ -5442,34 +5442,14 @@ fn sqlite_recovery_proof_mutation_is_exact(
     conn: &Connection,
     mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
-    sqlite_recovery_proof_manifest_is_exact(conn, mutation)?;
+    // `erasure_records` stores only the mutable current head. The immutable
+    // effect keyed by this successor manifest proves the historical CAS;
+    // the verified inventory checks that its extension remains in the chain.
     sqlite_recovery_proof_objects_are_exact(conn, mutation)?;
     sqlite_recovery_proof_states_are_exact(conn, mutation)?;
     sqlite_recovery_proof_indexes_are_exact(conn, mutation)?;
     sqlite_recovery_proof_effect_is_exact(conn, mutation)?;
     sqlite_recovery_proof_subject_is_exact(conn, mutation)
-}
-
-fn sqlite_recovery_proof_manifest_is_exact(
-    conn: &Connection,
-    mutation: &ErasureForkRecoveryMutationV1,
-) -> Result<(), ErasureErrorV1> {
-    let manifest = conn
-        .query_row(
-            "SELECT manifest_digest, manifest_cbor FROM erasure_records
-             WHERE request_digest=?1",
-            params![mutation.request().digest().as_slice()],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-        .optional()
-        .map_err(map_erasure_receipt_failure)?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    if reference_from_sql(manifest.0)? != mutation.next_manifest()
-        || ErasureForkRecoveryProofV1::bytes_digest(&manifest.1) != mutation.next_manifest_bytes()
-    {
-        return Err(ErasureErrorV1::ProvenanceMissing);
-    }
-    Ok(())
 }
 
 fn sqlite_recovery_proof_objects_are_exact(

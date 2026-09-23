@@ -2185,3 +2185,102 @@ fn sqlite_exact_durable_fork_retry_preserves_current_inventory(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_exact_durable_fork_retry_preserves_current_inventory(StoreConfig::SqliteInMemory)
 }
+
+fn assert_exact_affected_fork_retry_after_later_scope_extension(
+    config: StoreConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open affected-fork retry host",
+        open_with_authority(
+            config,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open affected-fork retry sender", host.command_sender())?;
+    let parent = test_stage(
+        "create affected-fork retry parent",
+        commands.create_timeline("affected-fork-retry-parent"),
+    )?;
+    test_stage(
+        "publish affected-fork retry parent",
+        authority.set_timeline(parent.id()),
+    )?;
+    let request = test_stage(
+        "construct affected-fork retry request",
+        persistence_request(),
+    )?;
+    let request_reference = request.reference();
+    let request_provenance = request.provenance();
+    test_stage(
+        "submit affected-fork retry request",
+        commands.submit_erasure_request(request, request_provenance),
+    )?;
+    test_stage(
+        "authorize affected-fork retry request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze affected-fork retry request",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+
+    let first_operation = reference(43);
+    let first_child = test_stage(
+        "commit first affected fork",
+        commands.fork_timeline_identified(
+            first_operation,
+            parent.id(),
+            pos_core::Seq::ZERO,
+            "first-affected-child",
+        ),
+    )?;
+    authority.set_fork_child_scope(21);
+    let later_child = test_stage(
+        "commit later affected fork in the same scope",
+        commands.fork_timeline_identified(
+            reference(44),
+            first_child.id(),
+            pos_core::Seq::ZERO,
+            "later-affected-child",
+        ),
+    )?;
+    authority.set_fork_child_scope(19);
+    let retried_child = test_stage(
+        "retry first affected fork after its scope advanced",
+        commands.fork_timeline_identified(
+            first_operation,
+            parent.id(),
+            pos_core::Seq::ZERO,
+            "first-affected-child",
+        ),
+    )?;
+
+    assert_eq!(retried_child.id(), first_child.id());
+    assert_eq!(
+        commands.timeline(first_child.id()),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    assert_eq!(
+        commands.timeline(later_child.id()),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    drop(commands);
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    Ok(())
+}
+
+#[test]
+fn exact_affected_fork_retry_survives_later_scope_extension(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_exact_affected_fork_retry_after_later_scope_extension(StoreConfig::Memory)
+}
+
+#[test]
+fn sqlite_exact_affected_fork_retry_survives_later_scope_extension(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_exact_affected_fork_retry_after_later_scope_extension(StoreConfig::SqliteInMemory)
+}

@@ -246,7 +246,7 @@ where
             event_id.to_string().as_bytes(),
             &payload,
         );
-        expected_head = expected_seq;
+        expected_head = seq;
     }
     Ok(stored_head == expected_head && stored_chain_head == expected_chain_head.as_bytes())
 }

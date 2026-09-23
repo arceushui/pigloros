@@ -4838,19 +4838,15 @@ impl ErasureVerifiedInventoryV1 {
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             let extensions = state.scope_extensions();
             let extension = extensions
-                .last()
-                .filter(|extension| extension.fork() == child_scope)
+                .iter()
+                .find(|extension| extension.fork() == child_scope)
                 .copied()
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             let requirement = ErasureForkScopeRequirementV1 {
                 request,
                 scope_commitment: scope.reference(),
                 lineage_rule,
-                predecessor_extension: extensions
-                    .iter()
-                    .rev()
-                    .nth(1)
-                    .map(ErasureScopeExtensionV1::reference),
+                predecessor_extension: extension.predecessor_extension(),
             };
             retry_requirements.push(ErasureForkRetryScopeRequirementV1 {
                 requirement,
