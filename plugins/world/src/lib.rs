@@ -533,6 +533,8 @@ impl WorldObservationV1 {
     /// # Errors
     /// Returns [`WorldCodecError::NonFiniteFloat`] if any float is non-finite.
     /// Returns [`WorldCodecError::PayloadTooLarge`] if `sensor_value` exceeds `MAX_SENSOR_VALUE_BYTES`.
+    /// Returns [`WorldCodecError::NonUnitOrientation`] for an invalid quaternion
+    /// and [`WorldCodecError::UnknownSensorKind`] for an unsupported sensor.
     pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
         self.validate_encoding().map(|()| self.encode_validated())
     }
@@ -1571,21 +1573,29 @@ impl Driver for WorldDriver {
 /// Projects the latest accepted WOB1 body observation without a physics backend.
 pub struct WorldReducer;
 
+impl WorldReducer {
+    fn accepted_observation(event: &Event) -> Option<WorldObservationV1> {
+        if event.event_type.as_str() != EVENT_TYPE_OBSERVATION_V1 {
+            return None;
+        }
+        let observation = WorldObservationV1::decode(&event.payload).ok()?;
+        (observation.body_entity_id == event.entity).then_some(observation)
+    }
+}
+
 impl Reducer for WorldReducer {
     fn initial(&self) -> State {
         State::new()
     }
 
+    fn accepts_event(&self, event: &Event) -> bool {
+        Self::accepted_observation(event).is_some()
+    }
+
     fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() != EVENT_TYPE_OBSERVATION_V1 {
-            return;
-        }
-        let Ok(observation) = WorldObservationV1::decode(&event.payload) else {
+        let Some(observation) = Self::accepted_observation(event) else {
             return;
         };
-        if observation.body_entity_id != event.entity {
-            return;
-        }
         let mut projected = State::new();
         projected.set(
             "body_entity_id",

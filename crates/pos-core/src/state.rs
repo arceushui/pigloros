@@ -31,6 +31,11 @@ impl State {
 /// State is always a fold — never authoritative storage.
 pub trait Reducer: Send + Sync {
     fn initial(&self) -> State;
+    /// Whether this event can contribute to this reducer's State.
+    /// A rejected event is not materialized as an entity in the registry.
+    fn accepts_event(&self, _event: &Event) -> bool {
+        true
+    }
     fn apply(&self, state: &mut State, event: &Event);
 }
 
@@ -66,6 +71,9 @@ impl StateRegistry {
         {
             return;
         }
+        if !reducer.accepts_event(event) {
+            return;
+        }
         let state = self
             .states
             .entry(event.entity)
@@ -96,6 +104,24 @@ mod tests {
     };
 
     struct CountReducer;
+
+    struct RejectAllReducer;
+
+    impl Reducer for RejectAllReducer {
+        fn initial(&self) -> State {
+            let mut state = State::new();
+            state.set("seed", serde_json::json!(0));
+            state
+        }
+
+        fn accepts_event(&self, _event: &Event) -> bool {
+            false
+        }
+
+        fn apply(&self, _state: &mut State, _event: &Event) {
+            panic!("rejected event reached reducer");
+        }
+    }
 
     impl Reducer for CountReducer {
         fn initial(&self) -> State {
@@ -160,6 +186,24 @@ mod tests {
         assert!(registry.get(&entity).is_none());
         let default = registry.get_or_default(&entity);
         assert!(default.fields.is_empty());
+    }
+
+    #[test]
+    fn rejected_event_does_not_create_entity_state() {
+        let entity = EntityId::new();
+        let event = make_event(entity);
+        let mut rejected = StateRegistry::new();
+        rejected.apply(&RejectAllReducer, &event);
+        assert!(rejected.get(&entity).is_none());
+
+        let mut default_admission = StateRegistry::new();
+        default_admission.apply(&CountReducer, &event);
+        assert_eq!(
+            default_admission
+                .get(&entity)
+                .and_then(|state| state.get("count")),
+            Some(&serde_json::json!(1))
+        );
     }
 
     #[test]

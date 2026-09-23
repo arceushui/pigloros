@@ -441,11 +441,7 @@ mod tests {
             &evaluation,
         )
         .test_ok();
-        assert!(before
-            .state_for_reducer("world", &bodies[0])
-            .test_ok()
-            .fields
-            .is_empty());
+        assert!(before.state_for_reducer("world", &bodies[0]).is_none());
         assert!(before.state_for_reducer("world", &bodies[1]).is_none());
         super::replay_at(
             &mut reads,
@@ -493,6 +489,87 @@ mod tests {
         .test_ok();
         for (body, state) in bodies.iter().zip(&expected) {
             assert_eq!(with_telemetry.state_for_reducer("world", body), Some(state));
+        }
+    }
+
+    #[test]
+    fn world_replay_does_not_materialize_invalid_or_disposable_entities() {
+        let (mut host, timeline, bodies, action, committed) = committed_world_step();
+        let gate = host.containment_gate();
+        let canonical = committed
+            .iter()
+            .find(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .test_ok();
+        let last_observation_seq = committed.last().test_ok().seq;
+        let mut noncanonical_bytes = canonical.payload.as_slice().to_vec();
+        noncanonical_bytes.push(0);
+        let invalid = [
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                action.payload,
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                CanonicalBytes::from_static(b"malformed"),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                CanonicalBytes::from_vec(noncanonical_bytes),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("world.observation"),
+                canonical.payload.clone(),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                canonical.payload.clone(),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("world.telemetry.ephemeral"),
+                CanonicalBytes::from_static(b"discardable"),
+            ),
+        ];
+        let invalid_entities: Vec<_> = invalid.iter().map(|draft| draft.entity).collect();
+        host.command_sender()
+            .test_ok()
+            .append(timeline, &invalid)
+            .test_ok();
+
+        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let mut accepted = world_registry(gate.clone());
+        let mut after_invalid = world_registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        super::replay_at(
+            &mut reads,
+            timeline,
+            last_observation_seq,
+            &mut accepted,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        super::replay(
+            &mut reads,
+            timeline,
+            &mut after_invalid,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        for body in bodies {
+            assert_eq!(
+                after_invalid.state_for_reducer("world", &body),
+                accepted.state_for_reducer("world", &body)
+            );
+        }
+        for entity in invalid_entities {
+            assert!(after_invalid.state_for_reducer("world", &entity).is_none());
         }
     }
 
