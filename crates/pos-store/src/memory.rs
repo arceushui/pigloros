@@ -6315,12 +6315,17 @@ mod coverage_entrypoints {
             Hash::from_bytes([11; 32]),
             Hash::from_bytes([12; 32]),
         );
+        let calls = std::cell::Cell::new(0);
         let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            calls.set(calls.get() + 1);
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(store
             .append_signed_authorized(TimelineId::new(), &invalid, &mut callback)
             .is_err());
+        assert_eq!(calls.get(), 0);
+        // Cover the fixture separately while asserting the store never called it.
+        assert!(callback(&invalid, Seq::ZERO).is_err());
         assert!(store.begin_key_registry_destruction(request).is_err());
         assert!(store
             .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))
