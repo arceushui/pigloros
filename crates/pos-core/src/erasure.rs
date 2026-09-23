@@ -368,13 +368,19 @@ impl std::fmt::Display for ErasureHostErrorV1 {
 
 impl std::error::Error for ErasureHostErrorV1 {}
 
+mod erasure_gate_sealed {
+    pub trait Sealed {}
+}
+
 /// Host-owned erasure containment seam used by stores and runtime consumers.
 ///
 /// Implementations resolve a Timeline/Fork to the immutable scope reference
 /// committed by the erasure coordinator. The callback form lets an adapter
 /// keep the decision and its protected effect in one host-owned serialization
-/// boundary; callers must not preflight and then act outside this seam.
-pub trait ErasureGate: Send + Sync {
+/// boundary; callers must not preflight and then act outside this seam. This
+/// trait is sealed: it shares the host-issued gate as an object-safe interface
+/// and is not an extension point for caller-supplied authorization policies.
+pub trait ErasureGate: erasure_gate_sealed::Sealed + Send + Sync {
     /// Authorize one protected operation at its current host boundary.
     ///
     /// # Errors
@@ -1150,6 +1156,8 @@ impl ErasureContainmentGateV1 {
         self.authorize_state(timeline, operation, &authority)
     }
 }
+
+impl erasure_gate_sealed::Sealed for ErasureContainmentGateV1 {}
 
 impl ErasureGate for ErasureContainmentGateV1 {
     fn authorize(
@@ -4931,6 +4939,10 @@ impl ErasureVerifiedInventoryV1 {
             state
                 .scope()
                 .is_some_and(|scope| scope.scope_members().contains(&input.child_scope))
+                || state
+                    .scope_extensions()
+                    .iter()
+                    .any(|extension| extension.fork() == input.child_scope)
         }) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -5046,13 +5058,6 @@ impl ErasureVerifiedInventoryV1 {
                         .request_heads
                         .iter()
                         .any(|(request, _)| *request == admission.mutation.request())
-                    || self.members.iter().any(|(state, _)| {
-                        state.request().reference() == admission.mutation.request()
-                            && state
-                                .scope_extensions()
-                                .iter()
-                                .any(|extension| extension.fork() == input.child_scope)
-                    })
             })
         {
             return Err(ErasureErrorV1::PolicyConflict);
@@ -5856,7 +5861,8 @@ fn update_fork_child_identity(
     }
 }
 
-fn fork_admission_binding_digest(
+#[derive(Clone, Copy)]
+struct ForkAdmissionBindingDigestInput<'a> {
     operation: ErasureReferenceV1,
     expected_inventory_generation: ErasureReferenceV1,
     child_scope: ErasureReferenceV1,
@@ -5865,26 +5871,28 @@ fn fork_admission_binding_digest(
     predecessor: ErasureReferenceV1,
     next_manifest: ErasureReferenceV1,
     persistence_evidence: ErasureReferenceV1,
-    child: &crate::TimelineMeta,
-) -> ErasureReferenceV1 {
-    let Some((parent, at_seq)) = child.fork_point else {
+    child: &'a crate::TimelineMeta,
+}
+
+fn fork_admission_binding_digest(input: ForkAdmissionBindingDigestInput<'_>) -> ErasureReferenceV1 {
+    let Some((parent, at_seq)) = input.child.fork_point else {
         return reference_zero();
     };
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/erasure-fork-admission/v1");
     for reference in [
-        operation,
-        expected_inventory_generation,
-        child_scope,
-        extension,
-        mutation,
-        predecessor,
-        next_manifest,
-        persistence_evidence,
+        input.operation,
+        input.expected_inventory_generation,
+        input.child_scope,
+        input.extension,
+        input.mutation,
+        input.predecessor,
+        input.next_manifest,
+        input.persistence_evidence,
     ] {
         hasher.update(&reference.digest());
     }
-    update_fork_child_identity(&mut hasher, child, &[0]);
+    update_fork_child_identity(&mut hasher, input.child, &[0]);
     hasher.update(&parent.inner().to_bytes());
     hasher.update(&at_seq.as_u64().to_be_bytes());
     ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
@@ -5929,40 +5937,52 @@ fn bytes_digest(bytes: &[u8]) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(*blake3::hash(bytes).as_bytes())
 }
 
-fn fork_admission_persistence_evidence_digest(
+struct ForkAdmissionPersistenceEvidenceDigestInput<'a, Objects, States> {
     next_manifest_bytes: ErasureReferenceV1,
     object_count: usize,
-    objects: impl Iterator<Item = (ErasureReferenceV1, ErasureReferenceV1)>,
+    objects: Objects,
     state_count: usize,
-    states: impl Iterator<Item = (ErasureReferenceV1, ErasureReferenceV1)>,
-    index_inserts: &[ErasureIndexInsertV1],
+    states: States,
+    index_inserts: &'a [ErasureIndexInsertV1],
     effect: ErasureReferenceV1,
     effect_bytes: ErasureReferenceV1,
     effect_subject: Option<ErasureReferenceV1>,
-) -> ErasureReferenceV1 {
+}
+
+fn fork_admission_persistence_evidence_digest<Objects, States>(
+    evidence: ForkAdmissionPersistenceEvidenceDigestInput<'_, Objects, States>,
+) -> ErasureReferenceV1
+where
+    Objects: Iterator<Item = (ErasureReferenceV1, ErasureReferenceV1)>,
+    States: Iterator<Item = (ErasureReferenceV1, ErasureReferenceV1)>,
+{
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/erasure-fork-persistence-evidence/v1");
-    hasher.update(&next_manifest_bytes.digest());
+    hasher.update(&evidence.next_manifest_bytes.digest());
     hasher.update(
-        &u64::try_from(object_count)
+        &u64::try_from(evidence.object_count)
             .unwrap_or(u64::MAX)
             .to_be_bytes(),
     );
-    for (reference, bytes) in objects {
-        hasher.update(&reference.digest());
-        hasher.update(&bytes.digest());
-    }
-    hasher.update(&u64::try_from(state_count).unwrap_or(u64::MAX).to_be_bytes());
-    for (reference, bytes) in states {
+    for (reference, bytes) in evidence.objects {
         hasher.update(&reference.digest());
         hasher.update(&bytes.digest());
     }
     hasher.update(
-        &u64::try_from(index_inserts.len())
+        &u64::try_from(evidence.state_count)
             .unwrap_or(u64::MAX)
             .to_be_bytes(),
     );
-    for index in index_inserts {
+    for (reference, bytes) in evidence.states {
+        hasher.update(&reference.digest());
+        hasher.update(&bytes.digest());
+    }
+    hasher.update(
+        &u64::try_from(evidence.index_inserts.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for index in &evidence.index_inserts {
         let (kind, ordinal, reference) = match *index {
             ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (0, ordinal, reference),
             ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (1, ordinal, reference),
@@ -5974,9 +5994,9 @@ fn fork_admission_persistence_evidence_digest(
         hasher.update(&ordinal.to_be_bytes());
         hasher.update(&reference.digest());
     }
-    hasher.update(&effect.digest());
-    hasher.update(&effect_bytes.digest());
-    match effect_subject {
+    hasher.update(&evidence.effect.digest());
+    hasher.update(&evidence.effect_bytes.digest());
+    match evidence.effect_subject {
         Some(subject) => {
             hasher.update(&[1]);
             hasher.update(&subject.digest());
@@ -5991,23 +6011,23 @@ fn fork_admission_persistence_evidence_digest(
 fn fork_recovery_mutation_evidence_digest(
     mutation: &ErasureForkRecoveryMutationV1,
 ) -> ErasureReferenceV1 {
-    fork_admission_persistence_evidence_digest(
-        mutation.next_manifest_bytes,
-        mutation.objects.len(),
-        mutation
+    fork_admission_persistence_evidence_digest(ForkAdmissionPersistenceEvidenceDigestInput {
+        next_manifest_bytes: mutation.next_manifest_bytes,
+        object_count: mutation.objects.len(),
+        objects: mutation
             .objects
             .iter()
             .map(|object| (object.reference(), object.bytes())),
-        mutation.states.len(),
-        mutation
+        state_count: mutation.states.len(),
+        states: mutation
             .states
             .iter()
             .map(|state| (state.reference(), state.bytes())),
-        &mutation.index_inserts,
-        mutation.effect,
-        mutation.effect_bytes,
-        mutation.effect_subject,
-    )
+        index_inserts: &mutation.index_inserts,
+        effect: mutation.effect,
+        effect_bytes: mutation.effect_bytes,
+        effect_subject: mutation.effect_subject,
+    })
 }
 
 /// Durable, payload-free result of one committed future-Fork operation.
@@ -6220,33 +6240,35 @@ impl PreparedErasureForkAdmissionV1 {
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         let effect_bytes = mutation.effect().to_canonical_cbor()?;
         let persistence_evidence = fork_admission_persistence_evidence_digest(
-            bytes_digest(mutation.next_manifest().canonical_cbor()),
-            mutation.new_objects().len(),
-            mutation
-                .new_objects()
-                .iter()
-                .map(|object| (object.reference(), bytes_digest(object.canonical_cbor()))),
-            mutation.new_states().len(),
-            mutation
-                .new_states()
-                .iter()
-                .map(|state| (state.reference(), bytes_digest(state.canonical_cbor()))),
-            mutation.index_inserts(),
-            mutation.effect().identity(),
-            bytes_digest(&effect_bytes),
-            mutation.effect().subject(),
+            ForkAdmissionPersistenceEvidenceDigestInput {
+                next_manifest_bytes: bytes_digest(mutation.next_manifest().canonical_cbor()),
+                object_count: mutation.new_objects().len(),
+                objects: mutation
+                    .new_objects()
+                    .iter()
+                    .map(|object| (object.reference(), bytes_digest(object.canonical_cbor()))),
+                state_count: mutation.new_states().len(),
+                states: mutation
+                    .new_states()
+                    .iter()
+                    .map(|state| (state.reference(), bytes_digest(state.canonical_cbor()))),
+                index_inserts: mutation.index_inserts(),
+                effect: mutation.effect().identity(),
+                effect_bytes: bytes_digest(&effect_bytes),
+                effect_subject: mutation.effect().subject(),
+            },
         );
-        let digest = fork_admission_binding_digest(
-            input.operation,
-            input.expected_inventory_generation,
-            input.child_scope,
-            extension.reference(),
-            mutation.request(),
+        let digest = fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+            operation: input.operation,
+            expected_inventory_generation: input.expected_inventory_generation,
+            child_scope: input.child_scope,
+            extension: extension.reference(),
+            mutation: mutation.request(),
             predecessor,
-            mutation.next_manifest().digest(),
+            next_manifest: mutation.next_manifest().digest(),
             persistence_evidence,
-            &input.child,
-        );
+            child: &input.child,
+        });
         debug_assert_eq!(
             input.child.fork_point,
             Some((parent, at_seq)),
@@ -6602,19 +6624,19 @@ impl ErasureForkRecoveryProofV1 {
             ) {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            let expected = fork_admission_binding_digest(
-                admission.operation,
-                admission.expected_inventory_generation,
-                admission.child_scope,
-                admission.extension,
-                admission.request,
-                admission
+            let expected = fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+                operation: admission.operation,
+                expected_inventory_generation: admission.expected_inventory_generation,
+                child_scope: admission.child_scope,
+                extension: admission.extension,
+                mutation: admission.request,
+                predecessor: admission
                     .predecessor
                     .ok_or(ErasureErrorV1::ProvenanceMissing)?,
-                admission.next_manifest,
-                fork_recovery_mutation_evidence_digest(admission),
-                recovered.child(),
-            );
+                next_manifest: admission.next_manifest,
+                persistence_evidence: fork_recovery_mutation_evidence_digest(admission),
+                child: recovered.child(),
+            });
             if expected != admission.binding_digest {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
@@ -8911,6 +8933,103 @@ mod coverage_paths {
     }
 
     #[test]
+    fn fork_batch_rejects_child_scope_already_in_an_unaffected_extension(
+    ) -> Result<(), ErasureErrorV1> {
+        let parent = TimelineId::new();
+        let child_scope = reference(97);
+        let affected = inventory_state(
+            reference(91),
+            reference(92),
+            reference(93),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let affected_scope = affected
+            .scope()
+            .map(ErasureScopeCommitmentV1::reference)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let mut unaffected = inventory_state(
+            reference(94),
+            reference(95),
+            reference(96),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let unaffected_scope = unaffected
+            .scope()
+            .map(ErasureScopeCommitmentV1::reference)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        unaffected
+            .scope_extensions
+            .push(ErasureScopeExtensionV1::new(
+                ErasureScopeExtensionInputV1 {
+                    request: unaffected.request().reference(),
+                    scope_commitment: unaffected_scope,
+                    fork: child_scope,
+                    lineage_rule: reference(28),
+                    predecessor_extension: None,
+                    admission_provenance: reference(98),
+                },
+            )?);
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![
+                (
+                    affected.clone(),
+                    ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                        affected.manifest_digest(),
+                        vec![(parent, affected_scope)],
+                        Vec::new(),
+                    ),
+                ),
+                (
+                    unaffected,
+                    ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                        reference(95),
+                        Vec::new(),
+                        vec![parent],
+                    ),
+                ),
+            ],
+            vec![parent],
+            4,
+        )?;
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(99),
+            expected_inventory_generation: inventory.generation(),
+            child_scope,
+            child: crate::TimelineMeta {
+                id: TimelineId::new(),
+                mode: crate::TimelineMode::Historical,
+                name: Some("extension-collision-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: affected.request().reference(),
+            scope_commitment: affected_scope,
+            fork: child_scope,
+            lineage_rule: reference(28),
+            predecessor_extension: None,
+            admission_provenance: reference(100),
+        })?;
+        let mutation = PreparedErasureCasV1::new(
+            affected.request().reference(),
+            Some(affected.manifest_digest()),
+            StoredErasureManifestV1::from_stored(reference(101), Vec::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ErasureCasEffectV1::None,
+        );
+        let admission = PreparedErasureForkAdmissionV1::new(input.clone(), extension, mutation)?;
+
+        assert_eq!(
+            inventory.prepare_fork_batch(input, vec![admission]),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn gate_mutations_fail_closed_after_lock_poisoning() {
         fn poison_fence(gate: &Arc<ErasureContainmentGateV1>) {
             let poisoned = Arc::clone(gate);
@@ -9193,17 +9312,17 @@ mod coverage_paths {
         let admission = &proof.admissions()[0];
         assert_eq!(
             admission.binding_digest(),
-            fork_admission_binding_digest(
-                reference(180),
-                reference(181),
-                reference(182),
-                admission.extension(),
-                reference(183),
-                reference(189),
-                reference(190),
-                fork_recovery_mutation_evidence_digest(&proof.admissions[0]),
-                result.child(),
-            )
+            fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+                operation: reference(180),
+                expected_inventory_generation: reference(181),
+                child_scope: reference(182),
+                extension: admission.extension(),
+                mutation: reference(183),
+                predecessor: reference(189),
+                next_manifest: reference(190),
+                persistence_evidence: fork_recovery_mutation_evidence_digest(&proof.admissions[0],),
+                child: result.child(),
+            },)
         );
         assert_eq!(admission.request(), reference(183));
         assert_ne!(admission.extension(), reference_zero());
@@ -9232,32 +9351,32 @@ mod coverage_paths {
         assert_eq!(admission.effect_subject(), None);
         assert_eq!(
             admission.binding_digest(),
-            fork_admission_binding_digest(
-                reference(180),
-                reference(181),
-                reference(182),
-                admission.extension(),
-                reference(183),
-                reference(189),
-                reference(190),
-                fork_recovery_mutation_evidence_digest(&proof.admissions[0]),
-                result.child(),
-            )
+            fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+                operation: reference(180),
+                expected_inventory_generation: reference(181),
+                child_scope: reference(182),
+                extension: admission.extension(),
+                mutation: reference(183),
+                predecessor: reference(189),
+                next_manifest: reference(190),
+                persistence_evidence: fork_recovery_mutation_evidence_digest(&proof.admissions[0],),
+                child: result.child(),
+            },)
         );
 
         let root = crate::TimelineMeta::root("proof-root");
         assert_eq!(
-            fork_admission_binding_digest(
-                reference(1),
-                reference(2),
-                reference(3),
-                reference(4),
-                reference(5),
-                reference(6),
-                reference(7),
-                reference(8),
-                &root,
-            ),
+            fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+                operation: reference(1),
+                expected_inventory_generation: reference(2),
+                child_scope: reference(3),
+                extension: reference(4),
+                mutation: reference(5),
+                predecessor: reference(6),
+                next_manifest: reference(7),
+                persistence_evidence: reference(8),
+                child: &root,
+            },),
             reference_zero()
         );
         assert_eq!(
@@ -9554,24 +9673,7 @@ mod coverage_paths {
             proof
         );
         assert_eq!(proof.validate(&result), Ok(()));
-        let mut missing_object = proof.clone();
-        missing_object.admissions[0].objects.pop();
-        assert_eq!(
-            missing_object.validate(&result),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        let mut missing_state = proof.clone();
-        missing_state.admissions[0].states.pop();
-        assert_eq!(
-            missing_state.validate(&result),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        let mut missing_index = proof.clone();
-        missing_index.admissions[0].index_inserts.pop();
-        assert_eq!(
-            missing_index.validate(&result),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
+        assert_recovery_proof_rejects_missing_persisted_components(&proof, &result);
         let mut changed_manifest_bytes = proof.clone();
         changed_manifest_bytes.admissions[0].next_manifest_bytes = reference(195);
         assert_eq!(
@@ -9601,6 +9703,30 @@ mod coverage_paths {
         assert_recovery_proof_rejects_oversized_admissions(&proof)?;
         assert_recovery_proof_rejects_oversized_effect(&input, &extension)?;
         Ok(())
+    }
+
+    fn assert_recovery_proof_rejects_missing_persisted_components(
+        proof: &ErasureForkRecoveryProofV1,
+        result: &ErasureForkRecoveryV1,
+    ) {
+        let mut missing_object = proof.clone();
+        missing_object.admissions[0].objects.pop();
+        assert_eq!(
+            missing_object.validate(result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut missing_state = proof.clone();
+        missing_state.admissions[0].states.pop();
+        assert_eq!(
+            missing_state.validate(result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut missing_index = proof.clone();
+        missing_index.admissions[0].index_inserts.pop();
+        assert_eq!(
+            missing_index.validate(result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     struct CompleteForkRecoveryProofFixture {
@@ -9734,17 +9860,17 @@ mod coverage_paths {
         let predecessor_extension = admission
             .predecessor
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        admission.binding_digest = fork_admission_binding_digest(
-            admission.operation,
-            admission.expected_inventory_generation,
-            admission.child_scope,
-            admission.extension,
-            admission.request,
-            predecessor_extension,
-            admission.next_manifest,
-            fork_recovery_mutation_evidence_digest(admission),
-            result.child(),
-        );
+        admission.binding_digest = fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+            operation: admission.operation,
+            expected_inventory_generation: admission.expected_inventory_generation,
+            child_scope: admission.child_scope,
+            extension: admission.extension,
+            mutation: admission.request,
+            predecessor: predecessor_extension,
+            next_manifest: admission.next_manifest,
+            persistence_evidence: fork_recovery_mutation_evidence_digest(admission),
+            child: result.child(),
+        });
         let admission_binding = admission.binding_digest;
         mismatched_admission.binding_digest = fork_batch_binding_digest(
             mismatched_admission.operation,

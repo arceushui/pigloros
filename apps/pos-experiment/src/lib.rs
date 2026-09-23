@@ -2526,6 +2526,7 @@ impl BacktestRunner {
     }
 
     /// Run backtest phases on an already-opened store (test seam for fault injection).
+    #[cfg(test)]
     fn run_on_store(
         self,
         store: &mut dyn pos_core::store::EventStore,
