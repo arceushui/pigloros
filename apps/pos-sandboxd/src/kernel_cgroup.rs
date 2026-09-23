@@ -59,6 +59,9 @@ pub enum AttemptCgroupError {
     /// The manager-reported path was rebound to a different cgroup.
     #[error("the attempt cgroup path was replaced")]
     PathReused,
+    /// A missing path did not prove that the retained cgroup itself was deleted.
+    #[error("the attempt cgroup path disappeared without proven deletion")]
+    DeletionUnproven,
 }
 
 /// The verified fixed cgroup v2 root, retained as a descriptor.
@@ -229,7 +232,10 @@ impl BoundAttemptCgroup {
     /// # Errors
     /// Rejects a populated, malformed, unreadable, or identity-replaced cgroup.
     pub fn observe_empty(&mut self) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
-        let retained = self.directory.metadata().map_err(AttemptCgroupError::Metadata)?;
+        let retained = self
+            .directory
+            .metadata()
+            .map_err(AttemptCgroupError::Metadata)?;
         if retained.dev() != self.device || retained.ino() != self.inode {
             return Err(AttemptCgroupError::PathReused);
         }
@@ -241,7 +247,12 @@ impl BoundAttemptCgroup {
             Mode::empty(),
             RESOLVE_CHILD,
         ) {
-            Err(Errno::NOENT) => (AttemptCgroupEmptyBasis::Deleted, None),
+            Err(Errno::NOENT) => {
+                if retained.nlink() != 0 {
+                    return Err(AttemptCgroupError::DeletionUnproven);
+                }
+                (AttemptCgroupEmptyBasis::Deleted, None)
+            }
             Err(error) => return Err(AttemptCgroupError::PathOpen(error)),
             Ok(current) => {
                 let metadata = File::from(current)
@@ -336,7 +347,10 @@ mod tests {
 
     #[test]
     fn populated_parser_requires_one_bounded_binary_value() {
-        assert_eq!(parse_populated(b"populated 0\nfrozen 1\n").ok(), Some(false));
+        assert_eq!(
+            parse_populated(b"populated 0\nfrozen 1\n").ok(),
+            Some(false)
+        );
         assert_eq!(parse_populated(b"frozen 0\npopulated 1\n").ok(), Some(true));
         for malformed in [
             b"".as_slice(),
@@ -360,8 +374,13 @@ mod tests {
             relative_cgroup_path("/system.slice/test.service").ok(),
             Some("system.slice/test.service")
         );
-        for path in ["", "/", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/a\0b"] {
-            assert!(matches!(relative_cgroup_path(path), Err(AttemptCgroupError::InvalidPath)));
+        for path in [
+            "", "/", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/a\0b",
+        ] {
+            assert!(matches!(
+                relative_cgroup_path(path),
+                Err(AttemptCgroupError::InvalidPath)
+            ));
         }
         assert!(matches!(
             relative_cgroup_path(&format!("/{}", "x".repeat(MAX_CONTROL_GROUP_BYTES))),
@@ -399,7 +418,10 @@ mod tests {
         fs::write(&events, b"populated 0\nfrozen 0\n")?;
         let empty = bound.observe_empty()?;
         assert_eq!(empty.basis(), AttemptCgroupEmptyBasis::Events);
-        assert_eq!(empty.raw_events(), Some(b"populated 0\nfrozen 0\n".as_slice()));
+        assert_eq!(
+            empty.raw_events(),
+            Some(b"populated 0\nfrozen 0\n".as_slice())
+        );
         assert_eq!(empty.control_group(), "/system.slice/test.service");
         assert_eq!(empty.unit_path(), "/org/freedesktop/systemd1/unit/test");
         assert!(empty.observed_monotonic().0 >= 0);
@@ -427,6 +449,10 @@ mod tests {
             "/system.slice/test.service".to_owned(),
         )?;
         fs::rename(&directory, parent.join("moved.service"))?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::DeletionUnproven)
+        ));
         fs::create_dir(&directory)?;
         fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
         assert!(matches!(
