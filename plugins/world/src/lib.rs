@@ -3871,25 +3871,6 @@ mod tests {
             ))
         );
 
-        for params in [
-            vec![0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
-            vec![0xa2, 0x61, b'a', 1, 0x61, b'a', 2],
-            vec![0x81, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
-        ] {
-            let proposal = ProposedAction::new(
-                Kind::new(EVENT_TYPE_ACTION_V1),
-                actor,
-                rewrite_array_field(&payload, 5, ciborium::Value::Bytes(params)),
-                Kind::new("world.action.v1.submit"),
-            );
-            assert_eq!(
-                plugin.approve(&proposal),
-                Err(ActionRejected::DomainValidationFailed(
-                    WorldCodecError::NonCanonicalParamsCbor.to_string()
-                ))
-            );
-        }
-
         let wrong_capability = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION_V1),
             actor,
@@ -3922,6 +3903,38 @@ mod tests {
             plugin.approve(&malformed),
             Err(ActionRejected::DomainValidationFailed(_))
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_v1_approver_rejects_noncanonical_map_params() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies(vec![body]);
+        let mut action = sample_action();
+        action.actor_entity_id = actor;
+        action.body_entity_id = body;
+        action.catalogue_version = 1;
+        let payload = action.encode().test_ok();
+
+        for params in [
+            vec![0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
+            vec![0xa2, 0x61, b'a', 1, 0x61, b'a', 2],
+            vec![0x81, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
+        ] {
+            let proposal = ProposedAction::new(
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                actor,
+                rewrite_array_field(&payload, 5, ciborium::Value::Bytes(params)),
+                Kind::new("world.action.v1.submit"),
+            );
+            assert_eq!(
+                plugin.approve(&proposal),
+                Err(ActionRejected::DomainValidationFailed(
+                    WorldCodecError::NonCanonicalParamsCbor.to_string()
+                ))
+            );
+        }
     }
 
     #[test]
