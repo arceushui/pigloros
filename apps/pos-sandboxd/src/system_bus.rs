@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use futures_util::{Stream, StreamExt};
-use zbus::{zvariant::OwnedObjectPath, Connection};
+use zbus::{proxy::CacheProperties, zvariant::OwnedObjectPath, Connection};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
@@ -424,6 +424,8 @@ impl SystemdTransientUnitTransport {
         let service = ServiceProxy::builder(&self.connection)
             .path(verified.unit_path.clone())
             .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
+            // The second ControlGroup read must reach systemd, not a proxy cache.
+            .cache_properties(CacheProperties::No)
             .build()
             .await
             .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
