@@ -188,12 +188,7 @@ fn verify_snapshot_effect_with_rechecks(
         crate::read_complete_world_replay(sender, snap.timeline, SeqRange::all(), read_bounds)
             .map_err(SnapshotError::from)?;
     let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
-    verify_snapshot_event_sets(
-        snap,
-        registry,
-        &all_events[tail_start..],
-        &all_events,
-    )?;
+    verify_snapshot_event_sets(snap, registry, &all_events[tail_start..], &all_events)?;
     let final_bounds = crate::require_world_replay(sender, closure, requested_use)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
     if final_bounds == read_bounds {
