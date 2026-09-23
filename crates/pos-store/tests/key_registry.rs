@@ -211,14 +211,13 @@ fn generic_timeline_clone_clears_source_signature_identity(
     Ok(())
 }
 
-fn rotated_import_fixture() -> Result<
-    (
-        KeyRegistryStateV1,
-        pos_core::store::TimelineExport,
-        [(KeyIdentityV1, pos_core::PublicKey); 2],
-    ),
-    Box<dyn std::error::Error>,
-> {
+type RotatedImportFixture = (
+    KeyRegistryStateV1,
+    pos_core::store::TimelineExport,
+    [(KeyIdentityV1, pos_core::PublicKey); 2],
+);
+
+fn rotated_import_fixture() -> Result<RotatedImportFixture, Box<dyn std::error::Error>> {
     let (_, first_verifier) = pos_crypto::signing::generate_keypair();
     let (_, second_verifier) = pos_crypto::signing::generate_keypair();
     let first_key = pos_crypto::signing::public_key_from_verifying_key(&first_verifier);
