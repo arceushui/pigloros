@@ -2252,7 +2252,7 @@ mod tests {
             .test_ok();
         world.state["fields"]["observation_id"] = serde_json::json!("missing");
 
-        let mut without_world = report.baseline.clone();
+        let mut without_world = report.baseline;
         without_world
             .projections
             .retain(|projection| projection.reducer != "world");
