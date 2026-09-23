@@ -548,7 +548,7 @@ fn register_static_plugins(
     let society_binding = empty_output_binding(society)?;
     let probe_binding = empty_output_binding(probe)?;
     experiment
-        .register_with_output_policy(
+        .register_with_verified_output_policy(
             observation,
             observation_binding,
             Some(Box::new(EntityStateProjection)),
@@ -556,7 +556,7 @@ fn register_static_plugins(
         )
         .test_ok()?;
     experiment
-        .register_with_output_policy(
+        .register_with_verified_output_policy(
             society,
             society_binding,
             Some(Box::new(SocietyReducer)),
@@ -564,7 +564,7 @@ fn register_static_plugins(
         )
         .test_ok()?;
     experiment
-        .register_with_output_policy(
+        .register_with_verified_output_policy(
             probe,
             probe_binding,
             None,
@@ -603,7 +603,7 @@ fn register_experiment(
     });
     register_static_plugins(&mut experiment, scenario, &observation, &society, &probe)?;
     experiment
-        .register_with_output_policy(
+        .register_with_verified_output_policy(
             &fast,
             fast_binding,
             Some(Box::new(AgentReducer)),
@@ -620,7 +620,7 @@ fn register_experiment(
         )
         .test_ok()?;
     experiment
-        .register_with_output_policy(
+        .register_with_verified_output_policy(
             &slow,
             slow_binding,
             Some(Box::new(AgentReducer)),

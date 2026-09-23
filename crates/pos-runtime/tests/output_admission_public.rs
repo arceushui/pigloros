@@ -473,7 +473,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
     let mut admitted = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    admitted.register_with_output_policy(
+    admitted.register_with_verified_output_policy(
         &plugin,
         source.binding,
         None,

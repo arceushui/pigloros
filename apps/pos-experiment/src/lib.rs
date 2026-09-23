@@ -1163,50 +1163,6 @@ impl Experiment {
         self.registry.register_generated(plugin, reducer, driver)
     }
 
-    /// Register a Plugin with its host-verified output policy and executable budget.
-    ///
-    /// # Errors
-    /// Returns the runtime registration or output-admission error.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn register_with_output_policy(
-        &mut self,
-        plugin: &dyn pos_core::Plugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        reducer: Option<Box<dyn pos_core::Reducer>>,
-        driver: Option<Box<dyn pos_runtime::Driver>>,
-    ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry
-            .register_with_output_policy(plugin, binding, reducer, driver)
-    }
-
-    /// Register a Plugin with its host-verified output policy, executable
-    /// budget, and optional action approver.
-    ///
-    /// # Errors
-    /// Returns the runtime registration or output-admission error when the
-    /// policy, budget, ownership, or approver route is invalid.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn register_with_output_policy_and_approver(
-        &mut self,
-        plugin: &dyn pos_core::Plugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        reducer: Option<Box<dyn pos_core::Reducer>>,
-        driver: Option<Box<dyn pos_runtime::Driver>>,
-        approver: Option<Box<dyn pos_core::ActionApprover>>,
-        approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
-    ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_with_output_policy_and_approver(
-            plugin,
-            binding,
-            reducer,
-            driver,
-            approver,
-            approver_event_types,
-        )
-    }
-
     /// Register a Plugin with a complete host-authorized output binding.
     ///
     /// # Errors
@@ -7091,7 +7047,7 @@ mod coverage_entrypoints {
             "coverage-approver-wrapper",
             StopCondition::MaxTicks(1),
         ));
-        ok(experiment.register_with_output_policy_and_approver(
+        ok(experiment.register_with_verified_output_policy_and_approver(
             &plugin,
             binding,
             None,

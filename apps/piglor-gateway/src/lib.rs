@@ -200,13 +200,10 @@ mod coverage_tests {
             "world.action.v1",
         )
         .is_err());
-        assert!(gateway_output_binding_with_inputs(
-            &plugin,
-            &[],
-            "deterministic-local-v1",
-            "",
-        )
-        .is_err());
+        assert!(
+            gateway_output_binding_with_inputs(&plugin, &[], "deterministic-local-v1", "",)
+                .is_err()
+        );
 
         assert!(gateway_output_binding_with_inputs(
             &InvalidVersionPlugin,

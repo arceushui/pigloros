@@ -2717,53 +2717,6 @@ impl PluginRegistry {
         )
     }
 
-    /// Register a Plugin with its complete host-verified output-policy binding.
-    ///
-    /// A Plugin that emits drafts without this binding is rejected at the
-    /// production Driver boundary; there is no implicit allow-all policy.
-    ///
-    /// # Errors
-    /// Returns an identity, registration, or capability error when the policy
-    /// cannot be bound to the Plugin.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn register_with_output_policy(
-        &mut self,
-        plugin: &dyn Plugin,
-        binding: OutputPolicyBindingV1,
-        reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-    ) -> Result<(), RuntimeError> {
-        self.register_with_verified_output_policy(plugin, binding, reducer, driver)
-    }
-
-    /// Register a Plugin with its host-verified output-policy binding and
-    /// optional action approver.
-    ///
-    /// # Errors
-    /// Returns the runtime registration or output-admission error when the
-    /// policy, budget, ownership, or approver route is invalid.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn register_with_output_policy_and_approver(
-        &mut self,
-        plugin: &dyn Plugin,
-        binding: OutputPolicyBindingV1,
-        reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-        approver: Option<Box<dyn ActionApprover>>,
-        approver_event_types: impl IntoIterator<Item = Kind>,
-    ) -> Result<(), RuntimeError> {
-        self.register_with_verified_output_policy_and_approver(
-            plugin,
-            binding,
-            reducer,
-            driver,
-            approver,
-            approver_event_types,
-        )
-    }
-
     /// Register a Plugin with a complete host-authorized output binding.
     ///
     /// Release registration has no policy-only or generated fallback.  The
@@ -4076,7 +4029,7 @@ mod tests {
         .test_ok();
         let mut registry = gated_registry();
         assert!(matches!(
-            registry.register_with_output_policy(
+            registry.register_with_verified_output_policy(
                 &plugin,
                 foreign_binding,
                 None,
@@ -6679,7 +6632,7 @@ mod tests {
             "deterministic-local-v1",
         )
         .test_ok();
-        reg.register_with_output_policy_and_approver(
+        reg.register_with_verified_output_policy_and_approver(
             &plugin,
             binding,
             None,
