@@ -1207,6 +1207,21 @@ impl WorldDriver {
             })
     }
 
+    fn record_causation(
+        causation_by_body: &mut Vec<(EntityId, EventId)>,
+        body_entity_id: EntityId,
+        event_id: EventId,
+    ) {
+        if let Some((_, causation)) = causation_by_body
+            .iter_mut()
+            .find(|(body, _)| *body == body_entity_id)
+        {
+            *causation = event_id;
+        } else {
+            causation_by_body.push((body_entity_id, event_id));
+        }
+    }
+
     fn config_draft(&mut self) -> Result<Option<pos_core::event::EventDraft>, RuntimeError> {
         if self.config_emitted {
             return Ok(None);
@@ -1241,16 +1256,7 @@ impl WorldDriver {
                 });
             }
             self.applied_action_seqs.push(event.seq.as_u64());
-            if let Some((_, causation)) = self
-                .causation_by_body
-                .iter_mut()
-                .find(|(body, _)| *body == action.body_entity_id)
-            {
-                *causation = event.id;
-            } else {
-                self.causation_by_body
-                    .push((action.body_entity_id, event.id));
-            }
+            Self::record_causation(&mut self.causation_by_body, action.body_entity_id, event.id);
         }
         Ok(())
     }
@@ -1388,17 +1394,11 @@ impl Driver for WorldDriver {
                 restored
                     .applied_action_seqs
                     .push(event.header().seq().as_u64());
-                if let Some((_, causation)) = restored
-                    .causation_by_body
-                    .iter_mut()
-                    .find(|(body, _)| *body == action.body_entity_id)
-                {
-                    *causation = event.header().id();
-                } else {
-                    restored
-                        .causation_by_body
-                        .push((action.body_entity_id, event.header().id()));
-                }
+                Self::record_causation(
+                    &mut restored.causation_by_body,
+                    action.body_entity_id,
+                    event.header().id(),
+                );
                 restored.tick = restored.tick.max(action.tick.saturating_add(1));
             } else if event_type == EVENT_TYPE_OBSERVATION_V1 {
                 let observation = WorldObservationV1::decode(payload).map_err(|error| {
