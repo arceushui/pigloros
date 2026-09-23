@@ -440,6 +440,7 @@ fn validate_event_page_rows(rows: &[WorldEventRowV1]) -> Result<(u64, u64), Worl
     }
     let mut event_ids = Vec::with_capacity(rows.len());
     let mut source_positions = Vec::with_capacity(rows.len());
+    let mut last_source_sequences = Vec::with_capacity(rows.len());
     let mut first_logical_seq = 0;
     let mut last_logical_seq = 0;
     for (index, row) in rows.iter().enumerate() {
@@ -460,6 +461,17 @@ fn validate_event_page_rows(rows: &[WorldEventRowV1]) -> Result<(u64, u64), Worl
         let source_position = (input.source_timeline_id, input.source_segment_seq);
         if event_ids.contains(&input.event_id) || source_positions.contains(&source_position) {
             return Err(WorldHistoryErrorV1::DuplicateSourceEvent);
+        }
+        if let Some((_, last_sequence)) = last_source_sequences
+            .iter_mut()
+            .find(|(timeline, _)| *timeline == input.source_timeline_id)
+        {
+            if last_sequence.checked_add(1) != Some(input.source_segment_seq) {
+                return Err(WorldHistoryErrorV1::InvalidRange);
+            }
+            *last_sequence = input.source_segment_seq;
+        } else {
+            last_source_sequences.push((input.source_timeline_id, input.source_segment_seq));
         }
         event_ids.push(input.event_id);
         source_positions.push(source_position);

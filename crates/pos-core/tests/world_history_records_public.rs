@@ -366,6 +366,43 @@ fn public_wep1_checks_page_bounds_sequence_and_source_identity(
 }
 
 #[test]
+fn public_wep1_checks_interleaved_source_sequence_in_constructor_and_decoder(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut other_source = row_input(2, 1, 2);
+    other_source.source_timeline_id = timeline(3);
+    let other_source = WorldEventRowV1::new(other_source)?;
+    let valid = WorldEventPageV1::new(
+        timeline(1),
+        vec![row(1, 1, 1)?, other_source.clone(), row(3, 2, 3)?],
+    )?;
+    assert_eq!(WorldEventPageV1::decode(&valid.encode()), Ok(valid.clone()));
+
+    assert_eq!(
+        WorldEventPageV1::new(
+            timeline(1),
+            vec![row(1, 1, 1)?, other_source, row(3, 3, 3)?],
+        ),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
+
+    let mut encoded: ciborium::value::Value = ciborium::from_reader(valid.encode().as_slice())?;
+    let page_fields = encoded.as_array_mut().ok_or("WEP1 page must be an array")?;
+    let rows = page_fields[5]
+        .as_array_mut()
+        .ok_or("WEP1 rows must be an array")?;
+    let third_row = rows[2]
+        .as_array_mut()
+        .ok_or("WEP1 source row must be an array")?;
+    third_row[2] = uint(3);
+    let skipped_source = independent_cbor(&encoded)?;
+    assert_eq!(
+        WorldEventPageV1::decode(&skipped_source),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_whb1_matches_independent_cbor_and_round_trips() -> Result<(), Box<dyn std::error::Error>>
 {
     use ciborium::value::Value::Array;
