@@ -125,6 +125,13 @@ fn memory_key_registry_public_contract_covers_transaction_boundaries(
         Err(CoreError::Storage(_))
     ));
 
+    let mut unfenced = MemoryStore::new();
+    unfenced.save_key_registry(&registry)?;
+    let unfenced_timeline = unfenced.create_timeline("unfenced-registry")?;
+    assert!(unfenced
+        .append_signed_authorized(unfenced_timeline.id(), &registry, &mut absent_callback)
+        .is_err());
+
     store.save_key_registry(&registry)?;
     let timeline = store.create_timeline("memory-registry-contract")?;
     let mut seed = store

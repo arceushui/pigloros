@@ -2713,8 +2713,8 @@ impl EventStore for MemoryStore {
         let outcome = registry
             .begin_key_destruction(request)
             .map_err(|error| CoreError::Storage(format!("key destruction: {error}")))?;
-        self.save_key_registry(&registry)?;
-        Ok((outcome, registry))
+        self.save_key_registry(&registry)
+            .map(|()| (outcome, registry))
     }
 
     fn complete_key_registry_destruction(
@@ -2728,8 +2728,8 @@ impl EventStore for MemoryStore {
         let outcome = registry
             .complete_key_destruction(request, deletion_receipt)
             .map_err(|error| CoreError::Storage(format!("key destruction: {error}")))?;
-        self.save_key_registry(&registry)?;
-        Ok((outcome, registry))
+        self.save_key_registry(&registry)
+            .map(|()| (outcome, registry))
     }
 
     fn append_bounded(
@@ -6309,6 +6309,22 @@ mod coverage_entrypoints {
         store.key_registry = Some(invalid.clone());
         assert!(store.load_key_registry().is_err());
         assert!(store.save_key_registry(&invalid).is_err());
+        let identity = KeyIdentityV1::new("corrupt-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let request = pos_core::KeyDestructionRequestV1::new(
+            identity,
+            Hash::from_bytes([11; 32]),
+            Hash::from_bytes([12; 32]),
+        );
+        let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(store
+            .append_signed_authorized(TimelineId::new(), &invalid, &mut callback)
+            .is_err());
+        assert!(store.begin_key_registry_destruction(request).is_err());
+        assert!(store
+            .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))
+            .is_err());
     }
 
     #[test]
