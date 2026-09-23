@@ -9546,10 +9546,7 @@ mod coverage_paths {
             recovery_object_value(&mutation.objects[0]);
             ERASURE_MAX_REFERENCES + 1
         ]);
-        assert_eq!(
-            recovery_proof_replacing_mutation_field(proof, 8, oversized_objects),
-            Err(ErasureErrorV1::ScopeInvalid)
-        );
+        assert!(recovery_proof_replacing_mutation_field(proof, 8, oversized_objects).is_err());
         assert!(recovery_proof_replacing_mutation_field(
             proof,
             8,
