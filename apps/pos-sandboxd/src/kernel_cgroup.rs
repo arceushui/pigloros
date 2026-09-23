@@ -1,6 +1,6 @@
 //! Read-only kernel observations for one manager-bound attempt cgroup.
 
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 
@@ -83,7 +83,14 @@ impl CgroupRoot {
     }
 
     fn verify(root: File) -> Result<Self, AttemptCgroupError> {
-        let filesystem = fstatfs(&root).map_err(AttemptCgroupError::RootFilesystem)?;
+        Self::verify_with(root, |file| fstatfs(file))
+    }
+
+    fn verify_with(
+        root: File,
+        inspect: impl FnOnce(&File) -> Result<rustix::fs::StatFs, Errno>,
+    ) -> Result<Self, AttemptCgroupError> {
+        let filesystem = inspect(&root).map_err(AttemptCgroupError::RootFilesystem)?;
         if u64::try_from(filesystem.f_type).ok() != Some(CGROUP2_SUPER_MAGIC) {
             return Err(AttemptCgroupError::WrongFilesystem);
         }
@@ -183,6 +190,22 @@ impl BoundAttemptCgroup {
         unit_path: OwnedObjectPath,
         control_group: String,
     ) -> Result<Self, AttemptCgroupError> {
+        Self::open_with_metadata(
+            root,
+            unit_name,
+            unit_path,
+            control_group,
+            File::metadata,
+        )
+    }
+
+    fn open_with_metadata(
+        root: CgroupRoot,
+        unit_name: TransientServiceUnitName,
+        unit_path: OwnedObjectPath,
+        control_group: String,
+        read_metadata: impl FnOnce(&File) -> std::io::Result<Metadata>,
+    ) -> Result<Self, AttemptCgroupError> {
         let relative = relative_cgroup_path(&control_group)?;
         let directory = openat2(
             &root.0,
@@ -193,7 +216,7 @@ impl BoundAttemptCgroup {
         )
         .map(File::from)
         .map_err(AttemptCgroupError::PathOpen)?;
-        let metadata = directory.metadata().map_err(AttemptCgroupError::Metadata)?;
+        let metadata = read_metadata(&directory).map_err(AttemptCgroupError::Metadata)?;
         let events = openat2(
             &directory,
             "cgroup.events",
@@ -232,10 +255,14 @@ impl BoundAttemptCgroup {
     /// # Errors
     /// Rejects a populated, malformed, unreadable, or identity-replaced cgroup.
     pub fn observe_empty(&mut self) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
-        let retained = self
-            .directory
-            .metadata()
-            .map_err(AttemptCgroupError::Metadata)?;
+        self.observe_empty_with_metadata(File::metadata)
+    }
+
+    fn observe_empty_with_metadata(
+        &mut self,
+        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+    ) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
+        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
         if retained.dev() != self.device || retained.ino() != self.inode {
             return Err(AttemptCgroupError::PathReused);
         }
@@ -255,8 +282,7 @@ impl BoundAttemptCgroup {
             }
             Err(error) => return Err(AttemptCgroupError::PathOpen(error)),
             Ok(current) => {
-                let metadata = File::from(current)
-                    .metadata()
+                let metadata = read_metadata(&File::from(current))
                     .map_err(AttemptCgroupError::Metadata)?;
                 if metadata.dev() != self.device || metadata.ino() != self.inode {
                     return Err(AttemptCgroupError::PathReused);
@@ -397,6 +423,12 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         let error = CgroupRoot::verify(File::open(temporary.path())?).err();
         assert!(matches!(error, Some(AttemptCgroupError::WrongFilesystem)));
+        let error = CgroupRoot::verify_with(File::open(temporary.path())?, |_| Err(Errno::BADF))
+            .err();
+        assert!(matches!(
+            error,
+            Some(AttemptCgroupError::RootFilesystem(_))
+        ));
         Ok(())
     }
 
@@ -590,6 +622,55 @@ mod tests {
         )
         .err();
         assert!(matches!(error, Some(AttemptCgroupError::EventsRead(_))));
+        let error = BoundAttemptCgroup::open_with_metadata(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([7; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+            |_| Err(std::io::Error::other("injected metadata failure")),
+        )
+        .err();
+        assert!(matches!(error, Some(AttemptCgroupError::Metadata(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn identity_metadata_failures_do_not_prove_emptiness() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let directory = temporary.path().join("system.slice/test.service");
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
+        let mut bound = BoundAttemptCgroup::open(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([8; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+        )?;
+        let retained_error = bound
+            .observe_empty_with_metadata(|_| {
+                Err(std::io::Error::other("injected retained metadata failure"))
+            })
+            .err();
+        assert!(matches!(
+            retained_error,
+            Some(AttemptCgroupError::Metadata(_))
+        ));
+        let mut reads = 0;
+        let reopened_error = bound
+            .observe_empty_with_metadata(|file| {
+                reads += 1;
+                if reads == 2 {
+                    Err(std::io::Error::other("injected reopened metadata failure"))
+                } else {
+                    file.metadata()
+                }
+            })
+            .err();
+        assert!(matches!(
+            reopened_error,
+            Some(AttemptCgroupError::Metadata(_))
+        ));
+        assert_eq!(reads, 2);
         Ok(())
     }
 }

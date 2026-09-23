@@ -1151,6 +1151,23 @@ async fn fixed_mount_binding_rejects_absent_attempt_cgroup() -> Result<(), Box<d
 }
 
 #[tokio::test]
+async fn fixed_mount_failure_stops_before_bus_binding() -> Result<(), Box<dyn Error>> {
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server, verified, _temporary) =
+        started_cgroup_transport(ManagerBehavior::default(), service).await?;
+    let error = transport
+        .bind_cgroup_with_root_result(&verified, Err(AttemptCgroupError::WrongFilesystem))
+        .await
+        .err()
+        .ok_or("wrong fixed mount was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::CgroupKernel(AttemptCgroupError::WrongFilesystem)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn cgroup_binding_rejects_lost_unit_lookup() -> Result<(), Box<dyn Error>> {
     let behavior = ManagerBehavior {
         unit_lookup: UnitLookupBehavior::RejectAfterFirst,

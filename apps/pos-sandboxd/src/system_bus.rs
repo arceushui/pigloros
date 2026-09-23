@@ -402,7 +402,16 @@ impl SystemdTransientUnitTransport {
         &self,
         verified: &SystemdVerifiedStart,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
-        let root = CgroupRoot::system()?;
+        self.bind_cgroup_with_root_result(verified, CgroupRoot::system())
+            .await
+    }
+
+    async fn bind_cgroup_with_root_result(
+        &self,
+        verified: &SystemdVerifiedStart,
+        root: Result<CgroupRoot, AttemptCgroupError>,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        let root = root?;
         self.bind_cgroup_with_root(verified, root).await
     }
 
