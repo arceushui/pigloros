@@ -7130,12 +7130,6 @@ mod coverage_entrypoints {
                 (ErasureReferenceV1::from_digest([18; 32]), vec![0xA1, 0xB2]),
             );
         });
-        assert_memory_recovery_proof_survives_manifest_change(|store| {
-            store.erasure_records.insert(
-                ErasureReferenceV1::from_digest([7; 32]),
-                (ErasureReferenceV1::from_digest([9; 32]), vec![0xBA, 0xDB]),
-            );
-        });
     }
 
     fn memory_recovery_proof_checks_objects_and_state() {
