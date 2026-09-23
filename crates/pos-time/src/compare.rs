@@ -48,8 +48,10 @@ pub fn compare(
 ) -> Result<ForkDiff, CoreError> {
     let [a, b] = timelines;
     let [registry_a, registry_b] = registries;
-    let requested_a = comparison_use(a, fork_seq, registry_a)?;
-    let requested_b = comparison_use(b, fork_seq, registry_b)?;
+    let [requested_a, requested_b] =
+        comparison_use(a, fork_seq, registry_a).and_then(|requested_a| {
+            comparison_use(b, fork_seq, registry_b).map(|requested_b| [requested_a, requested_b])
+        })?;
     let requested_uses = [&requested_a, &requested_b];
     let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
     let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
