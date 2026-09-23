@@ -171,6 +171,9 @@ pub enum WorldReplayClosureErrorV1 {
     /// A consumer or producer points at an absent native leaf.
     #[error("World Replay consumer or producer points at a missing artifact")]
     MissingConsumerArtifact,
+    /// An optional view is not selected by the immutable WCS1 root set.
+    #[error("World Replay closure contains an unselected optional view")]
+    UnselectedOptionalView,
     /// The retention clock or artifact authority could not be read.
     #[error("World Replay artifact authority is unavailable")]
     AuthorityUnavailable,
@@ -319,6 +322,15 @@ impl WorldReplayClosureV1 {
             })
         }) {
             return Err(WorldReplayClosureErrorV1::MissingConsumerArtifact);
+        }
+        if artifacts.iter().any(|leaf| {
+            leaf.as_input().kind == WorldArtifactKindV1::OptionalView
+                && !input
+                    .consumer_set
+                    .optional_view_roots()
+                    .contains(&leaf.digest())
+        }) {
+            return Err(WorldReplayClosureErrorV1::UnselectedOptionalView);
         }
         Ok(Self {
             timeline_id: input.timeline_id,
@@ -544,7 +556,11 @@ impl WorldReplayClosureV1 {
             optional_views: self
                 .artifacts
                 .iter()
-                .filter(|leaf| leaf.as_input().kind == WorldArtifactKindV1::OptionalView)
+                .filter(|leaf| {
+                    self.consumer_set
+                        .optional_view_roots()
+                        .contains(&leaf.digest())
+                })
                 .map(|leaf| (leaf.digest(), leaf.as_input().native_digest))
                 .collect(),
         })

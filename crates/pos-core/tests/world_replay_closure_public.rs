@@ -688,6 +688,24 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
 }
 
 #[test]
+fn unselected_optional_view_cannot_enter_the_admitted_closure() {
+    let mut extra = closure_input();
+    extra.artifacts.push(leaf(
+        scope(),
+        extra.retention_lease.digest(),
+        WorldArtifactKindV1::OptionalView,
+        hash(54),
+        [115; 32],
+        ArtifactOptionalityV1::Optional,
+        ArtifactTransitionRuleV1::RedactViews,
+    ));
+    assert_eq!(
+        WorldReplayClosureV1::new(extra),
+        Err(WorldReplayClosureErrorV1::UnselectedOptionalView)
+    );
+}
+
+#[test]
 fn authority_failures_are_not_treated_as_replay_evidence() {
     let mut clock_failure =
         Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::FailNow);
