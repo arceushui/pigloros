@@ -274,10 +274,10 @@ pub enum SystemdTransientUnitTransportError {
     /// The exact attempt unit could not be identified at cgroup binding time.
     #[error("systemd attempt-unit identity changed before cgroup binding")]
     CgroupUnitMismatch,
-    /// The typed service ControlGroup property could not be read.
+    /// The typed service `ControlGroup` property could not be read.
     #[error("failed to read the exact systemd attempt ControlGroup")]
     CgroupReadback(#[source] zbus::Error),
-    /// The manager could not reverse-map ControlGroup to its unit object.
+    /// The manager could not reverse-map `ControlGroup` to its unit object.
     #[error("failed to reverse-map the systemd attempt ControlGroup")]
     CgroupReverseLookup(#[source] zbus::Error),
     /// The manager-bound cgroup could not be safely opened or observed.

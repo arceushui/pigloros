@@ -66,7 +66,7 @@ pub enum AttemptCgroupError {
 
 /// The verified fixed cgroup v2 root, retained as a descriptor.
 #[derive(Debug)]
-pub(crate) struct CgroupRoot(File);
+pub struct CgroupRoot(File);
 
 impl CgroupRoot {
     pub(crate) fn system() -> Result<Self, AttemptCgroupError> {
@@ -156,7 +156,7 @@ impl AttemptCgroupEmptyObservation {
         self.raw_events.as_deref()
     }
 
-    /// Return the CLOCK_MONOTONIC observation time as seconds and nanoseconds.
+    /// Return the `CLOCK_MONOTONIC` observation time as seconds and nanoseconds.
     #[must_use]
     pub const fn observed_monotonic(&self) -> (i64, i64) {
         (self.monotonic_seconds, self.monotonic_nanoseconds)
@@ -278,7 +278,7 @@ impl BoundAttemptCgroup {
             basis: basis_and_raw.0,
             raw_events: basis_and_raw.1,
             monotonic_seconds: observed.tv_sec,
-            monotonic_nanoseconds: i64::from(observed.tv_nsec),
+            monotonic_nanoseconds: observed.tv_nsec,
         })
     }
 
