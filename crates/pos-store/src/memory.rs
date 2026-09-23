@@ -1507,11 +1507,11 @@ impl MemoryStore {
         let proof = admission.recovery_proof()?;
         let child = admission.child().clone();
         let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
-        let chain_head = self
-            .compute_chain_hash_at_unchecked(parent, at_seq)
-            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
+            let chain_head = self
+                .compute_chain_hash_at_unchecked(parent, at_seq)
+                .map_err(|_| ErasureErrorV1::PolicyConflict)?;
             let exact_child = self.memory_fork_child_is_exact(&child, chain_head)?;
             let exact_manifest = self.persisted_fork_erasure_mutations_are_exact(admission);
             let exact_proof = self.erasure_fork_recovery_proofs.get(&operation) == Some(&proof);
@@ -1535,6 +1535,9 @@ impl MemoryStore {
             return Err(ErasureErrorV1::PolicyConflict);
         }
 
+        let chain_head = self
+            .compute_chain_hash_at_unchecked(parent, at_seq)
+            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
         let timeline = Timeline::new(child);
         let mut delta = MemoryErasureCasDelta::default();
         for prepared in admission.admissions() {

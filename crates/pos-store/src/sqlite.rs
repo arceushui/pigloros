@@ -5218,16 +5218,16 @@ impl SqliteStore {
             let recovery_proof_digest = recovery_proof.content_digest()?;
             let child = admission.child();
             let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
-            let chain_head = Self::compute_chain_hash_at_unchecked_on(
-                &self.conn,
-                self.hasher.as_ref(),
-                parent,
-                at_seq,
-            )
-            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
             if let Some(receipt) = sqlite_fork_admission_receipt(&self.conn, admission.operation())?
             {
+                let chain_head = Self::compute_chain_hash_at_unchecked_on(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    parent,
+                    at_seq,
+                )
+                .map_err(|_| ErasureErrorV1::PolicyConflict)?;
                 return sqlite_fork_admission_is_exact(
                     &self.conn,
                     self.hasher.as_ref(),
@@ -5251,6 +5251,13 @@ impl SqliteStore {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
 
+            let chain_head = Self::compute_chain_hash_at_unchecked_on(
+                &self.conn,
+                self.hasher.as_ref(),
+                parent,
+                at_seq,
+            )
+            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
             for prepared in admission.admissions() {
                 // The complete inventory-generation comparison above binds
                 // every active request head. An exact retry is therefore

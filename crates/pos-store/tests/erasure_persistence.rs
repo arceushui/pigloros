@@ -740,6 +740,35 @@ where
     Ok((shared, gate, request.reference(), child, prepared))
 }
 
+fn assert_fork_admission_rejects_a_deleted_parent_as_stale<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (store, gate, request, child, prepared) = prepared_fork(store)?;
+    let (parent, _) = prepared
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    store.borrow_mut().delete_timeline(parent)?;
+
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(store.borrow().scope_index_count(request)?, 0);
+    let inventory = store
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert!(!inventory.topology().contains(&parent));
+    assert!(!inventory.topology().contains(&child));
+    Ok(())
+}
+
 fn assert_fork_admission_rejects_a_foreign_transition_permit<S>(
     store: S,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -1201,6 +1230,12 @@ fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
     assert_eq!(topology_after, topology_before);
     assert!(!topology_after.contains(&child));
     Ok(())
+}
+
+#[test]
+fn memory_fork_admission_reports_stale_generation_before_missing_parent(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_deleted_parent_as_stale(MemoryStore::new())
 }
 
 #[test]
@@ -3185,6 +3220,13 @@ fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
         .topology()
         .contains(&child));
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_reports_stale_generation_before_missing_parent(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_deleted_parent_as_stale(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
