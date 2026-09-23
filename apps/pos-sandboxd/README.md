@@ -25,5 +25,10 @@ property through the generated typed service proxy.
 The existing request verifier rejects any unequal complete readback. The
 effective `RootImagePolicy` is recorded separately because it is manager-owned
 state, not requested configuration or signature-admission evidence. The typed
-result proves requested-state verification only; later slices own launcher
-readiness, release, image admission, kernel observation, and lifecycle proof.
+result proves requested-state verification only. The separate `stop_job` and
+`force_kill` operations command only the deterministic attempt unit through
+typed systemd D-Bus. Stop uses `replace` mode so a queued start job cannot
+block cleanup; start retains `fail` mode. A completed stop job or acknowledged
+SIGKILL is not proof that the unit or cgroup is absent. Later slices own bounded
+orchestration, kernel observation, launcher readiness/release, and full
+lifecycle cleanup.
