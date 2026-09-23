@@ -2748,48 +2748,12 @@ impl GatewayWorldActionPayload {
 }
 
 fn encode_world_action(action: &WorldActionV1) -> Result<CanonicalBytes, ActionRejected> {
-    ciborium::from_reader::<ciborium::Value, _>(action.params_cbor.as_slice())
-        .map_err(|_| ActionRejected::DomainValidationFailed("invalid action parameters".to_owned()))
-        .and_then(|params| {
-            if !valid_action_params(&params) {
-                return Err(ActionRejected::DomainValidationFailed(
-                    "non-canonical or non-finite action parameters".to_owned(),
-                ));
-            }
-            action.encode().map_err(|error| match error {
-                pos_plugin_world::WorldCodecError::PayloadTooLarge { size, max } => {
-                    ActionRejected::PayloadTooLarge { size, max }
-                }
-                error => ActionRejected::DomainValidationFailed(error.to_string()),
-            })
-        })
-}
-
-fn valid_action_params(value: &ciborium::Value) -> bool {
-    match value {
-        ciborium::Value::Float(value) => value.is_finite(),
-        ciborium::Value::Array(values) => values.iter().all(valid_action_params),
-        ciborium::Value::Map(entries) => {
-            entries.iter().enumerate().all(|(index, (key, value))| {
-                valid_action_params(key)
-                    && valid_action_params(value)
-                    && !entries[..index].iter().any(|(previous, _)| previous == key)
-            }) && entries.windows(2).all(|pair| {
-                let left = action_param_key_bytes(&pair[0].0);
-                let right = action_param_key_bytes(&pair[1].0);
-                (left.len(), left) < (right.len(), right)
-            })
+    action.encode().map_err(|error| match error {
+        pos_plugin_world::WorldCodecError::PayloadTooLarge { size, max } => {
+            ActionRejected::PayloadTooLarge { size, max }
         }
-        ciborium::Value::Tag(_, value) => valid_action_params(value),
-        _ => true,
-    }
-}
-
-fn action_param_key_bytes(key: &ciborium::Value) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    // Parsed CBOR values serialize into this infallible byte sink.
-    drop(ciborium::into_writer(key, &mut bytes));
-    bytes
+        error => ActionRejected::DomainValidationFailed(error.to_string()),
+    })
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
