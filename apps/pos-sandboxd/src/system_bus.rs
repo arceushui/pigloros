@@ -16,6 +16,8 @@ use crate::{
 };
 
 const JOB_MODE: &str = "fail";
+const KILL_WHOM: &str = "all";
+const SIGKILL: i32 = 9;
 const UNIT_PREFIX: &str = "pigloros-attempt-";
 const UNIT_SUFFIX: &str = ".service";
 const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
@@ -71,23 +73,23 @@ impl SystemdStartJob {
     }
 }
 
-/// A systemd start-job result that cannot authorize requested-state readback.
+/// A systemd unit-job result that cannot authorize the next lifecycle step.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SystemdJobFailure {
     /// The job was explicitly cancelled.
-    #[error("systemd cancelled the transient-unit start job")]
+    #[error("systemd cancelled the transient-unit job")]
     Canceled,
     /// The job exceeded its systemd job timeout.
-    #[error("the systemd transient-unit start job timed out")]
+    #[error("the systemd transient-unit job timed out")]
     Timeout,
     /// The job failed.
-    #[error("the systemd transient-unit start job failed")]
+    #[error("the systemd transient-unit job failed")]
     Failed,
     /// A dependency job failed.
-    #[error("a dependency of the systemd transient-unit start job failed")]
+    #[error("a dependency of the systemd transient-unit job failed")]
     Dependency,
     /// systemd skipped the job.
-    #[error("systemd skipped the transient-unit start job")]
+    #[error("systemd skipped the transient-unit job")]
     Skipped,
     /// A newer or malformed manager returned an unrecognized result.
     #[error("systemd returned unknown transient-unit job result {0:?}")]
@@ -127,7 +129,7 @@ fn decode_job_completion(
 
 async fn await_job_completion<S>(
     completions: &mut S,
-    job: &SystemdStartJob,
+    job_path: &str,
     submitted_name: String,
 ) -> Result<(), SystemdTransientUnitTransportError>
 where
@@ -138,7 +140,7 @@ where
             .next()
             .await
             .ok_or(SystemdTransientUnitTransportError::JobSignalEnded)??;
-        if completion.job.as_str() != job.as_str() {
+        if completion.job.as_str() != job_path {
             continue;
         }
         if completion.unit != submitted_name {
@@ -151,6 +153,30 @@ where
             return Err(failure.into());
         }
         return Ok(());
+    }
+}
+
+/// One exact StopUnit job that completed successfully.
+///
+/// This is a command observation, not unit absence, cgroup emptiness, or full
+/// attempt-cleanup evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemdStopJobCompleted {
+    unit_name: TransientServiceUnitName,
+    job: OwnedObjectPath,
+}
+
+impl SystemdStopJobCompleted {
+    /// Return the deterministic unit that received the stop command.
+    #[must_use]
+    pub const fn unit_name(&self) -> &TransientServiceUnitName {
+        &self.unit_name
+    }
+
+    /// Return the exact completed stop-job object path.
+    #[must_use]
+    pub fn job_path(&self) -> &str {
+        self.job.as_str()
     }
 }
 
@@ -196,7 +222,7 @@ impl SystemdVerifiedStart {
     }
 }
 
-/// Fail-closed failures before or during typed transient-unit submission.
+/// Fail-closed failures at the typed transient-unit command boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemdTransientUnitTransportError {
     /// The process could not establish its privileged system-bus connection.
@@ -214,6 +240,12 @@ pub enum SystemdTransientUnitTransportError {
     /// systemd rejected or failed the typed `StartTransientUnit` call.
     #[error("systemd rejected the transient-unit request")]
     ManagerCall(#[source] zbus::Error),
+    /// systemd rejected or failed the typed `StopUnit` call.
+    #[error("systemd rejected the transient-unit stop request")]
+    StopCall(#[source] zbus::Error),
+    /// systemd rejected or failed the typed whole-unit `KillUnit` call.
+    #[error("systemd rejected the transient-unit force-kill request")]
+    KillCall(#[source] zbus::Error),
     /// The manager's job-completion signal could not be subscribed to.
     #[error("failed to subscribe to systemd transient-unit job completion")]
     JobSignalSubscribe(#[source] zbus::Error),
@@ -310,6 +342,35 @@ impl SystemdTransientUnitTransport {
             .await
     }
 
+    /// Submit and await the exact stop job for one deterministic attempt unit.
+    ///
+    /// The caller must bound the wait and later prove unit/cgroup absence. A
+    /// completed stop job is not a terminal attempt-cleanup proof.
+    ///
+    /// # Errors
+    /// Rejects a proxy, subscription, call, signal, identity, or job-result
+    /// failure without claiming the unit was stopped.
+    pub async fn stop_job(
+        &self,
+        unit_name: TransientServiceUnitName,
+    ) -> Result<SystemdStopJobCompleted, SystemdTransientUnitTransportError> {
+        stop_job_with_proxy(ManagerProxy::new(&self.connection).await, unit_name).await
+    }
+
+    /// Send SIGKILL to all processes of one deterministic attempt unit.
+    ///
+    /// This explicit escalation is only a command acknowledgement. The caller
+    /// must separately read back cgroup emptiness and complete resource cleanup.
+    ///
+    /// # Errors
+    /// Rejects a proxy or manager-call failure without claiming termination.
+    pub async fn force_kill(
+        &self,
+        unit_name: TransientServiceUnitName,
+    ) -> Result<(), SystemdTransientUnitTransportError> {
+        force_kill_with_proxy(ManagerProxy::new(&self.connection).await, unit_name).await
+    }
+
     async fn start_with_prepared(
         &self,
         unit_name: TransientServiceUnitName,
@@ -335,6 +396,43 @@ impl SystemdTransientUnitTransport {
         let proxy = ManagerProxy::new(&self.connection).await;
         submit_and_verify(proxy, properties, unit_name, &request, &self.connection).await
     }
+}
+
+async fn stop_job_with_proxy(
+    proxy: Result<ManagerProxy<'_>, zbus::Error>,
+    unit_name: TransientServiceUnitName,
+) -> Result<SystemdStopJobCompleted, SystemdTransientUnitTransportError> {
+    let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
+    let completions = proxy.receive_job_removed().await;
+    stop_job_with_completions(&proxy, completions, unit_name).await
+}
+
+async fn stop_job_with_completions(
+    proxy: &ManagerProxy<'_>,
+    completions: Result<JobRemovedStream, zbus::Error>,
+    unit_name: TransientServiceUnitName,
+) -> Result<SystemdStopJobCompleted, SystemdTransientUnitTransportError> {
+    let completions =
+        completions.map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?;
+    let mut completions = completions.map(|completion| decode_job_completion(completion.args()));
+    let name = unit_name.as_str().to_owned();
+    let job = proxy
+        .stop_unit(name.clone(), JOB_MODE.to_owned())
+        .await
+        .map_err(SystemdTransientUnitTransportError::StopCall)?;
+    await_job_completion(&mut completions, job.as_str(), name).await?;
+    Ok(SystemdStopJobCompleted { unit_name, job })
+}
+
+async fn force_kill_with_proxy(
+    proxy: Result<ManagerProxy<'_>, zbus::Error>,
+    unit_name: TransientServiceUnitName,
+) -> Result<(), SystemdTransientUnitTransportError> {
+    let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
+    proxy
+        .kill_unit(unit_name.as_str().to_owned(), KILL_WHOM.to_owned(), SIGKILL)
+        .await
+        .map_err(SystemdTransientUnitTransportError::KillCall)
 }
 
 async fn submit_and_verify(
@@ -386,7 +484,7 @@ async fn submit_with_completions(
         Err(error) => return Err(classify_call_error(error)),
     };
     let job = SystemdStartJob(job_path);
-    await_job_completion(&mut completions, &job, submitted_name.clone()).await?;
+    await_job_completion(&mut completions, job.as_str(), submitted_name.clone()).await?;
     let unit_path = proxy
         .get_unit(submitted_name)
         .await

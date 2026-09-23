@@ -13,7 +13,7 @@ pub use hardening::{
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
 };
 pub use system_bus::{
-    SystemdJobFailure, SystemdStartJob, SystemdTransientUnitTransport,
+    SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
     SystemdTransientUnitTransportError, SystemdVerifiedStart, TransientServiceUnitName,
     TransientServiceUnitNameError,
 };
