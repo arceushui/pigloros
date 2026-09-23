@@ -2735,7 +2735,7 @@ impl GeographicReplayVerifier for MemoryStore {
 }
 
 impl MemoryStore {
-    fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
+    const fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
         if self.erasure_topology_requires_permit {
             Err(CoreError::ErasureContainmentUnavailable)
         } else {
