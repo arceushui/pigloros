@@ -20,9 +20,12 @@ pub enum WorldClosureBindingErrorV1 {
     /// An unsupported record version was supplied.
     #[error("unsupported WCB1 version")]
     UnsupportedVersion,
-    /// A fixed integer, read limit, history relation or record size is invalid.
+    /// A fixed integer, read limit or record size is out of bounds.
     #[error("WCB1 field is out of bounds")]
     FieldOutOfBounds,
+    /// The history root does not match the logical head's empty/nonempty state.
+    #[error("WCB1 history root does not match logical head")]
+    InvalidHistoryRelation,
     /// A required or present optional content address is zero.
     #[error("WCB1 content address is zero")]
     ZeroContentAddress,
@@ -88,8 +91,10 @@ impl WorldClosureBindingV1 {
         {
             return Err(WorldClosureBindingErrorV1::ZeroContentAddress);
         }
-        if (input.logical_head == 0) != input.history_root_hash.is_none()
-            || input.read_limits.max_node_visits == 0
+        if (input.logical_head == 0) != input.history_root_hash.is_none() {
+            return Err(WorldClosureBindingErrorV1::InvalidHistoryRelation);
+        }
+        if input.read_limits.max_node_visits == 0
             || input.read_limits.max_native_bytes == 0
             || !(1..=32).contains(&input.read_limits.max_combined_depth)
         {
@@ -224,7 +229,7 @@ impl Reader<'_> {
                     Err(WorldClosureBindingErrorV1::UnsupportedVersion)
                 }
             })
-            .and_then(|()| self.identity())
+            .and_then(|()| self.identity_and_logical_head())
             .and_then(
                 |(timeline_id, operation_id, cut_coordinate, logical_head)| {
                     self.addresses().and_then(|addresses| {
@@ -248,7 +253,7 @@ impl Reader<'_> {
             )
     }
 
-    fn identity(
+    fn identity_and_logical_head(
         &mut self,
     ) -> Result<(TimelineId, Hash, WorldClosureCutCoordinateV1, u64), WorldClosureBindingErrorV1>
     {

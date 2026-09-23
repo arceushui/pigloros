@@ -147,13 +147,13 @@ fn public_constructor_enforces_addresses_history_and_finite_limits() {
     input.logical_head = 1;
     assert_eq!(
         WorldClosureBindingV1::new(input),
-        Err(WorldClosureBindingErrorV1::FieldOutOfBounds)
+        Err(WorldClosureBindingErrorV1::InvalidHistoryRelation)
     );
     input = baseline_input();
     input.history_root_hash = Some(hash(5));
     assert_eq!(
         WorldClosureBindingV1::new(input),
-        Err(WorldClosureBindingErrorV1::FieldOutOfBounds)
+        Err(WorldClosureBindingErrorV1::InvalidHistoryRelation)
     );
     input = baseline_input();
     input.read_limits.max_node_visits = 0;
@@ -286,13 +286,13 @@ fn public_decoder_enforces_integer_width_and_structural_relations() {
     no_history[95] = 1;
     assert_eq!(
         WorldClosureBindingV1::from_canonical_cbor(&no_history),
-        Err(WorldClosureBindingErrorV1::FieldOutOfBounds)
+        Err(WorldClosureBindingErrorV1::InvalidHistoryRelation)
     );
     let mut extra_history = valid.clone();
     extra_history.splice(232..=232, [0x58, 0x20].into_iter().chain([5; 32]));
     assert_eq!(
         WorldClosureBindingV1::from_canonical_cbor(&extra_history),
-        Err(WorldClosureBindingErrorV1::FieldOutOfBounds)
+        Err(WorldClosureBindingErrorV1::InvalidHistoryRelation)
     );
     let mut zero_lease = valid;
     zero_lease[132..164].fill(0);
@@ -303,11 +303,12 @@ fn public_decoder_enforces_integer_width_and_structural_relations() {
 }
 
 #[test]
-fn public_closed_errors_have_stable_display() {
+fn public_closed_errors_have_nonempty_display() {
     for error in [
         WorldClosureBindingErrorV1::InvalidEncoding,
         WorldClosureBindingErrorV1::UnsupportedVersion,
         WorldClosureBindingErrorV1::FieldOutOfBounds,
+        WorldClosureBindingErrorV1::InvalidHistoryRelation,
         WorldClosureBindingErrorV1::ZeroContentAddress,
         WorldClosureBindingErrorV1::NonCanonicalEncoding,
     ] {
