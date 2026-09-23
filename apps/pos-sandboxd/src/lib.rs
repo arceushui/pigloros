@@ -5,12 +5,17 @@
 //! and architecture before these requested-state components are used.
 
 mod hardening;
+mod kernel_cgroup;
 mod system_bus;
 mod transient_unit;
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
+};
+pub use kernel_cgroup::{
+    AttemptCgroupEmptyBasis, AttemptCgroupEmptyObservation, AttemptCgroupError,
+    BoundAttemptCgroup,
 };
 pub use system_bus::{
     SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
