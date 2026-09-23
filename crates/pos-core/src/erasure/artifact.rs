@@ -4,6 +4,7 @@ use super::{
     ErasureArtifactClassV1, ErasureErrorV1, ErasureKeyRoleV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ERASURE_MAX_TARGETS,
 };
+use crate::{Hash, KeyIdentityV1, KeyRegistryStateV1};
 
 /// Data classification fixed before an artifact is committed.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -219,6 +220,94 @@ pub struct ArtifactClaimInputV1 {
     pub current_claim: ErasureReplayClaimV1,
     /// Current owner-reported artifact state.
     pub state: ArtifactStateV1,
+}
+
+/// Availability of a historical signature and its exact public key. Retained
+/// bytes still require a separate cryptographic verification step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignatureEvidenceV1 {
+    /// This artifact has no signature dependency on the affected key.
+    NotRequired,
+    /// Historical signature and exact public verification key are retained.
+    Retained,
+    /// A required historical signature is unavailable.
+    SignatureMissing,
+    /// The exact public verification key is unavailable.
+    PublicKeyMissing,
+}
+
+/// Evidence connecting one registered Replay or ReproManifest artifact
+/// dependency to a destruction fact in the authoritative key registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyDestructionArtifactEvidenceV1 {
+    /// Exact owner, role, and epoch required by the artifact.
+    pub identity: KeyIdentityV1,
+    /// Fingerprint of the required key material.
+    pub material_digest: Hash,
+    /// Whether reproducing this artifact requires the destroyed private bytes.
+    pub private_material_required: bool,
+    /// Availability of the historical signature and its public key.
+    pub signature: SignatureEvidenceV1,
+    /// Whether every other required artifact byte remains available.
+    pub required_artifacts_present: bool,
+}
+
+impl ArtifactClaimInputV1 {
+    /// Apply a committed destruction fact to one artifact's owner-reported
+    /// state before the host-owned `ReplayClaimEvaluatorV1` evaluates it.
+    /// Historical signing-key destruction alone preserves a claim when the
+    /// signature, public key, and required artifacts remain available.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] when the key role, identity,
+    /// digest, or signature state conflicts with the committed registry.
+    pub fn with_destruction_evidence(
+        mut self,
+        registry: &KeyRegistryStateV1,
+        evidence: KeyDestructionArtifactEvidenceV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let required_role = if evidence.identity.role.is_signing() {
+            ErasureKeyRoleV1::Signing
+        } else {
+            ErasureKeyRoleV1::DataEncryption
+        };
+        if self.registration.key_role != Some(required_role)
+            || registry
+                .tombstone(evidence.identity)
+                .is_none_or(|fact| fact.destroyed_material_digest != evidence.material_digest)
+            || registry
+                .key_record(evidence.identity)
+                .is_none_or(|record| record.private_material_digest.is_some())
+            || (required_role == ErasureKeyRoleV1::Signing
+                && evidence.signature == SignatureEvidenceV1::NotRequired)
+            || (required_role == ErasureKeyRoleV1::DataEncryption
+                && evidence.signature != SignatureEvidenceV1::NotRequired)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if !matches!(
+            self.state,
+            ArtifactStateV1::Retained | ArtifactStateV1::TransitionApplied
+        ) {
+            return Ok(self);
+        }
+        self.state = if evidence.private_material_required
+            || evidence.signature == SignatureEvidenceV1::PublicKeyMissing
+            || (required_role == ErasureKeyRoleV1::Signing
+                && registry
+                    .key_record(evidence.identity)
+                    .is_none_or(|record| record.public_verification_key.is_none()))
+        {
+            ArtifactStateV1::MissingKey
+        } else if evidence.signature == SignatureEvidenceV1::SignatureMissing
+            || !evidence.required_artifacts_present
+        {
+            ArtifactStateV1::MissingRequiredOutput
+        } else {
+            self.state
+        };
+        Ok(self)
+    }
 }
 
 /// Deterministic result for one registered artifact.

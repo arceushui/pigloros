@@ -1,8 +1,10 @@
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureErrorV1,
-    ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
-    ReplayClaimEvaluatorV1, ERASURE_MAX_TARGETS,
+    ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
+    KeyDestructionArtifactEvidenceV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
+    KeyRegistryStateV1, KeyRoleV1, PublicKey, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    SignatureEvidenceV1, ERASURE_MAX_TARGETS,
 };
 
 trait TestValueExt<T> {
@@ -43,6 +45,210 @@ const fn input(
         current_claim: ErasureReplayClaimV1::Exact,
         state,
     }
+}
+
+fn destroyed_registry(role: KeyRoleV1) -> (KeyIdentityV1, Hash, KeyRegistryStateV1) {
+    let identity = KeyIdentityV1::new("claim-owner", role, 1);
+    let digest = Hash::from_bytes([31; 32]);
+    let public_key = role.is_signing().then(|| PublicKey::from_bytes([32; 32]));
+    let mut registry = KeyRegistryStateV1::new();
+    registry
+        .register_key(KeyRegistrationV1::new(identity, digest, public_key))
+        .test_ok();
+    let request = KeyDestructionRequestV1::new(identity, digest, Hash::from_bytes([33; 32]));
+    registry.begin_key_destruction(request).test_ok();
+    registry
+        .complete_key_destruction(request, pos_core::deletion_receipt(&request))
+        .test_ok();
+    assert!(registry.tombstone(identity).is_some());
+    (identity, digest, registry)
+}
+
+fn signing_artifact(class: ErasureArtifactClassV1) -> ArtifactClaimInputV1 {
+    ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            class,
+            reference(34),
+            ArtifactDataClassV1::StructuralAuditMetadata,
+            Some(ErasureKeyRoleV1::Signing),
+            reference(35),
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+        ),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state: ArtifactStateV1::Retained,
+    }
+}
+
+#[test]
+fn committed_encryption_key_destruction_weakens_replay_and_repro_manifest() {
+    let (identity, material_digest, registry) =
+        destroyed_registry(KeyRoleV1::SubjectDataEncryption);
+    for (index, class) in [
+        ErasureArtifactClassV1::TimelineReplay,
+        ErasureArtifactClassV1::ReproManifest,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let artifact = input(
+            class,
+            u8::try_from(index + 1).test_ok(),
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+            ArtifactStateV1::Retained,
+        )
+        .with_destruction_evidence(
+            &registry,
+            KeyDestructionArtifactEvidenceV1 {
+                identity,
+                material_digest,
+                private_material_required: true,
+                signature: SignatureEvidenceV1::NotRequired,
+                required_artifacts_present: true,
+            },
+        )
+        .test_ok();
+        let evaluation =
+            ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[artifact]).test_ok();
+        assert_eq!(
+            evaluation.replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
+        assert_eq!(artifact.state, ArtifactStateV1::MissingKey);
+        assert!(!evaluation.artifacts()[0].authoritative_use_permitted());
+    }
+}
+
+#[test]
+fn historical_signing_fact_preserves_claim_only_with_required_evidence() {
+    let (identity, material_digest, registry) =
+        destroyed_registry(KeyRoleV1::TimelineIntegritySigning);
+    let evidence = KeyDestructionArtifactEvidenceV1 {
+        identity,
+        material_digest,
+        private_material_required: false,
+        signature: SignatureEvidenceV1::Retained,
+        required_artifacts_present: true,
+    };
+    for class in [
+        ErasureArtifactClassV1::TimelineReplay,
+        ErasureArtifactClassV1::ReproManifest,
+    ] {
+        let retained = signing_artifact(class)
+            .with_destruction_evidence(&registry, evidence)
+            .test_ok();
+        assert_eq!(
+            ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[retained])
+                .test_ok()
+                .replay_claim(),
+            ErasureReplayClaimV1::Exact
+        );
+        for signature in [
+            SignatureEvidenceV1::SignatureMissing,
+            SignatureEvidenceV1::PublicKeyMissing,
+        ] {
+            let missing = signing_artifact(class)
+                .with_destruction_evidence(
+                    &registry,
+                    KeyDestructionArtifactEvidenceV1 {
+                        signature,
+                        ..evidence
+                    },
+                )
+                .test_ok();
+            assert_eq!(
+                ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[missing])
+                    .test_ok()
+                    .replay_claim(),
+                ErasureReplayClaimV1::UnverifiableArtifactsMissing
+            );
+        }
+        let missing_artifact = signing_artifact(class)
+            .with_destruction_evidence(
+                &registry,
+                KeyDestructionArtifactEvidenceV1 {
+                    required_artifacts_present: false,
+                    ..evidence
+                },
+            )
+            .test_ok();
+        assert_eq!(
+            ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[missing_artifact])
+                .test_ok()
+                .replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
+    }
+}
+
+#[test]
+fn destruction_evidence_never_upgrades_and_rejects_wrong_fact_or_role() {
+    let (identity, material_digest, registry) =
+        destroyed_registry(KeyRoleV1::TimelineIntegritySigning);
+    let evidence = KeyDestructionArtifactEvidenceV1 {
+        identity,
+        material_digest,
+        private_material_required: false,
+        signature: SignatureEvidenceV1::Retained,
+        required_artifacts_present: true,
+    };
+    let mut structural = signing_artifact(ErasureArtifactClassV1::ReproManifest);
+    structural.current_claim = ErasureReplayClaimV1::StructuralOnly;
+    let evaluated = structural
+        .with_destruction_evidence(&registry, evidence)
+        .test_ok();
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::StructuralOnly, &[evaluated])
+            .test_ok()
+            .replay_claim(),
+        ErasureReplayClaimV1::StructuralOnly
+    );
+    let mut missing = structural;
+    missing.state = ArtifactStateV1::Erased;
+    assert_eq!(
+        missing
+            .with_destruction_evidence(&registry, evidence)
+            .test_ok()
+            .state,
+        ArtifactStateV1::Erased
+    );
+    assert_eq!(
+        signing_artifact(ErasureArtifactClassV1::TimelineReplay).with_destruction_evidence(
+            &registry,
+            KeyDestructionArtifactEvidenceV1 {
+                material_digest: Hash::from_bytes([99; 32]),
+                ..evidence
+            }
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        signing_artifact(ErasureArtifactClassV1::TimelineReplay)
+            .with_destruction_evidence(&KeyRegistryStateV1::new(), evidence),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        signing_artifact(ErasureArtifactClassV1::TimelineReplay).with_destruction_evidence(
+            &registry,
+            KeyDestructionArtifactEvidenceV1 {
+                signature: SignatureEvidenceV1::NotRequired,
+                ..evidence
+            }
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        input(
+            ErasureArtifactClassV1::TimelineReplay,
+            1,
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+            ArtifactStateV1::Retained,
+        )
+        .with_destruction_evidence(&registry, evidence),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
 }
 
 #[test]
