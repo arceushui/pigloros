@@ -216,6 +216,17 @@ fn public_decoder_rejects_malformed_truncated_and_oversized_inputs() {
             Err(expected)
         );
     }
+
+    let mut hostile_length = valid;
+    hostile_length.splice(
+        7..=7,
+        [0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    );
+    assert!(hostile_length.len() < MAX_WORLD_CLOSURE_BINDING_BYTES_V1);
+    assert_eq!(
+        WorldClosureBindingV1::from_canonical_cbor(&hostile_length),
+        Err(WorldClosureBindingErrorV1::InvalidEncoding)
+    );
 }
 
 #[test]
