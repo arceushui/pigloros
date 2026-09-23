@@ -118,6 +118,8 @@ pub enum WorldCodecError {
     SensorResolutionBelowMinimum,
     #[error("params_cbor is not canonical CBOR")]
     NonCanonicalParamsCbor,
+    #[error("World record is not canonical CBOR")]
+    NonCanonicalRecord,
     #[error("trailing bytes after CBOR item")]
     TrailingBytes,
     #[error("CBOR decode error")]
@@ -258,11 +260,24 @@ fn cbor_decode_array(
     if cursor.position() != bytes.len() as u64 {
         return Err(WorldCodecError::TrailingBytes);
     }
+    if cbor_encode(&value).as_slice() != bytes {
+        return Err(WorldCodecError::NonCanonicalRecord);
+    }
     match value {
         ciborium::Value::Array(items) if items.len() == expected_len => Ok(items),
         ciborium::Value::Array(_) => Err(WorldCodecError::WrongArrayLength),
         _ => Err(WorldCodecError::CborError),
     }
+}
+
+fn validate_canonical_params(bytes: &[u8]) -> Result<(), WorldCodecError> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let parsed: ciborium::Value =
+        ciborium::from_reader(&mut cursor).map_err(|_| WorldCodecError::NonCanonicalParamsCbor)?;
+    if cursor.position() != bytes.len() as u64 || cbor_encode(&parsed).as_slice() != bytes {
+        return Err(WorldCodecError::NonCanonicalParamsCbor);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -337,19 +352,7 @@ impl WorldActionV1 {
         if self.action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
         }
-        // Validate params_cbor is canonical: parse and re-encode must match.
-        {
-            let mut cursor = std::io::Cursor::new(self.params_cbor.as_slice());
-            let parsed: ciborium::Value = ciborium::from_reader(&mut cursor)
-                .map_err(|_| WorldCodecError::NonCanonicalParamsCbor)?;
-            if cursor.position() != self.params_cbor.len() as u64 {
-                return Err(WorldCodecError::NonCanonicalParamsCbor);
-            }
-            let reencoded = cbor_encode(&parsed);
-            if reencoded != self.params_cbor {
-                return Err(WorldCodecError::NonCanonicalParamsCbor);
-            }
-        }
+        validate_canonical_params(&self.params_cbor)?;
         let arr = ciborium::Value::Array(vec![
             cbor_magic(*MAGIC_WAC1),
             cbor_u8(VERSION_V1),
@@ -395,6 +398,7 @@ impl WorldActionV1 {
         if action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
         }
+        validate_canonical_params(&params_cbor)?;
         let catalogue_version = decode_u32(&items[7])?;
         let tick = decode_u64(&items[8])?;
         Ok(Self {
@@ -1518,6 +1522,15 @@ mod tests {
             signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         }
+    }
+
+    fn overlong_version(bytes: &CanonicalBytes) -> CanonicalBytes {
+        let bytes = bytes.as_slice();
+        assert_eq!(bytes[6], VERSION_V1);
+        let mut noncanonical = bytes[..6].to_vec();
+        noncanonical.extend_from_slice(&[0x18, VERSION_V1]);
+        noncanonical.extend_from_slice(&bytes[7..]);
+        CanonicalBytes::from_vec(noncanonical)
     }
 
     // ---------------------------------------------------------------------------
@@ -3213,6 +3226,41 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_rejects_parseable_noncanonical_wob1() {
+        let reducer = WorldReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        let canonical = make_observation_event(entity);
+        let noncanonical = make_versioned_event(
+            1,
+            entity,
+            EVENT_TYPE_OBSERVATION_V1,
+            overlong_version(&canonical.payload),
+        );
+        reducer.apply(&mut state, &noncanonical);
+        assert_eq!(
+            state
+                .get("observation_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert!(state.get("last_x").is_none());
+
+        reducer.apply(&mut state, &canonical);
+        assert_eq!(
+            state
+                .get("observation_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            state.get("last_x").and_then(serde_json::Value::as_f64),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn body_partial_eq() {
         let entity = EntityId::new();
         let b1 = Body {
@@ -3760,6 +3808,32 @@ mod tests {
         assert_eq!(
             plugin.approve(&legacy),
             Err(ActionRejected::UnknownEventType)
+        );
+
+        let noncanonical_outer = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            overlong_version(&payload),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&noncanonical_outer),
+            Err(ActionRejected::DomainValidationFailed(
+                WorldCodecError::NonCanonicalRecord.to_string()
+            ))
+        );
+
+        let noncanonical_params = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            rewrite_array_field(&payload, 5, ciborium::Value::Bytes(vec![0x18, 0x01])),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&noncanonical_params),
+            Err(ActionRejected::DomainValidationFailed(
+                WorldCodecError::NonCanonicalParamsCbor.to_string()
+            ))
         );
 
         let wrong_capability = ProposedAction::new(
