@@ -6,7 +6,7 @@
 //! |--------|--------|--------|-------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] | Remints timeline/event ids; converts to drafts (signatures dropped) |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] | Parent first, then child; forks need `parent_fork_hash` |
-//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must carry an owner/role/epoch-bound signature under one key |
+//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must carry a signature verified against its exact owner/role/epoch trust anchor |
 //!
 //! Prefer [`export_timeline_own`] (alias: [`export_timeline_cow`]) for copy-on-write sync.
 //! [`export_timeline_raw`] is the same function kept for existing call sites.
@@ -1057,8 +1057,8 @@ pub fn export_timeline_raw(
 ///
 /// Creates a fresh [`TimelineId`], converts events to [`EventDraft`]s, and appends
 /// via [`EventStore::append`] — so **event ids are reminted**, seqs restart from the
-/// store, and signed exports are rejected rather than silently stripping their
-/// signatures (`EventDraft` has no signature field).
+/// store. This changes Event identity and sequence, so the imported drafts
+/// clear signatures and signature identities (`EventDraft` has neither field).
 ///
 /// For identity-preserving `CoW` sync, use [`export_timeline_own`] +
 /// [`import_timeline_with_id`] instead. For crypto-checked identity import, see
@@ -1076,14 +1076,12 @@ pub fn import_timeline(
         parent_fork_hash: _,
     } = export;
     let name = timeline.meta.name.unwrap_or_default();
-    ensure_import_events_are_non_geographic(&events)
-        .and_then(|()| ensure_import_events_are_unsigned(&events))
-        .and_then(|()| {
-            let create_result = store.create_timeline(&name);
-            import_timeline_using(create_result, events, |timeline_id, drafts| {
-                store.append(timeline_id, drafts)
-            })
+    ensure_import_events_are_non_geographic(&events).and_then(|()| {
+        let create_result = store.create_timeline(&name);
+        import_timeline_using(create_result, events, |timeline_id, drafts| {
+            store.append(timeline_id, drafts)
         })
+    })
 }
 
 /// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
@@ -1149,20 +1147,6 @@ fn ensure_import_events_are_non_geographic(events: &[Event]) -> Result<(), CoreE
     {
         Err(CoreError::Storage(
             "generic import of geographic evidence is disabled".to_owned(),
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-/// Refuse signed events before a generic import can discard their signature fields.
-fn ensure_import_events_are_unsigned(events: &[Event]) -> Result<(), CoreError> {
-    if events
-        .iter()
-        .any(|event| event.signature.is_some() || event.signature_identity.is_some())
-    {
-        Err(CoreError::Storage(
-            "generic import of signed events is disabled; use verified identity import".to_owned(),
         ))
     } else {
         Ok(())
@@ -2116,7 +2100,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn generic_import_rejects_signed_events_before_stripping_metadata(
+    fn generic_import_accepts_signed_source_as_an_unsigned_clone(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let entity = EntityId::new();
         for (signature, signature_identity) in [
@@ -2149,10 +2133,7 @@ mod tests {
                 events: vec![event],
                 parent_fork_hash: None,
             };
-            let error = import_timeline(&mut TrivialStore::new(), export).test_err()?;
-            assert!(error
-                .to_string()
-                .contains("generic import of signed events is disabled"));
+            import_timeline(&mut TrivialStore::new(), export).test_ok()?;
         }
         Ok(())
     }

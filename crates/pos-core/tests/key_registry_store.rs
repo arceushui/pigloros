@@ -17,6 +17,28 @@ fn source_controlled_owner_identifier_preserves_literal_bytes() {
     );
 }
 
+#[test]
+fn registry_snapshot_requires_exact_version_one() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = KeyRegistryStateV1::new();
+    let mut snapshot = serde_json::to_value(&registry)?;
+    assert_eq!(snapshot["version"], 1);
+    assert_eq!(
+        serde_json::from_value::<KeyRegistryStateV1>(snapshot.clone())?,
+        registry
+    );
+
+    snapshot["version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<KeyRegistryStateV1>(snapshot.clone()).is_err());
+    snapshot["version"] = serde_json::json!(0);
+    assert!(serde_json::from_value::<KeyRegistryStateV1>(snapshot.clone()).is_err());
+    let Some(object) = snapshot.as_object_mut() else {
+        return Err("registry snapshot must be a map".into());
+    };
+    object.remove("version");
+    assert!(serde_json::from_value::<KeyRegistryStateV1>(snapshot).is_err());
+    Ok(())
+}
+
 struct RegistryStore {
     registry: Option<KeyRegistryStateV1>,
     timeline: Option<Timeline>,

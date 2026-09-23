@@ -168,6 +168,189 @@ fn memory_key_registry_public_contract_covers_transaction_boundaries(
 }
 
 #[test]
+fn generic_timeline_clone_clears_source_signature_identity(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut source = MemoryStore::new();
+    bind_test_erasure_gate(&mut source)?;
+    let timeline = source.create_timeline("signed-source")?;
+    let mut event = source
+        .append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                pos_core::Kind::new("clone.test"),
+                pos_core::CanonicalBytes::from_static(b"payload"),
+            )],
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CoreError::Storage("source event missing".to_owned()))?;
+    event.signature = Some(pos_core::Signature::from_bytes([7; 64]));
+    event.signature_identity = Some(KeyIdentityV1::new(
+        "clone-owner",
+        KeyRoleV1::TimelineIntegritySigning,
+        1,
+    ));
+    let export = pos_core::store::TimelineExport {
+        timeline: timeline.clone(),
+        events: vec![event.clone()],
+        parent_fork_hash: None,
+    };
+    let mut destination = MemoryStore::new();
+    bind_test_erasure_gate(&mut destination)?;
+    let clone = pos_core::store::import_timeline(&mut destination, export)?;
+    assert_ne!(clone.id(), timeline.id());
+    let cloned_events = destination.read(clone.id(), pos_core::SeqRange::all())?;
+    let cloned = cloned_events
+        .first()
+        .ok_or_else(|| CoreError::Storage("cloned event missing".to_owned()))?;
+    assert_ne!(cloned.id, event.id);
+    assert_eq!(cloned.payload, event.payload);
+    assert!(cloned.signature.is_none());
+    assert!(cloned.signature_identity.is_none());
+    Ok(())
+}
+
+fn rotated_import_fixture() -> Result<
+    (
+        KeyRegistryStateV1,
+        pos_core::store::TimelineExport,
+        [(KeyIdentityV1, pos_core::PublicKey); 2],
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (_, first_verifier) = pos_crypto::signing::generate_keypair();
+    let (_, second_verifier) = pos_crypto::signing::generate_keypair();
+    let first_key = pos_crypto::signing::public_key_from_verifying_key(&first_verifier);
+    let second_key = pos_crypto::signing::public_key_from_verifying_key(&second_verifier);
+    let first = KeyIdentityV1::new("rotated-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+    let second = KeyIdentityV1::new("rotated-owner", KeyRoleV1::TimelineIntegritySigning, 2);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        first,
+        Hash::from_bytes([41; 32]),
+        Some(first_key),
+    ))?;
+    registry.register_key(KeyRegistrationV1::new(
+        second,
+        Hash::from_bytes([42; 32]),
+        Some(second_key),
+    ))?;
+    let destruction = KeyDestructionRequestV1::new(
+        first,
+        Hash::from_bytes([41; 32]),
+        Hash::from_bytes([43; 32]),
+    );
+    registry.begin_key_destruction(destruction)?;
+    registry.complete_key_destruction(destruction, pos_core::deletion_receipt(&destruction))?;
+
+    let mut source = MemoryStore::new();
+    bind_test_erasure_gate(&mut source)?;
+    let timeline = source.create_timeline("rotated-import")?;
+    let drafts = [
+        EventDraft::new(
+            EntityId::new(),
+            pos_core::Kind::new("rotation.first"),
+            pos_core::CanonicalBytes::from_static(b"first"),
+        ),
+        EventDraft::new(
+            EntityId::new(),
+            pos_core::Kind::new("rotation.second"),
+            pos_core::CanonicalBytes::from_static(b"second"),
+        ),
+    ];
+    let mut events = source.append(timeline.id(), &drafts)?;
+    for (event, (identity, signature)) in events.iter_mut().zip([
+        (first, pos_core::Signature::from_bytes([51; 64])),
+        (second, pos_core::Signature::from_bytes([52; 64])),
+    ]) {
+        event.signature_identity = Some(identity);
+        event.signature = Some(signature);
+    }
+    let timeline = source
+        .get_timeline(timeline.id())?
+        .ok_or_else(|| CoreError::Storage("source timeline missing".to_owned()))?;
+    Ok((
+        registry,
+        pos_core::store::TimelineExport {
+            timeline,
+            events,
+            parent_fork_hash: None,
+        },
+        [(first, first_key), (second, second_key)],
+    ))
+}
+
+#[test]
+fn verified_import_resolves_each_rotated_identity_including_a_tombstone(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (registry, export, anchors) = rotated_import_fixture()?;
+    let mut destination = MemoryStore::new();
+    bind_test_erasure_gate(&mut destination)?;
+    destination.save_key_registry(&registry)?;
+    let calls = Cell::new(0);
+    let imported = pos_store::import_timeline_with_verified_signatures(
+        &mut destination,
+        export,
+        &anchors,
+        |event, public_key| {
+            calls.set(calls.get() + 1);
+            let (expected_key, expected_signature) = match event.signature_identity {
+                Some(identity) if identity == anchors[0].0 => {
+                    (anchors[0].1, pos_core::Signature::from_bytes([51; 64]))
+                }
+                Some(identity) if identity == anchors[1].0 => {
+                    (anchors[1].1, pos_core::Signature::from_bytes([52; 64]))
+                }
+                _ => return Err(CoreError::SignatureVerificationFailed),
+            };
+            if *public_key != expected_key || event.signature != Some(expected_signature) {
+                return Err(CoreError::SignatureVerificationFailed);
+            }
+            Ok(())
+        },
+    )?;
+    assert_eq!(calls.get(), 2);
+    assert_eq!(
+        destination
+            .read(imported.id(), pos_core::SeqRange::all())?
+            .len(),
+        2
+    );
+    assert!(registry.tombstone(anchors[0].0).is_some());
+    Ok(())
+}
+
+#[test]
+fn verified_import_rejects_missing_duplicate_and_mismatched_anchors_before_create(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (registry, export, anchors) = rotated_import_fixture()?;
+    let wrong_owner = KeyIdentityV1::new("other-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+    let rejected = [
+        vec![anchors[1]],
+        vec![anchors[0], anchors[0], anchors[1]],
+        vec![(wrong_owner, anchors[0].1), anchors[1]],
+        vec![(anchors[0].0, anchors[1].1), anchors[1]],
+    ];
+    for trust_set in rejected {
+        let mut destination = MemoryStore::new();
+        bind_test_erasure_gate(&mut destination)?;
+        destination.save_key_registry(&registry)?;
+        assert!(matches!(
+            pos_store::import_timeline_with_verified_signatures(
+                &mut destination,
+                export.clone(),
+                &trust_set,
+                |_, _| Ok(()),
+            ),
+            Err(CoreError::SignatureVerificationFailed)
+        ));
+        assert!(destination.list_timelines()?.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registry()?;
