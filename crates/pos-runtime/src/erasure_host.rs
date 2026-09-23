@@ -2040,7 +2040,11 @@ impl ErasureExecutionHostV1 {
         };
         let requirements = input
             .current_inventory
-            .fork_retry_scope_requirements(input.parent, recovered_child.id)
+            .fork_retry_scope_requirements(
+                input.parent,
+                recovered_child.id,
+                recovered.child_scope(),
+            )
             .map_err(stale_error)?;
         for requirement in requirements {
             let requirement = requirement.map_err(stale_error)?;

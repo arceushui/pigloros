@@ -166,10 +166,18 @@ impl Default for TestAuthority {
 
 impl TestAuthority {
     fn set_timeline(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
-        self.timelines
+        let mut timelines = self
+            .timelines
             .lock()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
-            .push((timeline, reference(9)));
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        if let Some((_, scope)) = timelines
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == timeline)
+        {
+            *scope = reference(9);
+        } else {
+            timelines.push((timeline, reference(9)));
+        }
         Ok(())
     }
 
@@ -2320,6 +2328,7 @@ fn sqlite_exact_affected_fork_retry_survives_later_scope_extension(
 
 fn assert_exact_fork_retry_after_later_request_excludes_child(
     config: StoreConfig,
+    include_child: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
@@ -2352,10 +2361,25 @@ fn assert_exact_fork_retry_after_later_request_excludes_child(
                 "pre-freeze-child",
             ),
         )?;
-        test_stage(
-            "classify pre-existing child as unaffected",
-            authority.set_timeline_unaffected(original_child.id()),
+        let intervening = test_stage(
+            "create an intervening unaffected timeline",
+            commands.create_timeline("pre-freeze-intervening"),
         )?;
+        test_stage(
+            "classify intervening timeline as unaffected",
+            authority.set_timeline_unaffected(intervening.id()),
+        )?;
+        if include_child {
+            test_stage(
+                "include pre-existing child in the later scope",
+                authority.set_timeline(original_child.id()),
+            )?;
+        } else {
+            test_stage(
+                "classify pre-existing child as unaffected",
+                authority.set_timeline_unaffected(original_child.id()),
+            )?;
+        }
 
         let request = test_stage("construct request after Fork", persistence_request())?;
         let request_reference = request.reference();
@@ -2385,10 +2409,23 @@ fn assert_exact_fork_retry_after_later_request_excludes_child(
         assert_eq!(retried_child.id(), original_child.id());
         assert_eq!(
             commands
-                .timeline(original_child.id())?
+                .timeline(intervening.id())?
                 .map(|timeline| timeline.id()),
-            Some(original_child.id())
+            Some(intervening.id())
         );
+        if include_child {
+            assert_eq!(
+                commands.timeline(original_child.id()),
+                Err(ErasureHostErrorV1::AccessFrozen)
+            );
+        } else {
+            assert_eq!(
+                commands
+                    .timeline(original_child.id())?
+                    .map(|timeline| timeline.id()),
+                Some(original_child.id())
+            );
+        }
     }
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
@@ -2397,11 +2434,23 @@ fn assert_exact_fork_retry_after_later_request_excludes_child(
 #[test]
 fn exact_fork_retry_survives_later_request_excluding_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::Memory)
+    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::Memory, false)
 }
 
 #[test]
 fn sqlite_exact_fork_retry_survives_later_request_excluding_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::SqliteInMemory)
+    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::SqliteInMemory, false)
+}
+
+#[test]
+fn exact_fork_retry_survives_later_request_including_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::Memory, true)
+}
+
+#[test]
+fn sqlite_exact_fork_retry_survives_later_request_including_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::SqliteInMemory, true)
 }

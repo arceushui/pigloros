@@ -313,7 +313,7 @@ pub struct ProjectionRegistry {
     /// Ordered list so iteration is deterministic.
     slots: Vec<(String, Slot)>,
     /// Host-owned erasure gate for protected projection materialization.
-    erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
     /// Whether the current gate was supplied by the host composition root.
     /// The constructor's fail-closed gate can be replaced exactly once.
     erasure_gate_bound: bool,
@@ -350,13 +350,13 @@ impl ProjectionRegistry {
 
     /// Bind the host-owned erasure gate used by protected observations.
     #[must_use]
-    pub fn with_erasure_gate(mut self, gate: Arc<ErasureContainmentGateV1>) -> Self {
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
         self.bind_erasure_gate(gate);
         self
     }
 
     /// Bind the host-owned erasure gate in place.
-    pub fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) {
+    pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
         if self.erasure_gate_bound {
             return;
         }
@@ -366,7 +366,7 @@ impl ProjectionRegistry {
 
     /// Return the host-bound erasure gate, when this registry has one.
     #[must_use]
-    pub fn clone_erasure_gate(&self) -> Option<Arc<ErasureContainmentGateV1>> {
+    pub fn clone_erasure_gate(&self) -> Option<Arc<dyn ErasureGate>> {
         self.erasure_gate_bound
             .then_some(self.erasure_gate.clone())
             .flatten()
@@ -2259,7 +2259,7 @@ mod wave3_tests {
         let mut registry = ProjectionRegistry::new();
         assert!(registry.clone_erasure_gate().is_none());
 
-        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let gate: Arc<dyn ErasureGate> = Arc::new(ErasureContainmentGateV1::new_test_open());
         registry.bind_erasure_gate(Arc::clone(&gate));
         let cloned = registry.clone_erasure_gate();
         assert!(cloned

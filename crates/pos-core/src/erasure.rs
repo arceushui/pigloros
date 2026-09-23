@@ -419,6 +419,7 @@ pub struct ErasureContainmentGateV1 {
 pub struct ErasureTopologyStoreBindingV1 {
     gate_identity: Arc<()>,
     store_identity: Arc<()>,
+    requires_transition_permit: bool,
 }
 
 impl PartialEq for ErasureTopologyStoreBindingV1 {
@@ -429,6 +430,15 @@ impl PartialEq for ErasureTopologyStoreBindingV1 {
 }
 
 impl Eq for ErasureTopologyStoreBindingV1 {}
+
+impl ErasureTopologyStoreBindingV1 {
+    /// Whether the bound gate requires every topology mutation to use a
+    /// verified host transition permit.
+    #[must_use]
+    pub const fn requires_transition_permit(&self) -> bool {
+        self.requires_transition_permit
+    }
+}
 
 /// Capability proving that a store mutation is executing inside the host's
 /// topology-transition fence.
@@ -592,6 +602,7 @@ impl ErasureContainmentGateV1 {
         Ok(ErasureTopologyStoreBindingV1 {
             gate_identity: Arc::clone(&self.topology_binding_id),
             store_identity: Arc::new(()),
+            requires_transition_permit: self.fail_closed_unbound,
         })
     }
 
@@ -4790,6 +4801,7 @@ impl ErasureVerifiedInventoryV1 {
         &self,
         parent: TimelineId,
         child: TimelineId,
+        expected_child_scope: ErasureReferenceV1,
     ) -> Result<
         impl Iterator<Item = Result<ErasureForkRetryScopeRequirementV1, ErasureErrorV1>> + '_,
         ErasureErrorV1,
@@ -4826,28 +4838,35 @@ impl ErasureVerifiedInventoryV1 {
                             Err(ErasureErrorV1::ProvenanceMissing)
                         };
                     };
-                    let Some(lineage_rule) = scope.lineage_rule() else {
-                        return if child_scope.is_none() {
-                            Ok(None)
-                        } else {
-                            Err(ErasureErrorV1::ProvenanceMissing)
-                        };
-                    };
                     let Some(child_scope) = child_scope else {
                         // The current request scope positively excludes this
                         // already-persisted child. It cannot create a new
                         // extension requirement for the historical operation.
                         return Ok(None);
                     };
-                    if parent_scope.is_none() {
-                        return Err(ErasureErrorV1::ProvenanceMissing);
-                    }
                     let extension = state
                         .scope_extensions()
                         .iter()
-                        .find(|extension| extension.fork() == child_scope)
-                        .copied()
-                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                        .find(|extension| extension.fork() == expected_child_scope)
+                        .copied();
+                    let Some(extension) = extension else {
+                        // A later request may freeze a scope that already
+                        // contains this child directly. That inclusion did
+                        // not admit a new Fork extension for the old
+                        // operation and therefore adds no retry requirement.
+                        return if scope.scope_members().contains(&child_scope) {
+                            Ok(None)
+                        } else {
+                            Err(ErasureErrorV1::ProvenanceMissing)
+                        };
+                    };
+                    let (Some(lineage_rule), true, true) = (
+                        scope.lineage_rule(),
+                        child_scope == expected_child_scope,
+                        parent_scope.is_some(),
+                    ) else {
+                        return Err(ErasureErrorV1::ProvenanceMissing);
+                    };
                     Ok(Some(ErasureForkRetryScopeRequirementV1 {
                         requirement: ErasureForkScopeRequirementV1 {
                             request,
@@ -6665,7 +6684,7 @@ impl ErasureForkRecoveryProofV1 {
             }
         };
         let mut requirements = current_inventory
-            .fork_retry_scope_requirements(parent, recovered.child().id)
+            .fork_retry_scope_requirements(parent, recovered.child().id, recovered.child_scope())
             .map_err(stale_error)?;
         for admission in &self.admissions {
             let requirement = requirements

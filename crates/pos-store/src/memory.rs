@@ -179,6 +179,8 @@ pub struct MemoryStore {
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
+    /// Host-managed topology may only change through verified transitions.
+    erasure_topology_requires_permit: bool,
     /// Opaque host-issued identity for this adapter's topology transitions.
     erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
@@ -493,6 +495,7 @@ impl MemoryStore {
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
         self.erasure_topology_store_binding = None;
+        self.erasure_topology_requires_permit = false;
         self
     }
 
@@ -521,6 +524,7 @@ impl MemoryStore {
             // before the composition root supplies the host-owned gate.
             erasure_gate,
             erasure_gate_bound,
+            erasure_topology_requires_permit: false,
             erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
@@ -1568,6 +1572,9 @@ impl MemoryStore {
         successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
+            if self.erasure_fork_recovery_proofs.contains_key(&operation) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             return Ok(None);
         };
         let proof = self
@@ -2691,6 +2698,14 @@ impl GeographicReplayVerifier for MemoryStore {
 }
 
 impl MemoryStore {
+    fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
+        if self.erasure_topology_requires_permit {
+            Err(CoreError::ErasureContainmentUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+
     fn ensure_host_transition_permit(
         &self,
         permit: &ErasureTopologyTransitionPermitV1,
@@ -2881,6 +2896,7 @@ impl MemoryStore {
         let binding = gate
             .issue_topology_store_binding()
             .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
+        self.erasure_topology_requires_permit = binding.requires_transition_permit();
         self.erasure_gate = Some(gate);
         self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
@@ -2907,6 +2923,7 @@ impl EventStore for MemoryStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
         self.timelines.insert(
@@ -3185,6 +3202,7 @@ impl EventStore for MemoryStore {
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
             store
                 .ensure_generic_timeline_visibility(parent)
@@ -3268,6 +3286,7 @@ impl EventStore for MemoryStore {
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.create_timeline_with_meta_with_erasure_fence(&meta)
     }
 
@@ -3316,6 +3335,7 @@ impl EventStore for MemoryStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         delete_timeline(self, id)
     }
 
@@ -3332,6 +3352,7 @@ impl EventStore for MemoryStore {
         meta: TimelineMeta,
         events: &[Event],
     ) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         pos_core::store::import_committed_with_rollback(self, meta, events)
     }
 }
@@ -7261,6 +7282,62 @@ mod coverage_entrypoints {
         assert_eq!(
             ok(store.recover_fork_admission(operation, &candidate)),
             Some(expected)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_fork_recovery_rejects_proof_without_receipt() {
+        let mut store = new_store();
+        let parent = ok(store.create_timeline("orphan-proof-parent"));
+        let snapshot =
+            ok(store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS));
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = ok(query.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS));
+        let operation = ErasureReferenceV1::from_digest([249; 32]);
+        let admission = ok(inventory.clone().prepare_fork_batch(
+            pos_core::ErasureForkAdmissionInputV1 {
+                operation,
+                expected_inventory_generation: inventory.generation(),
+                child_scope: ErasureReferenceV1::from_digest([250; 32]),
+                child: TimelineMeta {
+                    id: TimelineId::new(),
+                    mode: pos_core::timeline::TimelineMode::Historical,
+                    name: Some("orphan-proof-child".to_owned()),
+                    owner: None,
+                    fork_point: Some((parent.id(), Seq::ZERO)),
+                },
+            },
+            Vec::new(),
+        ));
+        let proof = ok(admission.recovery_proof());
+        let expected = ok(admission.recovery_result());
+        let gate = Arc::clone(
+            store
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing recovery gate"))),
+        );
+        let successor = admission.successor_inventory().clone();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let outcome = ok(store.commit_fork_admission(permit, admission.clone()));
+            Ok::<_, ErasureErrorV1>((successor.clone(), outcome))
+        };
+        ok(gate.install_from_verified_inventory_transition(&mut transition));
+
+        assert_eq!(
+            ok(store.recover_fork_admission(operation, &successor)),
+            Some(expected)
+        );
+        store.erasure_fork_admissions.remove(&operation);
+        store.erasure_fork_recovery_proofs.insert(operation, proof);
+        assert_eq!(
+            store.recover_fork_admission(operation, &successor),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            store.recover_fork_admission(ErasureReferenceV1::from_digest([251; 32]), &successor),
+            Ok(None)
         );
     }
 

@@ -150,6 +150,8 @@ pub struct SqliteStore {
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
+    /// Host-managed topology may only change through verified transitions.
+    erasure_topology_requires_permit: bool,
     /// Opaque host-issued identity for this adapter's topology transitions.
     erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
@@ -793,6 +795,7 @@ impl SqliteStore {
             // before the composition root supplies the host-owned gate.
             erasure_gate,
             erasure_gate_bound,
+            erasure_topology_requires_permit: false,
             erasure_topology_store_binding: None,
             authority_persistence_binding: None,
             #[cfg(test)]
@@ -2179,6 +2182,14 @@ fn timeline_fields_to_timeline(
 }
 
 impl SqliteStore {
+    fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
+        if self.erasure_topology_requires_permit {
+            Err(CoreError::ErasureContainmentUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+
     fn append_or_duplicate_with_limit(
         &mut self,
         timeline: TimelineId,
@@ -3572,6 +3583,7 @@ impl SqliteStore {
         let binding = gate
             .issue_topology_store_binding()
             .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
+        self.erasure_topology_requires_permit = binding.requires_transition_permit();
         self.erasure_gate = Some(gate);
         self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
@@ -3833,6 +3845,7 @@ impl SqliteStore {
         self.initialize_timeline_with_key_registry_in_transaction_with_meta(
             &TimelineMeta::root(name),
             expected_registry,
+            false,
         )
     }
 
@@ -3840,6 +3853,7 @@ impl SqliteStore {
         &mut self,
         meta: &TimelineMeta,
         expected_registry: &KeyRegistryStateV1,
+        host_transition: bool,
     ) -> Result<(Timeline, bool), CoreError> {
         let persisted = self.load_key_registry()?;
         if persisted
@@ -3860,6 +3874,9 @@ impl SqliteStore {
             .ok_or_else(|| CoreError::Storage("ledger Timeline name is missing".to_owned()))?;
         self.find_timeline_by_name_unchecked(name)?.map_or_else(
             || {
+                if !host_transition {
+                    self.ensure_direct_topology_mutation_allowed()?;
+                }
                 self.create_timeline_with_meta_for_host_transition_unchecked(meta)
                     .map(|timeline| (timeline, true))
             },
@@ -3940,6 +3957,7 @@ impl EventStore for SqliteStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
         let chain_head = self.hasher.genesis_hash();
@@ -4034,6 +4052,7 @@ impl EventStore for SqliteStore {
         let result = self.initialize_timeline_with_key_registry_in_transaction_with_meta(
             meta,
             expected_registry,
+            true,
         );
         finish_immediate_transaction(&self.conn, result)
     }
@@ -4464,6 +4483,7 @@ impl EventStore for SqliteStore {
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
             store
                 .ensure_generic_timeline_visibility(parent)
@@ -4590,6 +4610,7 @@ impl EventStore for SqliteStore {
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         let mut create = |store: &mut Self| {
             let id = meta.id;
             // Resolve fork parent before the duplicate-id check so storage failures on the
@@ -4741,6 +4762,7 @@ impl EventStore for SqliteStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.ensure_admin_visibility(id).and_then(|()| {
             let id_str = id.to_string();
             // Refuse delete while child forks still reference this timeline.
@@ -4852,6 +4874,7 @@ impl EventStore for SqliteStore {
         meta: TimelineMeta,
         events: &[Event],
     ) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         // Single transaction so create+append is all-or-nothing for concurrent readers.
         self.conn
             .execute_batch(begin_immediate_sql())
@@ -5390,6 +5413,18 @@ fn sqlite_recover_fork_admission(
     successor_inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
     let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
+        let has_orphaned_proof = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM erasure_fork_recovery_proofs WHERE operation_digest=?1
+                )",
+                params![operation.digest().as_slice()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(map_erasure_receipt_failure)?;
+        if has_orphaned_proof {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         return Ok(None);
     };
     let recovered = receipt.recover(operation)?;
@@ -5606,7 +5641,9 @@ fn sqlite_timeline_is_exact(
     };
     let mut statement = conn
         .prepare(
-            "SELECT seq, event_id, payload
+            "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+                    causation_id, correlation_id, schema_version, payload_hash, signature,
+                    signature_owner_id, signature_role, signature_epoch
              FROM events
              WHERE timeline_id=?1
              ORDER BY seq",
@@ -5617,21 +5654,11 @@ fn sqlite_timeline_is_exact(
         .map_err(map_erasure_receipt_failure)?;
     let events = std::iter::from_fn(|| match event_rows.next() {
         Ok(Some(row)) => Some((|| {
-            let seq = row
-                .get::<_, i64>(0)
-                .map_err(map_erasure_receipt_failure)
-                .and_then(|seq| u64::try_from(seq).map_err(|_| ErasureErrorV1::ProvenanceMissing))
-                .map(Seq::from_u64)?;
-            let event_id = row
-                .get::<_, String>(1)
-                .map_err(map_erasure_receipt_failure)
-                .and_then(|event_id| {
-                    parse_event_id(&event_id).map_err(|_| ErasureErrorV1::ProvenanceMissing)
-                })?;
-            let payload = row
-                .get::<_, Vec<u8>>(2)
-                .map_err(map_erasure_receipt_failure)?;
-            Ok((seq, event_id, CanonicalBytes::from_vec(payload)))
+            let event = decode_event_row(row).map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            if hasher.hash_payload(&event.payload) != event.payload_hash {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            Ok((event.seq, event.id, event.payload))
         })()),
         Ok(None) => None,
         Err(error) => Some(Err(map_erasure_receipt_failure(error))),
@@ -6549,6 +6576,12 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
     let causation_id: Option<String> = row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
     let correlation_id: Option<String> =
         row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let schema_version: i64 = row.get(8).map_err(|e| CoreError::Storage(e.to_string()))?;
+    if schema_version != i64::from(SchemaVersion::V1.as_u32()) {
+        return Err(CoreError::Serialization(
+            "unsupported event schema version".to_owned(),
+        ));
+    }
     let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
     let sig_bytes: Option<Vec<u8>> = row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
     let signature_owner_id: Option<String> =
@@ -6562,13 +6595,17 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
     let signature = decode_signature(sig_bytes)?;
     let signature_identity =
         decode_signature_identity(signature_owner_id, signature_role, signature_epoch)?;
+    let seq = u64::try_from(seq)
+        .map_err(|_| CoreError::Serialization("bad event sequence".to_owned()))?;
+    let wall_time = u64::try_from(wall_time)
+        .map_err(|_| CoreError::Serialization("bad event wall time".to_owned()))?;
     let event = Event {
         id: parse_event_id(&event_id)?,
         entity: parse_entity_id(&entity_id)?,
         event_type: Kind::new(event_type),
         payload: CanonicalBytes::from_vec(payload),
-        wall_time: WallTime::from_micros(u64::try_from(wall_time).unwrap_or(0)),
-        seq: Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
+        wall_time: WallTime::from_micros(wall_time),
+        seq: Seq::from_u64(seq),
         causation_id: causation_id.as_deref().map(parse_event_id).transpose()?,
         correlation_id: correlation_id
             .as_deref()

@@ -337,6 +337,11 @@ pub trait EventStore: Send {
     /// containment; silently accepting the gate would leave a compatibility
     /// bypass around the fail-closed boundary.
     ///
+    /// A host-managed adapter must also reject direct Timeline topology
+    /// mutations after binding. Root creation, Fork creation, identity imports,
+    /// and deletion must use the host-transition permit seams so the host can
+    /// publish the verified successor inventory atomically with the mutation.
+    ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the adapter rejects the binding.
     fn bind_erasure_gate(&mut self, _gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
