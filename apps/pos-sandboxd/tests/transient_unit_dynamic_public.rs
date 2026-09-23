@@ -73,16 +73,16 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
             .collect::<Vec<_>>(),
         EXPECTED_PROPERTY_NAMES
     );
-    assert_eq!(properties[1].value().dbus_signature(), "s");
-    assert_eq!(properties[0].value().dbus_signature(), "s");
-    assert_eq!(properties[2].value().dbus_signature(), "a(ssbt)");
-    assert_eq!(properties[28].value().dbus_signature(), "(bas)");
-    assert_eq!(properties[29].value().dbus_signature(), "(bas)");
+    assert_eq!(properties[1].dbus_signature(), "s");
+    assert_eq!(properties[0].dbus_signature(), "s");
+    assert_eq!(properties[2].dbus_signature(), "a(ssbt)");
+    assert_eq!(properties[28].dbus_signature(), "(bas)");
+    assert_eq!(properties[29].dbus_signature(), "(bas)");
     for property in &properties[33..40] {
-        assert_eq!(property.value().dbus_signature(), "t");
+        assert_eq!(property.dbus_signature(), "t");
     }
-    assert_eq!(properties[40].value().dbus_signature(), "u");
-    assert_eq!(properties[41].value().dbus_signature(), "a(hs)");
+    assert_eq!(properties[40].dbus_signature(), "u");
+    assert_eq!(properties[41].dbus_signature(), "a(hs)");
 
     match properties[1].value() {
         SystemdTransientUnitValue::RootDirectory(value) => {

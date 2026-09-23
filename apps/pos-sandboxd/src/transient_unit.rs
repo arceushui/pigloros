@@ -203,20 +203,6 @@ pub enum SystemdTransientUnitValue {
 }
 
 impl SystemdTransientUnitValue {
-    /// Return the exact D-Bus signature for this requested value.
-    #[must_use]
-    pub const fn dbus_signature(&self) -> &'static str {
-        match self {
-            Self::Static(value) => value.dbus_signature(),
-            Self::RootDirectory(_) => "s",
-            Self::BindReadOnlyPaths(_) => "a(ssbt)",
-            Self::SystemCallFilter(_) | Self::RestrictAddressFamilies(_) => "(bas)",
-            Self::OperatingLimit(_) => "t",
-            Self::FileDescriptorStoreMax(_) => "u",
-            Self::ExtraFileDescriptors(_) => "a(hs)",
-        }
-    }
-
     fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
         match self {
             Self::Static(value) => Ok(Self::Static(*value)),
@@ -262,6 +248,64 @@ impl SystemdTransientUnitProperty {
     #[must_use]
     pub const fn value(&self) -> &SystemdTransientUnitValue {
         &self.value
+    }
+
+    /// Return the exact D-Bus signature for this named requested property.
+    #[must_use]
+    pub const fn dbus_signature(&self) -> &'static str {
+        match &self.value {
+            SystemdTransientUnitValue::Static(value) => value.dbus_signature(),
+            SystemdTransientUnitValue::RootDirectory(_) => "s",
+            SystemdTransientUnitValue::BindReadOnlyPaths(_) => "a(ssbt)",
+            SystemdTransientUnitValue::SystemCallFilter(_)
+            | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
+            SystemdTransientUnitValue::OperatingLimit(_) => "t",
+            SystemdTransientUnitValue::FileDescriptorStoreMax(_) => "u",
+            SystemdTransientUnitValue::ExtraFileDescriptors(_) => "a(hs)",
+        }
+    }
+
+    fn readback_matches(
+        &self,
+        observed: &SystemdTransientUnitReadback,
+        system_call_filter: &SystemCallFilter,
+    ) -> bool {
+        observed.name == self.name()
+            && match (&self.value, &observed.value) {
+                (
+                    SystemdTransientUnitValue::FileDescriptorStoreMax(expected),
+                    SystemdTransientUnitReadbackValue::U32(actual),
+                ) => expected == actual,
+                (
+                    SystemdTransientUnitValue::Static(expected),
+                    SystemdTransientUnitReadbackValue::Static(actual),
+                ) => actual == &SystemdHardeningReadbackValue::from(*expected),
+                (
+                    SystemdTransientUnitValue::RootDirectory(expected),
+                    SystemdTransientUnitReadbackValue::String(actual),
+                ) => expected == actual,
+                (
+                    SystemdTransientUnitValue::BindReadOnlyPaths(expected),
+                    SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
+                ) => expected == actual,
+                (
+                    SystemdTransientUnitValue::SystemCallFilter(_),
+                    SystemdTransientUnitReadbackValue::BoolStringArray(actual),
+                ) => system_call_filter.verify_readback(actual).is_ok(),
+                (
+                    SystemdTransientUnitValue::RestrictAddressFamilies(expected),
+                    SystemdTransientUnitReadbackValue::BoolStringArray(actual),
+                ) => expected == actual,
+                (
+                    SystemdTransientUnitValue::OperatingLimit(expected),
+                    SystemdTransientUnitReadbackValue::U64(actual),
+                ) => expected == actual,
+                (
+                    SystemdTransientUnitValue::ExtraFileDescriptors(expected),
+                    SystemdTransientUnitReadbackValue::StringArray(actual),
+                ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+                _ => false,
+            }
     }
 
     fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
@@ -479,12 +523,12 @@ impl TransientUnitRequest {
                 ));
             }
         }
-        for limit in SystemdOperatingLimitProperty::ALL {
-            properties.push(SystemdTransientUnitProperty::new(
+        properties.extend(SystemdOperatingLimitProperty::ALL.map(|limit| {
+            SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::OperatingLimit(limit),
                 SystemdTransientUnitValue::OperatingLimit(service_limits.value(limit)),
-            ));
-        }
+            )
+        }));
         properties.push(SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::FileDescriptorStoreMax,
             SystemdTransientUnitValue::FileDescriptorStoreMax(0),
@@ -530,55 +574,14 @@ impl TransientUnitRequest {
             && readback
                 .iter()
                 .zip(&self.properties)
-                .all(|(observed, requested)| self.readback_matches(observed, requested))
+                .all(|(observed, requested)| {
+                    requested.readback_matches(observed, &self.system_call_filter)
+                })
         {
             Ok(())
         } else {
             Err(TransientUnitRequestError::ReadbackMismatch)
         }
-    }
-
-    fn readback_matches(
-        &self,
-        observed: &SystemdTransientUnitReadback,
-        requested: &SystemdTransientUnitProperty,
-    ) -> bool {
-        observed.name == requested.name()
-            && match (&requested.value, &observed.value) {
-                (
-                    SystemdTransientUnitValue::FileDescriptorStoreMax(expected),
-                    SystemdTransientUnitReadbackValue::U32(actual),
-                ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::Static(expected),
-                    SystemdTransientUnitReadbackValue::Static(actual),
-                ) => actual == &SystemdHardeningReadbackValue::from(*expected),
-                (
-                    SystemdTransientUnitValue::RootDirectory(expected),
-                    SystemdTransientUnitReadbackValue::String(actual),
-                ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::BindReadOnlyPaths(expected),
-                    SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
-                ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::SystemCallFilter(_),
-                    SystemdTransientUnitReadbackValue::BoolStringArray(actual),
-                ) => self.system_call_filter.verify_readback(actual).is_ok(),
-                (
-                    SystemdTransientUnitValue::RestrictAddressFamilies(expected),
-                    SystemdTransientUnitReadbackValue::BoolStringArray(actual),
-                ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::OperatingLimit(expected),
-                    SystemdTransientUnitReadbackValue::U64(actual),
-                ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::ExtraFileDescriptors(expected),
-                    SystemdTransientUnitReadbackValue::StringArray(actual),
-                ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
-                _ => false,
-            }
     }
 }
 
