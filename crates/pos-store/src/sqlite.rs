@@ -5490,15 +5490,6 @@ fn sqlite_recover_fork_admission(
     operation: ErasureReferenceV1,
     successor_inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-    sqlite_recover_fork_admission_impl(conn, hasher, operation, successor_inventory)
-}
-
-fn sqlite_recover_fork_admission_impl(
-    conn: &Connection,
-    hasher: &dyn Hasher,
-    operation: ErasureReferenceV1,
-    successor_inventory: &ErasureVerifiedInventoryV1,
-) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
     let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
         return Ok(None);
     };
@@ -5852,16 +5843,6 @@ fn sqlite_timeline_exact_metadata(
 }
 
 fn sqlite_fork_admission_is_exact(
-    conn: &Connection,
-    hasher: &dyn Hasher,
-    admission: &PreparedErasureForkBatchV1,
-    chain_head: Hash,
-    receipt: &SqliteForkAdmissionReceiptV1,
-) -> Result<bool, ErasureErrorV1> {
-    sqlite_fork_admission_is_exact_impl(conn, hasher, admission, chain_head, receipt)
-}
-
-fn sqlite_fork_admission_is_exact_impl(
     conn: &Connection,
     hasher: &dyn Hasher,
     admission: &PreparedErasureForkBatchV1,
