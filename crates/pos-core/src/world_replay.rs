@@ -290,21 +290,21 @@ impl WorldReplayClosureV1 {
             return Err(WorldReplayClosureErrorV1::PolicyMismatch);
         }
         if input.consumer_set.consumers().iter().any(|consumer| {
-            !has_identity(
+            !has_leaf_address(
                 &artifacts,
                 WorldArtifactKindV1::ReducerImplementation,
                 consumer.reducer_hash(),
-            ) || !has_identity(
+            ) || !has_leaf_address(
                 &artifacts,
                 WorldArtifactKindV1::Schema,
                 consumer.schema_hash(),
-            ) || !has_identity(
+            ) || !has_leaf_address(
                 &artifacts,
                 WorldArtifactKindV1::RuntimeIdentity,
                 consumer.runtime_hash(),
             )
         }) || input.consumer_set.producers().iter().any(|producer| {
-            !has_identity(
+            !has_leaf_address(
                 &artifacts,
                 WorldArtifactKindV1::OutputPolicy,
                 producer.output_policy_hash(),
@@ -313,7 +313,7 @@ impl WorldReplayClosureV1 {
             !artifacts.iter().any(|leaf| {
                 let input = leaf.as_input();
                 input.kind == WorldArtifactKindV1::OptionalView
-                    && input.native_digest == *root
+                    && leaf.digest() == *root
                     && input.optionality == crate::ArtifactOptionalityV1::Optional
                     && input.transition == crate::ArtifactTransitionRuleV1::RedactViews
             })
@@ -467,21 +467,22 @@ impl WorldReplayClosureV1 {
                     },
                 )
             },
-            |scope| {
+            |scope, artifacts| {
                 build_test_consumer_set(
                     scope,
+                    artifacts[13].digest(),
                     || {
                         crate::world_consumer_set::WorldConsumerV1::new(
                             "count".to_owned(),
-                            Hash::from_bytes([40; 32]),
-                            Hash::from_bytes([41; 32]),
-                            Hash::from_bytes([42; 32]),
+                            artifacts[8].digest(),
+                            artifacts[7].digest(),
+                            artifacts[9].digest(),
                         )
                     },
                     || {
                         crate::world_consumer_set::WorldProducerV1::new(
                             PluginId::from_ulid(Ulid::from(1_u128)),
-                            Hash::from_bytes([43; 32]),
+                            artifacts[0].digest(),
                         )
                     },
                 )
@@ -540,7 +541,12 @@ impl WorldReplayClosureV1 {
         Ok(WorldReplayAdmissionV1 {
             closure_digest: self.digest(),
             evaluation,
-            optional_view_roots: self.consumer_set.optional_view_roots().to_vec(),
+            optional_views: self
+                .artifacts
+                .iter()
+                .filter(|leaf| leaf.as_input().kind == WorldArtifactKindV1::OptionalView)
+                .map(|leaf| (leaf.digest(), leaf.as_input().native_digest))
+                .collect(),
         })
     }
 }
@@ -548,6 +554,7 @@ impl WorldReplayClosureV1 {
 #[cfg(feature = "test-support")]
 fn build_test_consumer_set<ConsumerFactory, ProducerFactory, ConsumerError, ProducerError>(
     scope: Hash,
+    optional_view_root: Hash,
     make_consumer: ConsumerFactory,
     make_producer: ProducerFactory,
 ) -> Result<WorldConsumerSetV1, WorldReplayClosureErrorV1>
@@ -561,7 +568,7 @@ where
         scope,
         consumers: vec![consumer],
         producers: vec![producer],
-        optional_view_roots: vec![Hash::from_bytes([53; 32])],
+        optional_view_roots: vec![optional_view_root],
     })
     .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)
 }
@@ -588,7 +595,8 @@ where
     PolicyFactory: FnOnce() -> Result<WorldRetentionPolicyV1, PolicyError>,
     LeaseFactory:
         FnOnce(&WorldRetentionPolicyV1, TimelineId) -> Result<WorldRetentionLeaseV1, LeaseError>,
-    ConsumerFactory: FnOnce(Hash) -> Result<WorldConsumerSetV1, ConsumerError>,
+    ConsumerFactory:
+        FnOnce(Hash, &[WorldArtifactLeafV1]) -> Result<WorldConsumerSetV1, ConsumerError>,
     ArtifactFactory: FnOnce(
         Hash,
         &WorldRetentionPolicyV1,
@@ -600,9 +608,9 @@ where
     let retention_lease = make_lease(&retention_policy, timeline_id)
         .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
     let scope = WorldReplayClosureV1::artifact_scope(timeline_id, retention_lease.digest());
-    let consumer_set =
-        make_consumer_set(scope).map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
     let artifacts = make_artifacts(scope, &retention_policy, &retention_lease)
+        .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
+    let consumer_set = make_consumer_set(scope, &artifacts)
         .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
     let closure = WorldReplayClosureV1::new(WorldReplayClosureInputV1 {
         timeline_id,
@@ -625,6 +633,16 @@ fn has_identity(
     artifacts
         .iter()
         .any(|leaf| leaf.as_input().kind == kind && leaf.as_input().native_digest == digest)
+}
+
+fn has_leaf_address(
+    artifacts: &[WorldArtifactLeafV1],
+    kind: WorldArtifactKindV1,
+    address: Hash,
+) -> bool {
+    artifacts
+        .iter()
+        .any(|leaf| leaf.as_input().kind == kind && leaf.digest() == address)
 }
 
 /// Host-owned source of current time and artifact availability.
@@ -664,7 +682,7 @@ pub trait WorldReplayClosureAuthorityV1 {
 pub struct WorldReplayAdmissionV1 {
     closure_digest: Hash,
     evaluation: ReplayClaimEvaluationV1,
-    optional_view_roots: Vec<Hash>,
+    optional_views: Vec<(Hash, Hash)>,
 }
 
 #[cfg(feature = "test-support")]
@@ -712,12 +730,14 @@ impl WorldReplayAdmissionV1 {
             .all(crate::EvaluatedArtifactClaimV1::authoritative_use_permitted);
         if required_members_authorized
             && requested_view_roots.iter().all(|root| {
-                self.optional_view_roots.contains(root)
-                    && self.evaluation.artifacts().iter().any(|artifact| {
-                        Hash::from_bytes(artifact.artifact_digest().digest()) == *root
-                            && artifact.to() == ErasureReplayClaimV1::Exact
-                            && artifact.authoritative_use_permitted()
-                    })
+                self.optional_views.iter().any(|(node, native)| {
+                    node == root
+                        && self.evaluation.artifacts().iter().any(|artifact| {
+                            Hash::from_bytes(artifact.artifact_digest().digest()) == *native
+                                && artifact.to() == ErasureReplayClaimV1::Exact
+                                && artifact.authoritative_use_permitted()
+                        })
+                })
             })
         {
             Ok(())
@@ -786,7 +806,7 @@ mod tests {
             Hash::from_bytes([62; 32]),
             || Err::<WorldRetentionPolicyV1, _>(()),
             |_, _| Err::<WorldRetentionLeaseV1, _>(()),
-            |_| Err::<WorldConsumerSetV1, _>(()),
+            |_, _| Err::<WorldConsumerSetV1, _>(()),
             |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
         );
         assert_eq!(
@@ -800,7 +820,7 @@ mod tests {
             Hash::from_bytes([62; 32]),
             move || Ok::<_, ()>(policy),
             |_, _| Err::<WorldRetentionLeaseV1, _>(()),
-            |_| Err::<WorldConsumerSetV1, _>(()),
+            |_, _| Err::<WorldConsumerSetV1, _>(()),
             |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
         );
         assert_eq!(
@@ -814,8 +834,8 @@ mod tests {
             Hash::from_bytes([62; 32]),
             move || Ok::<_, ()>(policy),
             valid_lease,
-            |_| Err::<WorldConsumerSetV1, _>(()),
-            |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
+            |_, _| Err::<WorldConsumerSetV1, _>(()),
+            test_fixture_artifacts,
         );
         assert_eq!(
             consumer_failure,
@@ -829,7 +849,7 @@ mod tests {
             Hash::from_bytes([62; 32]),
             move || Ok::<_, ()>(policy),
             valid_lease,
-            move |_| Ok::<_, ()>(consumer_set),
+            move |_, _| Ok::<_, ()>(consumer_set),
             |_, _, _| Err::<Vec<WorldArtifactLeafV1>, _>(()),
         );
         assert_eq!(
@@ -844,7 +864,7 @@ mod tests {
             Hash::zero(),
             move || Ok::<_, ()>(policy),
             valid_lease,
-            move |_| Ok::<_, ()>(consumer_set),
+            move |_, _| Ok::<_, ()>(consumer_set),
             test_fixture_artifacts,
         );
         assert_eq!(
@@ -870,6 +890,7 @@ mod tests {
     fn fixture_consumer_set_closes_factory_failures() -> Result<(), Box<dyn std::error::Error>> {
         let consumer_failure = build_test_consumer_set(
             Hash::from_bytes([9; 32]),
+            Hash::from_bytes([53; 32]),
             || Err::<crate::world_consumer_set::WorldConsumerV1, _>(()),
             || Err::<crate::world_consumer_set::WorldProducerV1, _>(()),
         );
@@ -887,6 +908,7 @@ mod tests {
         let consumer_for_failure = consumer.clone();
         let producer_failure = build_test_consumer_set(
             Hash::from_bytes([9; 32]),
+            Hash::from_bytes([53; 32]),
             move || Ok::<_, ()>(consumer_for_failure),
             || Err::<crate::world_consumer_set::WorldProducerV1, _>(()),
         );
@@ -901,6 +923,7 @@ mod tests {
         )?;
         let invalid_set = build_test_consumer_set(
             Hash::zero(),
+            Hash::from_bytes([53; 32]),
             move || Ok::<_, ()>(consumer),
             move || Ok::<_, ()>(producer),
         );
