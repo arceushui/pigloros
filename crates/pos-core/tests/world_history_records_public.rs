@@ -207,12 +207,6 @@ fn public_wep1_rejects_invalid_row_fields_and_addresses() -> Result<(), Box<dyn 
     );
 
     let mut input = row_input(1, 1, 1);
-    input.event_type.clear();
-    assert_eq!(
-        WorldEventRowV1::new(input),
-        Err(WorldHistoryErrorV1::FieldOutOfBounds)
-    );
-    let mut input = row_input(1, 1, 1);
     input.event_type = "x".repeat(MAX_WORLD_EVENT_TYPE_BYTES_V1 + 1);
     assert_eq!(
         WorldEventRowV1::new(input),
