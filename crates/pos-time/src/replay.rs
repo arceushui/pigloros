@@ -713,7 +713,7 @@ mod tests {
 
         assert!(matches!(
             super::replay(&mut reads, timeline, &mut registry, &closure),
-            Err(CoreError::ArtifactUnavailable)
+            Err(CoreError::ErasureContainmentUnavailable)
         ));
         assert_eq!(registry.state_for_reducer("count", &entity), None);
     }
