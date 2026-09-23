@@ -538,6 +538,19 @@ fn public_whb1_enforces_contiguous_nonoverlapping_partitions(
         ),
         Err(WorldHistoryErrorV1::InvalidRange)
     );
+    assert_eq!(
+        history_branch(
+            1,
+            u64::MAX - 63,
+            u64::MAX,
+            64,
+            vec![
+                history_child(u64::MAX - 63, u64::MAX, 64, 3)?,
+                history_child(1, 1, 1, 4)?,
+            ],
+        ),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
     Ok(())
 }
 
