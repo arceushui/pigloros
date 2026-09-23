@@ -941,7 +941,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     // That later extension is not part of the old operation's proof.
     let directly_included_state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
-        Some(scope.clone()),
+        Some(scope),
         vec![first_extension, second_extension],
     )?;
     let directly_included = ErasureVerifiedInventoryV1::from_verified_recovery(
