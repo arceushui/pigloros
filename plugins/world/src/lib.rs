@@ -275,17 +275,53 @@ fn cbor_decode_array(
     }
 }
 
-fn validate_canonical_params(bytes: &[u8]) -> Result<(), WorldCodecError> {
-    let mut cursor = std::io::Cursor::new(bytes);
-    let parsed: ciborium::Value =
-        ciborium::from_reader(&mut cursor).map_err(|_| WorldCodecError::NonCanonicalParamsCbor)?;
-    if cursor.position() != bytes.len() as u64
-        || cbor_encode(&parsed).as_slice() != bytes
-        || !canonical_params_value(&parsed)
-    {
-        return Err(WorldCodecError::NonCanonicalParamsCbor);
+/// Normalize an actuator's horizontal X/Z pair to finite f32 components and
+/// encode the shortest canonical CBOR float representation for each component.
+///
+/// # Errors
+/// Returns [`WorldCodecError::NonFiniteFloat`] if either source value or its
+/// f32 conversion is non-finite.
+pub fn encode_actuator_pair_v1(x: f64, z: f64) -> Result<Vec<u8>, WorldCodecError> {
+    if !x.is_finite() || !z.is_finite() {
+        return Err(WorldCodecError::NonFiniteFloat);
     }
-    Ok(())
+    #[allow(clippy::cast_possible_truncation)]
+    let normalized = [x as f32, z as f32];
+    if !normalized.iter().all(|component| component.is_finite()) {
+        return Err(WorldCodecError::NonFiniteFloat);
+    }
+    Ok(cbor_encode(&ciborium::Value::Array(
+        normalized
+            .into_iter()
+            .map(|component| ciborium::Value::Float(f64::from(component)))
+            .collect(),
+    )))
+}
+
+fn decode_actuator_pair_v1(bytes: &[u8]) -> Result<(f32, f32), WorldCodecError> {
+    let items = cbor_decode_array(bytes, 2).map_err(|_| WorldCodecError::NonCanonicalParamsCbor)?;
+    let components = items
+        .iter()
+        .map(|item| {
+            let ciborium::Value::Float(value) = item else {
+                return Err(WorldCodecError::NonCanonicalParamsCbor);
+            };
+            if !value.is_finite() {
+                return Err(WorldCodecError::NonCanonicalParamsCbor);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let normalized = *value as f32;
+            if !normalized.is_finite() || f64::from(normalized).to_bits() != value.to_bits() {
+                return Err(WorldCodecError::NonCanonicalParamsCbor);
+            }
+            Ok(normalized)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((components[0], components[1]))
+}
+
+fn validate_canonical_params(bytes: &[u8]) -> Result<(), WorldCodecError> {
+    decode_actuator_pair_v1(bytes).map(|_| ())
 }
 
 fn decode_canonical_action_params_field(
@@ -294,26 +330,6 @@ fn decode_canonical_action_params_field(
     let params = decode_bytes_max(value, MAX_ACTION_BYTES)?;
     validate_canonical_params(&params)?;
     Ok(params)
-}
-
-fn canonical_params_value(value: &ciborium::Value) -> bool {
-    match value {
-        ciborium::Value::Float(value) => value.is_finite(),
-        ciborium::Value::Array(values) => values.iter().all(canonical_params_value),
-        ciborium::Value::Map(entries) => {
-            entries.iter().enumerate().all(|(index, (key, value))| {
-                canonical_params_value(key)
-                    && canonical_params_value(value)
-                    && !entries[..index].iter().any(|(previous, _)| previous == key)
-            }) && entries.windows(2).all(|pair| {
-                let left = cbor_encode(&pair[0].0);
-                let right = cbor_encode(&pair[1].0);
-                (left.len(), left) < (right.len(), right)
-            })
-        }
-        ciborium::Value::Tag(_, value) => canonical_params_value(value),
-        _ => true,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +385,7 @@ pub struct WorldActionV1 {
     pub actor_entity_id: EntityId,
     pub body_entity_id: EntityId,
     pub action_kind: ActionKindV1,
-    /// Canonical CBOR bytes for action parameters. Must be valid canonical CBOR.
+    /// Canonical CBOR array of exactly two normalized finite f32 floats (X, Z).
     pub params_cbor: Vec<u8>,
     /// Must be `ACTION_SCOPE_SINGLE_BODY` (0) in v1.
     pub action_scope: u8,
@@ -382,8 +398,8 @@ impl WorldActionV1 {
     ///
     /// # Errors
     /// Returns [`WorldCodecError::InvalidActionScope`] if `action_scope != ACTION_SCOPE_SINGLE_BODY`.
-    /// Returns [`WorldCodecError::NonCanonicalParamsCbor`] if `params_cbor` is not valid canonical CBOR.
-    /// Returns [`WorldCodecError::PayloadTooLarge`] if the encoded payload exceeds 4,096 bytes.
+    /// Returns [`WorldCodecError::NonCanonicalParamsCbor`] unless `params_cbor`
+    /// is an exact normalized X/Z actuator pair.
     pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
         if self.action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
@@ -400,14 +416,7 @@ impl WorldActionV1 {
             cbor_u32(self.catalogue_version),
             cbor_u64(self.tick),
         ]);
-        let encoded = cbor_encode(&arr);
-        if encoded.len() > MAX_ACTION_BYTES {
-            return Err(WorldCodecError::PayloadTooLarge {
-                size: encoded.len(),
-                max: MAX_ACTION_BYTES,
-            });
-        }
-        Ok(CanonicalBytes::from_vec(encoded))
+        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
     }
 
     /// Decode from canonical CBOR bytes.
@@ -687,10 +696,7 @@ impl WorldConfigV1 {
 // ---------------------------------------------------------------------------
 
 fn decode_velocity_params(params: &[u8]) -> Option<(f32, f32)> {
-    let items = cbor_decode_array(params, 2).ok()?;
-    let vx = decode_finite_f32(&items[0]).ok()?;
-    let vy = decode_finite_f32(&items[1]).ok()?;
-    Some((vx, vy))
+    decode_actuator_pair_v1(params).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1577,7 +1583,7 @@ mod tests {
             actor_entity_id: EntityId::new(),
             body_entity_id: EntityId::new(),
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![0xf6], // CBOR null — minimal valid canonical CBOR
+            params_cbor: encode_actuator_pair_v1(0.0, 0.0).test_ok(),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 42,
             tick: 100,
@@ -1883,7 +1889,7 @@ mod tests {
             assert_eq!(a.encode(), Err(WorldCodecError::NonCanonicalParamsCbor));
         }
 
-        a.params_cbor = vec![0xa2, 0x61, b'a', 2, 0x61, b'b', 1];
+        a.params_cbor = encode_actuator_pair_v1(1.25, -2.5).test_ok();
         assert!(a.encode().is_ok());
         a.params_cbor = vec![0xff];
         assert!(matches!(
@@ -1911,6 +1917,56 @@ mod tests {
             ciborium::Value::Float(f64::INFINITY),
         ]));
         assert_eq!(decode_velocity_params(&invalid_second), None);
+    }
+
+    #[test]
+    fn actuator_pair_normalizes_float_sources_and_preserves_signed_zero() {
+        let params = encode_actuator_pair_v1(1.0 / 3.0, -0.0).test_ok();
+        let (x, z) = decode_velocity_params(&params).test_ok();
+        assert_eq!(x, 0.333_333_34_f32);
+        assert_eq!(z.to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(
+            encode_actuator_pair_v1(f64::MIN_POSITIVE, -f64::MIN_POSITIVE).test_ok(),
+            encode_actuator_pair_v1(0.0, -0.0).test_ok()
+        );
+        assert_eq!(
+            encode_actuator_pair_v1(f64::INFINITY, 0.0),
+            Err(WorldCodecError::NonFiniteFloat)
+        );
+        assert_eq!(
+            encode_actuator_pair_v1(0.0, f64::MAX),
+            Err(WorldCodecError::NonFiniteFloat)
+        );
+    }
+
+    #[test]
+    fn actuator_pair_rejects_unnormalized_and_wrong_shape_wire_inputs() {
+        let mut action = sample_action();
+        for params in [
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Float(1.0 / 3.0),
+                ciborium::Value::Float(0.0),
+            ])),
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Integer(1.into()),
+                ciborium::Value::Float(0.0),
+            ])),
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Float(1.0),
+                ciborium::Value::Float(0.0),
+                ciborium::Value::Float(0.0),
+            ])),
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Float(f64::MAX),
+                ciborium::Value::Float(0.0),
+            ])),
+        ] {
+            action.params_cbor = params;
+            assert_eq!(
+                action.encode(),
+                Err(WorldCodecError::NonCanonicalParamsCbor)
+            );
+        }
     }
 
     #[test]
@@ -1971,7 +2027,7 @@ mod tests {
         action.params_cbor = cbor_encode(&ciborium::Value::Bytes(vec![0; MAX_ACTION_BYTES]));
         assert!(matches!(
             action.encode(),
-            Err(WorldCodecError::PayloadTooLarge { .. })
+            Err(WorldCodecError::NonCanonicalParamsCbor)
         ));
         assert!(matches!(
             WorldActionV1::decode(&CanonicalBytes::from_vec(vec![0; MAX_ACTION_BYTES + 1])),
@@ -2006,12 +2062,10 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn world_action_v1_empty_params_allowed() {
+    fn world_action_v1_empty_params_rejected() {
         let mut a = sample_action();
         a.params_cbor = vec![0xf6]; // CBOR null
-        let bytes = a.encode().test_ok();
-        let decoded = WorldActionV1::decode(&bytes).test_ok();
-        assert_eq!(decoded.params_cbor, vec![0xf6]);
+        assert_eq!(a.encode(), Err(WorldCodecError::NonCanonicalParamsCbor));
     }
 
     // ---------------------------------------------------------------------------
@@ -3802,23 +3856,23 @@ mod tests {
         assert!(matches!(error, RuntimeError::InvalidPayload { .. }));
         driver.abort_step();
 
-        let invalid_parameters = WorldActionV1 {
+        let valid_parameters = WorldActionV1 {
             actor_entity_id: EntityId::new(),
             body_entity_id: entity,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![0xf6],
+            params_cbor: encode_vel_params(1.0, 0.0),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
         };
+        let mut invalid_parameters = make_action_event_from(entity, &valid_parameters);
+        invalid_parameters.payload = rewrite_array_field(
+            &invalid_parameters.payload,
+            5,
+            ciborium::Value::Bytes(vec![0xf6]),
+        );
         let error = driver
-            .step(
-                tl.id(),
-                ObservationView::from_events(&[make_action_event_from(
-                    entity,
-                    &invalid_parameters,
-                )]),
-            )
+            .step(tl.id(), ObservationView::from_events(&[invalid_parameters]))
             .test_err();
         assert!(matches!(error, RuntimeError::InvalidPayload { .. }));
         driver.abort_step();

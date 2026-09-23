@@ -42,7 +42,8 @@ use pos_core::{
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{
-    ActionKindV1, WorldActionV1, WorldPlugin, EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
+    encode_actuator_pair_v1, ActionKindV1, WorldActionV1, WorldPlugin,
+    EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
@@ -2719,7 +2720,7 @@ struct GatewayWorldActionPayload {
     actor_entity_id: EntityId,
     body_entity_id: EntityId,
     action_kind: String,
-    params: Vec<u8>,
+    params: [serde_json::Value; 2],
     action_scope: u8,
     catalogue_version: u32,
     tick: u64,
@@ -2727,6 +2728,20 @@ struct GatewayWorldActionPayload {
 
 impl GatewayWorldActionPayload {
     fn encode(self) -> Result<CanonicalBytes, ActionRejected> {
+        let component = |value: &serde_json::Value| {
+            value
+                .as_number()
+                .filter(|number| number.is_f64())
+                .and_then(serde_json::Number::as_f64)
+                .ok_or_else(|| {
+                    ActionRejected::DomainValidationFailed(
+                        "actuator parameters must be exactly two JSON floats".to_owned(),
+                    )
+                })
+        };
+        let params_cbor =
+            encode_actuator_pair_v1(component(&self.params[0])?, component(&self.params[1])?)
+                .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))?;
         match self.action_kind.as_str() {
             "impulse" => Some(ActionKindV1::Impulse),
             "target_velocity" => Some(ActionKindV1::TargetVelocity),
@@ -2738,7 +2753,7 @@ impl GatewayWorldActionPayload {
                 actor_entity_id: self.actor_entity_id,
                 body_entity_id: self.body_entity_id,
                 action_kind,
-                params_cbor: self.params,
+                params_cbor,
                 action_scope: self.action_scope,
                 catalogue_version: self.catalogue_version,
                 tick: self.tick,
@@ -3432,7 +3447,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3516,7 +3531,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3599,7 +3614,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3641,7 +3656,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3690,7 +3705,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3923,7 +3938,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3979,7 +3994,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -6765,7 +6780,7 @@ mod tests {
             actor_entity_id: actor,
             body_entity_id: body,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![1],
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: 0,
             catalogue_version: 1,
             tick: 1,
@@ -6842,6 +6857,41 @@ mod tests {
         drop(gateway);
     }
 
+    #[test]
+    fn json_world_actions_require_exactly_two_float_components() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let payload = serde_json::json!({
+            "actor_entity_id": actor,
+            "body_entity_id": body,
+            "action_kind": "impulse",
+            "params": [1.0, -0.0],
+            "action_scope": 0,
+            "catalogue_version": 1,
+            "tick": 1
+        });
+        let action: GatewayWorldActionPayload = serde_json::from_value(payload.clone()).test_ok();
+        let decoded = WorldActionV1::decode(&action.encode().test_ok()).test_ok();
+        assert_eq!(
+            decoded.params_cbor,
+            encode_actuator_pair_v1(1.0, -0.0).test_ok()
+        );
+
+        for invalid in [
+            serde_json::json!([1, 0.0]),
+            serde_json::json!([1.0, "0.0"]),
+            serde_json::json!([1.0]),
+            serde_json::json!([1.0, 0.0, 0.0]),
+        ] {
+            let mut candidate = payload.clone();
+            candidate["params"] = invalid;
+            match serde_json::from_value::<GatewayWorldActionPayload>(candidate) {
+                Ok(action) => assert!(action.encode().is_err()),
+                Err(_) => {}
+            }
+        }
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn submit_proposed_action_approves_and_rejects() {
@@ -6857,7 +6907,7 @@ mod tests {
             actor_entity_id: actor,
             body_entity_id: body,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![0x83, 1, 2, 3],
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: 0,
             catalogue_version: 1,
             tick: 1,

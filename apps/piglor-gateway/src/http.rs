@@ -588,7 +588,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [marker],
+            "params": [f64::from(marker), 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": u64::from(marker)

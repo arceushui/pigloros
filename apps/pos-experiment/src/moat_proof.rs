@@ -27,9 +27,10 @@ use pos_core::{
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
 use pos_plugin_world::{
-    ActionKindV1, Body, SimpleKinematicBackend, WorldActionV1, WorldConfigV1, WorldDriver,
-    WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY, COORD_CONVENTION_RIGHT_HANDED_Y_UP,
-    EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1, SENSOR_MIN_RESOLUTION_MM,
+    encode_actuator_pair_v1, ActionKindV1, Body, SimpleKinematicBackend, WorldActionV1,
+    WorldConfigV1, WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
+    COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
+    SENSOR_MIN_RESOLUTION_MM,
 };
 use pos_runtime::{
     Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
@@ -305,8 +306,6 @@ pub enum MoatProofError {
     Runtime(#[from] RuntimeError),
     #[error("world action encoding failed: {0}")]
     WorldCodec(#[from] pos_plugin_world::WorldCodecError),
-    #[error("world action parameter encoding failed: {0}")]
-    ActionParams(String),
     #[error("fork cut has no committed events")]
     MissingForkCut,
     #[error("proof evidence failed independent verification: {0}")]
@@ -402,10 +401,9 @@ fn intervention(
     input: &MoatProofInputV1,
     tick: u64,
 ) -> Result<pos_core::ProposedAction, MoatProofError> {
-    let mut params = Vec::new();
     result_pipeline! {
-        ciborium::into_writer(&input.fork_velocity.to_vec(), &mut params)
-            .map_err(|error| MoatProofError::ActionParams(error.to_string())) => |()|;
+        encode_actuator_pair_v1(input.fork_velocity[0], input.fork_velocity[1])
+            .map_err(MoatProofError::from) => |params|;
         let action = WorldActionV1 {
             actor_entity_id: actor,
             body_entity_id: body,
