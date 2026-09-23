@@ -1213,7 +1213,9 @@ async fn started_cgroup_transport(
     fs::write(directory.join("cgroup.events"), b"populated 0\nfrozen 0\n")?;
     let (transport, server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let unit_name = TransientServiceUnitName::from_attempt_id([0x10; 16])?;
-    let launch_request = request(LaunchMode::AirGapped)?;
+    let launch_request = request(LaunchMode::Local {
+        host_service: descriptor()?,
+    })?;
     let verified = transport.start(unit_name, launch_request).await?;
     Ok((transport, server, verified, temporary))
 }
