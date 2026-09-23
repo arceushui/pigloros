@@ -331,6 +331,116 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
 }
 
 #[test]
+fn sqlite_key_registry_signing_and_rotation_are_ordered_across_handles(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (registry, identity, _) = registry()?;
+    let mut setup = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut setup)?;
+    setup.save_key_registry(&registry)?;
+    let timeline = setup.create_timeline("registry-rotation")?;
+    let timeline_id = timeline.id();
+    let mut event = seed_event(&mut setup, timeline_id)?;
+    event.id = EventId::new();
+    drop(setup);
+
+    let mut signing_store = SqliteStore::open(path)?;
+    let mut rotation_store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut signing_store)?;
+    bind_test_erasure_gate(&mut rotation_store)?;
+    let mut rotated_registry = registry.clone();
+    let rotated = KeyIdentityV1::new(identity.owner_id, identity.role, identity.epoch + 1);
+    rotated_registry.register_key(KeyRegistrationV1::new(
+        rotated,
+        Hash::from_bytes([5; 32]),
+        Some(pos_core::PublicKey::from_bytes([6; 32])),
+    ))?;
+    let signing_expected_registry = registry.clone();
+    let expected_after_rotation = rotated_registry.clone();
+    let (callback_entered_tx, callback_entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (rotation_attempted_tx, rotation_attempted_rx) = std::sync::mpsc::channel();
+    let (rotation_done_tx, rotation_done_rx) = std::sync::mpsc::channel();
+
+    let (sign_result, rotation_result, rotation_waited) = std::thread::scope(|scope| {
+        let sign_handle = scope.spawn(move || {
+            let mut callback_event = event;
+            let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
+                callback_entered_tx
+                    .send(())
+                    .map_err(|_| CoreError::Storage("signing callback signal failed".to_owned()))?;
+                release_rx.recv().map_err(|_| {
+                    CoreError::Storage("signing callback release failed".to_owned())
+                })?;
+                callback_event.seq = seq;
+                Ok::<Event, CoreError>(callback_event.clone())
+            };
+            signing_store.append_signed_authorized(
+                timeline_id,
+                &signing_expected_registry,
+                &mut callback,
+            )
+        });
+        if let Err(error) = callback_entered_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            let release_failed = release_tx.send(()).is_err();
+            return Err(format!(
+                "signing callback was not entered: {error}; release failed: {release_failed}"
+            )
+            .into());
+        }
+
+        let rotate_handle = scope.spawn(move || {
+            rotation_attempted_tx
+                .send(())
+                .map_err(|_| CoreError::Storage("rotation start signal failed".to_owned()))?;
+            let result = rotation_store.save_key_registry(&rotated_registry);
+            rotation_done_tx
+                .send(())
+                .map_err(|_| CoreError::Storage("rotation completion signal failed".to_owned()))?;
+            result
+        });
+        rotation_attempted_rx.recv_timeout(std::time::Duration::from_secs(5))?;
+        let rotation_waited = matches!(
+            rotation_done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        release_tx.send(())?;
+        let sign_result = sign_handle
+            .join()
+            .map_err(|_| std::io::Error::other("signing thread panicked"))?;
+        let rotation_result = rotate_handle
+            .join()
+            .map_err(|_| std::io::Error::other("rotation thread panicked"))?;
+        Ok::<_, Box<dyn std::error::Error>>((sign_result, rotation_result, rotation_waited))
+    })?;
+
+    assert!(rotation_waited);
+    sign_result?;
+    rotation_result?;
+    let mut verify = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut verify)?;
+    assert_eq!(
+        verify.read(timeline_id, pos_core::SeqRange::all())?.len(),
+        2
+    );
+    assert_eq!(verify.load_key_registry()?, Some(expected_after_rotation));
+    let mut callback_called = false;
+    let mut late_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        callback_called = true;
+        Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    };
+    assert!(verify
+        .append_signed_authorized(timeline_id, &registry, &mut late_callback)
+        .is_err());
+    assert!(!callback_called);
+    Ok(())
+}
+
+#[test]
 fn sqlite_key_registry_load_rejects_malformed_persisted_state(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;

@@ -11980,6 +11980,100 @@ mod tests {
     }
 
     #[test]
+    fn signed_append_commit_failure_rolls_back_the_event() {
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok();
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        let mut store = open_store_at(path);
+        store.save_key_registry(&registry).test_ok();
+        let timeline = store.create_timeline("signed-commit-failure").test_ok();
+        let mut event = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"seed")])
+            .test_ok()
+            .into_iter()
+            .next()
+            .test_ok();
+        event.id = EventId::new();
+        let mut callback_called = false;
+        let mut callback = |_registry: &KeyRegistryStateV1, seq: Seq| {
+            callback_called = true;
+            event.seq = seq;
+            Ok(event.clone())
+        };
+        store.conn.commit_hook(Some(|| true)).test_ok();
+        let error = store
+            .append_signed_authorized(timeline.id(), &registry, &mut callback)
+            .test_err();
+        assert!(callback_called);
+        assert!(error.to_string().contains("transaction commit failed"));
+        drop(store);
+
+        let reopened = open_store_at(path);
+        assert_eq!(
+            reopened
+                .read(timeline.id(), SeqRange::all())
+                .test_ok()
+                .len(),
+            1
+        );
+        assert_eq!(reopened.load_key_registry().test_ok(), Some(registry));
+    }
+
+    #[test]
+    fn signed_append_insertion_failure_rolls_back_the_event() {
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        let mut store = new_store();
+        store.save_key_registry(&registry).test_ok();
+        let timeline = store.create_timeline("signed-insertion-failure").test_ok();
+        let mut event = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"seed")])
+            .test_ok()
+            .into_iter()
+            .next()
+            .test_ok();
+        event.id = EventId::new();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_signed_event BEFORE INSERT ON events
+                 BEGIN SELECT RAISE(ABORT, 'signed insert denied'); END",
+            )
+            .test_ok();
+        let mut callback_called = false;
+        let mut callback = |_registry: &KeyRegistryStateV1, seq: Seq| {
+            callback_called = true;
+            event.seq = seq;
+            Ok(event.clone())
+        };
+        let error = store
+            .append_signed_authorized(timeline.id(), &registry, &mut callback)
+            .test_err();
+        assert!(callback_called);
+        assert!(error.to_string().contains("signed insert denied"));
+        assert_eq!(
+            store.read(timeline.id(), SeqRange::all()).test_ok().len(),
+            1
+        );
+        assert_eq!(store.load_key_registry().test_ok(), Some(registry));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_bad_signature_blob_length() {
         let mut store = new_store();

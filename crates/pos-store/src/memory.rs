@@ -2680,6 +2680,58 @@ impl EventStore for MemoryStore {
         Ok(())
     }
 
+    fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+    ) -> Result<(), CoreError> {
+        // A MemoryStore has one mutable owner; no second handle can change its
+        // registry between this check and the all-or-nothing committed append.
+        let persisted = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        if persisted != *expected_registry {
+            return Err(CoreError::Storage(
+                "key registry changed during signing".to_owned(),
+            ));
+        }
+        let head = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let event = create_event(&persisted, head.head.next())?;
+        self.append_committed(timeline, &[event])
+    }
+
+    fn begin_key_registry_destruction(
+        &mut self,
+        request: pos_core::KeyDestructionRequestV1,
+    ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .begin_key_destruction(request)
+            .map_err(|error| CoreError::Storage(format!("key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
+    }
+
+    fn complete_key_registry_destruction(
+        &mut self,
+        request: pos_core::KeyDestructionRequestV1,
+        deletion_receipt: Hash,
+    ) -> Result<(pos_core::KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .complete_key_destruction(request, deletion_receipt)
+            .map_err(|error| CoreError::Storage(format!("key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
+    }
+
     fn append_bounded(
         &mut self,
         timeline: TimelineId,
