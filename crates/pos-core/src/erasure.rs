@@ -5874,7 +5874,9 @@ struct ForkAdmissionBindingDigestInput<'a> {
     child: &'a crate::TimelineMeta,
 }
 
-fn fork_admission_binding_digest(input: ForkAdmissionBindingDigestInput<'_>) -> ErasureReferenceV1 {
+fn fork_admission_binding_digest(
+    input: &ForkAdmissionBindingDigestInput<'_>,
+) -> ErasureReferenceV1 {
     let Some((parent, at_seq)) = input.child.fork_point else {
         return reference_zero();
     };
@@ -6258,7 +6260,7 @@ impl PreparedErasureForkAdmissionV1 {
                 effect_subject: mutation.effect().subject(),
             },
         );
-        let digest = fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+        let digest = fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
             operation: input.operation,
             expected_inventory_generation: input.expected_inventory_generation,
             child_scope: input.child_scope,
@@ -6624,7 +6626,7 @@ impl ErasureForkRecoveryProofV1 {
             ) {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            let expected = fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+            let expected = fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
                 operation: admission.operation,
                 expected_inventory_generation: admission.expected_inventory_generation,
                 child_scope: admission.child_scope,
@@ -9312,7 +9314,7 @@ mod coverage_paths {
         let admission = &proof.admissions()[0];
         assert_eq!(
             admission.binding_digest(),
-            fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+            fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
                 operation: reference(180),
                 expected_inventory_generation: reference(181),
                 child_scope: reference(182),
@@ -9351,7 +9353,7 @@ mod coverage_paths {
         assert_eq!(admission.effect_subject(), None);
         assert_eq!(
             admission.binding_digest(),
-            fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+            fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
                 operation: reference(180),
                 expected_inventory_generation: reference(181),
                 child_scope: reference(182),
@@ -9366,7 +9368,7 @@ mod coverage_paths {
 
         let root = crate::TimelineMeta::root("proof-root");
         assert_eq!(
-            fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
+            fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
                 operation: reference(1),
                 expected_inventory_generation: reference(2),
                 child_scope: reference(3),
@@ -9860,17 +9862,18 @@ mod coverage_paths {
         let predecessor_extension = admission
             .predecessor
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        admission.binding_digest = fork_admission_binding_digest(ForkAdmissionBindingDigestInput {
-            operation: admission.operation,
-            expected_inventory_generation: admission.expected_inventory_generation,
-            child_scope: admission.child_scope,
-            extension: admission.extension,
-            mutation: admission.request,
-            predecessor: predecessor_extension,
-            next_manifest: admission.next_manifest,
-            persistence_evidence: fork_recovery_mutation_evidence_digest(admission),
-            child: result.child(),
-        });
+        admission.binding_digest =
+            fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
+                operation: admission.operation,
+                expected_inventory_generation: admission.expected_inventory_generation,
+                child_scope: admission.child_scope,
+                extension: admission.extension,
+                mutation: admission.request,
+                predecessor: predecessor_extension,
+                next_manifest: admission.next_manifest,
+                persistence_evidence: fork_recovery_mutation_evidence_digest(admission),
+                child: result.child(),
+            });
         let admission_binding = admission.binding_digest;
         mismatched_admission.binding_digest = fork_batch_binding_digest(
             mismatched_admission.operation,
