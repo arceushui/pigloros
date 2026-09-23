@@ -301,14 +301,18 @@ mod tests {
         assert_eq!(count_for(&partial, &entity), 3);
     }
 
-    #[test]
-    fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
+    fn committed_world_step() -> (
+        pos_runtime::ErasureExecutionHostV1,
+        TimelineId,
+        [EntityId; 2],
+        Event,
+        Vec<Event>,
+    ) {
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gate = host.containment_gate();
         let mut bodies = [EntityId::new(), EntityId::new()];
         bodies.sort_unstable();
         let config = WorldConfigV1 {
@@ -382,6 +386,19 @@ mod tests {
             (timeline, action, committed)
         };
         drop(driver);
+        (host, timeline, bodies, action, committed)
+    }
+
+    fn world_registry(gate: Arc<ErasureContainmentGateV1>) -> ProjectionRegistry {
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("world", Box::new(WorldReducer));
+        registry
+    }
+
+    #[test]
+    fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
+        let (mut host, timeline, bodies, action, committed) = committed_world_step();
+        let gate = host.containment_gate();
 
         let observations: Vec<_> = committed
             .iter()
@@ -402,8 +419,7 @@ mod tests {
             (1.0, 0.0, 2.0)
         );
 
-        let mut live = ProjectionRegistry::new().with_erasure_gate(gate.clone());
-        live.register("world", Box::new(WorldReducer));
+        let mut live = world_registry(gate.clone());
         live.apply_event(&action);
         live.fold_events(&committed);
         let expected: Vec<_> = bodies
@@ -412,12 +428,9 @@ mod tests {
             .collect();
 
         let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
-        let mut before = ProjectionRegistry::new().with_erasure_gate(gate.clone());
-        before.register("world", Box::new(WorldReducer));
-        let mut first = ProjectionRegistry::new().with_erasure_gate(gate.clone());
-        first.register("world", Box::new(WorldReducer));
-        let mut complete = ProjectionRegistry::new().with_erasure_gate(gate.clone());
-        complete.register("world", Box::new(WorldReducer));
+        let mut before = world_registry(gate.clone());
+        let mut first = world_registry(gate.clone());
+        let mut complete = world_registry(gate.clone());
         let mut reads = host.read_sender().test_ok();
         super::replay_at(
             &mut reads,
@@ -469,8 +482,7 @@ mod tests {
             .test_ok()
             .append(timeline, &[telemetry])
             .test_ok();
-        let mut with_telemetry = ProjectionRegistry::new().with_erasure_gate(gate);
-        with_telemetry.register("world", Box::new(WorldReducer));
+        let mut with_telemetry = world_registry(gate);
         super::replay(
             &mut host.read_sender().test_ok(),
             timeline,
