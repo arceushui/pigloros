@@ -5955,7 +5955,9 @@ fn fork_admission_persistence_evidence_digest(
             hasher.update(&[1]);
             hasher.update(&subject.digest());
         }
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
     }
     ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
 }
