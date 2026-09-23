@@ -98,7 +98,7 @@ pub fn compare(
             &mut first_timeline_effect,
         )
         .map_err(crate::host_error_to_core)
-        .and_then(|()| second_timeline_fence_result)
+        .and(second_timeline_fence_result)
         .and(comparison_outcome)
 }
 
