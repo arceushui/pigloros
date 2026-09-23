@@ -7235,9 +7235,7 @@ mod coverage_entrypoints {
             .clone()
             .prepare_fork_batch(first_input, Vec::new()));
         let stale_inventory = inventory.clone();
-        let second = ok(inventory
-            .clone()
-            .prepare_fork_batch(second_input, Vec::new()));
+        let second = ok(inventory.prepare_fork_batch(second_input, Vec::new()));
         let expected = ok(first.recovery_result());
         let proof = ok(first.recovery_proof());
         let gate = Arc::clone(
