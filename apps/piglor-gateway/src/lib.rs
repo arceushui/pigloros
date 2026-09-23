@@ -6878,9 +6878,8 @@ mod tests {
         ] {
             let mut candidate = payload.clone();
             candidate["params"] = invalid;
-            match serde_json::from_value::<GatewayWorldActionPayload>(candidate) {
-                Ok(action) => assert!(action.encode().is_err()),
-                Err(_) => {}
+            if let Ok(action) = serde_json::from_value::<GatewayWorldActionPayload>(candidate) {
+                assert!(action.encode().is_err());
             }
         }
 
