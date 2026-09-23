@@ -1124,10 +1124,15 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 1);
-    assert_eq!(
-        successor_inventory.require_unaffected_topology(child),
-        Ok(())
-    );
+    let (parent, _) = prepared
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    let retry_requirements = successor_inventory.fork_retry_scope_requirements(parent, child)?;
+    assert_eq!(retry_requirements.len(), prepared.admissions().len());
+    for (retry_requirement, admission) in retry_requirements.iter().zip(prepared.admissions()) {
+        assert_eq!(retry_requirement.extension(), admission.extension());
+    }
     let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     assert_ne!(
         stale_inventory.generation(),
