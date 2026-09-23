@@ -170,6 +170,10 @@ fn public_constructor_enforces_scope_height_fanout_order_and_ranges() -> TestRes
     );
 
     let leaf = child(first, first, 1, hash(40))?;
+    assert_eq!(leaf.first_key(), first);
+    assert_eq!(leaf.last_key(), first);
+    assert_eq!(leaf.leaf_count(), 1);
+    assert_eq!(leaf.node_hash(), hash(40));
     for height in [0, 32] {
         assert_eq!(
             WorldDependencyDirectoryV1::new(WorldDependencyDirectoryInputV1 {
@@ -381,6 +385,8 @@ fn public_wdb1_roundtrips_maximum_fanout_and_height() -> TestResult {
         height: MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
         children: vec![child(first, last, 2, hash(3))?],
     })?;
+    assert_eq!(root.first_key(), first);
+    assert_eq!(root.last_key(), last);
     assert_eq!(WorldDependencyDirectoryV1::decode(&root.encode())?, root);
     Ok(())
 }
@@ -390,6 +396,11 @@ fn public_decoder_rejects_noncanonical_malformed_and_hostile_inputs() -> TestRes
     let expected = encode(wire()?)?;
     let decode =
         |bytes: Vec<u8>| WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(bytes));
+
+    assert_eq!(
+        decode(Vec::new()),
+        Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
+    );
 
     let mut wrong_magic = expected.clone();
     wrong_magic[2] = b'X';

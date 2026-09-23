@@ -271,17 +271,16 @@ impl WorldDependencyDirectoryV1 {
             bytes: bytes.as_slice(),
             offset: 0,
         };
-        let directory = match reader.directory() {
-            Ok(directory) => directory,
-            Err(error) => return Err(error),
-        };
-        if let Err(error) = reader.finish() {
-            return Err(error);
-        }
-        if directory.encode().as_slice() != bytes.as_slice() {
-            return Err(WorldDependencyDirectoryErrorV1::NonCanonicalEncoding);
-        }
-        Ok(directory)
+        reader
+            .directory()
+            .and_then(|directory| reader.finish().map(|()| directory))
+            .and_then(|directory| {
+                if directory.encode().as_slice() == bytes.as_slice() {
+                    Ok(directory)
+                } else {
+                    Err(WorldDependencyDirectoryErrorV1::NonCanonicalEncoding)
+                }
+            })
     }
 
     /// Encode the exact eight-field preferred definite WDB1 representation.
@@ -520,7 +519,7 @@ impl Reader<'_> {
             })
     }
 
-    fn finish(&self) -> Result<(), WorldDependencyDirectoryErrorV1> {
+    const fn finish(&self) -> Result<(), WorldDependencyDirectoryErrorV1> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
@@ -542,22 +541,21 @@ impl Reader<'_> {
     }
 
     fn head(&mut self, expected_major: u8) -> Result<u64, WorldDependencyDirectoryErrorV1> {
-        let initial = match self.take(1) {
-            Ok(bytes) => bytes[0],
-            Err(error) => return Err(error),
-        };
-        if initial >> 5 != expected_major {
-            return Err(WorldDependencyDirectoryErrorV1::InvalidEncoding);
-        }
-        match initial & 31 {
-            value @ 0..=23 => Ok(u64::from(value)),
-            argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
-                bytes
-                    .iter()
-                    .fold(0, |value, byte| (value << 8) | u64::from(*byte))
-            }),
-            _ => Err(WorldDependencyDirectoryErrorV1::InvalidEncoding),
-        }
+        self.take(1).map(|bytes| bytes[0]).and_then(|initial| {
+            if initial >> 5 != expected_major {
+                Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
+            } else {
+                match initial & 31 {
+                    value @ 0..=23 => Ok(u64::from(value)),
+                    argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
+                        bytes
+                            .iter()
+                            .fold(0, |value, byte| (value << 8) | u64::from(*byte))
+                    }),
+                    _ => Err(WorldDependencyDirectoryErrorV1::InvalidEncoding),
+                }
+            }
+        })
     }
 
     fn code(&mut self) -> Result<u8, WorldDependencyDirectoryErrorV1> {
