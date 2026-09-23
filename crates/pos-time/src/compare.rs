@@ -97,9 +97,9 @@ pub fn compare(
             ErasureProtectedOperationV1::Export,
             &mut first_timeline_effect,
         )
-        .map_err(crate::host_error_to_core)?;
-    second_timeline_fence_result?;
-    comparison_outcome
+        .map_err(crate::host_error_to_core)
+        .and_then(|()| second_timeline_fence_result)
+        .and_then(|()| comparison_outcome)
 }
 
 fn require_comparison_artifacts(
