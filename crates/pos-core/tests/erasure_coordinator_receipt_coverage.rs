@@ -3135,6 +3135,7 @@ fn public_errors_lifecycles_and_digest_helpers_are_closed() {
         ErasureErrorV1::ReceiptCommitFailed,
         ErasureErrorV1::TrustSnapshotInvalid,
         ErasureErrorV1::ProvenanceMissing,
+        ErasureErrorV1::StaleGeneration,
     ];
     for (code, error) in errors.into_iter().enumerate() {
         assert_eq!(error.code(), code as u64);
