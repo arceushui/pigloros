@@ -6453,6 +6453,10 @@ mod tests {
             map_erasure_error(ErasureErrorV1::PolicyConflict),
             ErasureHostErrorV1::Conflict
         );
+        assert_eq!(
+            map_erasure_error(ErasureErrorV1::StaleGeneration),
+            ErasureHostErrorV1::StaleGeneration
+        );
         for error in [
             ErasureErrorV1::UnsupportedVersion,
             ErasureErrorV1::AccessFreezeFailed,
@@ -6481,6 +6485,7 @@ mod tests {
             ErasureErrorV1::Unauthorized,
             ErasureErrorV1::ScopeInvalid,
             ErasureErrorV1::PolicyConflict,
+            ErasureErrorV1::StaleGeneration,
             ErasureErrorV1::AccessFreezeFailed,
             ErasureErrorV1::TrustSnapshotInvalid,
             ErasureErrorV1::ProvenanceMissing,
@@ -7129,6 +7134,32 @@ mod tests {
         let resolving_authority = UnusedCoordinatorAuthorityV1 {
             resolved_child_scope: Some(recovered.child_scope()),
         };
+        let stale_generation_input = IdentifiedForkTransitionInput {
+            operation,
+            parent,
+            child: recovered.child(),
+            current_generation: recovered.expected_inventory_generation(),
+            current_inventory: &current_inventory,
+            authority: &resolving_authority,
+            coordinator: reference(65),
+            recovered: Some(recovered.clone()),
+        };
+        let mut transition_failure = None;
+        assert_eq!(
+            ErasureExecutionHostV1::recover_identified_fork(
+                &stale_generation_input,
+                &recovered,
+                &mut transition_failure,
+            ),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            transition_failure,
+            Some(TransitionFailureV1::Host(
+                ErasureHostErrorV1::StaleGeneration
+            ))
+        );
+
         let missing_inventory_input = IdentifiedForkTransitionInput {
             operation,
             parent,
