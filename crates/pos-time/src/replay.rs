@@ -67,6 +67,7 @@ fn replay_range(
             .into_iter()
             .map(str::to_owned)
             .collect(),
+        Vec::new(),
     )
     .map_err(|_| CoreError::ArtifactUnavailable)?;
     let mut outcome = Err(CoreError::ArtifactUnavailable);

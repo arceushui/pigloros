@@ -49,26 +49,12 @@ pub struct WorldReplayUseV1 {
 }
 
 impl WorldReplayUseV1 {
-    /// Construct a bounded request with a canonical consumer selection.
-    ///
-    /// # Errors
-    /// Returns [`WorldReplayVerificationErrorV1::RequestMismatch`] for an
-    /// empty, duplicate, oversized, or malformed consumer selection.
-    pub fn new(
-        timeline_id: TimelineId,
-        operation: ErasureProtectedOperationV1,
-        range: SeqRange,
-        consumer_ids: Vec<String>,
-    ) -> Result<Self, WorldReplayVerificationErrorV1> {
-        Self::new_with_optional_views(timeline_id, operation, range, consumer_ids, Vec::new())
-    }
-
-    /// Construct a bounded request that names every optional view it will expose.
+    /// Construct a bounded request with canonical consumer and optional-view selections.
     ///
     /// # Errors
     /// Returns [`WorldReplayVerificationErrorV1::RequestMismatch`] for an
     /// invalid consumer selection or optional-view root set.
-    pub fn new_with_optional_views(
+    pub fn new(
         timeline_id: TimelineId,
         operation: ErasureProtectedOperationV1,
         range: SeqRange,
@@ -380,6 +366,7 @@ mod tests {
             ErasureProtectedOperationV1::Read,
             SeqRange::all(),
             vec!["count".to_owned()],
+            Vec::new(),
         )
         .test_ok();
         let exact = test_verified_world_replay(
@@ -435,6 +422,7 @@ mod tests {
                     ErasureProtectedOperationV1::Read,
                     SeqRange::all(),
                     consumers,
+                    Vec::new(),
                 ),
                 Err(WorldReplayVerificationErrorV1::RequestMismatch)
             );
@@ -445,6 +433,7 @@ mod tests {
                 ErasureProtectedOperationV1::Read,
                 SeqRange::bounded(pos_core::Seq::from_u64(2), pos_core::Seq::from_u64(1)),
                 vec!["count".to_owned()],
+                Vec::new(),
             ),
             Err(WorldReplayVerificationErrorV1::RequestMismatch)
         );
@@ -455,7 +444,7 @@ mod tests {
         let closure = WorldReplayClosureV1::test_fixture().test_ok();
         let generation = ErasureReferenceV1::from_digest([63; 32]);
         let root = closure.consumer_set().optional_view_roots()[0];
-        let request = WorldReplayUseV1::new_with_optional_views(
+        let request = WorldReplayUseV1::new(
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,
             SeqRange::all(),
@@ -497,7 +486,7 @@ mod tests {
 
         for roots in [vec![Hash::zero()], vec![root, root]] {
             assert_eq!(
-                WorldReplayUseV1::new_with_optional_views(
+                WorldReplayUseV1::new(
                     closure.timeline_id(),
                     ErasureProtectedOperationV1::Read,
                     SeqRange::all(),
@@ -507,7 +496,7 @@ mod tests {
                 Err(WorldReplayVerificationErrorV1::RequestMismatch)
             );
         }
-        let unknown = WorldReplayUseV1::new_with_optional_views(
+        let unknown = WorldReplayUseV1::new(
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,
             SeqRange::all(),
