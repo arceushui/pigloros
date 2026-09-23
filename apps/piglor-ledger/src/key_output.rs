@@ -198,46 +198,38 @@ pub enum FaultStage {
 #[cfg(all(test, unix))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod injected_fault {
+    use std::cell::RefCell;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
 
     use super::FaultStage;
 
-    static PLAN: Mutex<Option<(PathBuf, Vec<FaultStage>)>> = Mutex::new(None);
+    thread_local! {
+        static PLAN: RefCell<Option<(PathBuf, Vec<FaultStage>)>> = const { RefCell::new(None) };
+    }
 
     pub(super) fn install(path: &Path, stages: &[FaultStage]) {
-        let mut plan = PLAN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *plan = Some((path.to_path_buf(), stages.to_vec()));
+        PLAN.with(|plan| *plan.borrow_mut() = Some((path.to_path_buf(), stages.to_vec())));
     }
 
     pub(super) fn clear() {
-        let mut plan = PLAN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *plan = None;
+        PLAN.with(|plan| *plan.borrow_mut() = None);
     }
 
     pub(super) fn take(path: &Path, stage: FaultStage) -> bool {
-        let mut plan = PLAN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some((planned_path, stages)) = plan.as_mut() else {
-            drop(plan);
-            return false;
-        };
-        if planned_path != path {
-            drop(plan);
-            return false;
-        }
-        let Some(index) = stages.iter().position(|candidate| *candidate == stage) else {
-            drop(plan);
-            return false;
-        };
-        stages.remove(index);
-        drop(plan);
-        true
+        PLAN.with(|plan| {
+            let mut plan = plan.borrow_mut();
+            let Some((planned_path, stages)) = plan.as_mut() else {
+                return false;
+            };
+            if planned_path != path {
+                return false;
+            }
+            let Some(index) = stages.iter().position(|candidate| *candidate == stage) else {
+                return false;
+            };
+            stages.remove(index);
+            true
+        })
     }
 }
 
