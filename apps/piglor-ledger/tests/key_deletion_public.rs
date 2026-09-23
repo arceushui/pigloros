@@ -194,18 +194,21 @@ fn startup_requires_explicit_recovery_for_multiple_pending_ledger_keys(
             Some(PublicKey::from_bytes([byte; 32])),
         ))?;
     }
+    let mut store = authorized_store(&database)?;
+    store.save_key_registry(&state)?;
     for (epoch, byte) in [(1, 1_u8), (2, 2_u8)] {
-        state.begin_key_destruction(KeyDestructionRequestV1::new(
+        store.begin_key_registry_destruction(KeyDestructionRequestV1::new(
             KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, epoch),
             Hash::from_bytes([byte; 32]),
             Hash::from_bytes([7; 32]),
         ))?;
     }
-    let mut store = authorized_store(&database)?;
-    store.save_key_registry(&state)?;
     drop(store);
+    assert_eq!(
+        registry(&database)?.pending_destruction_requests().count(),
+        2
+    );
     assert!(open_store(&Source::Store(database), Some(&key)).is_err());
-    assert_eq!(state.pending_destruction_requests().count(), 2);
     Ok(())
 }
 
