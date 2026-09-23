@@ -8051,6 +8051,7 @@ mod coverage_paths {
                     &ErasureTopologyStoreBindingV1 {
                         gate_identity: Arc::clone(&gate.topology_binding_id),
                         store_identity: Arc::new(()),
+                        requires_transition_permit: false,
                     },
                 ),
                 permit.claim_for_store(&foreign_gate, &store_binding),

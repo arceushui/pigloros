@@ -135,7 +135,7 @@ fn bind_registry_erasure_gate_inner(
     let registry_gate = registry
         .clone_erasure_gate()
         .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-    let gate_interface: Arc<dyn ErasureGate> = Arc::clone(&gate);
+    let gate_interface: Arc<dyn ErasureGate> = gate.clone();
     if !Arc::ptr_eq(&registry_gate, &gate_interface) {
         return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     }
@@ -224,7 +224,7 @@ fn bind_backtest_erasure_gate(
         let existing = registry
             .clone_erasure_gate()
             .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-        let gate_interface: Arc<dyn ErasureGate> = Arc::clone(&gate);
+        let gate_interface: Arc<dyn ErasureGate> = gate.clone();
         if !Arc::ptr_eq(&existing, &gate_interface) {
             return Err(pos_core::CoreError::ErasureContainmentUnavailable);
         }
@@ -2515,7 +2515,7 @@ impl BacktestRunner {
     ) -> Result<BacktestResult, ExperimentError> {
         let host_gate = store.containment_gate();
         if let Some(configured) = self.erasure_gate.as_ref() {
-            let configured: Arc<dyn ErasureGate> = Arc::clone(configured);
+            let configured: Arc<dyn ErasureGate> = configured.clone();
             if !Arc::ptr_eq(&configured, &host_gate) {
                 return Err(ExperimentError::Store(
                     pos_core::CoreError::ErasureContainmentUnavailable,
@@ -2532,7 +2532,7 @@ impl BacktestRunner {
     ) -> Result<BacktestResult, ExperimentError> {
         let store_gate = self.erasure_gate.clone();
         let runtime_gate = store_gate.as_ref().map(|gate| {
-            let gate: Arc<dyn ErasureGate> = Arc::clone(gate);
+            let gate: Arc<dyn ErasureGate> = gate.clone();
             gate
         });
         self.run_on_store_with_gate_bindings(store, store_gate, runtime_gate)
