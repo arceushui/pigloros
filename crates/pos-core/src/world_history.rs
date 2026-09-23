@@ -529,11 +529,11 @@ fn validate_history_branch(input: &WorldHistoryBranchInputV1) -> Result<(), Worl
         }
         child_validation.and_then(|()| {
             if input.children.last().map(|child| child.last_logical_seq)
-                != Some(input.last_logical_seq)
+                == Some(input.last_logical_seq)
             {
-                Err(WorldHistoryErrorV1::InvalidRange)
-            } else {
                 Ok(())
+            } else {
+                Err(WorldHistoryErrorV1::InvalidRange)
             }
         })
     })
