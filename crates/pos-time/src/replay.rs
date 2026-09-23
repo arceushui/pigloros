@@ -141,6 +141,13 @@ mod tests {
         store::{EventStore, SeqRange},
         CoreError, ErasureContainmentGateV1, Event, Reducer, State,
     };
+    use pos_plugin_world::{
+        encode_actuator_pair_v1, ActionKindV1, Body, SimpleKinematicBackend, WorldActionV1,
+        WorldConfigV1, WorldDriver, WorldObservationV1, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
+        COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
+        SENSOR_MIN_RESOLUTION_MM,
+    };
+    use pos_runtime::{Driver, ObservationView};
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
@@ -292,6 +299,189 @@ mod tests {
         .test_ok();
         assert_eq!(count_for(&complete, &entity), 3);
         assert_eq!(count_for(&partial, &entity), 3);
+    }
+
+    #[test]
+    fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let mut bodies = [EntityId::new(), EntityId::new()];
+        bodies.sort_unstable();
+        let config = WorldConfigV1 {
+            timestep_micros: 1_000_000,
+            coord_convention: COORD_CONVENTION_RIGHT_HANDED_Y_UP,
+            gravity_x: 0.0,
+            gravity_y: -9.81,
+            gravity_z: 0.0,
+            backend_id: "simple-kinematic".to_owned(),
+            backend_version: "1.0.0".to_owned(),
+            backend_content_hash: [3; 32],
+            action_schema_version: 1,
+            observation_schema_version: 1,
+            sensor_min_resolution_mm: SENSOR_MIN_RESOLUTION_MM,
+            actuator_catalogue_version: 1,
+        };
+        let mut driver = WorldDriver::new(
+            vec![
+                Body {
+                    entity_id: bodies[1],
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    vz: 0.0,
+                },
+                Body {
+                    entity_id: bodies[0],
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    vz: 0.0,
+                },
+            ],
+            Box::new(SimpleKinematicBackend::new()),
+            config,
+        );
+        let action = WorldActionV1 {
+            actor_entity_id: bodies[0],
+            body_entity_id: bodies[0],
+            action_kind: ActionKindV1::TargetVelocity,
+            params_cbor: encode_actuator_pair_v1(1.0, 2.0).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let (timeline, action, committed) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("world-live-replay").test_ok().id();
+            let action = commands
+                .append(
+                    timeline,
+                    &[EventDraft::new(
+                        bodies[0],
+                        Kind::new(EVENT_TYPE_ACTION_V1),
+                        action.encode().test_ok(),
+                    )],
+                )
+                .test_ok()
+                .remove(0);
+            let output = driver
+                .step(
+                    timeline,
+                    ObservationView::from_events(std::slice::from_ref(&action)),
+                )
+                .test_ok();
+            let committed = commands.append(timeline, &output.drafts).test_ok();
+            (timeline, action, committed)
+        };
+        drop(driver);
+
+        let observations: Vec<_> = committed
+            .iter()
+            .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .collect();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].entity, bodies[0]);
+        assert_eq!(observations[1].entity, bodies[1]);
+        assert!(observations[0].seq < observations[1].seq);
+        assert_eq!(observations[0].causation_id, Some(action.id));
+        let observed = WorldObservationV1::decode(&observations[0].payload).test_ok();
+        assert_eq!(
+            (observed.pos_x, observed.pos_y, observed.pos_z),
+            (1.0, 0.0, 2.0)
+        );
+        assert_eq!(
+            (observed.vel_lin_x, observed.vel_lin_y, observed.vel_lin_z),
+            (1.0, 0.0, 2.0)
+        );
+
+        let mut live = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        live.register("world", Box::new(WorldReducer));
+        live.apply_event(&action);
+        live.fold_events(&committed);
+        let expected: Vec<_> = bodies
+            .iter()
+            .map(|body| live.state_for_reducer("world", body).test_ok().clone())
+            .collect();
+
+        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let mut before = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        before.register("world", Box::new(WorldReducer));
+        let mut first = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        first.register("world", Box::new(WorldReducer));
+        let mut complete = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        complete.register("world", Box::new(WorldReducer));
+        let mut reads = host.read_sender().test_ok();
+        super::replay_at(
+            &mut reads,
+            timeline,
+            action.seq,
+            &mut before,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        assert!(before
+            .state_for_reducer("world", &bodies[0])
+            .test_ok()
+            .fields
+            .is_empty());
+        assert!(before.state_for_reducer("world", &bodies[1]).is_none());
+        super::replay_at(
+            &mut reads,
+            timeline,
+            observations[0].seq,
+            &mut first,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        assert_eq!(
+            first.state_for_reducer("world", &bodies[0]),
+            Some(&expected[0])
+        );
+        assert!(first.state_for_reducer("world", &bodies[1]).is_none());
+        super::replay(
+            &mut reads,
+            timeline,
+            &mut complete,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        for (body, state) in bodies.iter().zip(&expected) {
+            assert_eq!(complete.state_for_reducer("world", body), Some(state));
+        }
+
+        let telemetry = EventDraft::new(
+            bodies[0],
+            Kind::new("world.telemetry.ephemeral"),
+            CanonicalBytes::from_static(b"discardable"),
+        );
+        host.command_sender()
+            .test_ok()
+            .append(timeline, &[telemetry])
+            .test_ok();
+        let mut with_telemetry = ProjectionRegistry::new().with_erasure_gate(gate);
+        with_telemetry.register("world", Box::new(WorldReducer));
+        super::replay(
+            &mut host.read_sender().test_ok(),
+            timeline,
+            &mut with_telemetry,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        for (body, state) in bodies.iter().zip(&expected) {
+            assert_eq!(with_telemetry.state_for_reducer("world", body), Some(state));
+        }
     }
 
     struct ReadFailStore;
@@ -448,8 +638,11 @@ mod tests {
         let store = ReadFailStore;
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
+        let entity = EntityId::new();
+        reg.apply_event(&make_event(entity, 1));
         let err = replay(&store, TimelineId::new(), &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
+        assert_eq!(count_for(&reg, &entity), 1);
     }
 
     #[test]
