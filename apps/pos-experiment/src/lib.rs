@@ -169,19 +169,22 @@ fn bind_registry_to_host_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<(), ExperimentError> {
+    ensure_registry_erasure_gate(registry, gate).map_err(ExperimentError::Store)
+}
+
+fn ensure_registry_erasure_gate(
+    registry: &mut PluginRegistry,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<(), pos_core::CoreError> {
     if !registry.erasure_gate_is_bound() {
         registry.bind_erasure_gate(gate);
         return Ok(());
     }
     let Some(existing) = registry.clone_erasure_gate() else {
-        return Err(ExperimentError::Store(
-            pos_core::CoreError::ErasureContainmentUnavailable,
-        ));
+        return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     };
     if !Arc::ptr_eq(&existing, &gate) {
-        return Err(ExperimentError::Store(
-            pos_core::CoreError::ErasureContainmentUnavailable,
-        ));
+        return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     }
     Ok(())
 }
@@ -220,17 +223,8 @@ fn bind_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Arc<ErasureContainmentGateV1>, pos_core::CoreError> {
-    if registry.erasure_gate_is_bound() {
-        let existing = registry
-            .clone_erasure_gate()
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-        let gate_interface: Arc<dyn ErasureGate> = gate.clone();
-        if !Arc::ptr_eq(&existing, &gate_interface) {
-            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
-        }
-    } else {
-        registry.bind_erasure_gate(gate.clone());
-    }
+    let gate_interface: Arc<dyn ErasureGate> = gate.clone();
+    ensure_registry_erasure_gate(registry, gate_interface)?;
     store.bind_erasure_gate(gate.clone())?;
     Ok(gate)
 }
@@ -239,17 +233,7 @@ fn inherit_backtest_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<(), pos_core::CoreError> {
-    if registry.erasure_gate_is_bound() {
-        let existing = registry
-            .clone_erasure_gate()
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-        if !Arc::ptr_eq(&existing, &gate) {
-            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
-        }
-    } else {
-        registry.bind_erasure_gate(gate);
-    }
-    Ok(())
+    ensure_registry_erasure_gate(registry, gate)
 }
 
 fn start_backtest_train(

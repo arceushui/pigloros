@@ -3833,13 +3833,7 @@ where
             .to_be_bytes(),
     );
     for index in evidence.index_inserts {
-        let (kind, ordinal, reference) = match *index {
-            ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (0, ordinal, reference),
-            ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (1, ordinal, reference),
-            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
-                (2, ordinal, reference)
-            }
-        };
+        let (kind, ordinal, reference) = recovery_index_parts(*index);
         hasher.update(&[kind]);
         hasher.update(&ordinal.to_be_bytes());
         hasher.update(&reference.digest());
@@ -4782,6 +4776,16 @@ fn recovery_index_from_value(value: &Value) -> Result<ErasureIndexInsertV1, Eras
     }
 }
 
+fn recovery_index_parts(index: ErasureIndexInsertV1) -> (u8, u64, ErasureReferenceV1) {
+    match index {
+        ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (0, ordinal, reference),
+        ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (1, ordinal, reference),
+        ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
+            (2, ordinal, reference)
+        }
+    }
+}
+
 fn recovery_proof_value(proof: &ErasureForkRecoveryProofV1) -> Value {
     Value::Array(vec![
         text(ERASURE_FORK_RECOVERY_PROOF_TAG_V1),
@@ -4832,13 +4836,7 @@ fn recovery_object_value(object: &ErasureForkRecoveryObjectV1) -> Value {
 }
 
 fn recovery_index_value(index: &ErasureIndexInsertV1) -> Value {
-    let (kind, ordinal, reference) = match *index {
-        ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (0, ordinal, reference),
-        ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (1, ordinal, reference),
-        ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
-            (2, ordinal, reference)
-        }
-    };
+    let (kind, ordinal, reference) = recovery_index_parts(*index);
     Value::Array(vec![uint(kind), uint(ordinal), digest(reference)])
 }
 
