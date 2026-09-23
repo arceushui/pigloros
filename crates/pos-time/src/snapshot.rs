@@ -82,22 +82,15 @@ fn snapshot_effect_with_rechecks(
     closure: &WorldReplayClosureV1,
     requested_use: &WorldReplayUseV1,
 ) -> Result<Snapshot, CoreError> {
-    crate::require_world_replay(sender, closure, requested_use).and_then(|read_bounds| {
-        crate::read_complete_world_replay(sender, timeline, SeqRange::all(), read_bounds)
-            .and_then(|events| {
-                snapshot_from_events(timeline, registry, &events).and_then(|snapshot| {
-                    crate::require_world_replay(sender, closure, requested_use).and_then(
-                        |final_bounds| {
-                            if final_bounds == read_bounds {
-                                Ok(snapshot)
-                            } else {
-                                Err(CoreError::ArtifactUnavailable)
-                            }
-                        },
-                    )
-                })
-            })
-    })
+    let read_bounds = crate::require_world_replay(sender, closure, requested_use)?;
+    let events = crate::read_complete_world_replay(sender, timeline, SeqRange::all(), read_bounds)?;
+    let snapshot = snapshot_from_events(timeline, registry, &events)?;
+    let final_bounds = crate::require_world_replay(sender, closure, requested_use)?;
+    if final_bounds == read_bounds {
+        Ok(snapshot)
+    } else {
+        Err(CoreError::ArtifactUnavailable)
+    }
 }
 
 /// Error type for snapshot consistency checks.
@@ -189,32 +182,25 @@ fn verify_snapshot_effect_with_rechecks(
     closure: &WorldReplayClosureV1,
     requested_use: &WorldReplayUseV1,
 ) -> Result<(), SnapshotError> {
-    crate::require_world_replay(sender, closure, requested_use)
-        .map_err(|_| SnapshotError::ArtifactUnavailable)
-        .and_then(|read_bounds| {
-            crate::read_complete_world_replay(sender, snap.timeline, SeqRange::all(), read_bounds)
-                .map_err(SnapshotError::from)
-                .and_then(|all_events| {
-                    let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
-                    verify_snapshot_event_sets(
-                        snap,
-                        registry,
-                        &all_events[tail_start..],
-                        &all_events,
-                    )
-                    .and_then(|()| {
-                        crate::require_world_replay(sender, closure, requested_use)
-                            .map_err(|_| SnapshotError::ArtifactUnavailable)
-                            .and_then(|final_bounds| {
-                                if final_bounds == read_bounds {
-                                    Ok(())
-                                } else {
-                                    Err(SnapshotError::ArtifactUnavailable)
-                                }
-                            })
-                    })
-                })
-        })
+    let read_bounds = crate::require_world_replay(sender, closure, requested_use)
+        .map_err(|_| SnapshotError::ArtifactUnavailable)?;
+    let all_events =
+        crate::read_complete_world_replay(sender, snap.timeline, SeqRange::all(), read_bounds)
+            .map_err(SnapshotError::from)?;
+    let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
+    verify_snapshot_event_sets(
+        snap,
+        registry,
+        &all_events[tail_start..],
+        &all_events,
+    )?;
+    let final_bounds = crate::require_world_replay(sender, closure, requested_use)
+        .map_err(|_| SnapshotError::ArtifactUnavailable)?;
+    if final_bounds == read_bounds {
+        Ok(())
+    } else {
+        Err(SnapshotError::ArtifactUnavailable)
+    }
 }
 
 fn snapshot_use(
