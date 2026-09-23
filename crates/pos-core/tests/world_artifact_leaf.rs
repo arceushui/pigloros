@@ -361,7 +361,7 @@ fn wrong_shapes_and_types_are_rejected_through_public_decode() -> TestResult {
         WorldArtifactLeafV1::from_canonical_cbor(&encode(fields)?),
         Err(WorldArtifactErrorV1::InvalidEncoding)
     );
-    for (index, value) in [(1, 0), (1, 2), (3, 14), (7, 5), (8, 2), (9, 4)] {
+    for (index, value) in [(1, 0), (1, 2), (3, 15), (7, 5), (8, 2), (9, 4)] {
         let mut fields = wire();
         fields[index] = Value::Integer(value.into());
         assert_eq!(
