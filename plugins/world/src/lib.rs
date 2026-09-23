@@ -115,7 +115,7 @@ pub enum WorldCodecError {
     InvalidCoordConvention,
     #[error("sensor_min_resolution_mm must be >= {SENSOR_MIN_RESOLUTION_MM}")]
     SensorResolutionBelowMinimum,
-    #[error("params_cbor is not canonical CBOR")]
+    #[error("params_cbor must be a canonical normalized two-float actuator pair")]
     NonCanonicalParamsCbor,
     #[error("World record is not canonical CBOR")]
     NonCanonicalRecord,
@@ -320,7 +320,7 @@ fn decode_actuator_pair_v1(bytes: &[u8]) -> Result<(f32, f32), WorldCodecError> 
     Ok((components[0], components[1]))
 }
 
-fn validate_canonical_params(bytes: &[u8]) -> Result<(), WorldCodecError> {
+fn validate_actuator_pair_v1(bytes: &[u8]) -> Result<(), WorldCodecError> {
     decode_actuator_pair_v1(bytes).map(|_| ())
 }
 
@@ -328,7 +328,7 @@ fn decode_canonical_action_params_field(
     value: &ciborium::Value,
 ) -> Result<Vec<u8>, WorldCodecError> {
     let params = decode_bytes_max(value, MAX_ACTION_BYTES)?;
-    validate_canonical_params(&params)?;
+    validate_actuator_pair_v1(&params)?;
     Ok(params)
 }
 
@@ -370,10 +370,10 @@ fn decode_tstr(val: &ciborium::Value) -> Result<String, WorldCodecError> {
 }
 
 // ---------------------------------------------------------------------------
-// WorldActionV1 — CBOR definite array, magic WAC1 (ADR-047 v3)
+// WorldActionV1 — CBOR definite array, magic WAC1 (ADR-047)
 // ---------------------------------------------------------------------------
 
-/// A versioned world action command (ADR-047 v3, `world.action.v1`).
+/// A versioned world action command (ADR-047, `world.action.v1`).
 ///
 /// Array (9 elements):
 /// `[magic_bstr4, version_u8=1, actor_id_bstr16, body_id_bstr16,
@@ -404,7 +404,7 @@ impl WorldActionV1 {
         if self.action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
         }
-        validate_canonical_params(&self.params_cbor)?;
+        validate_actuator_pair_v1(&self.params_cbor)?;
         let arr = ciborium::Value::Array(vec![
             cbor_magic(*MAGIC_WAC1),
             cbor_u8(VERSION_V1),
@@ -695,7 +695,7 @@ impl WorldConfigV1 {
 // Action folding helpers
 // ---------------------------------------------------------------------------
 
-fn decode_velocity_params(params: &[u8]) -> Option<(f32, f32)> {
+fn decode_horizontal_velocity_params(params: &[u8]) -> Option<(f32, f32)> {
     decode_actuator_pair_v1(params).ok()
 }
 
@@ -703,9 +703,7 @@ fn decode_velocity_params(params: &[u8]) -> Option<(f32, f32)> {
 // World backend trait (physics seam)
 // ---------------------------------------------------------------------------
 
-/// A swappable physics backend.
-///
-/// For Wave 5 we provide a simple kinematic backend. Wave 6 will add rapier-based 3D physics.
+/// A swappable physics backend; the built-in adapter uses simple kinematics.
 pub trait WorldBackend: Send + Sync {
     /// Human-readable name for this backend.
     fn name(&self) -> &'static str;
@@ -853,9 +851,9 @@ impl WorldBackend for SimpleKinematicBackend {
             .iter()
             .map(|body| WorldObservation {
                 entity_id: body.entity_id,
-                x: body.x + body.vx * seconds,
-                y: body.y + body.vy * seconds,
-                z: body.z + body.vz * seconds,
+                x: body.vx.mul_add(seconds, body.x),
+                y: body.vy.mul_add(seconds, body.y),
+                z: body.vz.mul_add(seconds, body.z),
                 vx: body.vx,
                 vy: body.vy,
                 vz: body.vz,
@@ -1095,7 +1093,7 @@ impl WorldDriver {
         else {
             return false;
         };
-        let Some((vx, vz)) = decode_velocity_params(&action.params_cbor) else {
+        let Some((vx, vz)) = decode_horizontal_velocity_params(&action.params_cbor) else {
             return false;
         };
         match action.action_kind {
@@ -1869,7 +1867,7 @@ mod tests {
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Text("unknown_kind".to_owned()),
-            ciborium::Value::Bytes(vec![0xf6]),
+            ciborium::Value::Bytes(encode_actuator_pair_v1(0.0, 0.0).test_ok()),
             ciborium::Value::Integer(0.into()),
             ciborium::Value::Integer(1.into()),
             ciborium::Value::Integer(0.into()),
@@ -1902,7 +1900,7 @@ mod tests {
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Text("impulse".to_owned()),
-            ciborium::Value::Bytes(vec![0xf6]),
+            ciborium::Value::Bytes(encode_actuator_pair_v1(0.0, 0.0).test_ok()),
             ciborium::Value::Integer(1.into()), // invalid scope
             ciborium::Value::Integer(1.into()),
             ciborium::Value::Integer(0.into()),
@@ -1949,7 +1947,10 @@ mod tests {
     #[test]
     fn velocity_parameter_decoder_accepts_a_canonical_pair() {
         let params = encode_vel_params(1.25, -2.5);
-        assert_eq!(decode_velocity_params(&params), Some((1.25, -2.5)));
+        assert_eq!(
+            decode_horizontal_velocity_params(&params),
+            Some((1.25, -2.5))
+        );
     }
 
     #[test]
@@ -1958,19 +1959,19 @@ mod tests {
             ciborium::Value::Float(f64::NAN),
             ciborium::Value::Float(0.0),
         ]));
-        assert_eq!(decode_velocity_params(&invalid_first), None);
+        assert_eq!(decode_horizontal_velocity_params(&invalid_first), None);
 
         let invalid_second = cbor_encode(&ciborium::Value::Array(vec![
             ciborium::Value::Float(0.0),
             ciborium::Value::Float(f64::INFINITY),
         ]));
-        assert_eq!(decode_velocity_params(&invalid_second), None);
+        assert_eq!(decode_horizontal_velocity_params(&invalid_second), None);
     }
 
     #[test]
     fn actuator_pair_normalizes_float_sources_and_preserves_signed_zero() {
         let params = encode_actuator_pair_v1(1.0 / 3.0, -0.0).test_ok();
-        let (x, z) = decode_velocity_params(&params).test_ok();
+        let (x, z) = decode_horizontal_velocity_params(&params).test_ok();
         assert_eq!(x.to_bits(), 0.333_333_34_f32.to_bits());
         assert_eq!(z.to_bits(), (-0.0_f32).to_bits());
         assert_eq!(
@@ -1984,6 +1985,24 @@ mod tests {
         assert_eq!(
             encode_actuator_pair_v1(0.0, f64::MAX),
             Err(WorldCodecError::NonFiniteFloat)
+        );
+
+        let one = f32::from_bits(0x3f80_0000);
+        let next = f32::from_bits(0x3f80_0001);
+        let midpoint = (f64::from(one) + f64::from(next)) / 2.0;
+        let tie = encode_actuator_pair_v1(midpoint, 0.0).test_ok();
+        assert_eq!(
+            decode_horizontal_velocity_params(&tie)
+                .test_ok()
+                .0
+                .to_bits(),
+            one.to_bits()
+        );
+
+        let least_subnormal = f32::from_bits(1);
+        assert_eq!(
+            encode_actuator_pair_v1(1.0, f64::from(least_subnormal)).test_ok(),
+            vec![0x82, 0xf9, 0x3c, 0x00, 0xfa, 0x00, 0x00, 0x00, 0x01]
         );
     }
 
