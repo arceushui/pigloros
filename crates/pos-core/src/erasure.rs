@@ -4900,8 +4900,8 @@ impl ErasureVerifiedInventoryV1 {
     /// Returns [`ErasureErrorV1::StaleGeneration`] when the supplied inventory
     /// generation is stale. Returns [`ErasureErrorV1::PolicyConflict`] for an
     /// existing child, an omitted/duplicate/extraneous request mutation, a
-    /// repeated child-scope identity, or inconsistent child metadata and ERSE1
-    /// evidence.
+    /// child-scope identity already present in any frozen base scope or
+    /// extension, or inconsistent child metadata and ERSE1 evidence.
     pub fn prepare_fork_batch(
         self,
         input: ErasureForkAdmissionInputV1,
@@ -4927,6 +4927,13 @@ impl ErasureVerifiedInventoryV1 {
             .classifications
             .binary_search_by_key(&parent, |(timeline, _)| *timeline)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        if self.members.iter().any(|(state, _)| {
+            state
+                .scope()
+                .is_some_and(|scope| scope.scope_members().contains(&input.child_scope))
+        }) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         self.validate_prepared_fork_admissions(&input, &mut admissions)?;
 
         let Self {
@@ -5041,15 +5048,10 @@ impl ErasureVerifiedInventoryV1 {
                         .any(|(request, _)| *request == admission.mutation.request())
                     || self.members.iter().any(|(state, _)| {
                         state.request().reference() == admission.mutation.request()
-                            && (state.scope().is_some_and(|scope| {
-                                // A Fork scope cannot reuse a base member identity;
-                                // retries must distinguish the original extension
-                                // from direct membership in that immutable scope.
-                                scope.scope_members().contains(&input.child_scope)
-                            }) || state
+                            && state
                                 .scope_extensions()
                                 .iter()
-                                .any(|extension| extension.fork() == input.child_scope))
+                                .any(|extension| extension.fork() == input.child_scope)
                     })
             })
         {
