@@ -42,6 +42,7 @@ pub mod world_artifact;
 pub mod world_closure_binding;
 pub mod world_consumer_set;
 pub mod world_dependency_directory;
+pub mod world_history;
 pub mod world_transform;
 
 pub use world_artifact::{
@@ -217,6 +218,13 @@ pub use world_dependency_directory::{
     WorldDependencyBranchChildV1, WorldDependencyBranchErrorV1, WorldDependencyBranchInputV1,
     WorldDependencyBranchV1, WorldDependencyKeyV1, MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1,
     MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1, MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
+};
+pub use world_history::{
+    WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1, WorldHistoryBranchInputV1,
+    WorldHistoryBranchV1, WorldHistoryChildRecordRefV1, WorldHistoryChildV1, WorldHistoryErrorV1,
+    MAX_WORLD_EVENT_PAGE_BYTES_V1, MAX_WORLD_EVENT_PAGE_ROWS_V1, MAX_WORLD_EVENT_TYPE_BYTES_V1,
+    MAX_WORLD_HISTORY_BRANCH_BYTES_V1, MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1,
+    MAX_WORLD_HISTORY_HEIGHT_V1,
 };
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
