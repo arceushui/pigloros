@@ -229,13 +229,6 @@ fn bind_backtest_erasure_gate(
     Ok(gate)
 }
 
-fn inherit_backtest_erasure_gate(
-    registry: &mut PluginRegistry,
-    gate: Arc<dyn ErasureGate>,
-) -> Result<(), pos_core::CoreError> {
-    ensure_registry_erasure_gate(registry, gate)
-}
-
 fn start_backtest_train(
     store: &mut dyn pos_core::store::EventStore,
     registry: &mut PluginRegistry,
@@ -251,7 +244,7 @@ fn start_backtest_train(
             return Err(pos_core::CoreError::ErasureContainmentUnavailable);
         }
     } else {
-        inherit_backtest_erasure_gate(registry, Arc::clone(&runtime_gate))?;
+        ensure_registry_erasure_gate(registry, Arc::clone(&runtime_gate))?;
     }
     let timeline = store.create_timeline(name)?;
     Ok((runtime_gate, timeline))
@@ -1021,7 +1014,7 @@ fn prepare_backtest_eval_registry(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<Vec<pos_core::Event>, ExperimentError> {
-    inherit_backtest_erasure_gate(registry, gate)?;
+    ensure_registry_erasure_gate(registry, gate).map_err(ExperimentError::Store)?;
     restore_inherited_eval_events(store, timeline, train_head, registry)
 }
 
@@ -5708,7 +5701,7 @@ mod tests {
             Err(CoreError::ErasureContainmentUnavailable)
         ));
         assert!(matches!(
-            inherit_backtest_erasure_gate(&mut registry, gate),
+            ensure_registry_erasure_gate(&mut registry, gate),
             Err(CoreError::ErasureContainmentUnavailable)
         ));
     }
@@ -5725,7 +5718,7 @@ mod tests {
             Err(CoreError::ErasureContainmentUnavailable)
         ));
         assert!(matches!(
-            inherit_backtest_erasure_gate(&mut registry, host_gate),
+            ensure_registry_erasure_gate(&mut registry, host_gate),
             Err(CoreError::ErasureContainmentUnavailable)
         ));
     }

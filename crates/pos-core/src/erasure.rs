@@ -6928,7 +6928,7 @@ fn recovery_index_from_value(value: &Value) -> Result<ErasureIndexInsertV1, Eras
     }
 }
 
-fn recovery_index_parts(index: ErasureIndexInsertV1) -> (u8, u64, ErasureReferenceV1) {
+const fn recovery_index_parts(index: ErasureIndexInsertV1) -> (u8, u64, ErasureReferenceV1) {
     match index {
         ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (0, ordinal, reference),
         ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (1, ordinal, reference),
