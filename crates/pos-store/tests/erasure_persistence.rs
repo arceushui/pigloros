@@ -2492,7 +2492,7 @@ fn sqlite_fresh_fork_rejects_adapter_failures() -> Result<(), Box<dyn std::error
             )?;
             Ok(())
         },
-        ErasureErrorV1::PolicyConflict,
+        ErasureErrorV1::StaleGeneration,
     )?;
     assert_sqlite_fork_first_commit_failure(
         |connection, prepared| {
@@ -2502,7 +2502,7 @@ fn sqlite_fresh_fork_rejects_adapter_failures() -> Result<(), Box<dyn std::error
             )?;
             Ok(())
         },
-        ErasureErrorV1::PolicyConflict,
+        ErasureErrorV1::StaleGeneration,
     )?;
     assert_sqlite_fork_first_commit_failure(
         |connection, _| {
@@ -3200,7 +3200,7 @@ fn sqlite_fork_admission_rejects_an_unreceipted_existing_successor(
     );
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert!(!store
         .borrow_mut()
