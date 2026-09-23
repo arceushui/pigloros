@@ -4595,6 +4595,7 @@ dependencies = [
 name = "pos-sandboxd"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "pos-conformance",
  "pos-reference",
  "thiserror 2.0.20",

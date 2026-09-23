@@ -13,8 +13,9 @@ pub use hardening::{
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
 };
 pub use system_bus::{
-    SystemdStartJob, SystemdTransientUnitTransport, SystemdTransientUnitTransportError,
-    TransientServiceUnitName, TransientServiceUnitNameError,
+    SystemdJobFailure, SystemdStartJob, SystemdTransientUnitTransport,
+    SystemdTransientUnitTransportError, SystemdVerifiedStart, TransientServiceUnitName,
+    TransientServiceUnitNameError,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,
@@ -22,6 +23,36 @@ pub use transient_unit::{
     SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
     TransientUnitRequest, TransientUnitRequestError,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemdTransientUnitPropertyKind {
+    Hardening(SystemdHardeningProperty),
+    RootDirectory,
+    BindReadOnlyPaths,
+    SystemCallFilter,
+    RestrictAddressFamilies,
+    FileDescriptorStoreMax,
+    ExtraFileDescriptors,
+}
+
+impl SystemdTransientUnitPropertyKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Hardening(property) => property.name(),
+            Self::RootDirectory => "RootDirectory",
+            Self::BindReadOnlyPaths => "BindReadOnlyPaths",
+            Self::SystemCallFilter => "SystemCallFilter",
+            Self::RestrictAddressFamilies => "RestrictAddressFamilies",
+            Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
+            Self::ExtraFileDescriptors => "ExtraFileDescriptors",
+        }
+    }
+}
+
+trait SystemdTransientUnitPropertyAccess {
+    fn kind(&self) -> SystemdTransientUnitPropertyKind;
+    fn into_parts(self) -> (&'static str, SystemdTransientUnitValue);
+}
 
 use pos_reference::sandbox_provider_protocol::{
     SandboxArchitecture, SandboxProviderProtocolError, SandboxSyscallSet,
