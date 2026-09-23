@@ -2199,6 +2199,28 @@ fn assert_exact_durable_fork_retry_preserves_current_inventory(
                 "stale-fork-child",
             ),
         )?;
+        assert_eq!(
+            commands.fork_timeline_identified(
+                operation,
+                TimelineId::new(),
+                pos_core::Seq::ZERO,
+                "stale-fork-child",
+            ),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert_eq!(
+            test_stage(
+                "retry durable fork after conflicting parent",
+                commands.fork_timeline_identified(
+                    operation,
+                    parent.id(),
+                    pos_core::Seq::ZERO,
+                    "stale-fork-child",
+                ),
+            )?
+            .id(),
+            committed_child.id()
+        );
         test_stage(
             "advance inventory generation",
             commands.create_timeline("stale-fork-intervening"),
