@@ -51,10 +51,11 @@ use pos_core::{
     ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
-    ErasureTopologyTransitionPermitV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PersistedAuthorityV1,
-    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, Hash, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -2017,7 +2018,11 @@ struct ForkChainRow {
 /// non-root entries carry their validated fork sequence.
 type ForkChain = Vec<(TimelineId, Seq)>;
 type ForkChainWithLeafHead = (ForkChain, u64);
-type SqliteErasureEffectRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+struct SqliteErasureEffectRow {
+    effect_digest: Vec<u8>,
+    effect_cbor: Vec<u8>,
+    subject_digest: Option<Vec<u8>>,
+}
 
 #[derive(Debug)]
 enum DecodedForkChainRow {
@@ -4568,10 +4573,16 @@ impl EventStore for SqliteStore {
         &mut self,
         permit: &ErasureTopologyTransitionPermitV1,
         parent: TimelineId,
-        _at_seq: Seq,
+        at_seq: Seq,
         meta: TimelineMeta,
     ) -> Result<Timeline, CoreError> {
         self.ensure_host_transition_permit(permit)?;
+        if meta.fork_point != Some((parent, at_seq)) {
+            return Err(CoreError::Storage(
+                "preallocated Fork metadata does not match the requested parent and sequence"
+                    .to_owned(),
+            ));
+        }
         self.ensure_generic_timeline_visibility(parent)
             .and_then(|()| self.create_timeline_with_meta_for_host_transition_unchecked(&meta))
     }
@@ -5235,8 +5246,14 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
     fn recover_fork_admission(
         &mut self,
         operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-        sqlite_recover_fork_admission(&self.conn, self.hasher.as_ref(), operation)
+        sqlite_recover_fork_admission(
+            &self.conn,
+            self.hasher.as_ref(),
+            operation,
+            successor_inventory,
+        )
     }
 }
 
@@ -5471,14 +5488,16 @@ fn sqlite_recover_fork_admission(
     conn: &Connection,
     hasher: &dyn Hasher,
     operation: ErasureReferenceV1,
+    successor_inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-    sqlite_recover_fork_admission_impl(conn, hasher, operation)
+    sqlite_recover_fork_admission_impl(conn, hasher, operation, successor_inventory)
 }
 
 fn sqlite_recover_fork_admission_impl(
     conn: &Connection,
     hasher: &dyn Hasher,
     operation: ErasureReferenceV1,
+    successor_inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
     let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
         return Ok(None);
@@ -5487,6 +5506,10 @@ fn sqlite_recover_fork_admission_impl(
     let proof = sqlite_fork_recovery_proof(conn, operation, &recovered)?;
     sqlite_recovery_proof_is_exact(conn, &proof)?;
     sqlite_verify_recovered_fork_child(conn, hasher, &recovered)?;
+    if recovered.successor_generation() != successor_inventory.generation() {
+        return Err(ErasureErrorV1::StaleGeneration);
+    }
+    proof.validate_complete_for_inventory(&recovered, successor_inventory)?;
     Ok(Some(recovered))
 }
 
@@ -5624,13 +5647,17 @@ fn sqlite_recovery_proof_effect_is_exact(
     conn: &Connection,
     mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
-    let (effect_digest, effect_bytes, effect_subject) =
-        sqlite_erasure_effect_row(conn, mutation.next_manifest())?;
-    let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&effect_bytes)?;
-    if reference_from_sql(effect_digest)? != mutation.effect()
+    let effect_row = sqlite_erasure_effect_row(conn, mutation.next_manifest())?;
+    let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&effect_row.effect_cbor)?;
+    if reference_from_sql(effect_row.effect_digest)? != mutation.effect()
         || effect.identity() != mutation.effect()
-        || ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes) != mutation.effect_bytes()
-        || effect_subject.map(reference_from_sql).transpose()? != mutation.effect_subject()
+        || ErasureForkRecoveryProofV1::bytes_digest(&effect_row.effect_cbor)
+            != mutation.effect_bytes()
+        || effect_row
+            .subject_digest
+            .map(reference_from_sql)
+            .transpose()?
+            != mutation.effect_subject()
     {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
@@ -5669,11 +5696,11 @@ fn sqlite_erasure_effect_row(
          FROM erasure_effects WHERE manifest_digest=?1",
         params![manifest.digest().as_slice()],
         |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-            ))
+            Ok(SqliteErasureEffectRow {
+                effect_digest: row.get(0)?,
+                effect_cbor: row.get(1)?,
+                subject_digest: row.get(2)?,
+            })
         },
     )
     .optional()
@@ -5738,15 +5765,15 @@ fn sqlite_timeline_is_exact(
         Ok(None) => None,
         Err(error) => Some(Err(map_erasure_receipt_failure(error))),
     });
-    crate::fork_child_is_exact(
-        child,
-        &actual_meta,
+    crate::fork_child_is_exact(crate::ForkChildVerificationInput {
+        expected_meta: child,
+        actual_meta: &actual_meta,
         stored_head,
-        &stored_chain_head,
+        stored_chain_head: &stored_chain_head,
         chain_head,
         events,
         hasher,
-    )
+    })
 }
 
 fn sqlite_timeline_exact_metadata(
@@ -7264,6 +7291,30 @@ mod tests {
                 .find_timeline_by_name_for_host_transition(permit, "missing-host-name")
                 .test_ok()
                 .is_none());
+
+            let other_parent = store
+                .create_timeline_for_host_transition(permit, "host-other-parent")
+                .test_ok();
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(
+                        other_parent.id(),
+                        Seq::ZERO,
+                        "host-child-wrong-parent",
+                    ),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::from_u64(1),
+                    TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-wrong-sequence"),
+                )
+                .is_err());
 
             let child_meta = TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-meta");
             let child = store

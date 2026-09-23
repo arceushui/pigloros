@@ -23,9 +23,9 @@ use pos_core::{
     ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedTopologyObservationV1,
-    EventStore, Seq, TimelineId, TimelineMeta, TimelineMode, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
+    ErasureStateV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1,
+    ErasureVerifiedTopologyObservationV1, EventStore, Seq, TimelineId, TimelineMeta, TimelineMode,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -112,6 +112,23 @@ fn bind_test_gate<S: EventStore>(
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
     Ok(gate)
+}
+
+fn recover_fork_admission<S: ErasureForkPersistencePortV1>(
+    store: &mut S,
+    operation: ErasureReferenceV1,
+    successor_inventory: &ErasureVerifiedInventoryV1,
+) -> Result<Option<pos_core::ErasureForkRecoveryV1>, ErasureErrorV1> {
+    ErasureForkPersistencePortV1::recover_fork_admission(store, operation, successor_inventory)
+}
+
+fn verified_empty_inventory(
+    maximum_requests: usize,
+) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+    let snapshot =
+        ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), maximum_requests)?;
+    pos_core::ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+        .verified_inventory(maximum_requests)
 }
 
 fn commit_fork_admission<S>(
@@ -982,17 +999,14 @@ where
     let (shared, gate, request, child, batch) = prepared_positively_unaffected_fork(store)?;
     let operation = batch.operation();
     let expected_result = batch.recovery_result()?;
+    let successor_inventory = batch.successor_inventory().clone();
     assert!(batch.admissions().is_empty());
     assert_eq!(
         commit_fork_admission(&shared, &gate, &batch)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(shared.borrow().scope_index_count(request)?, 0);
-    assert!(shared
-        .borrow_mut()
-        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
-        .topology()
-        .contains(&child));
+    assert!(successor_inventory.topology().contains(&child));
     shared.borrow_mut().append(
         child,
         &[pos_core::EventDraft::new(
@@ -1002,7 +1016,7 @@ where
         )],
     )?;
     assert_eq!(
-        shared.borrow_mut().recover_fork_admission(operation)?,
+        recover_fork_admission(&mut *shared.borrow_mut(), operation, &successor_inventory)?,
         Some(expected_result)
     );
     assert_eq!(
@@ -1053,6 +1067,7 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
     let (store, gate, request, child, prepared) = prepared_fork(MemoryStore::new())?;
     let operation = prepared.operation();
     let expected_result = prepared.recovery_result()?;
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(expected_result.operation(), operation);
     assert_eq!(expected_result.binding_digest(), prepared.binding_digest());
     assert_eq!(
@@ -1105,17 +1120,26 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 1);
-    assert!(store
-        .borrow_mut()
-        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
-        .topology()
-        .contains(&child));
+    assert!(successor_inventory.topology().contains(&child));
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        successor_inventory.generation()
+    );
     assert_eq!(
-        store.borrow_mut().recover_fork_admission(operation)?,
+        recover_fork_admission(&mut *store.borrow_mut(), operation, &stale_inventory,),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut *store.borrow_mut(), operation, successor_inventory)?,
         Some(expected_result)
     );
     assert_eq!(
-        store.borrow_mut().recover_fork_admission(reference(250))?,
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            reference(250),
+            successor_inventory
+        )?,
         None
     );
     assert_eq!(
@@ -1124,7 +1148,7 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
     );
     store.borrow_mut().delete_timeline(child)?;
     assert_eq!(
-        store.borrow_mut().recover_fork_admission(operation),
+        recover_fork_admission(&mut *store.borrow_mut(), operation, successor_inventory),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1368,6 +1392,7 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
     let (store, gate, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
     let expected_result = prepared.recovery_result()?;
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1375,11 +1400,23 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
     drop(store);
 
     let mut reopened = SqliteStore::open(path)?;
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        successor_inventory.generation()
+    );
     assert_eq!(
-        reopened.recover_fork_admission(operation)?,
+        recover_fork_admission(&mut reopened, operation, &stale_inventory),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut reopened, operation, successor_inventory)?,
         Some(expected_result)
     );
-    assert_eq!(reopened.recover_fork_admission(reference(251))?, None);
+    assert_eq!(
+        recover_fork_admission(&mut reopened, reference(251), successor_inventory)?,
+        None
+    );
     let reopened_gate = bind_test_gate(&mut reopened)?;
     assert_eq!(
         commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared)?,
@@ -1406,6 +1443,7 @@ fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn
         prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
     let operation = batch.operation();
     let expected_result = batch.recovery_result()?;
+    let successor_inventory = batch.successor_inventory();
     assert_eq!(
         commit_fork_admission(&store, &gate, &batch)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1422,7 +1460,7 @@ fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn
 
     let mut reopened = SqliteStore::open(path)?;
     assert_eq!(
-        reopened.recover_fork_admission(operation)?,
+        recover_fork_admission(&mut reopened, operation, successor_inventory)?,
         Some(expected_result)
     );
     let reopened_gate = bind_test_gate(&mut reopened)?;
@@ -1443,6 +1481,7 @@ fn sqlite_fork_recovery_rejects_a_missing_events_table() -> Result<(), Box<dyn s
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let (store, gate, _, _, batch) = prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
     let operation = batch.operation();
+    let successor_inventory = batch.successor_inventory();
     assert_eq!(
         commit_fork_admission(&store, &gate, &batch)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1451,7 +1490,7 @@ fn sqlite_fork_recovery_rejects_a_missing_events_table() -> Result<(), Box<dyn s
     connection.execute_batch("DROP TABLE events")?;
     drop(connection);
     assert_eq!(
-        store.borrow_mut().recover_fork_admission(operation),
+        recover_fork_admission(&mut *store.borrow_mut(), operation, successor_inventory),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     Ok(())
@@ -1468,6 +1507,7 @@ fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let (store, gate, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1483,7 +1523,11 @@ fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn
     );
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(operation),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1500,6 +1544,7 @@ fn sqlite_fork_recovery_rejects_a_mismatched_original_child(
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let (store, gate, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -1515,7 +1560,11 @@ fn sqlite_fork_recovery_rejects_a_mismatched_original_child(
     );
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(operation),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1604,10 +1653,25 @@ fn assert_sqlite_fork_recovery_corruption_error(
     let connection = rusqlite::Connection::open(path)?;
     assert_eq!(corrupt(&connection, &prepared)?, 1);
     drop(connection);
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        prepared.successor_inventory().generation()
+    );
     assert_eq!(
-        store
-            .borrow_mut()
-            .recover_fork_admission(prepared.operation()),
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            &stale_inventory,
+        ),
+        Err(expected.clone())
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
         Err(expected)
     );
     Ok(())
@@ -1631,10 +1695,25 @@ fn assert_sqlite_fork_recovery_sql_error(
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch(sql)?;
     drop(connection);
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        prepared.successor_inventory().generation()
+    );
     assert_eq!(
-        store
-            .borrow_mut()
-            .recover_fork_admission(prepared.operation()),
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            &stale_inventory,
+        ),
+        Err(expected.clone())
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
         Err(expected)
     );
     Ok(())
@@ -1740,7 +1819,11 @@ fn assert_sqlite_fork_recovery_proof_rewrite_error(
     rewrite_sqlite_recovery_proof(&connection, &prepared, mutate)?;
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(prepared.operation()),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
         Err(expected)
     );
     Ok(())
@@ -2468,12 +2551,16 @@ fn sqlite_fork_recovery_returns_none_for_unknown_operation(
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let mut store = SqliteStore::open(path)?;
-    assert_eq!(store.recover_fork_admission(reference(250))?, None);
+    let inventory = store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_eq!(
+        recover_fork_admission(&mut store, reference(250), &inventory)?,
+        None
+    );
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("DROP TABLE erasure_fork_admissions")?;
     drop(connection);
     assert_eq!(
-        store.recover_fork_admission(reference(250)),
+        recover_fork_admission(&mut store, reference(250), &inventory),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     Ok(())
@@ -2490,6 +2577,7 @@ fn sqlite_fork_recovery_rejects_negative_persisted_sequence(
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
@@ -2503,7 +2591,11 @@ fn sqlite_fork_recovery_rejects_negative_persisted_sequence(
     )?;
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(operation),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -2587,6 +2679,7 @@ fn sqlite_fork_recovery_proof_checks_all_index_kinds_and_subject(
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let successor_inventory = prepared.successor_inventory();
     let operation = prepared.operation();
     let request = only_fork_mutation(&prepared).request();
     let manifest = only_fork_mutation(&prepared).next_manifest().digest();
@@ -2644,15 +2737,18 @@ fn sqlite_fork_recovery_proof_checks_all_index_kinds_and_subject(
         Ok(())
     })?;
     drop(connection);
-    assert!(SqliteStore::open(path)?
-        .recover_fork_admission(operation)?
-        .is_some());
+    let mut reopened = SqliteStore::open(path)?;
+    assert!(recover_fork_admission(&mut reopened, operation, successor_inventory)?.is_some());
     let connection = rusqlite::Connection::open(path)?;
     corrupt_sqlite_subject_manifest(&connection, &prepared, manifest)?;
     drop(connection);
 
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(operation),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     let connection = rusqlite::Connection::open(path)?;
@@ -2662,7 +2758,11 @@ fn sqlite_fork_recovery_proof_checks_all_index_kinds_and_subject(
     )?;
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(operation),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
