@@ -630,7 +630,7 @@ mod tests {
             json!(test_world_body().inner().to_bytes())
         );
         assert_eq!(event["payload"][4], "impulse");
-        assert_eq!(event["payload"][5], json!([1]));
+        assert_eq!(event["payload"][5], json!([130, 249, 60, 0, 249, 0, 0]));
         assert_eq!(event["payload"][6], 0);
         assert_eq!(event["payload"][7], 1);
         assert_eq!(event["payload"][8], 1);
