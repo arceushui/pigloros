@@ -2153,6 +2153,27 @@ fn assert_sqlite_fork_retry_corruption_error(
     ) -> rusqlite::Result<usize>,
     expected: ErasureErrorV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_result(corrupt, Err(expected))
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_manifest_change(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_result(corrupt, Ok(pos_core::ErasureCasOutcomeV1::ExactRetry))
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_result(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<usize>,
+    expected: Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()
@@ -2171,7 +2192,7 @@ fn assert_sqlite_fork_retry_corruption_error(
     let reopened_gate = bind_test_gate(&mut reopened)?;
     assert_eq!(
         commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared),
-        Err(expected)
+        expected
     );
     Ok(())
 }
@@ -2983,21 +3004,45 @@ fn sqlite_fork_retry_rejects_mistyped_child_fields() -> Result<(), Box<dyn std::
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_fork_retry_rejects_mistyped_manifest_fields() -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_fork_retry_ignores_mutable_manifest_head() -> Result<(), Box<dyn std::error::Error>> {
+    // The immutable recovery proof establishes the committed Fork; the
+    // erasure record is only the mutable current manifest head.
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_records WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_records SET manifest_digest=zeroblob(32) WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+        connection.execute(
+            "UPDATE erasure_records SET manifest_digest=X'00' WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_records SET manifest_cbor=X'00' WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
     for assignment in [
         "manifest_digest=printf('%032d', 0)",
         "manifest_cbor='not-a-blob'",
     ] {
-        assert_sqlite_fork_retry_corruption_error(
-            |connection, prepared| {
-                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
-                connection.execute(
-                    &format!("UPDATE erasure_records SET {assignment} WHERE request_digest=?1"),
-                    rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-                )
-            },
-            ErasureErrorV1::PolicyConflict,
-        )?;
+        assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                &format!("UPDATE erasure_records SET {assignment} WHERE request_digest=?1"),
+                rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+            )
+        })?;
     }
     Ok(())
 }
@@ -3602,31 +3647,6 @@ fn sqlite_fork_recovery_proof_rejects_corrupt_persisted_sides(
 #[test]
 fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn std::error::Error>>
 {
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "DELETE FROM erasure_records WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_records SET manifest_digest=zeroblob(32) WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
-        connection.execute(
-            "UPDATE erasure_records SET manifest_digest=X'00' WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_records SET manifest_cbor=X'00' WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "DELETE FROM erasure_evidence WHERE reference_digest=?1",
