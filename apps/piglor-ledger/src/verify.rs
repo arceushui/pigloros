@@ -244,7 +244,7 @@ fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
     }
     let mut bytes = Vec::with_capacity(value.len() * 3 / 4);
     let mut bits = 0_u8;
-    let mut remainder = 0_u32;
+    let mut remainder = 0_u8;
     for byte in value.bytes() {
         let sextet = match byte {
             b'A'..=b'Z' => byte - b'A',
@@ -254,12 +254,26 @@ fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
             b'_' => 63,
             _ => return Err(invalid()),
         };
-        remainder = (remainder << 6) | u32::from(sextet);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            bytes.push((remainder >> bits) as u8);
-            remainder &= (1_u32 << bits) - 1;
+        match bits {
+            0 => {
+                remainder = sextet;
+                bits = 6;
+            }
+            6 => {
+                bytes.push((remainder << 2) | (sextet >> 4));
+                remainder = sextet & 0x0f;
+                bits = 4;
+            }
+            4 => {
+                bytes.push((remainder << 4) | (sextet >> 2));
+                remainder = sextet & 0x03;
+                bits = 2;
+            }
+            _ => {
+                bytes.push((remainder << 6) | sextet);
+                remainder = 0;
+                bits = 0;
+            }
         }
     }
     if remainder != 0 || bytes.is_empty() || bytes.len() > 128 {
