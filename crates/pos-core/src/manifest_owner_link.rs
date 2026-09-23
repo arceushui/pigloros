@@ -404,21 +404,8 @@ impl ManifestSlotAdmissionReceiptV1 {
     /// # Errors
     /// Rejects malformed, noncanonical, oversized or impossible nullable inputs.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
-        let [
-            magic,
-            version,
-            owner,
-            generation,
-            scope,
-            wcs1,
-            mca1,
-            operation,
-            previous_lcq1,
-            inventory,
-            msb1,
-            key_evidence,
-            signature,
-        ] = decode_array::<13>(bytes, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1)?;
+        let [magic, version, owner, generation, scope, wcs1, mca1, operation, previous_lcq1, inventory, msb1, key_evidence, signature] =
+            decode_array::<13>(bytes, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1)?;
         check_magic(magic, b"MSR1")?;
         check_version(version)?;
         let record = Self::new(ManifestSlotAdmissionReceiptInputV1 {

@@ -49,11 +49,10 @@ pub mod world_transform;
 
 pub use manifest_owner_link::{
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
-    ManifestOwnerLinkErrorV1, ManifestSlotAdmissionReceiptInputV1,
-    ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
-    ManifestSlotBindingV1, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1,
-    MAX_MANIFEST_OWNER_PLUGINS_V1, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1,
-    MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+    ManifestOwnerLinkErrorV1, ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
+    ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
+    MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
+    MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
 };
 pub use world_artifact::{
     WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
