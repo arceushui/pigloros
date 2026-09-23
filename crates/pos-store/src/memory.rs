@@ -6983,7 +6983,7 @@ mod coverage_entrypoints {
             receipt: reference(13),
         };
         let effect_reference = effect.identity();
-        let effect_bytes = effect.to_canonical_cbor().test_ok();
+        let effect_bytes = ok(effect.to_canonical_cbor());
         let proof_value = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
             ciborium::value::Value::Integer(1.into()),
