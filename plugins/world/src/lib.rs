@@ -285,8 +285,10 @@ pub fn encode_actuator_pair_v1(x: f64, z: f64) -> Result<Vec<u8>, WorldCodecErro
     if !x.is_finite() || !z.is_finite() {
         return Err(WorldCodecError::NonFiniteFloat);
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let normalized = [x as f32, z as f32];
+    let normalized = [
+        x.to_f32().unwrap_or(f32::NAN),
+        z.to_f32().unwrap_or(f32::NAN),
+    ];
     if !normalized.iter().all(|component| component.is_finite()) {
         return Err(WorldCodecError::NonFiniteFloat);
     }
@@ -309,8 +311,7 @@ fn decode_actuator_pair_v1(bytes: &[u8]) -> Result<(f32, f32), WorldCodecError> 
             if !value.is_finite() {
                 return Err(WorldCodecError::NonCanonicalParamsCbor);
             }
-            #[allow(clippy::cast_possible_truncation)]
-            let normalized = *value as f32;
+            let normalized = value.to_f32().unwrap_or(f32::NAN);
             if !normalized.is_finite() || f64::from(normalized).to_bits() != value.to_bits() {
                 return Err(WorldCodecError::NonCanonicalParamsCbor);
             }
