@@ -256,6 +256,7 @@ enum AuthorityMode {
     FailNativeVerification,
     WrongNativeDigest,
     TransitionOptionalView,
+    TransitionBaseConfiguration,
 }
 
 struct Authority {
@@ -316,8 +317,10 @@ impl WorldReplayClosureAuthorityV1 for Authority {
         if self.missing == Some(artifact.as_input().kind) {
             return Ok(ArtifactStateV1::MissingRequiredOutput);
         }
-        if matches!(self.mode, AuthorityMode::TransitionOptionalView)
-            && artifact.as_input().kind == WorldArtifactKindV1::OptionalView
+        if (matches!(self.mode, AuthorityMode::TransitionOptionalView)
+            && artifact.as_input().kind == WorldArtifactKindV1::OptionalView)
+            || (matches!(self.mode, AuthorityMode::TransitionBaseConfiguration)
+                && artifact.as_input().kind == WorldArtifactKindV1::BaseConfiguration)
         {
             Ok(ArtifactStateV1::TransitionApplied)
         } else {
@@ -400,6 +403,23 @@ fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
         admission.require_authoritative_use_for(&[optional_view_root]),
         Err(WorldReplayClosureErrorV1::ClaimUnavailable)
     );
+    Ok(())
+}
+
+#[test]
+fn required_view_redaction_preserves_authoritative_replay() -> TestResult {
+    let mut input = closure_input();
+    let mut revised_leaf = input.artifacts[4].as_input().clone();
+    revised_leaf.transition = ArtifactTransitionRuleV1::RedactViews;
+    input.artifacts[4] = WorldArtifactLeafV1::new(revised_leaf)?;
+    let mut authority = Authority::new(WallTime::from_micros(1))
+        .with_mode(AuthorityMode::TransitionBaseConfiguration);
+    let admission = WorldReplayClosureV1::new(input)?.admit(&mut authority)?;
+    assert_eq!(
+        admission.evaluation().replay_claim(),
+        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+    );
+    admission.require_authoritative_use()?;
     Ok(())
 }
 

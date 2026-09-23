@@ -56,13 +56,8 @@ fn run_snapshot_fence(
     registry.try_with_state_transaction(|candidate| {
         let mut outcome = Err(CoreError::ArtifactUnavailable);
         let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-            outcome = snapshot_effect_with_rechecks(
-                sender,
-                timeline,
-                candidate,
-                closure,
-                &requested_use,
-            );
+            outcome =
+                snapshot_effect_with_rechecks(sender, timeline, candidate, closure, &requested_use);
         };
         sender
             .with_protected_effect_fence(
