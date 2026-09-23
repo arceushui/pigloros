@@ -78,10 +78,10 @@ fn snapshot_effect_with_rechecks(
                     snapshot_from_events(timeline, candidate, &events).and_then(|snapshot| {
                         crate::require_world_replay(sender, closure, requested_use).and_then(
                             |final_bounds| {
-                                if final_bounds != read_bounds {
-                                    Err(CoreError::ArtifactUnavailable)
-                                } else {
+                                if final_bounds == read_bounds {
                                     Ok(snapshot)
+                                } else {
+                                    Err(CoreError::ArtifactUnavailable)
                                 }
                             },
                         )
@@ -186,10 +186,10 @@ fn verify_snapshot_effect_with_rechecks(
                         crate::require_world_replay(sender, closure, requested_use)
                             .map_err(|_| SnapshotError::ArtifactUnavailable)
                             .and_then(|final_bounds| {
-                                if final_bounds != read_bounds {
-                                    Err(SnapshotError::ArtifactUnavailable)
-                                } else {
+                                if final_bounds == read_bounds {
                                     Ok(())
+                                } else {
+                                    Err(SnapshotError::ArtifactUnavailable)
                                 }
                             })
                     })
