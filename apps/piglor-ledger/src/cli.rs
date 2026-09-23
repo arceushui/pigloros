@@ -160,15 +160,13 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                         ));
                     }
                     if let Some(request) = pending.first().copied() {
-                        crate::key_output::destroy_owned_secret_key(
+                        let (_, recovered_registry) = crate::key_output::destroy_owned_secret_key(
                             event_store.as_mut(),
                             key_path,
                             request,
                         )
                         .map_err(|error| CliError::BadSource(error.to_string()))?;
-                        persisted_registry = event_store
-                            .load_key_registry()
-                            .map_err(|error| CliError::BadSource(error.to_string()))?;
+                        persisted_registry = Some(recovered_registry);
                     }
                 }
             }
