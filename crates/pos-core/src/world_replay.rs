@@ -246,7 +246,10 @@ impl WorldReplayClosureV1 {
             return Err(WorldReplayClosureErrorV1::BindingIdentityMissing);
         }
         let lease_digest = input.retention_lease.digest();
-        let scope = input.consumer_set.scope();
+        let scope = Self::artifact_scope(input.timeline_id, lease_digest);
+        if input.consumer_set.scope() != scope {
+            return Err(WorldReplayClosureErrorV1::ScopeMismatch);
+        }
         let mut artifacts = input.artifacts;
         artifacts.sort_unstable_by_key(|leaf| {
             (leaf.as_input().kind.code(), leaf.as_input().native_digest)
@@ -306,12 +309,15 @@ impl WorldReplayClosureV1 {
                 WorldArtifactKindV1::OutputPolicy,
                 producer.output_policy_hash(),
             )
-        }) || input
-            .consumer_set
-            .optional_view_roots()
-            .iter()
-            .any(|root| !has_identity(&artifacts, WorldArtifactKindV1::OptionalView, *root))
-        {
+        }) || input.consumer_set.optional_view_roots().iter().any(|root| {
+            !artifacts.iter().any(|leaf| {
+                let input = leaf.as_input();
+                input.kind == WorldArtifactKindV1::OptionalView
+                    && input.native_digest == *root
+                    && input.optionality == crate::ArtifactOptionalityV1::Optional
+                    && input.transition == crate::ArtifactTransitionRuleV1::RedactViews
+            })
+        }) {
             return Err(WorldReplayClosureErrorV1::MissingConsumerArtifact);
         }
         Ok(Self {
@@ -354,6 +360,16 @@ impl WorldReplayClosureV1 {
     #[must_use]
     pub const fn consumer_set(&self) -> &WorldConsumerSetV1 {
         &self.consumer_set
+    }
+
+    /// Derive the lease-scoped WAL1/WCS1 identity fixed by ADR-081.
+    #[must_use]
+    pub fn artifact_scope(timeline_id: TimelineId, native_lease_hash: Hash) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros.world-evidence.scope.v1\0");
+        hasher.update(&timeline_id.inner().to_bytes());
+        hasher.update(native_lease_hash.as_bytes());
+        Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
     /// Return the canonical closure identity used in Replay receipts.
@@ -583,7 +599,7 @@ where
         make_policy().map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
     let retention_lease = make_lease(&retention_policy, timeline_id)
         .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
-    let scope = Hash::from_bytes([9; 32]);
+    let scope = WorldReplayClosureV1::artifact_scope(timeline_id, retention_lease.digest());
     let consumer_set =
         make_consumer_set(scope).map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
     let artifacts = make_artifacts(scope, &retention_policy, &retention_lease)

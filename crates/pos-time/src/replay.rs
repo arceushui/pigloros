@@ -427,6 +427,32 @@ mod tests {
         assert_eq!(registry.state_for_reducer("count", &entity), None);
     }
 
+    #[test]
+    fn public_replay_rejects_requested_range_past_logical_head() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("range-past-head").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let result = super::replay_at(
+            &mut reads,
+            timeline,
+            Seq::from_u64(2),
+            &mut registry,
+            &closure,
+        );
+        assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+        assert_eq!(registry.state_for_reducer("count", &entity), None);
+    }
+
     struct ReadFailStore;
 
     #[cfg_attr(coverage_nightly, coverage(off))]

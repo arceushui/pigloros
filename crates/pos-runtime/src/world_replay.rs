@@ -45,6 +45,7 @@ pub struct WorldReplayUseV1 {
     operation: ErasureProtectedOperationV1,
     range: SeqRange,
     consumer_ids: Vec<String>,
+    requested_optional_view_roots: Vec<Hash>,
 }
 
 impl WorldReplayUseV1 {
@@ -57,12 +58,36 @@ impl WorldReplayUseV1 {
         timeline_id: TimelineId,
         operation: ErasureProtectedOperationV1,
         range: SeqRange,
+        consumer_ids: Vec<String>,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        Self::new_with_optional_views(timeline_id, operation, range, consumer_ids, Vec::new())
+    }
+
+    /// Construct a bounded request that names every optional view it will expose.
+    ///
+    /// # Errors
+    /// Returns [`WorldReplayVerificationErrorV1::RequestMismatch`] for an
+    /// invalid consumer selection or optional-view root set.
+    pub fn new_with_optional_views(
+        timeline_id: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        range: SeqRange,
         mut consumer_ids: Vec<String>,
+        mut requested_optional_view_roots: Vec<Hash>,
     ) -> Result<Self, WorldReplayVerificationErrorV1> {
         consumer_ids.sort_unstable();
+        requested_optional_view_roots.sort_unstable_by_key(|root| *root.as_bytes());
         let invalid = range.to.is_some_and(|to| to < range.from)
             || consumer_ids.is_empty()
             || consumer_ids.len() > pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_CONSUMERS
+            || requested_optional_view_roots.len()
+                > pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS
+            || requested_optional_view_roots
+                .iter()
+                .any(|root| *root == Hash::zero())
+            || requested_optional_view_roots
+                .windows(2)
+                .any(|pair| pair[0] == pair[1])
             || consumer_ids.iter().any(|id| {
                 id.is_empty()
                     || id.len()
@@ -77,6 +102,7 @@ impl WorldReplayUseV1 {
             operation,
             range,
             consumer_ids,
+            requested_optional_view_roots,
         })
     }
 
@@ -104,6 +130,12 @@ impl WorldReplayUseV1 {
         &self.consumer_ids
     }
 
+    /// Return the exact optional-view roots requested for this use.
+    #[must_use]
+    pub fn requested_optional_view_roots(&self) -> &[Hash] {
+        &self.requested_optional_view_roots
+    }
+
     pub(crate) fn is_covered_by(&self, closure: &WorldReplayClosureV1) -> bool {
         self.timeline_id == closure.timeline_id()
             && self.consumer_ids.iter().all(|requested| {
@@ -112,6 +144,12 @@ impl WorldReplayUseV1 {
                     .consumers()
                     .iter()
                     .any(|recorded| recorded.consumer_id() == requested)
+            })
+            && self.requested_optional_view_roots.iter().all(|requested| {
+                closure
+                    .consumer_set()
+                    .optional_view_roots()
+                    .contains(requested)
             })
     }
 }
@@ -129,6 +167,7 @@ pub struct VerifiedWorldReplayV1 {
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
     requested_use: WorldReplayUseV1,
+    authorized_optional_view_roots: Vec<Hash>,
     read_bounds: EventReadBounds,
 }
 
@@ -181,11 +220,16 @@ impl VerifiedWorldReplayV1 {
     /// installed owner reports an expired, erased, structurally limited, or
     /// otherwise non-authoritative result. Optional-view redaction remains an
     /// authoritative claim under ADR-060.
-    pub const fn require_authoritative_use(&self) -> Result<(), WorldReplayVerificationErrorV1> {
+    pub fn require_authoritative_use(&self) -> Result<(), WorldReplayVerificationErrorV1> {
         if matches!(
             self.replay_claim,
             ErasureReplayClaimV1::Exact | ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
-        ) {
+        ) && self
+            .requested_use
+            .requested_optional_view_roots()
+            .iter()
+            .all(|root| self.authorized_optional_view_roots.contains(root))
+        {
             Ok(())
         } else {
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
@@ -231,7 +275,7 @@ pub fn test_verified_world_replay(
 /// that explicitly enables the `test-support` feature.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub const fn test_verified_world_replay_with_fields(
+pub fn test_verified_world_replay_with_fields(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
@@ -254,7 +298,7 @@ pub const fn test_verified_world_replay_with_fields(
 /// downstream seam tests.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub const fn test_verified_world_replay_with_fields_and_bounds(
+pub fn test_verified_world_replay_with_fields_and_bounds(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
@@ -270,8 +314,21 @@ pub const fn test_verified_world_replay_with_fields_and_bounds(
         inventory_generation,
         replay_claim,
         requested_use,
+        authorized_optional_view_roots: Vec::new(),
         read_bounds,
     }
+}
+
+/// Attach explicit per-view authorization to a downstream seam-test result.
+/// The actual owner must verify each root's current claim before minting this result.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_verified_world_replay_with_authorized_views(
+    mut verified: VerifiedWorldReplayV1,
+    authorized_optional_view_roots: Vec<Hash>,
+) -> VerifiedWorldReplayV1 {
+    verified.authorized_optional_view_roots = authorized_optional_view_roots;
+    verified
 }
 
 /// Installed native World Replay verifier.
@@ -391,5 +448,73 @@ mod tests {
             ),
             Err(WorldReplayVerificationErrorV1::RequestMismatch)
         );
+    }
+
+    #[test]
+    fn optional_view_use_requires_exact_per_root_authorization() {
+        let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let generation = ErasureReferenceV1::from_digest([63; 32]);
+        let root = Hash::from_bytes([53; 32]);
+        let request = WorldReplayUseV1::new_with_optional_views(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            SeqRange::all(),
+            vec!["count".to_owned()],
+            vec![root],
+        )
+        .test_ok();
+        assert_eq!(request.requested_optional_view_roots(), &[root]);
+        assert!(request.is_covered_by(&closure));
+        let unverified =
+            test_verified_world_replay(&closure, &request, generation, ErasureReplayClaimV1::Exact);
+        assert_eq!(
+            unverified.require_authoritative_use(),
+            Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
+        );
+        let authorized = test_verified_world_replay_with_authorized_views(
+            test_verified_world_replay(
+                &closure,
+                &request,
+                generation,
+                ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            ),
+            vec![root],
+        );
+        assert_eq!(authorized.require_authoritative_use(), Ok(()));
+        let unavailable = test_verified_world_replay_with_authorized_views(
+            test_verified_world_replay(
+                &closure,
+                &request,
+                generation,
+                ErasureReplayClaimV1::StructuralOnly,
+            ),
+            vec![root],
+        );
+        assert_eq!(
+            unavailable.require_authoritative_use(),
+            Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
+        );
+
+        for roots in [vec![Hash::zero()], vec![root, root]] {
+            assert_eq!(
+                WorldReplayUseV1::new_with_optional_views(
+                    closure.timeline_id(),
+                    ErasureProtectedOperationV1::Read,
+                    SeqRange::all(),
+                    vec!["count".to_owned()],
+                    roots,
+                ),
+                Err(WorldReplayVerificationErrorV1::RequestMismatch)
+            );
+        }
+        let unknown = WorldReplayUseV1::new_with_optional_views(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            SeqRange::all(),
+            vec!["count".to_owned()],
+            vec![Hash::from_bytes([54; 32])],
+        )
+        .test_ok();
+        assert!(!unknown.is_covered_by(&closure));
     }
 }
