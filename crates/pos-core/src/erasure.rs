@@ -4844,21 +4844,21 @@ impl ErasureVerifiedInventoryV1 {
                         // extension requirement for the historical operation.
                         return Ok(None);
                     };
+                    if scope.scope_members().contains(&child_scope) {
+                        // Direct membership in the immutable base scope is
+                        // not an admission for this Fork. Check it before
+                        // extensions: a later Fork may reuse the same scope
+                        // reference and must not be mistaken for this
+                        // operation's original admission.
+                        return Ok(None);
+                    }
                     let extension = state
                         .scope_extensions()
                         .iter()
                         .find(|extension| extension.fork() == expected_child_scope)
                         .copied();
                     let Some(extension) = extension else {
-                        // A later request may freeze a scope that already
-                        // contains this child directly. That inclusion did
-                        // not admit a new Fork extension for the old
-                        // operation and therefore adds no retry requirement.
-                        return if scope.scope_members().contains(&child_scope) {
-                            Ok(None)
-                        } else {
-                            Err(ErasureErrorV1::ProvenanceMissing)
-                        };
+                        return Err(ErasureErrorV1::ProvenanceMissing);
                     };
                     let (Some(lineage_rule), true, true) = (
                         scope.lineage_rule(),

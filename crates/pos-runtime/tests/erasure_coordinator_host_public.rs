@@ -2326,9 +2326,15 @@ fn sqlite_exact_affected_fork_retry_survives_later_scope_extension(
     assert_exact_affected_fork_retry_after_later_scope_extension(StoreConfig::SqliteInMemory)
 }
 
-fn assert_exact_fork_retry_after_later_request_excludes_child(
+#[derive(Clone, Copy)]
+enum LaterRequestChildMembership {
+    Included,
+    Unaffected,
+}
+
+fn assert_exact_fork_retry_after_later_request(
     config: StoreConfig,
-    include_child: bool,
+    child_membership: LaterRequestChildMembership,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
@@ -2369,16 +2375,15 @@ fn assert_exact_fork_retry_after_later_request_excludes_child(
             "classify intervening timeline as unaffected",
             authority.set_timeline_unaffected(intervening.id()),
         )?;
-        if include_child {
-            test_stage(
+        match child_membership {
+            LaterRequestChildMembership::Included => test_stage(
                 "include pre-existing child in the later scope",
                 authority.set_timeline(original_child.id()),
-            )?;
-        } else {
-            test_stage(
+            )?,
+            LaterRequestChildMembership::Unaffected => test_stage(
                 "classify pre-existing child as unaffected",
                 authority.set_timeline_unaffected(original_child.id()),
-            )?;
+            )?,
         }
 
         let request = test_stage("construct request after Fork", persistence_request())?;
@@ -2397,6 +2402,24 @@ fn assert_exact_fork_retry_after_later_request_excludes_child(
             commands.freeze_access(request_reference, &freeze_transition()),
         )?;
 
+        let later_child = if matches!(child_membership, LaterRequestChildMembership::Included) {
+            // Reuse the original child's fork-scope reference to prove that
+            // a later extension is not confused with the original receipt
+            // when this request already included that child directly.
+            authority.set_fork_child_scope(19);
+            Some(test_stage(
+                "admit a later Fork into the directly including scope",
+                commands.fork_timeline_identified(
+                    reference(46),
+                    parent.id(),
+                    pos_core::Seq::ZERO,
+                    "later-child-same-scope",
+                ),
+            )?)
+        } else {
+            None
+        };
+
         let retried_child = test_stage(
             "retry original Fork after later request freeze",
             commands.fork_timeline_identified(
@@ -2407,13 +2430,19 @@ fn assert_exact_fork_retry_after_later_request_excludes_child(
             ),
         )?;
         assert_eq!(retried_child.id(), original_child.id());
+        if let Some(later_child) = later_child {
+            assert_eq!(
+                commands.timeline(later_child.id()),
+                Err(ErasureHostErrorV1::AccessFrozen)
+            );
+        }
         assert_eq!(
             commands
                 .timeline(intervening.id())?
                 .map(|timeline| timeline.id()),
             Some(intervening.id())
         );
-        if include_child {
+        if matches!(child_membership, LaterRequestChildMembership::Included) {
             assert_eq!(
                 commands.timeline(original_child.id()),
                 Err(ErasureHostErrorV1::AccessFrozen)
@@ -2434,23 +2463,35 @@ fn assert_exact_fork_retry_after_later_request_excludes_child(
 #[test]
 fn exact_fork_retry_survives_later_request_excluding_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::Memory, false)
+    assert_exact_fork_retry_after_later_request(
+        StoreConfig::Memory,
+        LaterRequestChildMembership::Unaffected,
+    )
 }
 
 #[test]
 fn sqlite_exact_fork_retry_survives_later_request_excluding_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::SqliteInMemory, false)
+    assert_exact_fork_retry_after_later_request(
+        StoreConfig::SqliteInMemory,
+        LaterRequestChildMembership::Unaffected,
+    )
 }
 
 #[test]
 fn exact_fork_retry_survives_later_request_including_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::Memory, true)
+    assert_exact_fork_retry_after_later_request(
+        StoreConfig::Memory,
+        LaterRequestChildMembership::Included,
+    )
 }
 
 #[test]
 fn sqlite_exact_fork_retry_survives_later_request_including_child(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::SqliteInMemory, true)
+    assert_exact_fork_retry_after_later_request(
+        StoreConfig::SqliteInMemory,
+        LaterRequestChildMembership::Included,
+    )
 }

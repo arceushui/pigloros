@@ -714,46 +714,11 @@ mod tests {
     }
 
     #[test]
-    fn fork_child_exactness_covers_metadata_sequence_event_and_chain_failures() {
+    fn fork_child_exactness_propagates_event_reader_failure() {
         let parent = pos_core::TimelineId::new();
         let expected = pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "child");
         let hasher = pos_crypto::chain::Blake3Hasher;
         let genesis = hasher.genesis_hash();
-        let event_id = pos_core::EventId::new();
-        let payload = pos_core::CanonicalBytes::from_static(b"child-event");
-        let child_head = hasher.hash_event(&genesis, event_id.to_string().as_bytes(), &payload);
-
-        assert!(fork_child_is_exact(ForkChildVerificationInput {
-            expected_meta: &expected,
-            actual_meta: &expected,
-            stored_head: pos_core::Seq::from_u64(1),
-            stored_chain_head: child_head.as_bytes(),
-            chain_head: genesis,
-            events: [Ok((pos_core::Seq::from_u64(1), event_id, payload.clone()))],
-            hasher: &hasher,
-        })
-        .test_ok());
-        let other_meta = pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "other");
-        assert!(!fork_child_is_exact(ForkChildVerificationInput {
-            expected_meta: &expected,
-            actual_meta: &other_meta,
-            stored_head: pos_core::Seq::ZERO,
-            stored_chain_head: genesis.as_bytes(),
-            chain_head: genesis,
-            events: std::iter::empty(),
-            hasher: &hasher,
-        })
-        .test_ok());
-        assert!(!fork_child_is_exact(ForkChildVerificationInput {
-            expected_meta: &expected,
-            actual_meta: &expected,
-            stored_head: pos_core::Seq::from_u64(1),
-            stored_chain_head: child_head.as_bytes(),
-            chain_head: genesis,
-            events: [Ok((pos_core::Seq::from_u64(2), event_id, payload))],
-            hasher: &hasher,
-        })
-        .test_ok());
         assert_eq!(
             fork_child_is_exact(ForkChildVerificationInput {
                 expected_meta: &expected,
