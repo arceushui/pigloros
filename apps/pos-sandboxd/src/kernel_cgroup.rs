@@ -66,7 +66,7 @@ pub enum AttemptCgroupError {
 
 /// The verified fixed cgroup v2 root, retained as a descriptor.
 #[derive(Debug)]
-pub(crate) struct CgroupRoot(File);
+pub(super) struct CgroupRoot(File);
 
 impl CgroupRoot {
     pub(crate) fn system() -> Result<Self, AttemptCgroupError> {
