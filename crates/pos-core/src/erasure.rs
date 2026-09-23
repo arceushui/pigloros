@@ -9432,6 +9432,72 @@ mod coverage_paths {
         Ok(bytes)
     }
 
+    fn decode_recovery_proof_after(
+        proof: &ErasureForkRecoveryProofV1,
+        mutate: impl FnOnce(&mut Value) -> Result<(), ErasureErrorV1>,
+    ) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
+        let mut value = recovery_proof_value(proof);
+        mutate(&mut value)?;
+        ErasureForkRecoveryProofV1::from_canonical_cbor(&encode_recovery_value(&value)?)
+    }
+
+    fn recovery_proof_mutation_fields_mut(
+        value: &mut Value,
+    ) -> Result<&mut Vec<Value>, ErasureErrorV1> {
+        let fields = match value {
+            Value::Array(fields) => fields,
+            _ => return Err(ErasureErrorV1::InvalidEncoding),
+        };
+        let admissions = match fields.get_mut(7) {
+            Some(Value::Array(admissions)) => admissions,
+            _ => return Err(ErasureErrorV1::InvalidEncoding),
+        };
+        match admissions.first_mut() {
+            Some(Value::Array(mutation_fields)) => Ok(mutation_fields),
+            _ => Err(ErasureErrorV1::InvalidEncoding),
+        }
+    }
+
+    fn recovery_proof_replacing_mutation_field(
+        proof: &ErasureForkRecoveryProofV1,
+        field: usize,
+        replacement: Value,
+    ) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
+        decode_recovery_proof_after(proof, |value| {
+            let mutation_fields = recovery_proof_mutation_fields_mut(value)?;
+            let field = mutation_fields
+                .get_mut(field)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            *field = replacement;
+            Ok(())
+        })
+    }
+
+    fn recovery_proof_replacing_mutation_item_field(
+        proof: &ErasureForkRecoveryProofV1,
+        list_field: usize,
+        item: usize,
+        item_field: usize,
+        replacement: Value,
+    ) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
+        decode_recovery_proof_after(proof, |value| {
+            let mutation_fields = recovery_proof_mutation_fields_mut(value)?;
+            let items = match mutation_fields.get_mut(list_field) {
+                Some(Value::Array(items)) => items,
+                _ => return Err(ErasureErrorV1::InvalidEncoding),
+            };
+            let item_fields = match items.get_mut(item) {
+                Some(Value::Array(item_fields)) => item_fields,
+                _ => return Err(ErasureErrorV1::InvalidEncoding),
+            };
+            let field = item_fields
+                .get_mut(item_field)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?;
+            *field = replacement;
+            Ok(())
+        })
+    }
+
     fn assert_recovery_proof_rejects_malformed_headers(
         proof: &ErasureForkRecoveryProofV1,
     ) -> Result<(), ErasureErrorV1> {
@@ -9462,95 +9528,112 @@ mod coverage_paths {
         Ok(())
     }
 
-    fn assert_recovery_mutation_rejects_malformed_fields(mutation: &ErasureForkRecoveryMutationV1) {
-        let malformed_mutation = |field: usize, replacement: Value| {
-            let mut value = recovery_mutation_value(mutation);
-            let Value::Array(fields) = &mut value else {
-                return Err(ErasureErrorV1::InvalidEncoding);
+    fn assert_recovery_mutation_rejects_malformed_fields(
+        proof: &ErasureForkRecoveryProofV1,
+    ) -> Result<(), ErasureErrorV1> {
+        assert!(decode_recovery_proof_after(proof, |value| {
+            let fields = match value {
+                Value::Array(fields) => fields,
+                _ => return Err(ErasureErrorV1::InvalidEncoding),
             };
-            fields[field] = replacement;
-            recovery_mutation_from_value(&value)
-        };
-        assert!(recovery_mutation_from_value(&Value::Text("wrong-mutation".to_owned())).is_err());
+            fields[7] = Value::Array(vec![Value::Text("wrong-mutation".to_owned())]);
+            Ok(())
+        })
+        .is_err());
         for field in [8, 9, 10] {
-            assert!(malformed_mutation(field, Value::Text("wrong-list".to_owned())).is_err());
+            assert!(recovery_proof_replacing_mutation_field(
+                proof,
+                field,
+                Value::Text("wrong-list".to_owned())
+            )
+            .is_err());
         }
+        let mutation = &proof.admissions[0];
         let oversized_objects = Value::Array(vec![
             recovery_object_value(&mutation.objects[0]);
             ERASURE_MAX_REFERENCES + 1
         ]);
         assert_eq!(
-            malformed_mutation(8, oversized_objects),
+            recovery_proof_replacing_mutation_field(proof, 8, oversized_objects),
             Err(ErasureErrorV1::ScopeInvalid)
         );
-        assert!(malformed_mutation(
+        assert!(recovery_proof_replacing_mutation_field(
+            proof,
             8,
             Value::Array(vec![Value::Text("wrong-object".to_owned())])
         )
         .is_err());
-        assert!(
-            malformed_mutation(9, Value::Array(vec![Value::Text("wrong-state".to_owned())]))
-                .is_err()
-        );
-        assert!(malformed_mutation(
+        assert!(recovery_proof_replacing_mutation_field(
+            proof,
+            9,
+            Value::Array(vec![Value::Text("wrong-state".to_owned())])
+        )
+        .is_err());
+        assert!(recovery_proof_replacing_mutation_field(
+            proof,
             10,
             Value::Array(vec![Value::Text("wrong-index".to_owned())])
         )
         .is_err());
         for field in [0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14] {
-            assert!(malformed_mutation(field, Value::Text("wrong-digest".to_owned())).is_err());
+            assert!(recovery_proof_replacing_mutation_field(
+                proof,
+                field,
+                Value::Text("wrong-digest".to_owned())
+            )
+            .is_err());
         }
+        Ok(())
     }
 
     fn assert_recovery_objects_and_indexes_reject_malformed_fields(
-        mutation: &ErasureForkRecoveryMutationV1,
+        proof: &ErasureForkRecoveryProofV1,
     ) -> Result<(), ErasureErrorV1> {
-        assert!(recovery_object_from_value(&Value::Text("wrong-object".to_owned())).is_err());
-        let object = &mutation.objects[0];
+        assert!(recovery_proof_replacing_mutation_field(
+            proof,
+            8,
+            Value::Array(vec![Value::Text("wrong-object".to_owned())])
+        )
+        .is_err());
         for field in 0..=1 {
-            let mut value = recovery_object_value(object);
-            let Value::Array(fields) = &mut value else {
-                return Err(ErasureErrorV1::InvalidEncoding);
-            };
-            fields[field] = Value::Text("wrong-object-field".to_owned());
-            assert!(recovery_object_from_value(&value).is_err());
+            assert!(recovery_proof_replacing_mutation_item_field(
+                proof,
+                8,
+                0,
+                field,
+                Value::Text("wrong-object-field".to_owned())
+            )
+            .is_err());
         }
 
-        let mut index = recovery_index_value(&mutation.index_inserts[0]);
-        {
-            let Value::Array(index_fields) = &mut index else {
-                return Err(ErasureErrorV1::InvalidEncoding);
-            };
-            index_fields[1] = Value::Text("wrong-ordinal".to_owned());
-        }
-        assert!(recovery_index_from_value(&index).is_err());
-        {
-            let Value::Array(index_fields) = &mut index else {
-                return Err(ErasureErrorV1::InvalidEncoding);
-            };
-            index_fields[1] = uint(0);
-            index_fields[2] = Value::Text("wrong-reference".to_owned());
-        }
-        assert!(recovery_index_from_value(&index).is_err());
-        {
-            let Value::Array(index_fields) = &mut index else {
-                return Err(ErasureErrorV1::InvalidEncoding);
-            };
-            index_fields[2] = digest(reference(192));
-            index_fields[0] = uint(9);
-        }
+        assert!(recovery_proof_replacing_mutation_item_field(
+            proof,
+            10,
+            0,
+            1,
+            Value::Text("wrong-ordinal".to_owned())
+        )
+        .is_err());
+        assert!(recovery_proof_replacing_mutation_item_field(
+            proof,
+            10,
+            0,
+            2,
+            Value::Text("wrong-reference".to_owned())
+        )
+        .is_err());
         assert_eq!(
-            recovery_index_from_value(&index),
+            recovery_proof_replacing_mutation_item_field(proof, 10, 0, 0, uint(9)),
             Err(ErasureErrorV1::InvalidEncoding)
         );
-        {
-            let Value::Array(index_fields) = &mut index else {
-                return Err(ErasureErrorV1::InvalidEncoding);
-            };
-            index_fields[0] = Value::Text("wrong-kind".to_owned());
-        }
         assert_eq!(
-            recovery_index_from_value(&index),
+            recovery_proof_replacing_mutation_item_field(
+                proof,
+                10,
+                0,
+                0,
+                Value::Text("wrong-kind".to_owned())
+            ),
             Err(ErasureErrorV1::InvalidEncoding)
         );
         Ok(())
@@ -9694,10 +9777,9 @@ mod coverage_paths {
             ErasureForkRecoveryProofV1::from_canonical_cbor(&malformed),
             Err(ErasureErrorV1::InvalidEncoding)
         );
-        let mutation = &proof.admissions[0];
         assert_recovery_proof_rejects_malformed_headers(&proof)?;
-        assert_recovery_mutation_rejects_malformed_fields(mutation);
-        assert_recovery_objects_and_indexes_reject_malformed_fields(mutation)?;
+        assert_recovery_mutation_rejects_malformed_fields(&proof)?;
+        assert_recovery_objects_and_indexes_reject_malformed_fields(&proof)?;
         assert_recovery_proof_rejects_oversized_admissions(&proof)?;
         assert_fork_admission_rejects_oversized_effect(&input, &extension);
         Ok(())

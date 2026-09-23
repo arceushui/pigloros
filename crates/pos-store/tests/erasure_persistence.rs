@@ -175,20 +175,20 @@ fn verified_empty_inventory(
         .verified_inventory(maximum_requests)
 }
 
-fn commit_fork_admission<S>(
-    shared: &Rc<RefCell<S>>,
+fn commit_fork_admission_with(
     gate: &Arc<ErasureContainmentGateV1>,
     admission: &pos_core::PreparedErasureForkBatchV1,
-) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>
-where
-    S: ErasureForkPersistencePortV1,
-{
+    mut commit: impl FnMut(
+        &pos_core::ErasureTopologyTransitionPermitV1,
+        pos_core::PreparedErasureForkBatchV1,
+    ) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>,
+) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1> {
     let candidate = admission.successor_inventory().clone();
     let mut transition_error = None;
-    let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| match shared
-        .borrow_mut()
-        .commit_fork_admission(permit, admission.clone())
-    {
+    let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| match commit(
+        permit,
+        admission.clone(),
+    ) {
         Ok(outcome) => Ok((candidate.clone(), outcome)),
         Err(error) => {
             transition_error = Some(error);
@@ -206,6 +206,19 @@ where
     )
 }
 
+fn commit_fork_admission<S>(
+    shared: &Rc<RefCell<S>>,
+    gate: &Arc<ErasureContainmentGateV1>,
+    admission: &pos_core::PreparedErasureForkBatchV1,
+) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>
+where
+    S: ErasureForkPersistencePortV1,
+{
+    commit_fork_admission_with(gate, admission, |permit, batch| {
+        shared.borrow_mut().commit_fork_admission(permit, batch)
+    })
+}
+
 fn commit_fork_admission_direct<S>(
     store: &mut S,
     gate: &Arc<ErasureContainmentGateV1>,
@@ -214,26 +227,9 @@ fn commit_fork_admission_direct<S>(
 where
     S: ErasureForkPersistencePortV1,
 {
-    let candidate = admission.successor_inventory().clone();
-    let mut transition_error = None;
-    let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| match store
-        .commit_fork_admission(permit, admission.clone())
-    {
-        Ok(outcome) => Ok((candidate.clone(), outcome)),
-        Err(error) => {
-            transition_error = Some(error);
-            Err(error)
-        }
-    };
-    let publication = gate.install_from_verified_inventory_transition(&mut transition);
-    transition_error.map_or_else(
-        || {
-            publication
-                .map(|(_, outcome)| outcome)
-                .map_err(|_| ErasureErrorV1::ProvenanceMissing)
-        },
-        Err,
-    )
+    commit_fork_admission_with(gate, admission, |permit, batch| {
+        store.commit_fork_admission(permit, batch)
+    })
 }
 
 impl<S: ErasurePersistencePortV1> ErasureStateResolverV1 for Host<S> {

@@ -5572,22 +5572,29 @@ mod tests {
     }
 
     #[test]
-    fn topology_candidate_verification_requires_both_credentials() {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let limits = host.recovery_limits;
+    fn topology_change_requires_both_authority_and_coordinator() -> Result<(), ErasureHostErrorV1> {
+        let mut fixture = rejected_host_with_resolve_control()?;
+        fixture.host.authority = None;
         assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits, &TimelineMeta::root("candidate"),),
-            Err(ErasureErrorV1::Unauthorized)
+            fixture
+                .host
+                .command_sender()?
+                .create_timeline("without-authority")
+                .map(|_| ()),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
         );
-        host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
+
+        fixture.host.authority = Some(fixture.authority.clone());
+        fixture.host.coordinator = None;
         assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits, &TimelineMeta::root("candidate"),),
-            Err(ErasureErrorV1::Unauthorized)
+            fixture
+                .host
+                .command_sender()?
+                .create_timeline("without-coordinator")
+                .map(|_| ()),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
         );
+        Ok(())
     }
 
     #[test]

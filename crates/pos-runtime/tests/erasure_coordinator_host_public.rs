@@ -186,6 +186,7 @@ impl TestAuthority {
     }
 
     fn set_timeline_unaffected(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
+        self.set_timeline(timeline)?;
         {
             let mut unaffected = self
                 .unaffected_timelines
