@@ -769,6 +769,34 @@ where
     Ok(())
 }
 
+fn assert_fork_admission_exact_retry_rejects_a_deleted_parent<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (store, gate, _, child, prepared) = prepared_fork(store)?;
+    let (parent, _) = prepared
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().delete_timeline(child)?;
+    store.borrow_mut().delete_timeline(parent)?;
+
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
 fn assert_fork_admission_rejects_a_foreign_transition_permit<S>(
     store: S,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -1236,6 +1264,11 @@ fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
 fn memory_fork_admission_reports_stale_generation_before_missing_parent(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_fork_admission_rejects_a_deleted_parent_as_stale(MemoryStore::new())
+}
+
+#[test]
+fn memory_fork_exact_retry_rejects_a_deleted_parent() -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_exact_retry_rejects_a_deleted_parent(MemoryStore::new())
 }
 
 #[test]
@@ -3227,6 +3260,12 @@ fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
 fn sqlite_fork_admission_reports_stale_generation_before_missing_parent(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_fork_admission_rejects_a_deleted_parent_as_stale(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_exact_retry_rejects_a_deleted_parent() -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_exact_retry_rejects_a_deleted_parent(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
