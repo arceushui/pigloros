@@ -1311,8 +1311,8 @@ impl ErasureExecutionHostV1 {
     /// this host. The returned trait object cannot publish or replace gate
     /// state; the host remains the sole owner of those operations.
     #[must_use]
-    pub fn containment_gate(&self) -> Arc<ErasureContainmentGateV1> {
-        Arc::clone(&self.gate)
+    pub fn containment_gate(&self) -> Arc<dyn ErasureGate> {
+        self.gate.clone()
     }
 
     /// Bind the independently owned consent authority before Gateway commands
@@ -1591,22 +1591,7 @@ impl ErasureExecutionHostV1 {
             &Timeline,
         ) -> Result<TopologyTransitionResultV1, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        self.apply_root_topology_change_with_preflight(move |_, _| Ok(candidate.clone()), change)
-    }
-
-    fn apply_root_topology_change_with_preflight(
-        &mut self,
-        preflight: impl FnMut(
-            &ErasureTopologyTransitionPermitV1,
-            &mut dyn ErasureHostStore,
-        ) -> Result<Timeline, ErasureHostErrorV1>,
-        change: impl FnMut(
-            &ErasureTopologyTransitionPermitV1,
-            &mut dyn ErasureHostStore,
-            &Timeline,
-        ) -> Result<TopologyTransitionResultV1, CoreError>,
-    ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
-        self.apply_unaffected_topology_change(None, preflight, change)
+        self.apply_unaffected_topology_change(None, move |_, _| Ok(candidate.clone()), change)
     }
 
     fn verify_unaffected_topology_candidate(
@@ -2046,10 +2031,19 @@ impl ErasureExecutionHostV1 {
             child_scope,
             child: retry_child,
         };
-        for requirement in input
+        let stale_error = |error| {
+            if input.current_generation == recovered.successor_generation() {
+                error
+            } else {
+                ErasureErrorV1::StaleGeneration
+            }
+        };
+        let requirements = input
             .current_inventory
-            .fork_retry_scope_requirements(input.parent, recovered_child.id)?
-        {
+            .fork_retry_scope_requirements(input.parent, recovered_child.id)
+            .map_err(stale_error)?;
+        for requirement in requirements {
+            let requirement = requirement.map_err(stale_error)?;
             let extension = input
                 .authority
                 .resolve_fork_scope_extension(requirement.requirement(), &retry_input)?;
@@ -2502,7 +2496,8 @@ impl ErasureCommandSenderV1<'_> {
         let inventory = self
             .host
             .ensure_generation_with_inventory(self.generation)?;
-        let (timeline, generation) = self.host.apply_root_topology_change_with_preflight(
+        let (timeline, generation) = self.host.apply_unaffected_topology_change(
+            None,
             |permit, store| {
                 let existing = store
                     .find_timeline_by_name_for_host_transition(permit, name)

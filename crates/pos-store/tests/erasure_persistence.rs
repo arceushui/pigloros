@@ -740,6 +740,162 @@ where
     Ok((shared, gate, request.reference(), child, prepared))
 }
 
+fn assert_fork_exact_retry_after_later_scope_extension<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (shared, gate, request, _, first) = prepared_fork(store)?;
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &first)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let snapshot = shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let parent = *snapshot
+        .topology()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let previous_extension = first
+        .admissions()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .extension();
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: previous_extension.scope_commitment(),
+        fork: reference(104),
+        lineage_rule: previous_extension.lineage_rule(),
+        predecessor_extension: Some(previous_extension.reference()),
+        admission_provenance: reference(105),
+    })?;
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(106),
+        expected_inventory_generation: inventory.generation(),
+        child_scope: reference(104),
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("later-admitted-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::ZERO)),
+        },
+    };
+    let later_admission = coordinator.prepare_fork_admission(request, extension, input.clone())?;
+    let later = inventory.prepare_fork_batch(input, vec![later_admission])?;
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &later)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(
+        shared
+            .borrow_mut()
+            .read_manifest(request)?
+            .map(|manifest| manifest.digest()),
+        Some(later.admissions()[0].mutation().next_manifest().digest())
+    );
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &first)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
+    Ok(())
+}
+
+fn assert_duplicate_fork_scope_is_rejected<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (shared, gate, request, _, first) = prepared_fork(store)?;
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &first)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    let previous_extension = first
+        .admissions()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .extension();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let snapshot = shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let parent = *snapshot
+        .topology()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(109),
+        expected_inventory_generation: inventory.generation(),
+        child_scope: previous_extension.fork(),
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("duplicate-scope-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::ZERO)),
+        },
+    };
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: previous_extension.scope_commitment(),
+        fork: previous_extension.fork(),
+        lineage_rule: previous_extension.lineage_rule(),
+        predecessor_extension: Some(previous_extension.reference()),
+        admission_provenance: reference(110),
+    })?;
+    let admission = coordinator.prepare_fork_admission(request, extension, input.clone())?;
+    assert_eq!(
+        inventory.prepare_fork_batch(input, vec![admission]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(shared.borrow().scope_index_count(request)?, 1);
+    assert_eq!(
+        shared
+            .borrow_mut()
+            .read_manifest(request)?
+            .map(|manifest| manifest.digest()),
+        Some(first.admissions()[0].mutation().next_manifest().digest())
+    );
+    assert!(!shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    Ok(())
+}
+
 fn assert_fork_admission_rejects_a_deleted_parent_as_stale<S>(
     store: S,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -1185,7 +1341,9 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         .child()
         .fork_point
         .ok_or(ErasureErrorV1::PolicyConflict)?;
-    let retry_requirements = successor_inventory.fork_retry_scope_requirements(parent, child)?;
+    let retry_requirements = successor_inventory
+        .fork_retry_scope_requirements(parent, child)?
+        .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(retry_requirements.len(), prepared.admissions().len());
     for (retry_requirement, admission) in retry_requirements.iter().zip(prepared.admissions()) {
         assert_eq!(retry_requirement.extension(), admission.extension());
@@ -1221,6 +1379,17 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
+}
+
+#[test]
+fn memory_fork_exact_retry_survives_a_later_scope_manifest(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_exact_retry_after_later_scope_extension(MemoryStore::new())
+}
+
+#[test]
+fn memory_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error::Error>> {
+    assert_duplicate_fork_scope_is_rejected(MemoryStore::new())
 }
 
 #[test]
@@ -1508,6 +1677,19 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
         .topology()
         .contains(&child));
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_exact_retry_survives_a_later_scope_manifest(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_exact_retry_after_later_scope_extension(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error::Error>> {
+    assert_duplicate_fork_scope_is_rejected(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
@@ -2751,7 +2933,7 @@ fn sqlite_fork_recovery_rejects_missing_or_corrupt_recovery_proof(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_fork_recovery_proof_checks_all_index_kinds_and_subject(
+fn sqlite_rejects_rewritten_fork_indexes_and_inconsistent_effect_subject(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
@@ -2817,12 +2999,6 @@ fn sqlite_fork_recovery_proof_checks_all_index_kinds_and_subject(
         Ok(())
     })?;
     drop(connection);
-    let mut reopened = SqliteStore::open(path)?;
-    assert!(recover_fork_admission(&mut reopened, operation, successor_inventory)?.is_some());
-    let connection = rusqlite::Connection::open(path)?;
-    corrupt_sqlite_subject_manifest(&connection, &prepared, manifest)?;
-    drop(connection);
-
     assert_eq!(
         recover_fork_admission(
             &mut SqliteStore::open(path)?,
@@ -2831,53 +3007,6 @@ fn sqlite_fork_recovery_proof_checks_all_index_kinds_and_subject(
         ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    let connection = rusqlite::Connection::open(path)?;
-    connection.execute(
-        "UPDATE erasure_effects SET manifest_digest=zeroblob(32) WHERE subject_digest=?1",
-        rusqlite::params![reference(235).digest().as_slice()],
-    )?;
-    drop(connection);
-    assert_eq!(
-        recover_fork_admission(
-            &mut SqliteStore::open(path)?,
-            operation,
-            successor_inventory,
-        ),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    Ok(())
-}
-
-#[cfg(feature = "sqlite")]
-fn corrupt_sqlite_subject_manifest(
-    connection: &rusqlite::Connection,
-    prepared: &pos_core::PreparedErasureForkBatchV1,
-    manifest: ErasureReferenceV1,
-) -> Result<(), Box<dyn std::error::Error>> {
-    connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
-    let (effect_digest, effect_cbor): (Vec<u8>, Vec<u8>) = connection.query_row(
-        "SELECT effect_digest, effect_cbor FROM erasure_effects WHERE manifest_digest=?1",
-        rusqlite::params![manifest.digest().as_slice()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    connection.execute(
-        "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
-         VALUES(?1,?2,?3,?4)",
-        rusqlite::params![
-            [0_u8].as_slice(),
-            effect_digest,
-            reference(235).digest().as_slice(),
-            effect_cbor,
-        ],
-    )?;
-    rewrite_sqlite_recovery_proof(connection, prepared, |value| {
-        let mutation = recovery_proof_mutation_fields(value)?;
-        let Some(effect_subject) = mutation.get_mut(13) else {
-            return Err(ErasureErrorV1::InvalidEncoding);
-        };
-        *effect_subject = digest_value(reference(235));
-        Ok(())
-    })?;
     Ok(())
 }
 
@@ -2901,6 +3030,39 @@ fn assert_sqlite_fork_recovery_proof_corruption_errors() -> Result<(), Box<dyn s
                 return Err(ErasureErrorV1::InvalidEncoding);
             };
             *objects = Value::Array(Vec::new());
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(Value::Array(states)) = mutation.get_mut(9) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            states.pop().ok_or(ErasureErrorV1::InvalidEncoding)?;
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(Value::Array(indexes)) = mutation.get_mut(10) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            indexes.pop().ok_or(ErasureErrorV1::InvalidEncoding)?;
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(next_manifest_bytes) = mutation.get_mut(7) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *next_manifest_bytes = digest_value(reference(234));
             Ok(())
         },
         ErasureErrorV1::ProvenanceMissing,

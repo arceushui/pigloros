@@ -806,6 +806,16 @@ fn verified_state_for_containment(
     ))
 }
 
+fn collect_fork_retry_scope_requirements(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<Vec<ErasureForkRetryScopeRequirementV1>, ErasureErrorV1> {
+    inventory
+        .fork_retry_scope_requirements(parent, child)?
+        .collect()
+}
+
 #[test]
 fn containment_blocks_only_effective_frozen_scope() -> Result<(), ErasureErrorV1> {
     let frozen = verified_state_for_containment(
@@ -904,7 +914,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         4,
     )?;
 
-    let requirements = inventory.fork_retry_scope_requirements(parent, child)?;
+    let requirements = collect_fork_retry_scope_requirements(&inventory, parent, child)?;
     assert_eq!(requirements.len(), 1);
     assert_eq!(requirements[0].requirement().request(), reference(1));
     assert_eq!(
@@ -931,9 +941,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         vec![parent, child],
         4,
     )?;
-    assert!(excluded
-        .fork_retry_scope_requirements(parent, child)?
-        .is_empty());
+    assert!(collect_fork_retry_scope_requirements(&excluded, parent, child)?.is_empty());
 
     assert_fork_retry_rejects_missing_classifications(&inventory, parent, child);
     assert_fork_retry_rejects_no_lineage(parent, child)?;
@@ -990,11 +998,11 @@ fn assert_fork_retry_rejects_missing_classifications(
     child: TimelineId,
 ) {
     assert_eq!(
-        inventory.fork_retry_scope_requirements(TimelineId::new(), child),
+        collect_fork_retry_scope_requirements(inventory, TimelineId::new(), child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        inventory.fork_retry_scope_requirements(parent, TimelineId::new()),
+        collect_fork_retry_scope_requirements(inventory, parent, TimelineId::new()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 }
@@ -1026,9 +1034,7 @@ fn assert_fork_retry_rejects_no_lineage(
         vec![parent, child],
         4,
     )?;
-    assert!(inventory
-        .fork_retry_scope_requirements(parent, child)?
-        .is_empty());
+    assert!(collect_fork_retry_scope_requirements(&inventory, parent, child)?.is_empty());
     let mut child_included = inventory;
     child_included
         .classifications
@@ -1038,7 +1044,7 @@ fn assert_fork_retry_rejects_no_lineage(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .membership = ErasureInventoryMembershipV1::Included(scope.reference());
     assert_eq!(
-        child_included.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&child_included, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1058,7 +1064,7 @@ fn assert_fork_retry_rejects_excluded_parent_with_included_child(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .membership = ErasureInventoryMembershipV1::Excluded;
     assert_eq!(
-        parent_excluded.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&parent_excluded, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     parent_excluded
@@ -1068,9 +1074,7 @@ fn assert_fork_retry_rejects_excluded_parent_with_included_child(
         .and_then(|(_, classifications)| classifications.first_mut())
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .membership = ErasureInventoryMembershipV1::Excluded;
-    assert!(parent_excluded
-        .fork_retry_scope_requirements(parent, child)?
-        .is_empty());
+    assert!(collect_fork_retry_scope_requirements(&parent_excluded, parent, child)?.is_empty());
     Ok(())
 }
 
@@ -1088,7 +1092,7 @@ fn assert_fork_retry_rejects_parent_corruption(
         .1
         .clear();
     assert_eq!(
-        incomplete_classifications.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&incomplete_classifications, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
@@ -1101,14 +1105,14 @@ fn assert_fork_retry_rejects_parent_corruption(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .request = reference(37);
     assert_eq!(
-        mismatched_parent.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&mismatched_parent, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let mut missing_state_scope = inventory.clone();
     missing_state_scope.members[0].0.scope = None;
     assert_eq!(
-        missing_state_scope.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&missing_state_scope, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1128,7 +1132,7 @@ fn assert_fork_retry_rejects_child_corruption(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .request = reference(38);
     assert_eq!(
-        missing_child_request.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&missing_child_request, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
@@ -1140,10 +1144,7 @@ fn assert_fork_retry_rejects_child_corruption(
         .and_then(|(_, classifications)| classifications.first_mut())
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .membership = ErasureInventoryMembershipV1::Excluded;
-    assert_eq!(
-        excluded_child.fork_retry_scope_requirements(parent, child),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
+    assert!(collect_fork_retry_scope_requirements(&excluded_child, parent, child)?.is_empty());
 
     let mut wrong_extension = inventory.clone();
     wrong_extension
@@ -1154,7 +1155,7 @@ fn assert_fork_retry_rejects_child_corruption(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .membership = ErasureInventoryMembershipV1::Included(reference(40));
     assert_eq!(
-        wrong_extension.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&wrong_extension, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1173,7 +1174,7 @@ fn assert_fork_retry_rejects_included_excluded_child(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .membership = ErasureInventoryMembershipV1::Included(reference(39));
     assert_eq!(
-        excluded.fork_retry_scope_requirements(parent, child),
+        collect_fork_retry_scope_requirements(&excluded, parent, child),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())

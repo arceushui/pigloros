@@ -120,6 +120,7 @@ fn coordinator_composition_rejects_zero_identity_at_every_public_entry() {
 
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
+    unaffected_timelines: Mutex<Vec<TimelineId>>,
     frozen: AtomicBool,
     deny_authentication: AtomicBool,
     deny_topology: AtomicBool,
@@ -142,6 +143,7 @@ impl Default for TestAuthority {
     fn default() -> Self {
         Self {
             timelines: Mutex::new(Vec::new()),
+            unaffected_timelines: Mutex::new(Vec::new()),
             frozen: AtomicBool::new(false),
             deny_authentication: AtomicBool::new(false),
             deny_topology: AtomicBool::new(false),
@@ -168,6 +170,17 @@ impl TestAuthority {
             .lock()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .push((timeline, reference(9)));
+        Ok(())
+    }
+
+    fn set_timeline_unaffected(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
+        let mut unaffected = self
+            .unaffected_timelines
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        if !unaffected.contains(&timeline) {
+            unaffected.push(timeline);
+        }
         Ok(())
     }
 
@@ -207,10 +220,17 @@ impl TestAuthority {
             }
         }
         if self.frozen.load(Ordering::Acquire) {
+            let unaffected = self
+                .unaffected_timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .clone();
+            let bindings = timelines
+                .into_iter()
+                .filter(|(timeline, _)| !unaffected.contains(timeline))
+                .collect();
             Ok(ErasureVerifiedTopologyObservationV1::new(
-                manifest,
-                timelines,
-                Vec::new(),
+                manifest, bindings, unaffected,
             ))
         } else {
             Ok(ErasureVerifiedTopologyObservationV1::new(
@@ -380,11 +400,12 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             .timelines
             .lock()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let scope = reference(self.fork_child_scope.load(Ordering::Acquire));
         if !timelines.iter().any(|(timeline, _)| *timeline == child.id) {
-            timelines.push((child.id, reference(19)));
+            timelines.push((child.id, scope));
         }
         drop(timelines);
-        Ok(reference(self.fork_child_scope.load(Ordering::Acquire)))
+        Ok(scope)
     }
 
     fn resolve_fork_scope_extension(
@@ -2249,6 +2270,17 @@ fn assert_exact_affected_fork_retry_after_later_scope_extension(
                 "later-affected-child",
             ),
         )?;
+        authority.set_fork_child_scope(21);
+        let retried_later_child = test_stage(
+            "retry later affected fork with its original child binding",
+            commands.fork_timeline_identified(
+                reference(44),
+                first_child.id(),
+                pos_core::Seq::ZERO,
+                "later-affected-child",
+            ),
+        )?;
+        assert_eq!(retried_later_child.id(), later_child.id());
         authority.set_fork_child_scope(19);
         let retried_child = test_stage(
             "retry first affected fork after its scope advanced",
@@ -2284,4 +2316,92 @@ fn exact_affected_fork_retry_survives_later_scope_extension(
 fn sqlite_exact_affected_fork_retry_survives_later_scope_extension(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_exact_affected_fork_retry_after_later_scope_extension(StoreConfig::SqliteInMemory)
+}
+
+fn assert_exact_fork_retry_after_later_request_excludes_child(
+    config: StoreConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open pre-freeze Fork retry host",
+        open_with_authority(
+            config,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    {
+        let mut commands = test_stage("open pre-freeze Fork retry sender", host.command_sender())?;
+        let parent = test_stage(
+            "create pre-freeze Fork parent",
+            commands.create_timeline("pre-freeze-fork-parent"),
+        )?;
+        test_stage(
+            "publish pre-freeze Fork parent",
+            authority.set_timeline(parent.id()),
+        )?;
+        let operation = reference(45);
+        let original_child = test_stage(
+            "commit Fork before request submission",
+            commands.fork_timeline_identified(
+                operation,
+                parent.id(),
+                pos_core::Seq::ZERO,
+                "pre-freeze-child",
+            ),
+        )?;
+        test_stage(
+            "classify pre-existing child as unaffected",
+            authority.set_timeline_unaffected(original_child.id()),
+        )?;
+
+        let request = test_stage("construct request after Fork", persistence_request())?;
+        let request_reference = request.reference();
+        let request_provenance = request.provenance();
+        test_stage(
+            "submit request after Fork",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize request after Fork",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze parent while excluding pre-existing child",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+
+        let retried_child = test_stage(
+            "retry original Fork after later request freeze",
+            commands.fork_timeline_identified(
+                operation,
+                parent.id(),
+                pos_core::Seq::ZERO,
+                "pre-freeze-child",
+            ),
+        )?;
+        assert_eq!(retried_child.id(), original_child.id());
+        assert_eq!(
+            commands
+                .timeline(original_child.id())?
+                .map(|timeline| timeline.id()),
+            Some(original_child.id())
+        );
+    }
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    Ok(())
+}
+
+#[test]
+fn exact_fork_retry_survives_later_request_excluding_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::Memory)
+}
+
+#[test]
+fn sqlite_exact_fork_retry_survives_later_request_excluding_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_exact_fork_retry_after_later_request_excludes_child(StoreConfig::SqliteInMemory)
 }

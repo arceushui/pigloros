@@ -5521,6 +5521,7 @@ fn sqlite_recovery_proof_effect_is_exact(
     let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&effect_row.effect_cbor)?;
     if reference_from_sql(effect_row.effect_digest)? != mutation.effect()
         || effect.identity() != mutation.effect()
+        || effect.subject() != mutation.effect_subject()
         || ErasureForkRecoveryProofV1::bytes_digest(&effect_row.effect_cbor)
             != mutation.effect_bytes()
         || effect_row
@@ -5763,24 +5764,10 @@ fn sqlite_fork_admission_is_exact(
     }
     for prepared in admission.admissions() {
         let mutation = prepared.mutation();
-        let manifest = conn
-            .query_row(
-                "SELECT manifest_digest, manifest_cbor FROM erasure_records
-                 WHERE request_digest=?1",
-                params![mutation.request().digest().as_slice()],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()
-            .map_err(map_erasure_receipt_failure)?;
-        let expected_digest = mutation.next_manifest().digest().digest();
-        let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
-            (digest.as_slice(), bytes.as_slice())
-                == (
-                    expected_digest.as_slice(),
-                    mutation.next_manifest().canonical_cbor(),
-                )
-        });
-        if !exact_manifest || !sqlite_mutation_is_exact(conn, mutation)? {
+        // `erasure_records` is a mutable head and may have advanced through a
+        // later Fork. The immutable mutation evidence and indexed extension
+        // prove that this operation's original successor remains committed.
+        if !sqlite_mutation_is_exact(conn, mutation)? {
             return Ok(false);
         }
     }
@@ -13895,6 +13882,93 @@ mod tests {
         assert_eq!(
             load_sqlite_erasure_effect(&store.conn, manifest),
             Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn sqlite_fork_recovery_effect_matches_proof_and_decoded_subject() {
+        use ciborium::value::Value;
+
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let digest = |reference: ErasureReferenceV1| Value::Bytes(reference.digest().to_vec());
+        let original_subject = reference(40);
+        let rewritten_subject = reference(41);
+        let manifest = reference(42);
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: original_subject,
+        };
+        let effect_bytes = effect.to_canonical_cbor().test_ok();
+        let make_proof = |declared_subject| {
+            let mutation = Value::Array(vec![
+                digest(reference(1)),
+                digest(reference(2)),
+                digest(reference(3)),
+                digest(reference(4)),
+                digest(reference(5)),
+                Value::Null,
+                digest(manifest),
+                digest(reference(6)),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                digest(effect.identity()),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)),
+                digest(declared_subject),
+                digest(reference(7)),
+            ]);
+            let value = Value::Array(vec![
+                Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+                Value::Integer(1.into()),
+                digest(reference(1)),
+                digest(reference(2)),
+                digest(reference(3)),
+                digest(reference(4)),
+                digest(reference(5)),
+                Value::Array(vec![mutation]),
+            ]);
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&value, &mut encoded).test_ok();
+            ErasureForkRecoveryProofV1::from_canonical_cbor(&encoded).test_ok()
+        };
+
+        let store = new_store();
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
+                 VALUES(?1,?2,?3,?4)",
+                params![
+                    manifest.digest().as_slice(),
+                    effect.identity().digest().as_slice(),
+                    original_subject.digest().as_slice(),
+                    effect_bytes.as_slice(),
+                ],
+            )
+            .test_ok();
+        let matching_proof = make_proof(original_subject);
+        sqlite_recovery_proof_effect_is_exact(
+            &store.conn,
+            matching_proof.admissions().first().test_ok(),
+        )
+        .test_ok();
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET subject_digest=?1 WHERE manifest_digest=?2",
+                params![
+                    rewritten_subject.digest().as_slice(),
+                    manifest.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        let rewritten_proof = make_proof(rewritten_subject);
+        assert_eq!(
+            sqlite_recovery_proof_effect_is_exact(
+                &store.conn,
+                rewritten_proof.admissions().first().test_ok(),
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
 

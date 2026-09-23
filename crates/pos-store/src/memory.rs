@@ -1628,13 +1628,10 @@ impl MemoryStore {
     ) -> bool {
         admission.admissions().iter().all(|prepared| {
             let mutation = prepared.mutation();
-            self.erasure_records
-                .get(&mutation.request())
-                .is_some_and(|(digest, bytes)| {
-                    *digest == mutation.next_manifest().digest()
-                        && bytes.as_slice() == mutation.next_manifest().canonical_cbor()
-                })
-                && memory_mutation_is_exact(self, mutation)
+            // The current manifest is a mutable head and may have advanced
+            // since this operation's receipt. Its immutable evidence and
+            // indexed extension remain the authority for exact replay.
+            memory_mutation_is_exact(self, mutation)
         })
     }
 
@@ -1691,10 +1688,13 @@ impl MemoryStore {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
-            let Some((effect, bytes)) = self.erasure_effects.get(&mutation.next_manifest()) else {
+            let Some((effect_digest, bytes)) = self.erasure_effects.get(&mutation.next_manifest())
+            else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
-            if *effect != mutation.effect()
+            let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes)?;
+            if effect.identity() != *effect_digest
+                || effect.subject() != mutation.effect_subject()
                 || ErasureForkRecoveryProofV1::bytes_digest(bytes) != mutation.effect_bytes()
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
@@ -6959,7 +6959,11 @@ mod coverage_entrypoints {
         let manifest_bytes = vec![0xA1, 0xB2];
         let object_bytes = vec![0xC3, 0xD4];
         let state_bytes = vec![0xE5, 0xF6];
-        let effect_bytes = vec![0x17, 0x28];
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: reference(13),
+        };
+        let effect_reference = effect.identity();
+        let effect_bytes = effect.to_canonical_cbor().test_ok();
         let proof_value = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
             ciborium::value::Value::Integer(1.into()),
@@ -7014,7 +7018,7 @@ mod coverage_entrypoints {
                         digest_value(17),
                     ]),
                 ]),
-                digest_value(12),
+                ciborium::value::Value::Bytes(effect_reference.digest().to_vec()),
                 ciborium::value::Value::Bytes(
                     ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)
                         .digest()
@@ -7047,7 +7051,7 @@ mod coverage_entrypoints {
             .insert((reference(7), 2), reference(17));
         store
             .erasure_effects
-            .insert(reference(9), (reference(12), effect_bytes));
+            .insert(reference(9), (effect_reference, effect_bytes));
         store
             .erasure_effect_subjects
             .insert(reference(13), reference(9));
