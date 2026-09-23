@@ -454,7 +454,7 @@ mod tests {
     fn optional_view_use_requires_exact_per_root_authorization() {
         let closure = WorldReplayClosureV1::test_fixture().test_ok();
         let generation = ErasureReferenceV1::from_digest([63; 32]);
-        let root = Hash::from_bytes([53; 32]);
+        let root = closure.consumer_set().optional_view_roots()[0];
         let request = WorldReplayUseV1::new_with_optional_views(
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,

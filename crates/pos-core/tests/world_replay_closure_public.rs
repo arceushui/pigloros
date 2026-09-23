@@ -64,20 +64,24 @@ fn lease(timeline_id: TimelineId, policy: &WorldRetentionPolicyV1) -> WorldReten
     ))
 }
 
-fn consumer_set(reducer: Hash, output_policy: Hash) -> WorldConsumerSetV1 {
+fn consumer_set(
+    artifacts: &[WorldArtifactLeafV1],
+    reducer: Hash,
+    output_policy: Hash,
+) -> WorldConsumerSetV1 {
     test_ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
         scope: scope(),
         consumers: vec![test_ok(WorldConsumerV1::new(
             "entity-state".to_owned(),
             reducer,
-            hash(41),
-            hash(42),
+            artifacts[7].digest(),
+            artifacts[9].digest(),
         ))],
         producers: vec![test_ok(WorldProducerV1::new(
             PluginId::from_ulid(Ulid::from(1_u128)),
             output_policy,
         ))],
-        optional_view_roots: vec![hash(53)],
+        optional_view_roots: vec![artifacts[13].digest()],
     }))
 }
 
@@ -230,6 +234,8 @@ fn closure_input() -> WorldReplayClosureInputV1 {
     let retention_policy = policy();
     let retention_lease = lease(timeline_id, &retention_policy);
     let scope = scope();
+    let artifacts = artifacts(&retention_policy, &retention_lease, scope);
+    let consumers = consumer_set(&artifacts, artifacts[8].digest(), artifacts[0].digest());
     WorldReplayClosureInputV1 {
         timeline_id,
         operation_identity: hash(60),
@@ -237,8 +243,8 @@ fn closure_input() -> WorldReplayClosureInputV1 {
         inventory_generation: hash(62),
         retention_policy: retention_policy.clone(),
         retention_lease,
-        consumer_set: consumer_set(hash(40), hash(43)),
-        artifacts: artifacts(&retention_policy, &retention_lease, scope),
+        consumer_set: consumers,
+        artifacts,
     }
 }
 
@@ -374,10 +380,11 @@ fn expiry_denies_use_and_missing_required_artifacts_degrade_the_claim() -> TestR
 
 #[test]
 fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
+    let optional_view_root = closure_input().consumer_set.optional_view_roots()[0];
     let mut retained = Authority::new(WallTime::from_micros(1));
     let retained_admission = admitted(&mut retained)?;
     assert_eq!(
-        retained_admission.require_authoritative_use_for(&[hash(53)]),
+        retained_admission.require_authoritative_use_for(&[optional_view_root]),
         Ok(())
     );
 
@@ -390,7 +397,7 @@ fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
     );
     admission.require_authoritative_use()?;
     assert_eq!(
-        admission.require_authoritative_use_for(&[hash(53)]),
+        admission.require_authoritative_use_for(&[optional_view_root]),
         Err(WorldReplayClosureErrorV1::ClaimUnavailable)
     );
     Ok(())
@@ -541,6 +548,29 @@ fn structural_validation_rejects_duplicate_digest_and_zero_length() {
 #[test]
 fn structural_validation_rejects_bad_bindings_and_consumer_references() {
     let base = closure_input();
+
+    let mut native_address_reference = base.clone();
+    native_address_reference.consumer_set = consumer_set(
+        &native_address_reference.artifacts,
+        hash(40),
+        native_address_reference.artifacts[0].digest(),
+    );
+    assert_eq!(
+        WorldReplayClosureV1::new(native_address_reference),
+        Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
+    );
+    let mut native_view_reference = base.clone();
+    native_view_reference.consumer_set =
+        test_ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+            scope: scope(),
+            consumers: base.consumer_set.consumers().to_vec(),
+            producers: base.consumer_set.producers().to_vec(),
+            optional_view_roots: vec![hash(53)],
+        }));
+    assert_eq!(
+        WorldReplayClosureV1::new(native_view_reference),
+        Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
+    );
     let policy = policy();
     let other_lease = lease(timeline(2), &policy);
     let mut wrong_timeline = base.clone();
@@ -611,14 +641,22 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
     );
 
     let mut missing_consumer_leaf = base;
-    missing_consumer_leaf.consumer_set = consumer_set(hash(98), hash(43));
+    missing_consumer_leaf.consumer_set = consumer_set(
+        &missing_consumer_leaf.artifacts,
+        hash(98),
+        missing_consumer_leaf.artifacts[0].digest(),
+    );
     assert_eq!(
         WorldReplayClosureV1::new(missing_consumer_leaf),
         Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
     );
 
     let mut missing_producer_leaf = closure_input();
-    missing_producer_leaf.consumer_set = consumer_set(hash(40), hash(98));
+    missing_producer_leaf.consumer_set = consumer_set(
+        &missing_producer_leaf.artifacts,
+        missing_producer_leaf.artifacts[8].digest(),
+        hash(98),
+    );
     assert_eq!(
         WorldReplayClosureV1::new(missing_producer_leaf),
         Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
@@ -637,6 +675,12 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
     let mut view_input = required_view.artifacts[13].as_input().clone();
     view_input.optionality = ArtifactOptionalityV1::Required;
     required_view.artifacts[13] = test_ok(WorldArtifactLeafV1::new(view_input));
+    required_view.consumer_set = test_ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope: scope(),
+        consumers: required_view.consumer_set.consumers().to_vec(),
+        producers: required_view.consumer_set.producers().to_vec(),
+        optional_view_roots: vec![required_view.artifacts[13].digest()],
+    }));
     assert_eq!(
         WorldReplayClosureV1::new(required_view),
         Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
