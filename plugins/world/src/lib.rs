@@ -330,10 +330,9 @@ fn validate_actuator_pair_v1(bytes: &[u8]) -> Result<(), WorldCodecError> {
 
 fn decode_canonical_action_params_field(
     value: &ciborium::Value,
-) -> Result<Vec<u8>, WorldCodecError> {
+) -> Result<(Vec<u8>, (f32, f32)), WorldCodecError> {
     let params = decode_bytes_max(value, MAX_ACTION_BYTES)?;
-    validate_actuator_pair_v1(&params)?;
-    Ok(params)
+    decode_actuator_pair_v1(&params).map(|velocity| (params, velocity))
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +427,10 @@ impl WorldActionV1 {
     /// # Errors
     /// Returns a [`WorldCodecError`] on any malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldCodecError> {
+        Self::decode_with_params(bytes).map(|(action, _)| action)
+    }
+
+    fn decode_with_params(bytes: &CanonicalBytes) -> Result<(Self, (f32, f32)), WorldCodecError> {
         if bytes.len() > MAX_ACTION_BYTES {
             return Err(WorldCodecError::PayloadTooLarge {
                 size: bytes.len(),
@@ -442,22 +445,25 @@ impl WorldActionV1 {
         let kind_str = decode_tstr(&items[4])?;
         let action_kind =
             ActionKindV1::from_str(&kind_str).ok_or(WorldCodecError::UnknownActionKind)?;
-        let params_cbor = decode_canonical_action_params_field(&items[5])?;
+        let (params_cbor, velocity) = decode_canonical_action_params_field(&items[5])?;
         let action_scope = decode_u8(&items[6])?;
         if action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
         }
         let catalogue_version = decode_u32(&items[7])?;
         let tick = decode_u64(&items[8])?;
-        Ok(Self {
-            actor_entity_id,
-            body_entity_id,
-            action_kind,
-            params_cbor,
-            action_scope,
-            catalogue_version,
-            tick,
-        })
+        Ok((
+            Self {
+                actor_entity_id,
+                body_entity_id,
+                action_kind,
+                params_cbor,
+                action_scope,
+                catalogue_version,
+                tick,
+            },
+            velocity,
+        ))
     }
 }
 
@@ -1095,17 +1101,17 @@ impl WorldDriver {
         self.causation_by_body = state.causation_by_body;
     }
 
-    fn apply_action_to_entities(entities: &mut [Body], action: &WorldActionV1) -> bool {
+    fn apply_action_to_entities(
+        entities: &mut [Body],
+        action: &WorldActionV1,
+        (vx, vz): (f32, f32),
+    ) -> bool {
         let Some(body) = entities
             .iter_mut()
             .find(|body| body.entity_id == action.body_entity_id)
         else {
             return false;
         };
-        // Both callers construct `action` with `WorldActionV1::decode`, which
-        // already rejects malformed or noncanonical actuator parameters.
-        let (vx, vz) = decode_horizontal_velocity_params(&action.params_cbor)
-            .expect("decoded world action has canonical actuator parameters");
         match action.action_kind {
             ActionKindV1::Impulse => {
                 body.vx += f64::from(vx);
@@ -1170,16 +1176,24 @@ impl WorldDriver {
             {
                 continue;
             }
-            let action = WorldActionV1::decode(&event.payload).map_err(|error| {
-                RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                    reason: error.to_string(),
-                }
-            })?;
-            if !Self::apply_action_to_entities(&mut self.entities, &action) {
+            let (action, velocity) =
+                WorldActionV1::decode_with_params(&event.payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            if action.catalogue_version != self.config.actuator_catalogue_version {
                 return Err(RuntimeError::InvalidPayload {
                     event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                    reason: "action target or velocity parameters are invalid".to_owned(),
+                    reason: "action catalogue version differs from pinned world configuration"
+                        .to_owned(),
+                });
+            }
+            if !Self::apply_action_to_entities(&mut self.entities, &action, velocity) {
+                return Err(RuntimeError::InvalidPayload {
+                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                    reason: "action target is not a staged world body".to_owned(),
                 });
             }
             self.applied_action_seqs.push(event.seq.as_u64());
@@ -1324,16 +1338,24 @@ impl Driver for WorldDriver {
                 continue;
             };
             if event_type == EVENT_TYPE_ACTION_V1 {
-                let action = WorldActionV1::decode(payload).map_err(|error| {
-                    RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                if !Self::apply_action_to_entities(&mut restored.entities, &action) {
+                let (action, velocity) =
+                    WorldActionV1::decode_with_params(payload).map_err(|error| {
+                        RuntimeError::InvalidPayload {
+                            event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                            reason: error.to_string(),
+                        }
+                    })?;
+                if action.catalogue_version != self.config.actuator_catalogue_version {
                     return Err(RuntimeError::InvalidPayload {
                         event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                        reason: "action target or velocity parameters are invalid".to_owned(),
+                        reason: "action catalogue version differs from pinned world configuration"
+                            .to_owned(),
+                    });
+                }
+                if !Self::apply_action_to_entities(&mut restored.entities, &action, velocity) {
+                    return Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: "action target is not a staged world body".to_owned(),
                     });
                 }
                 restored
@@ -4112,15 +4134,75 @@ mod tests {
                 ObservationView::from_events(&[make_action_event_from(body_id, &action)]),
             )
             .test_ok();
-        let body = &driver.entities[0];
-        assert_eq!(body.x.to_bits(), 0.015_625_f64.to_bits());
-        assert_eq!(body.y.to_bits(), 3.25_f64.to_bits());
-        assert_eq!(body.z.to_bits(), (-0.03125_f64).to_bits());
-        assert_eq!(body.vy.to_bits(), 1.0_f64.to_bits());
-        let observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+        let mut observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+        assert_eq!(observation.pos_x, 0.0);
+        assert_eq!(observation.pos_z, 0.0);
         assert_eq!(observation.vel_lin_x.to_bits(), 0.0625_f32.to_bits());
         assert_eq!(observation.vel_lin_y.to_bits(), 1.0_f32.to_bits());
         assert_eq!(observation.vel_lin_z.to_bits(), (-0.125_f32).to_bits());
+
+        // Four quarter-second steps must accumulate the unquantized backend
+        // position. Quantizing state after each step would still report zero.
+        for _ in 0..3 {
+            driver.commit_step();
+            let output = driver
+                .step(TimelineId::new(), ObservationView::empty())
+                .test_ok();
+            observation = WorldObservationV1::decode(&output.drafts[0].payload).test_ok();
+        }
+        assert_eq!(observation.tick, 3);
+        assert_eq!(observation.step_index, 3);
+        assert!((observation.pos_x - 0.1).abs() < 0.001);
+        assert!((observation.pos_y - 4.0).abs() < 0.001);
+        assert!((observation.pos_z + 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn driver_rejects_action_catalogue_outside_pinned_configuration() {
+        let body_id = EntityId::new();
+        let actor_id = EntityId::new();
+        let plugin = WorldPlugin::new()
+            .with_bodies([body_id])
+            .with_catalogue_version(2);
+        let action = WorldActionV1 {
+            actor_entity_id: actor_id,
+            body_entity_id: body_id,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 2,
+            tick: 0,
+        };
+        let proposal = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor_id,
+            action.encode().test_ok(),
+            Kind::new("world.action.v1.submit"),
+        );
+        plugin.approve(&proposal).test_ok();
+
+        let mut driver = WorldDriver::new(
+            vec![Body {
+                entity_id: body_id,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
+            }],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+        let error = driver
+            .step(
+                TimelineId::new(),
+                ObservationView::from_events(&[make_action_event_from(body_id, &action)]),
+            )
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("action catalogue version differs from pinned world configuration"));
     }
 
     #[test]
