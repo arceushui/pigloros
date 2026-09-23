@@ -2239,6 +2239,44 @@ mod tests {
     }
 
     #[test]
+    fn profile_comparison_fails_closed_on_invalid_provenance_in_either_run() {
+        let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
+            .test_ok()
+            .run()
+            .test_ok();
+        let mut invalid = report.baseline.clone();
+        let world = invalid
+            .projections
+            .iter_mut()
+            .find(|projection| projection.reducer == "world")
+            .test_ok();
+        world.state["fields"]["observation_id"] = serde_json::json!("missing");
+
+        let mut without_world = report.baseline.clone();
+        without_world
+            .projections
+            .retain(|projection| projection.reducer != "world");
+        assert_eq!(
+            comparable_proof_evidence(&without_world, &[])
+                .test_ok()
+                .projections,
+            without_world.projections
+        );
+        assert!(matches!(
+            comparable_proof_evidence(&invalid, &[]),
+            Err(MoatProofError::ProjectionProvenance("observation_id"))
+        ));
+        assert!(matches!(
+            comparable_pair(&invalid, &[], &without_world, &[]),
+            Err(MoatProofError::ProjectionProvenance("observation_id"))
+        ));
+        assert!(matches!(
+            comparable_pair(&without_world, &[], &invalid, &[]),
+            Err(MoatProofError::ProjectionProvenance("observation_id"))
+        ));
+    }
+
+    #[test]
     fn independent_reference_agrees_for_every_divergence_class() {
         let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
             .test_ok()
