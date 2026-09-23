@@ -3544,7 +3544,7 @@ mod tests {
         };
         let second = Body {
             entity_id: ids[1],
-            ..first.clone()
+            ..first
         };
         let mut driver = WorldDriver::new(
             vec![second, first],
@@ -4121,8 +4121,8 @@ mod tests {
             )
             .test_ok();
         let mut observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
-        assert_eq!(observation.pos_x, 0.0);
-        assert_eq!(observation.pos_z, 0.0);
+        assert!(observation.pos_x.abs() < f32::EPSILON);
+        assert!(observation.pos_z.abs() < f32::EPSILON);
         assert_eq!(observation.vel_lin_x.to_bits(), 0.0625_f32.to_bits());
         assert_eq!(observation.vel_lin_y.to_bits(), 1.0_f32.to_bits());
         assert_eq!(observation.vel_lin_z.to_bits(), (-0.125_f32).to_bits());
