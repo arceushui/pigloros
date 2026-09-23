@@ -1190,7 +1190,7 @@ fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
         .to_vec();
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 0);
     let topology_after = store
@@ -3176,7 +3176,7 @@ fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
     store.borrow_mut().create_timeline("generation-change")?;
     assert_eq!(
         commit_fork_admission(&store, &gate, &prepared),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 0);
     assert!(!store
