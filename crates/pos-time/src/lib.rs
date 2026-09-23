@@ -55,6 +55,41 @@ fn require_world_replay(
     Ok(verified.read_bounds())
 }
 
+fn read_complete_world_replay(
+    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
+    timeline: pos_core::TimelineId,
+    range: pos_core::SeqRange,
+    bounds: pos_core::EventReadBounds,
+) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
+    use pos_core::CoreError;
+
+    let head = sender
+        .timeline(timeline)
+        .map_err(host_error_to_core)?
+        .ok_or(CoreError::ArtifactUnavailable)?
+        .head
+        .as_u64();
+    let first = range.from.as_u64().max(1);
+    let last = range.to.map_or(head, |to| to.as_u64().min(head));
+    let expected = if first > last { 0 } else { last - first + 1 };
+    let expected = usize::try_from(expected).map_err(|_| CoreError::ArtifactUnavailable)?;
+    if expected > bounds.max_events() {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+
+    let events = sender
+        .read_bounded(timeline, range, bounds)
+        .map_err(host_error_to_core)?;
+    if events.len() != expected
+        || events.iter().enumerate().any(|(index, event)| {
+            event.seq.as_u64() != first + u64::try_from(index).unwrap_or(u64::MAX)
+        })
+    {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    Ok(events)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {

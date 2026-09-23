@@ -137,12 +137,8 @@ fn compare_with_sender(
     read_bounds: [EventReadBounds; 2],
 ) -> Result<ForkDiff, CoreError> {
     let post_fork_range = SeqRange::from_seq(fork_seq.next());
-    let events_a = sender
-        .read_bounded(a, post_fork_range, read_bounds[0])
-        .map_err(crate::host_error_to_core)?;
-    let events_b = sender
-        .read_bounded(b, post_fork_range, read_bounds[1])
-        .map_err(crate::host_error_to_core)?;
+    let events_a = crate::read_complete_world_replay(sender, a, post_fork_range, read_bounds[0])?;
+    let events_b = crate::read_complete_world_replay(sender, b, post_fork_range, read_bounds[1])?;
     compare_events(a, b, fork_seq, registry_a, registry_b, events_a, events_b)
 }
 
