@@ -274,10 +274,32 @@ fn validate_canonical_params(bytes: &[u8]) -> Result<(), WorldCodecError> {
     let mut cursor = std::io::Cursor::new(bytes);
     let parsed: ciborium::Value =
         ciborium::from_reader(&mut cursor).map_err(|_| WorldCodecError::NonCanonicalParamsCbor)?;
-    if cursor.position() != bytes.len() as u64 || cbor_encode(&parsed).as_slice() != bytes {
+    if cursor.position() != bytes.len() as u64
+        || cbor_encode(&parsed).as_slice() != bytes
+        || !canonical_params_value(&parsed)
+    {
         return Err(WorldCodecError::NonCanonicalParamsCbor);
     }
     Ok(())
+}
+
+fn canonical_params_value(value: &ciborium::Value) -> bool {
+    match value {
+        ciborium::Value::Float(value) => value.is_finite(),
+        ciborium::Value::Array(values) => values.iter().all(canonical_params_value),
+        ciborium::Value::Map(entries) => {
+            entries
+                .iter()
+                .all(|(key, value)| canonical_params_value(key) && canonical_params_value(value))
+                && entries.windows(2).all(|pair| {
+                    let left = cbor_encode(&pair[0].0);
+                    let right = cbor_encode(&pair[1].0);
+                    (left.len(), left) < (right.len(), right)
+                })
+        }
+        ciborium::Value::Tag(_, value) => canonical_params_value(value),
+        _ => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,6 +1858,19 @@ mod tests {
             a.encode(),
             Err(WorldCodecError::NonCanonicalParamsCbor)
         ));
+        for params in [
+            vec![0xa2, 0x61, b'b', 1, 0x61, b'a', 2], // unsorted map keys
+            vec![0xa2, 0x61, b'a', 1, 0x61, b'a', 2], // duplicate map key
+            vec![0x81, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2], // nested map
+            vec![0xc1, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2], // tagged map
+            vec![0xf9, 0x7c, 0x00],                   // non-finite float
+        ] {
+            a.params_cbor = params;
+            assert_eq!(a.encode(), Err(WorldCodecError::NonCanonicalParamsCbor));
+        }
+
+        a.params_cbor = vec![0xa2, 0x61, b'a', 2, 0x61, b'b', 1];
+        assert!(a.encode().is_ok());
         a.params_cbor = vec![0xff];
         assert!(matches!(
             a.encode(),
@@ -3835,6 +3870,25 @@ mod tests {
                 WorldCodecError::NonCanonicalParamsCbor.to_string()
             ))
         );
+
+        for params in [
+            vec![0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
+            vec![0xa2, 0x61, b'a', 1, 0x61, b'a', 2],
+            vec![0x81, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
+        ] {
+            let proposal = ProposedAction::new(
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                actor,
+                rewrite_array_field(&payload, 5, ciborium::Value::Bytes(params)),
+                Kind::new("world.action.v1.submit"),
+            );
+            assert_eq!(
+                plugin.approve(&proposal),
+                Err(ActionRejected::DomainValidationFailed(
+                    WorldCodecError::NonCanonicalParamsCbor.to_string()
+                ))
+            );
+        }
 
         let wrong_capability = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION_V1),
