@@ -215,9 +215,10 @@ pub use world_consumer_set::{
 };
 pub use world_history::{
     WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1, WorldHistoryBranchInputV1,
-    WorldHistoryBranchV1, WorldHistoryChildV1, WorldHistoryErrorV1, MAX_WORLD_EVENT_PAGE_BYTES_V1,
-    MAX_WORLD_EVENT_PAGE_ROWS_V1, MAX_WORLD_EVENT_TYPE_BYTES_V1, MAX_WORLD_HISTORY_BRANCH_BYTES_V1,
-    MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1, MAX_WORLD_HISTORY_EVENTS_V1, MAX_WORLD_HISTORY_HEIGHT_V1,
+    WorldHistoryBranchV1, WorldHistoryChildRecordRefV1, WorldHistoryChildV1, WorldHistoryErrorV1,
+    MAX_WORLD_EVENT_PAGE_BYTES_V1, MAX_WORLD_EVENT_PAGE_ROWS_V1, MAX_WORLD_EVENT_TYPE_BYTES_V1,
+    MAX_WORLD_HISTORY_BRANCH_BYTES_V1, MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1,
+    MAX_WORLD_HISTORY_HEIGHT_V1,
 };
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,

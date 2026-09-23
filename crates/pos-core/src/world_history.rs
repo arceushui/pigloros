@@ -20,8 +20,6 @@ pub const MAX_WORLD_HISTORY_BRANCH_BYTES_V1: usize = 65_536;
 pub const MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1: usize = 256;
 /// Maximum WHB1 tree height.
 pub const MAX_WORLD_HISTORY_HEIGHT_V1: u8 = 8;
-/// Maximum logical Events represented by one exact history closure.
-pub const MAX_WORLD_HISTORY_EVENTS_V1: u64 = 65_536;
 
 const WEP1_MAGIC: &[u8; 4] = b"WEP1";
 const WHB1_MAGIC: &[u8; 4] = b"WHB1";
@@ -53,6 +51,9 @@ pub enum WorldHistoryErrorV1 {
     /// A logical range is empty, discontinuous, inconsistent, or overflows.
     #[error("World history range is invalid")]
     InvalidRange,
+    /// A resolved child does not match its WHB1 reference or query context.
+    #[error("World history child does not match its parent reference")]
+    InvalidChildReference,
     /// One WEP1 page repeats a source Event identity.
     #[error("World history page repeats a source Event")]
     DuplicateSourceEvent,
@@ -159,9 +160,15 @@ impl WorldEventPageV1 {
             return Err(WorldHistoryErrorV1::FieldOutOfBounds);
         }
         let mut parser = Parser::new(bytes.as_slice());
-        parser
-            .event_page()
-            .and_then(|page| ensure_finished(&parser).map(|()| page))
+        parser.event_page().and_then(|page| {
+            ensure_finished(&parser).and_then(|()| {
+                if page.encode().as_slice() == bytes.as_slice() {
+                    Ok(page)
+                } else {
+                    Err(WorldHistoryErrorV1::NonCanonicalEncoding)
+                }
+            })
+        })
     }
 
     /// Encode the exact preferred definite WEP1 representation.
@@ -307,9 +314,15 @@ impl WorldHistoryBranchV1 {
             return Err(WorldHistoryErrorV1::FieldOutOfBounds);
         }
         let mut parser = Parser::new(bytes.as_slice());
-        parser
-            .history_branch()
-            .and_then(|branch| ensure_finished(&parser).map(|()| branch))
+        parser.history_branch().and_then(|branch| {
+            ensure_finished(&parser).and_then(|()| {
+                if branch.encode().as_slice() == bytes.as_slice() {
+                    Ok(branch)
+                } else {
+                    Err(WorldHistoryErrorV1::NonCanonicalEncoding)
+                }
+            })
+        })
     }
 
     /// Encode the exact preferred definite WHB1 representation.
@@ -347,6 +360,57 @@ impl WorldHistoryBranchV1 {
     pub const fn as_input(&self) -> &WorldHistoryBranchInputV1 {
         &self.0
     }
+
+    /// Validate already-resolved child records against their WHB1 summaries.
+    ///
+    /// The caller resolves the records from its owner snapshot and separately
+    /// verifies source Event occurrences. This method checks exact record
+    /// identity, query Timeline, child level, range, and content address; the
+    /// validated inclusive ranges bind the child counts.
+    ///
+    /// # Errors
+    /// Rejects a different query Timeline, a missing/extra child, or any child
+    /// record that does not match its encoded WHB1 summary.
+    pub fn validate_resolved_children(
+        &self,
+        queried_timeline_id: TimelineId,
+        records: &[WorldHistoryChildRecordRefV1<'_>],
+    ) -> Result<(), WorldHistoryErrorV1> {
+        if self.0.timeline_id != queried_timeline_id || records.len() != self.0.children.len() {
+            return Err(WorldHistoryErrorV1::InvalidChildReference);
+        }
+        for (child, record) in self.0.children.iter().zip(records) {
+            let matches = match (self.0.height, record) {
+                (1, WorldHistoryChildRecordRefV1::EventPage(page)) => {
+                    page.timeline_id == queried_timeline_id
+                        && page.first_logical_seq == child.first_logical_seq
+                        && page.last_logical_seq == child.last_logical_seq
+                        && page.digest() == child.node_hash
+                }
+                (height, WorldHistoryChildRecordRefV1::HistoryBranch(branch)) if height > 1 => {
+                    branch.0.timeline_id == queried_timeline_id
+                        && branch.0.height.checked_add(1) == Some(height)
+                        && branch.0.first_logical_seq == child.first_logical_seq
+                        && branch.0.last_logical_seq == child.last_logical_seq
+                        && branch.digest() == child.node_hash
+                }
+                _ => false,
+            };
+            if !matches {
+                return Err(WorldHistoryErrorV1::InvalidChildReference);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A decoded record supplied by the storage owner for one WHB1 child reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorldHistoryChildRecordRefV1<'a> {
+    /// A WEP1 page, valid only as a height-1 branch child.
+    EventPage(&'a WorldEventPageV1),
+    /// A WHB1 branch, valid only below a parent at the next height.
+    HistoryBranch(&'a WorldHistoryBranchV1),
 }
 
 fn validate_event_row(input: &WorldEventRowInputV1) -> Result<(), WorldHistoryErrorV1> {
@@ -384,8 +448,11 @@ fn validate_event_page_rows(rows: &[WorldEventRowV1]) -> Result<(u64, u64), Worl
         }
         last_logical_seq = input.logical_seq;
         if index > 0 {
-            let previous = rows[index - 1].0.logical_seq;
-            if previous.checked_add(1) != Some(input.logical_seq) {
+            let previous = rows[index - 1].as_input();
+            if previous.logical_seq.checked_add(1) != Some(input.logical_seq)
+                || (previous.source_timeline_id == input.source_timeline_id
+                    && previous.source_segment_seq.checked_add(1) != Some(input.source_segment_seq))
+            {
                 return Err(WorldHistoryErrorV1::InvalidRange);
             }
         }
@@ -409,9 +476,15 @@ fn validate_history_branch(input: &WorldHistoryBranchInputV1) -> Result<(), Worl
     if input.children.is_empty() || input.children.len() > MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1 {
         return Err(WorldHistoryErrorV1::FieldOutOfBounds);
     }
-    if input.event_count > MAX_WORLD_HISTORY_EVENTS_V1 {
+    let maximum_event_count = max_history_node_event_count(input.height);
+    if input.event_count > maximum_event_count {
         return Err(WorldHistoryErrorV1::FieldOutOfBounds);
     }
+    let child_maximum_event_count = if input.height == 1 {
+        u64::try_from(MAX_WORLD_EVENT_PAGE_ROWS_V1).unwrap_or(u64::MAX)
+    } else {
+        max_history_node_event_count(input.height - 1)
+    };
     validate_range(
         input.first_logical_seq,
         input.last_logical_seq,
@@ -419,7 +492,6 @@ fn validate_history_branch(input: &WorldHistoryBranchInputV1) -> Result<(), Worl
     )
     .and_then(|()| {
         let mut expected_first = input.first_logical_seq;
-        let mut child_count_sum = 0_u64;
         let mut child_hashes = Vec::with_capacity(input.children.len());
         let mut child_validation = Ok(());
         for (index, child) in input.children.iter().enumerate() {
@@ -433,13 +505,18 @@ fn validate_history_branch(input: &WorldHistoryBranchInputV1) -> Result<(), Worl
                     child.event_count,
                 )
                 .and_then(|()| {
+                    if child.event_count > child_maximum_event_count {
+                        return Err(WorldHistoryErrorV1::FieldOutOfBounds);
+                    }
+                    if index + 1 < input.children.len()
+                        && child.event_count != child_maximum_event_count
+                    {
+                        return Err(WorldHistoryErrorV1::InvalidRange);
+                    }
                     if child_hashes.contains(&child.node_hash) {
                         return Err(WorldHistoryErrorV1::InvalidRange);
                     }
                     child_hashes.push(child.node_hash);
-                    // Validated contiguous positive ranges cannot sum beyond the
-                    // parent range, whose inclusive count fits in `u64`.
-                    child_count_sum += child.event_count;
                     if index + 1 < input.children.len() {
                         match child.last_logical_seq.checked_add(1) {
                             Some(next) => expected_first = next,
@@ -453,7 +530,6 @@ fn validate_history_branch(input: &WorldHistoryBranchInputV1) -> Result<(), Worl
         child_validation.and_then(|()| {
             if input.children.last().map(|child| child.last_logical_seq)
                 != Some(input.last_logical_seq)
-                || child_count_sum != input.event_count
             {
                 Err(WorldHistoryErrorV1::InvalidRange)
             } else {
@@ -461,6 +537,19 @@ fn validate_history_branch(input: &WorldHistoryBranchInputV1) -> Result<(), Worl
             }
         })
     })
+}
+
+fn max_history_node_event_count(height: u8) -> u64 {
+    let mut maximum = u64::try_from(MAX_WORLD_EVENT_PAGE_ROWS_V1).unwrap_or(u64::MAX);
+    for _ in 0..height {
+        maximum = match maximum
+            .checked_mul(u64::try_from(MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1).unwrap_or(u64::MAX))
+        {
+            Some(value) => value,
+            None => return u64::MAX,
+        };
+    }
+    maximum
 }
 
 const fn validate_range(
@@ -952,29 +1041,18 @@ impl<'a> Parser<'a> {
     }
 
     fn additional(&mut self, additional: u8) -> Result<u64, WorldHistoryErrorV1> {
-        let decoded = match additional {
-            0..=23 => Ok((u64::from(additional), 0)),
-            24 => self.raw::<1>().map(|[byte]| (u64::from(byte), 1)),
+        match additional {
+            0..=23 => Ok(u64::from(additional)),
+            24 => self.raw::<1>().map(|[byte]| u64::from(byte)),
             25 => self
                 .raw::<2>()
-                .map(|bytes| (u64::from(u16::from_be_bytes(bytes)), 2)),
+                .map(|bytes| u64::from(u16::from_be_bytes(bytes))),
             26 => self
                 .raw::<4>()
-                .map(|bytes| (u64::from(u32::from_be_bytes(bytes)), 4)),
-            27 => self.raw::<8>().map(|bytes| (u64::from_be_bytes(bytes), 8)),
+                .map(|bytes| u64::from(u32::from_be_bytes(bytes))),
+            27 => self.raw::<8>().map(u64::from_be_bytes),
             _ => Err(WorldHistoryErrorV1::InvalidEncoding),
-        };
-        decoded.and_then(|(value, width)| {
-            if (width == 1 && value < 24)
-                || (width == 2 && value <= 0xff)
-                || (width == 4 && value <= 0xffff)
-                || (width == 8 && value <= 0xffff_ffff)
-            {
-                Err(WorldHistoryErrorV1::NonCanonicalEncoding)
-            } else {
-                Ok(value)
-            }
-        })
+        }
     }
 
     fn raw<const N: usize>(&mut self) -> Result<[u8; N], WorldHistoryErrorV1> {
