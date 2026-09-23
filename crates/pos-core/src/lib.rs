@@ -41,6 +41,7 @@ pub mod timeline;
 pub mod world_artifact;
 pub mod world_closure_binding;
 pub mod world_consumer_set;
+pub mod world_history;
 pub mod world_transform;
 
 pub use world_artifact::{
@@ -211,6 +212,12 @@ pub use world_consumer_set::{
     WorldConsumerSetErrorV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
     WorldProducerV1, WORLD_CONSUMER_SET_MAX_BYTES, WORLD_CONSUMER_SET_MAX_CONSUMERS,
     WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES, WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS,
+};
+pub use world_history::{
+    WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1, WorldHistoryBranchInputV1,
+    WorldHistoryBranchV1, WorldHistoryChildV1, WorldHistoryErrorV1, MAX_WORLD_EVENT_PAGE_BYTES_V1,
+    MAX_WORLD_EVENT_PAGE_ROWS_V1, MAX_WORLD_EVENT_TYPE_BYTES_V1, MAX_WORLD_HISTORY_BRANCH_BYTES_V1,
+    MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1, MAX_WORLD_HISTORY_EVENTS_V1, MAX_WORLD_HISTORY_HEIGHT_V1,
 };
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
