@@ -9383,9 +9383,14 @@ mod coverage_paths {
         Ok(())
     }
 
-    #[test]
-    fn fork_recovery_proof_rejects_a_rebound_incomplete_admission_set() -> Result<(), ErasureErrorV1>
-    {
+    struct CompleteForkRecoveryProofFixture {
+        proof: ErasureForkRecoveryProofV1,
+        result: ErasureForkRecoveryV1,
+        successor: ErasureVerifiedInventoryV1,
+    }
+
+    fn complete_fork_recovery_proof_fixture(
+    ) -> Result<CompleteForkRecoveryProofFixture, ErasureErrorV1> {
         let parent = TimelineId::new();
         let child = TimelineId::new();
         let request = reference(220);
@@ -9442,12 +9447,23 @@ mod coverage_paths {
         );
         let admission = PreparedErasureForkAdmissionV1::new(input.clone(), extension, mutation)?;
         let batch = predecessor.prepare_fork_batch(input, vec![admission])?;
-        let result = batch.recovery_result()?;
-        let proof = batch.recovery_proof()?;
-        let successor = batch.successor_inventory();
+        Ok(CompleteForkRecoveryProofFixture {
+            result: batch.recovery_result()?,
+            proof: batch.recovery_proof()?,
+            successor: batch.successor_inventory().clone(),
+        })
+    }
 
+    fn assert_recovery_proof_rejects_stale_or_incomplete_inventory(
+        fixture: &CompleteForkRecoveryProofFixture,
+    ) -> Result<(), ErasureErrorV1> {
+        let CompleteForkRecoveryProofFixture {
+            proof,
+            result,
+            successor,
+        } = fixture;
         assert_eq!(
-            proof.validate_complete_for_inventory(&result, successor),
+            proof.validate_complete_for_inventory(result, successor),
             Ok(())
         );
 
@@ -9458,13 +9474,13 @@ mod coverage_paths {
             unrelated_inventory.generation()
         );
         assert_eq!(
-            proof.validate_complete_for_inventory(&result, &unrelated_inventory),
+            proof.validate_complete_for_inventory(result, &unrelated_inventory),
             Err(ErasureErrorV1::StaleGeneration)
         );
         let mut persisted_validation_ran = false;
         assert_eq!(
             proof.validate_complete_for_inventory_with_persisted_state(
-                &result,
+                result,
                 &unrelated_inventory,
                 || {
                     persisted_validation_ran = true;
@@ -9475,14 +9491,24 @@ mod coverage_paths {
         );
         assert!(persisted_validation_ran);
 
-        let mut incomplete_successor = successor.clone();
+        let mut incomplete_successor = (*successor).clone();
         incomplete_successor.classifications.clear();
         assert_eq!(
-            proof.validate_complete_for_inventory(&result, &incomplete_successor),
+            proof.validate_complete_for_inventory(result, &incomplete_successor),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        Ok(())
+    }
 
-        let mut mismatched_admission = proof.clone();
+    fn assert_recovery_proof_rejects_rebound_or_shortened_admissions(
+        fixture: &CompleteForkRecoveryProofFixture,
+    ) -> Result<(), ErasureErrorV1> {
+        let CompleteForkRecoveryProofFixture {
+            proof,
+            result,
+            successor,
+        } = fixture;
+        let mut mismatched_admission = (*proof).clone();
         let admission = &mut mismatched_admission.admissions[0];
         admission.extension = reference(227);
         let predecessor_extension = admission
@@ -9521,7 +9547,7 @@ mod coverage_paths {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
-        let mut shortened = proof;
+        let mut shortened = (*proof).clone();
         shortened.admissions.clear();
         shortened.binding_digest = fork_batch_binding_digest(
             shortened.operation,
@@ -9545,5 +9571,19 @@ mod coverage_paths {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())
+    }
+
+    #[test]
+    fn fork_recovery_proof_rejects_a_rebound_incomplete_admission_set() -> Result<(), ErasureErrorV1>
+    {
+        let fixture = complete_fork_recovery_proof_fixture()?;
+        assert_eq!(
+            fixture
+                .proof
+                .validate_complete_for_inventory(&fixture.result, &fixture.successor),
+            Ok(())
+        );
+        assert_recovery_proof_rejects_stale_or_incomplete_inventory(&fixture)?;
+        assert_recovery_proof_rejects_rebound_or_shortened_admissions(&fixture)
     }
 }
