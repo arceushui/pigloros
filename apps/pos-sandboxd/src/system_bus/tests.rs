@@ -107,6 +107,7 @@ struct ManagerBehavior {
     unit_lookup: UnitLookupBehavior,
     result: String,
     emit_unrelated: bool,
+    emit_canceled_start: bool,
     completion_unit: Option<String>,
     emit_completion: bool,
     control_calls: Arc<Mutex<Vec<ObservedControl>>>,
@@ -134,6 +135,7 @@ impl Default for ManagerBehavior {
             unit_lookup: UnitLookupBehavior::default(),
             result: "done".to_owned(),
             emit_unrelated: false,
+            emit_canceled_start: false,
             completion_unit: None,
             emit_completion: true,
             control_calls: Arc::new(Mutex::new(Vec::new())),
@@ -258,6 +260,18 @@ impl RecordingManager {
             });
         let job = OwnedObjectPath::try_from(STOP_JOB_PATH)
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        if self.behavior.emit_canceled_start {
+            Self::job_removed(
+                &emitter,
+                381,
+                OwnedObjectPath::try_from(JOB_PATH)
+                    .map_err(|error| fdo::Error::Failed(error.to_string()))?,
+                name.clone(),
+                "canceled".to_owned(),
+            )
+            .await
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        }
         if self.behavior.emit_unrelated {
             Self::job_removed(
                 &emitter,
@@ -836,9 +850,10 @@ async fn manager_only_property_read_failure_is_classified() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn stop_job_observes_immediate_exact_completion() -> Result<(), Box<dyn Error>> {
+async fn stop_job_ignores_canceled_start_and_matches_stop() -> Result<(), Box<dyn Error>> {
     let behavior = ManagerBehavior {
         emit_unrelated: true,
+        emit_canceled_start: true,
         ..ManagerBehavior::default()
     };
     let calls = Arc::clone(&behavior.control_calls);
@@ -852,7 +867,7 @@ async fn stop_job_observes_immediate_exact_completion() -> Result<(), Box<dyn Er
         calls.lock().map_err(|error| error.to_string())?.as_slice(),
         &[ObservedControl::Stop {
             name: name.as_str().to_owned(),
-            mode: JOB_MODE.to_owned(),
+            mode: STOP_JOB_MODE.to_owned(),
         }]
     );
     Ok(())
@@ -1228,7 +1243,7 @@ async fn stop_job_rejects_ended_and_error_streams() -> Result<(), Box<dyn Error>
 
     let expected = ObservedControl::Stop {
         name: name.as_str().to_owned(),
-        mode: JOB_MODE.to_owned(),
+        mode: STOP_JOB_MODE.to_owned(),
     };
     assert_eq!(
         calls.lock().map_err(|error| error.to_string())?.as_slice(),
