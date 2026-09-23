@@ -1492,6 +1492,15 @@ fn containment_gate_covers_public_error_codes_and_safe_scope_paths() -> Result<(
 }
 
 #[test]
+fn stale_generation_error_has_a_stable_round_trip_code() {
+    assert_eq!(ErasureErrorV1::StaleGeneration.code(), 16);
+    assert_eq!(
+        ErasureErrorV1::from_code(16),
+        Ok(ErasureErrorV1::StaleGeneration)
+    );
+}
+
+#[test]
 fn erasure_host_errors_have_stable_payload_free_codes() {
     let errors = [
         ErasureHostErrorV1::RecoveryUnavailable,
