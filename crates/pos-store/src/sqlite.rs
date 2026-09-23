@@ -5247,10 +5247,6 @@ impl SqliteStore {
             if generation != admission.expected_inventory_generation() {
                 return Err(ErasureErrorV1::StaleGeneration);
             }
-            if sqlite_timeline_exists(&self.conn, child.id)? {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-
             let chain_head = Self::compute_chain_hash_at_unchecked_on(
                 &self.conn,
                 self.hasher.as_ref(),
@@ -5311,17 +5307,6 @@ impl SqliteStore {
         })();
         finish_erasure_transaction(&self.conn, result)
     }
-}
-
-fn sqlite_timeline_exists(conn: &Connection, timeline: TimelineId) -> Result<bool, ErasureErrorV1> {
-    conn.query_row(
-        "SELECT 1 FROM timelines WHERE id=?1",
-        params![timeline.to_string()],
-        |_| Ok(()),
-    )
-    .optional()
-    .map(|row| row.is_some())
-    .map_err(map_erasure_receipt_failure)
 }
 
 struct SqliteForkAdmissionReceiptV1 {

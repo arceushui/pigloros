@@ -1531,10 +1531,6 @@ impl MemoryStore {
         if generation != admission.expected_inventory_generation() {
             return Err(ErasureErrorV1::StaleGeneration);
         }
-        if self.timelines.contains_key(&child.id) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent, at_seq)
             .map_err(|_| ErasureErrorV1::PolicyConflict)?;
