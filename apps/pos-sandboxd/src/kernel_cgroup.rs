@@ -1,6 +1,6 @@
 //! Read-only kernel observations for one manager-bound attempt cgroup.
 
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 
@@ -9,7 +9,7 @@ use rustix::io::Errno;
 use rustix::time::{clock_gettime, ClockId};
 use zbus::zvariant::OwnedObjectPath;
 
-use crate::TransientServiceUnitName;
+use crate::{CgroupRoot, TransientServiceUnitName};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
@@ -59,17 +59,20 @@ pub enum AttemptCgroupError {
     /// The manager-reported path was rebound to a different cgroup.
     #[error("the attempt cgroup path was replaced")]
     PathReused,
+    /// A missing path did not prove that the retained cgroup itself was deleted.
+    #[error("the attempt cgroup path disappeared without proven deletion")]
+    DeletionUnproven,
 }
-
-/// The verified fixed cgroup v2 root, retained as a descriptor.
-#[derive(Debug)]
-pub(crate) struct CgroupRoot(File);
 
 impl CgroupRoot {
     pub(crate) fn system() -> Result<Self, AttemptCgroupError> {
+        Self::open_path(CGROUP_ROOT)
+    }
+
+    fn open_path(path: &str) -> Result<Self, AttemptCgroupError> {
         let root = openat2(
             CWD,
-            CGROUP_ROOT,
+            path,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
             ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
@@ -80,7 +83,14 @@ impl CgroupRoot {
     }
 
     fn verify(root: File) -> Result<Self, AttemptCgroupError> {
-        let filesystem = fstatfs(&root).map_err(AttemptCgroupError::RootFilesystem)?;
+        Self::verify_with(root, |file| fstatfs(file))
+    }
+
+    fn verify_with(
+        root: File,
+        inspect: impl FnOnce(&File) -> Result<rustix::fs::StatFs, Errno>,
+    ) -> Result<Self, AttemptCgroupError> {
+        let filesystem = inspect(&root).map_err(AttemptCgroupError::RootFilesystem)?;
         if u64::try_from(filesystem.f_type).ok() != Some(CGROUP2_SUPER_MAGIC) {
             return Err(AttemptCgroupError::WrongFilesystem);
         }
@@ -88,7 +98,7 @@ impl CgroupRoot {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(root: File) -> Self {
+    pub(crate) const fn for_test(root: File) -> Self {
         Self(root)
     }
 }
@@ -153,7 +163,7 @@ impl AttemptCgroupEmptyObservation {
         self.raw_events.as_deref()
     }
 
-    /// Return the CLOCK_MONOTONIC observation time as seconds and nanoseconds.
+    /// Return the `CLOCK_MONOTONIC` observation time as seconds and nanoseconds.
     #[must_use]
     pub const fn observed_monotonic(&self) -> (i64, i64) {
         (self.monotonic_seconds, self.monotonic_nanoseconds)
@@ -180,6 +190,22 @@ impl BoundAttemptCgroup {
         unit_path: OwnedObjectPath,
         control_group: String,
     ) -> Result<Self, AttemptCgroupError> {
+        Self::open_with_metadata(
+            root,
+            unit_name,
+            unit_path,
+            control_group,
+            File::metadata,
+        )
+    }
+
+    fn open_with_metadata(
+        root: CgroupRoot,
+        unit_name: TransientServiceUnitName,
+        unit_path: OwnedObjectPath,
+        control_group: String,
+        read_metadata: impl FnOnce(&File) -> std::io::Result<Metadata>,
+    ) -> Result<Self, AttemptCgroupError> {
         let relative = relative_cgroup_path(&control_group)?;
         let directory = openat2(
             &root.0,
@@ -190,7 +216,7 @@ impl BoundAttemptCgroup {
         )
         .map(File::from)
         .map_err(AttemptCgroupError::PathOpen)?;
-        let metadata = directory.metadata().map_err(AttemptCgroupError::Metadata)?;
+        let metadata = read_metadata(&directory).map_err(AttemptCgroupError::Metadata)?;
         let events = openat2(
             &directory,
             "cgroup.events",
@@ -229,7 +255,14 @@ impl BoundAttemptCgroup {
     /// # Errors
     /// Rejects a populated, malformed, unreadable, or identity-replaced cgroup.
     pub fn observe_empty(&mut self) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
-        let retained = self.directory.metadata().map_err(AttemptCgroupError::Metadata)?;
+        self.observe_empty_with_metadata(File::metadata)
+    }
+
+    fn observe_empty_with_metadata(
+        &mut self,
+        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+    ) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
+        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
         if retained.dev() != self.device || retained.ino() != self.inode {
             return Err(AttemptCgroupError::PathReused);
         }
@@ -241,11 +274,15 @@ impl BoundAttemptCgroup {
             Mode::empty(),
             RESOLVE_CHILD,
         ) {
-            Err(Errno::NOENT) => (AttemptCgroupEmptyBasis::Deleted, None),
+            Err(Errno::NOENT) => {
+                if retained.nlink() != 0 {
+                    return Err(AttemptCgroupError::DeletionUnproven);
+                }
+                (AttemptCgroupEmptyBasis::Deleted, None)
+            }
             Err(error) => return Err(AttemptCgroupError::PathOpen(error)),
             Ok(current) => {
-                let metadata = File::from(current)
-                    .metadata()
+                let metadata = read_metadata(&File::from(current))
                     .map_err(AttemptCgroupError::Metadata)?;
                 if metadata.dev() != self.device || metadata.ino() != self.inode {
                     return Err(AttemptCgroupError::PathReused);
@@ -267,7 +304,7 @@ impl BoundAttemptCgroup {
             basis: basis_and_raw.0,
             raw_events: basis_and_raw.1,
             monotonic_seconds: observed.tv_sec,
-            monotonic_nanoseconds: i64::from(observed.tv_nsec),
+            monotonic_nanoseconds: observed.tv_nsec,
         })
     }
 
@@ -327,19 +364,26 @@ fn parse_populated(raw: &[u8]) -> Result<bool, AttemptCgroupError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::error::Error;
     use std::fs;
+    use std::os::fd::OwnedFd;
     use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixStream;
 
     use super::*;
 
     #[test]
     fn populated_parser_requires_one_bounded_binary_value() {
-        assert_eq!(parse_populated(b"populated 0\nfrozen 1\n").ok(), Some(false));
+        assert_eq!(
+            parse_populated(b"populated 0\nfrozen 1\n").ok(),
+            Some(false)
+        );
         assert_eq!(parse_populated(b"frozen 0\npopulated 1\n").ok(), Some(true));
         for malformed in [
             b"".as_slice(),
+            b"\n".as_slice(),
             b"frozen 0\n".as_slice(),
             b"populated 2\n".as_slice(),
             b"populated 0\npopulated 1\n".as_slice(),
@@ -360,8 +404,13 @@ mod tests {
             relative_cgroup_path("/system.slice/test.service").ok(),
             Some("system.slice/test.service")
         );
-        for path in ["", "/", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/a\0b"] {
-            assert!(matches!(relative_cgroup_path(path), Err(AttemptCgroupError::InvalidPath)));
+        for path in [
+            "", "/", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/a\0b",
+        ] {
+            assert!(matches!(
+                relative_cgroup_path(path),
+                Err(AttemptCgroupError::InvalidPath)
+            ));
         }
         assert!(matches!(
             relative_cgroup_path(&format!("/{}", "x".repeat(MAX_CONTROL_GROUP_BYTES))),
@@ -374,6 +423,22 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         let error = CgroupRoot::verify(File::open(temporary.path())?).err();
         assert!(matches!(error, Some(AttemptCgroupError::WrongFilesystem)));
+        let error = CgroupRoot::verify_with(File::open(temporary.path())?, |_| Err(Errno::BADF))
+            .err();
+        assert!(matches!(
+            error,
+            Some(AttemptCgroupError::RootFilesystem(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_mount_opens_and_missing_root_fails_closed() -> Result<(), Box<dyn Error>> {
+        CgroupRoot::system()?;
+        let temporary = tempfile::tempdir()?;
+        let missing = temporary.path().join("missing-cgroup-root");
+        let error = CgroupRoot::open_path(missing.to_str().ok_or("non-UTF-8 path")?).err();
+        assert!(matches!(error, Some(AttemptCgroupError::RootOpen(_))));
         Ok(())
     }
 
@@ -399,11 +464,26 @@ mod tests {
         fs::write(&events, b"populated 0\nfrozen 0\n")?;
         let empty = bound.observe_empty()?;
         assert_eq!(empty.basis(), AttemptCgroupEmptyBasis::Events);
-        assert_eq!(empty.raw_events(), Some(b"populated 0\nfrozen 0\n".as_slice()));
+        assert_eq!(
+            empty.raw_events(),
+            Some(b"populated 0\nfrozen 0\n".as_slice())
+        );
         assert_eq!(empty.control_group(), "/system.slice/test.service");
         assert_eq!(empty.unit_path(), "/org/freedesktop/systemd1/unit/test");
         assert!(empty.observed_monotonic().0 >= 0);
         let original_identity = empty.cgroup_identity();
+        // Fault injection models an I/O failure on the retained events handle.
+        bound.events = File::open(&directory)?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::EventsRead(_))
+        ));
+        let (socket, _peer) = UnixStream::pair()?;
+        bound.events = File::from(OwnedFd::from(socket));
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::EventsRead(_))
+        ));
         fs::remove_file(events)?;
         fs::remove_dir(&directory)?;
         let deleted = bound.observe_empty()?;
@@ -426,7 +506,30 @@ mod tests {
             OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
             "/system.slice/test.service".to_owned(),
         )?;
+        let original_device = bound.device;
+        bound.device = original_device.wrapping_add(1);
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::PathReused)
+        ));
+        bound.device = original_device;
+        bound.control_group = "/".to_owned();
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::InvalidPath)
+        ));
+        bound.control_group = "/system.slice/test.service".to_owned();
         fs::rename(&directory, parent.join("moved.service"))?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::DeletionUnproven)
+        ));
+        symlink(parent.join("moved.service"), &directory)?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::PathOpen(_))
+        ));
+        fs::remove_file(&directory)?;
         fs::create_dir(&directory)?;
         fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
         assert!(matches!(
@@ -503,6 +606,71 @@ mod tests {
             bound.observe_empty(),
             Err(AttemptCgroupError::EventsTooLong)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_initial_events_fail_closed() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let directory = temporary.path().join("system.slice/test.service");
+        fs::create_dir_all(directory.join("cgroup.events"))?;
+        let error = BoundAttemptCgroup::open(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([6; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+        )
+        .err();
+        assert!(matches!(error, Some(AttemptCgroupError::EventsRead(_))));
+        let error = BoundAttemptCgroup::open_with_metadata(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([7; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+            |_| Err(std::io::Error::other("injected metadata failure")),
+        )
+        .err();
+        assert!(matches!(error, Some(AttemptCgroupError::Metadata(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn identity_metadata_failures_do_not_prove_emptiness() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let directory = temporary.path().join("system.slice/test.service");
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
+        let mut bound = BoundAttemptCgroup::open(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([8; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+        )?;
+        let retained_error = bound
+            .observe_empty_with_metadata(|_| {
+                Err(std::io::Error::other("injected retained metadata failure"))
+            })
+            .err();
+        assert!(matches!(
+            retained_error,
+            Some(AttemptCgroupError::Metadata(_))
+        ));
+        let mut reads = 0;
+        let reopened_error = bound
+            .observe_empty_with_metadata(|file| {
+                reads += 1;
+                if reads == 2 {
+                    Err(std::io::Error::other("injected reopened metadata failure"))
+                } else {
+                    file.metadata()
+                }
+            })
+            .err();
+        assert!(matches!(
+            reopened_error,
+            Some(AttemptCgroupError::Metadata(_))
+        ));
+        assert_eq!(reads, 2);
         Ok(())
     }
 }

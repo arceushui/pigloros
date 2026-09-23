@@ -3,15 +3,14 @@
 use std::future::Future;
 
 use futures_util::{Stream, StreamExt};
-use zbus::{zvariant::OwnedObjectPath, Connection};
+use zbus::{proxy::CacheProperties, zvariant::OwnedObjectPath, Connection};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
-use crate::kernel_cgroup::CgroupRoot;
 use crate::{
-    AttemptCgroupError, BoundAttemptCgroup, SystemdHardeningProperty, SystemdHardeningReadbackValue,
-    SystemdHardeningValue, SystemdManagerReadback, SystemdManagerReadbackOnlyProperty,
-    SystemdTransientUnitProperty,
+    AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
+    SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
+    SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty,
     SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind,
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
     TransientUnitRequest, TransientUnitRequestError,
@@ -274,10 +273,10 @@ pub enum SystemdTransientUnitTransportError {
     /// The exact attempt unit could not be identified at cgroup binding time.
     #[error("systemd attempt-unit identity changed before cgroup binding")]
     CgroupUnitMismatch,
-    /// The typed service ControlGroup property could not be read.
+    /// The typed service `ControlGroup` property could not be read.
     #[error("failed to read the exact systemd attempt ControlGroup")]
     CgroupReadback(#[source] zbus::Error),
-    /// The manager could not reverse-map ControlGroup to its unit object.
+    /// The manager could not reverse-map `ControlGroup` to its unit object.
     #[error("failed to reverse-map the systemd attempt ControlGroup")]
     CgroupReverseLookup(#[source] zbus::Error),
     /// The manager-bound cgroup could not be safely opened or observed.
@@ -403,7 +402,16 @@ impl SystemdTransientUnitTransport {
         &self,
         verified: &SystemdVerifiedStart,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
-        let root = CgroupRoot::system()?;
+        self.bind_cgroup_with_root_result(verified, CgroupRoot::system())
+            .await
+    }
+
+    async fn bind_cgroup_with_root_result(
+        &self,
+        verified: &SystemdVerifiedStart,
+        root: Result<CgroupRoot, AttemptCgroupError>,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        let root = root?;
         self.bind_cgroup_with_root(verified, root).await
     }
 
@@ -425,6 +433,8 @@ impl SystemdTransientUnitTransport {
         let service = ServiceProxy::builder(&self.connection)
             .path(verified.unit_path.clone())
             .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
+            // The second ControlGroup read must reach systemd, not a proxy cache.
+            .cache_properties(CacheProperties::No)
             .build()
             .await
             .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
@@ -835,4 +845,5 @@ fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'s
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
