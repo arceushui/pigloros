@@ -416,12 +416,23 @@ async fn stop_job_with_completions(
     let completions =
         completions.map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?;
     let mut completions = completions.map(|completion| decode_job_completion(completion.args()));
+    stop_job_with_stream(proxy, &mut completions, unit_name).await
+}
+
+async fn stop_job_with_stream<S>(
+    proxy: &ManagerProxy<'_>,
+    completions: &mut S,
+    unit_name: TransientServiceUnitName,
+) -> Result<SystemdStopJobCompleted, SystemdTransientUnitTransportError>
+where
+    S: Stream<Item = Result<SystemdJobCompletion, SystemdTransientUnitTransportError>> + Unpin,
+{
     let name = unit_name.as_str().to_owned();
     let job = proxy
         .stop_unit(name.clone(), JOB_MODE.to_owned())
         .await
         .map_err(SystemdTransientUnitTransportError::StopCall)?;
-    await_job_completion(&mut completions, job.as_str(), name).await?;
+    await_job_completion(completions, job.as_str(), name).await?;
     Ok(SystemdStopJobCompleted { unit_name, job })
 }
 

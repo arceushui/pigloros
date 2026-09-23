@@ -1199,6 +1199,45 @@ async fn signal_subscription_and_stream_failures_are_classified() -> Result<(), 
 }
 
 #[tokio::test]
+async fn stop_job_rejects_ended_and_error_streams() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior::default();
+    let calls = Arc::clone(&behavior.control_calls);
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let proxy = ManagerProxy::new(&transport.connection).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x0c; 16])?;
+
+    let mut ended = futures_util::stream::empty::<
+        Result<SystemdJobCompletion, SystemdTransientUnitTransportError>,
+    >();
+    let ended_error = stop_job_with_stream(&proxy, &mut ended, name.clone()).await;
+    assert!(matches!(
+        ended_error,
+        Err(SystemdTransientUnitTransportError::JobSignalEnded)
+    ));
+
+    let signal_error = SystemdTransientUnitTransportError::JobSignal(zbus::Error::Failure(
+        "test malformed stop signal".to_owned(),
+    ));
+    let mut malformed = futures_util::stream::once(std::future::ready(Err(signal_error)));
+    let malformed_error = stop_job_with_stream(&proxy, &mut malformed, name.clone()).await;
+    assert!(matches!(
+        malformed_error,
+        Err(SystemdTransientUnitTransportError::JobSignal(_))
+    ));
+
+    let expected = ObservedControl::Stop {
+        name: name.as_str().to_owned(),
+        mode: JOB_MODE.to_owned(),
+    };
+    assert_eq!(
+        calls.lock().map_err(|error| error.to_string())?.as_slice(),
+        &[expected.clone(), expected]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn stop_and_kill_proxy_failures_are_classified() {
     let stop = stop_job_with_proxy(
         Err(zbus::Error::Failure("test stop proxy failure".to_owned())),
