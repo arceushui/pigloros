@@ -179,6 +179,41 @@ fn destroy_key_rejects_invalid_flags_and_unknown_registry() -> Result<(), Box<dy
 }
 
 #[test]
+fn startup_rejects_non_utf8_signing_key() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    std::fs::write(&key, [0xff])?;
+
+    assert!(open_store(&Source::Store(database), Some(&key)).is_err());
+    Ok(())
+}
+
+#[test]
+fn destroy_key_reports_store_open_and_registry_load_errors(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    let missing_parent = directory.path().join("missing").join("ledger.db");
+    assert!(run(&destroy_args(&missing_parent, &key)).is_err());
+
+    drop(SqliteStore::open(
+        database
+            .to_str()
+            .ok_or("temporary database path is not UTF-8")?,
+    )?);
+    let connection = rusqlite::Connection::open(&database)?;
+    connection.execute_batch(
+        "DROP TABLE key_registry;
+         CREATE TABLE key_registry (singleton INTEGER PRIMARY KEY, wrong_column BLOB);",
+    )?;
+    drop(connection);
+    assert!(run(&destroy_args(&database, &key)).is_err());
+    Ok(())
+}
+
+#[test]
 fn startup_requires_explicit_recovery_for_multiple_pending_ledger_keys(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::TempDir::new()?;

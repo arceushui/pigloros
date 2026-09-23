@@ -151,6 +151,7 @@ pub fn delete_owned_secret_key(
 ///
 /// Calling this again with the same request resumes a pending request after a
 /// crash or an uncertain directory sync.
+/// Returns the outcome and the committed registry state.
 ///
 /// # Errors
 /// Returns the registry or owned-file error. A failure after the first commit
@@ -159,12 +160,16 @@ pub fn destroy_owned_secret_key<S: pos_core::EventStore + ?Sized>(
     store: &mut S,
     path: &Path,
     request: pos_core::KeyDestructionRequestV1,
-) -> Result<pos_core::KeyDestructionOutcomeV1, pos_core::CoreError> {
+) -> Result<
+    (
+        pos_core::KeyDestructionOutcomeV1,
+        pos_core::KeyRegistryStateV1,
+    ),
+    pos_core::CoreError,
+> {
     store.begin_key_registry_destruction(request)?;
     let receipt = delete_owned_secret_key(path, request)?;
-    store
-        .complete_key_registry_destruction(request, receipt)
-        .map(|(outcome, _)| outcome)
+    store.complete_key_registry_destruction(request, receipt)
 }
 
 #[cfg(unix)]
