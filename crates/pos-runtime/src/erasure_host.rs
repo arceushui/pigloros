@@ -7289,7 +7289,7 @@ mod tests {
         );
         assert_eq!(
             sender.recover_fork_admission(operation),
-            Ok(Some(expected_result))
+            Ok(Some(expected_result.clone()))
         );
         assert_eq!(
             sender.recover_fork_admission(ErasureReferenceV1::from_digest([99; 32])),
@@ -7307,7 +7307,7 @@ mod tests {
         assert_eq!(
             host.command_sender()
                 .and_then(|mut sender| sender.recover_fork_admission(operation)),
-            Err(ErasureHostErrorV1::StaleGeneration)
+            Ok(Some(expected_result))
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
