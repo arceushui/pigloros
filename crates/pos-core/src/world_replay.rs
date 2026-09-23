@@ -292,45 +292,8 @@ impl WorldReplayClosureV1 {
         ) {
             return Err(WorldReplayClosureErrorV1::PolicyMismatch);
         }
-        if input.consumer_set.consumers().iter().any(|consumer| {
-            !has_leaf_address(
-                &artifacts,
-                WorldArtifactKindV1::ReducerImplementation,
-                consumer.reducer_hash(),
-            ) || !has_leaf_address(
-                &artifacts,
-                WorldArtifactKindV1::Schema,
-                consumer.schema_hash(),
-            ) || !has_leaf_address(
-                &artifacts,
-                WorldArtifactKindV1::RuntimeIdentity,
-                consumer.runtime_hash(),
-            )
-        }) || input.consumer_set.producers().iter().any(|producer| {
-            !has_leaf_address(
-                &artifacts,
-                WorldArtifactKindV1::OutputPolicy,
-                producer.output_policy_hash(),
-            )
-        }) || input.consumer_set.optional_view_roots().iter().any(|root| {
-            !artifacts.iter().any(|leaf| {
-                let input = leaf.as_input();
-                input.kind == WorldArtifactKindV1::OptionalView
-                    && leaf.digest() == *root
-                    && input.optionality == crate::ArtifactOptionalityV1::Optional
-                    && input.transition == crate::ArtifactTransitionRuleV1::RedactViews
-            })
-        }) {
-            return Err(WorldReplayClosureErrorV1::MissingConsumerArtifact);
-        }
-        if artifacts.iter().any(|leaf| {
-            leaf.as_input().kind == WorldArtifactKindV1::OptionalView
-                && !input
-                    .consumer_set
-                    .optional_view_roots()
-                    .contains(&leaf.digest())
-        }) {
-            return Err(WorldReplayClosureErrorV1::UnselectedOptionalView);
+        if let Err(error) = validate_consumer_references(&artifacts, &input.consumer_set) {
+            return Err(error);
         }
         Ok(Self {
             timeline_id: input.timeline_id,
@@ -659,6 +622,50 @@ fn has_leaf_address(
     artifacts
         .iter()
         .any(|leaf| leaf.as_input().kind == kind && leaf.digest() == address)
+}
+
+fn validate_consumer_references(
+    artifacts: &[WorldArtifactLeafV1],
+    consumer_set: &WorldConsumerSetV1,
+) -> Result<(), WorldReplayClosureErrorV1> {
+    if consumer_set.consumers().iter().any(|consumer| {
+        !has_leaf_address(
+            artifacts,
+            WorldArtifactKindV1::ReducerImplementation,
+            consumer.reducer_hash(),
+        ) || !has_leaf_address(
+            artifacts,
+            WorldArtifactKindV1::Schema,
+            consumer.schema_hash(),
+        ) || !has_leaf_address(
+            artifacts,
+            WorldArtifactKindV1::RuntimeIdentity,
+            consumer.runtime_hash(),
+        )
+    }) || consumer_set.producers().iter().any(|producer| {
+        !has_leaf_address(
+            artifacts,
+            WorldArtifactKindV1::OutputPolicy,
+            producer.output_policy_hash(),
+        )
+    }) || consumer_set.optional_view_roots().iter().any(|root| {
+        !artifacts.iter().any(|leaf| {
+            let input = leaf.as_input();
+            input.kind == WorldArtifactKindV1::OptionalView
+                && leaf.digest() == *root
+                && input.optionality == crate::ArtifactOptionalityV1::Optional
+                && input.transition == crate::ArtifactTransitionRuleV1::RedactViews
+        })
+    }) {
+        return Err(WorldReplayClosureErrorV1::MissingConsumerArtifact);
+    }
+    if artifacts.iter().any(|leaf| {
+        leaf.as_input().kind == WorldArtifactKindV1::OptionalView
+            && !consumer_set.optional_view_roots().contains(&leaf.digest())
+    }) {
+        return Err(WorldReplayClosureErrorV1::UnselectedOptionalView);
+    }
+    Ok(())
 }
 
 /// Host-owned source of current time and artifact availability.
