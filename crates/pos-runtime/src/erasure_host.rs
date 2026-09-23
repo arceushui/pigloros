@@ -1943,6 +1943,14 @@ impl ErasureExecutionHostV1 {
                 return Err(map_erasure_error(error));
             }
         };
+        if let Some(recovered_child) = recovered.as_ref().map(ErasureForkRecoveryV1::child) {
+            if recovered_child.mode != TimelineMode::Historical
+                || recovered_child.name.as_deref() != Some(input.name)
+                || recovered_child.fork_point != Some((input.parent, input.at_seq))
+            {
+                return Err(ErasureHostErrorV1::Conflict);
+            }
+        }
         let parent_owner = if let Some(parent) = self
             .store
             .host_store()
@@ -1958,12 +1966,7 @@ impl ErasureExecutionHostV1 {
             return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
-            Some(recovered_child)
-                if recovered_child.mode == TimelineMode::Historical
-                    && recovered_child.name.as_deref() == Some(input.name)
-                    && recovered_child.fork_point == Some((input.parent, input.at_seq))
-                    && recovered_child.owner == parent_owner =>
-            {
+            Some(recovered_child) if recovered_child.owner == parent_owner => {
                 recovered_child.clone()
             }
             Some(_) => return Err(ErasureHostErrorV1::Conflict),
@@ -3517,6 +3520,7 @@ mod tests {
         EventStore,
         DeleteTimeline,
         TransitionLookup,
+        MissingTransitionTimeline,
         MismatchedTopologyMetadata,
         Passthrough,
     }
@@ -3834,6 +3838,10 @@ mod tests {
                 Err(CoreError::Storage(
                     "fault transition timeline lookup".to_owned(),
                 ))
+            } else if self.fault == FaultModeV1::MissingTransitionTimeline {
+                self.inner
+                    .get_timeline_for_host_transition(permit, id)
+                    .map(|_| None)
             } else {
                 self.inner.get_timeline_for_host_transition(permit, id)
             }
@@ -5103,7 +5111,7 @@ mod tests {
 
     fn rejected_host_with_unaffected_parent(
     ) -> Result<(ErasureExecutionHostV1, TimelineId), ErasureHostErrorV1> {
-        let (mut store, _) = fault_store_with_control(FaultModeV1::Passthrough);
+        let (mut store, _) = fault_store_with_control(FaultModeV1::MissingTransitionTimeline);
         let parent = store
             .create_timeline("active-missing-parent")
             .map_store_error()?;
@@ -5129,10 +5137,6 @@ mod tests {
         host.authority = Some(authority);
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)?;
-        host.store
-            .host_store()
-            .delete_timeline(parent.id())
-            .map_store_error()?;
         Ok((host, parent.id()))
     }
 
@@ -5681,7 +5685,7 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
 
-        let mut store = MemoryStore::new().without_erasure_gate();
+        let mut store = fault_store(FaultModeV1::MissingTransitionTimeline);
         let parent = store
             .create_timeline("missing-parent")
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
@@ -5695,11 +5699,6 @@ mod tests {
         let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         missing
             .install_inventory(&mut query, 4)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        missing
-            .store
-            .host_store()
-            .delete_timeline(parent)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             missing.apply_unaffected_topology_change(
@@ -7132,17 +7131,13 @@ mod tests {
     #[test]
     fn identified_fork_recovery_reports_closed_state_when_parent_is_missing() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
+            Box::new(fault_store(FaultModeV1::MissingTransitionTimeline)),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let parent = host
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("missing-recovery-parent"))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.store
-            .host_store()
-            .delete_timeline(parent.id())
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let candidate = host.inventory.as_ref().map_or_else(
             || std::panic::resume_unwind(Box::new("missing empty inventory")),
