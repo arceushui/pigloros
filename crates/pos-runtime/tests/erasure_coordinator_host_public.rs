@@ -23,7 +23,7 @@ use pos_core::{
     ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
-    ErasureVerifiedTopologyObservationV1, TimelineId, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureVerifiedTopologyObservationV1, TimelineId, TimelineMeta, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
@@ -266,9 +266,9 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         &self,
         request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
-        candidate: TimelineId,
+        candidate: &TimelineMeta,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        self.topology(request, manifest_digest, Some(candidate))
+        self.topology(request, manifest_digest, Some(candidate.id))
             .map(Some)
     }
 

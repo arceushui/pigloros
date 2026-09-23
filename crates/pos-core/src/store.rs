@@ -708,11 +708,13 @@ pub trait EventStore: Send {
 
     /// Persist a preallocated Fork while the host owns the topology-transition
     /// fence. The caller supplies the child identity so successor proof can
-    /// complete before durable mutation.
+    /// complete before durable mutation. The preallocated metadata must name
+    /// the same parent and fork position passed to the adapter.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the adapter cannot provide this
-    /// preallocated host-transition seam.
+    /// preallocated host-transition seam or the Fork metadata contradicts the
+    /// requested parent/position.
     fn fork_for_host_transition_with_meta(
         &mut self,
         _permit: &ErasureTopologyTransitionPermitV1,

@@ -201,14 +201,18 @@ pub(crate) fn generic_timeline_is_visible(
 ///
 /// Backends supply their own metadata and ordered event readers, while this
 /// helper owns the shared metadata, sequence, and chain-head invariant.
+pub(crate) struct ForkChildVerificationInput<'a, I> {
+    pub(crate) expected_meta: &'a pos_core::TimelineMeta,
+    pub(crate) actual_meta: &'a pos_core::TimelineMeta,
+    pub(crate) stored_head: pos_core::Seq,
+    pub(crate) stored_chain_head: &'a [u8],
+    pub(crate) chain_head: pos_core::Hash,
+    pub(crate) events: I,
+    pub(crate) hasher: &'a dyn pos_core::Hasher,
+}
+
 pub(crate) fn fork_child_is_exact<I>(
-    expected_meta: &pos_core::TimelineMeta,
-    actual_meta: &pos_core::TimelineMeta,
-    stored_head: pos_core::Seq,
-    stored_chain_head: &[u8],
-    chain_head: pos_core::Hash,
-    events: I,
-    hasher: &dyn pos_core::Hasher,
+    input: ForkChildVerificationInput<'_, I>,
 ) -> Result<bool, pos_core::ErasureErrorV1>
 where
     I: IntoIterator<
@@ -218,6 +222,15 @@ where
         >,
     >,
 {
+    let ForkChildVerificationInput {
+        expected_meta,
+        actual_meta,
+        stored_head,
+        stored_chain_head,
+        chain_head,
+        events,
+        hasher,
+    } = input;
     if actual_meta != expected_meta {
         return Ok(false);
     }
@@ -715,46 +728,47 @@ mod tests {
         let payload = pos_core::CanonicalBytes::from_static(b"child-event");
         let child_head = hasher.hash_event(&genesis, event_id.to_string().as_bytes(), &payload);
 
-        assert!(fork_child_is_exact(
-            &expected,
-            &expected,
-            pos_core::Seq::from_u64(1),
-            child_head.as_bytes(),
-            genesis,
-            [Ok((pos_core::Seq::from_u64(1), event_id, payload.clone()))],
-            &hasher,
-        )
+        assert!(fork_child_is_exact(ForkChildVerificationInput {
+            expected_meta: &expected,
+            actual_meta: &expected,
+            stored_head: pos_core::Seq::from_u64(1),
+            stored_chain_head: child_head.as_bytes(),
+            chain_head: genesis,
+            events: [Ok((pos_core::Seq::from_u64(1), event_id, payload.clone()))],
+            hasher: &hasher,
+        })
         .test_ok());
-        assert!(!fork_child_is_exact(
-            &expected,
-            &pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "other"),
-            pos_core::Seq::ZERO,
-            genesis.as_bytes(),
-            genesis,
-            std::iter::empty(),
-            &hasher,
-        )
+        let other_meta = pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "other");
+        assert!(!fork_child_is_exact(ForkChildVerificationInput {
+            expected_meta: &expected,
+            actual_meta: &other_meta,
+            stored_head: pos_core::Seq::ZERO,
+            stored_chain_head: genesis.as_bytes(),
+            chain_head: genesis,
+            events: std::iter::empty(),
+            hasher: &hasher,
+        })
         .test_ok());
-        assert!(!fork_child_is_exact(
-            &expected,
-            &expected,
-            pos_core::Seq::from_u64(1),
-            child_head.as_bytes(),
-            genesis,
-            [Ok((pos_core::Seq::from_u64(2), event_id, payload))],
-            &hasher,
-        )
+        assert!(!fork_child_is_exact(ForkChildVerificationInput {
+            expected_meta: &expected,
+            actual_meta: &expected,
+            stored_head: pos_core::Seq::from_u64(1),
+            stored_chain_head: child_head.as_bytes(),
+            chain_head: genesis,
+            events: [Ok((pos_core::Seq::from_u64(2), event_id, payload))],
+            hasher: &hasher,
+        })
         .test_ok());
         assert_eq!(
-            fork_child_is_exact(
-                &expected,
-                &expected,
-                pos_core::Seq::ZERO,
-                genesis.as_bytes(),
-                genesis,
-                [Err(pos_core::ErasureErrorV1::ProvenanceMissing)],
-                &hasher,
-            ),
+            fork_child_is_exact(ForkChildVerificationInput {
+                expected_meta: &expected,
+                actual_meta: &expected,
+                stored_head: pos_core::Seq::ZERO,
+                stored_chain_head: genesis.as_bytes(),
+                chain_head: genesis,
+                events: [Err(pos_core::ErasureErrorV1::ProvenanceMissing)],
+                hasher: &hasher,
+            }),
             Err(pos_core::ErasureErrorV1::ProvenanceMissing)
         );
     }

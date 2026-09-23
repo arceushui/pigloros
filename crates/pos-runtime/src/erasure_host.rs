@@ -87,7 +87,7 @@ struct IdentifiedForkApplicationInput<'a> {
     coordinator: ErasureReferenceV1,
 }
 
-struct OneShotInventoryV1(Option<ErasureVerifiedInventoryV1>);
+struct SingleUseVerifiedInventoryQueryV1(Option<ErasureVerifiedInventoryV1>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnaffectedTopologyTransitionError {
@@ -112,7 +112,7 @@ enum TransitionFailureV1 {
     ErasureBeforeCommit(ErasureErrorV1),
 }
 
-impl ErasureVerifiedInventoryQueryV1 for OneShotInventoryV1 {
+impl ErasureVerifiedInventoryQueryV1 for SingleUseVerifiedInventoryQueryV1 {
     fn verified_inventory(
         &mut self,
         _maximum_requests: usize,
@@ -197,9 +197,8 @@ pub trait ErasureCoordinatorAuthorityV1:
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1>;
 
     /// Resolve one topology observation after a durable root/Fork candidate
-    /// has been allocated. The candidate ID is supplied explicitly so an
-    /// authority can attest the exact new topology member instead of relying
-    /// on an out-of-band update.
+    /// has been allocated. The full metadata lets the authority attest the
+    /// exact prospective Fork relation, not only its new topology member ID.
     ///
     /// # Errors
     /// Returns a closed topology, policy, trust, or provenance error.
@@ -207,7 +206,7 @@ pub trait ErasureCoordinatorAuthorityV1:
         &self,
         _request: ErasureReferenceV1,
         _manifest_digest: ErasureReferenceV1,
-        _candidate: TimelineId,
+        _candidate: &TimelineMeta,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
@@ -528,7 +527,7 @@ impl ErasureCoordinatorCompositionV1 {
 struct HostedCoordinatorPortV1<'host> {
     store: RefCell<&'host mut dyn ErasureHostStore>,
     authority: &'host dyn ErasureCoordinatorAuthorityV1,
-    topology_candidate: Option<TimelineId>,
+    topology_candidate: Option<TimelineMeta>,
 }
 
 impl<'host> HostedCoordinatorPortV1<'host> {
@@ -543,8 +542,8 @@ impl<'host> HostedCoordinatorPortV1<'host> {
         }
     }
 
-    const fn with_topology_candidate(mut self, candidate: TimelineId) -> Self {
-        self.topology_candidate = Some(candidate);
+    fn with_topology_candidate(mut self, candidate: &TimelineMeta) -> Self {
+        self.topology_candidate = Some(candidate.clone());
         self
     }
 
@@ -568,12 +567,12 @@ impl<'host> HostedCoordinatorPortV1<'host> {
                     .map_err(|_| ErasureErrorV1::ScopeInvalid)
                     .and_then(|()| {
                         topology.extend_from_slice(snapshot.topology());
-                        if let Some(candidate) = self.topology_candidate {
-                            if let Err(index) = topology.binary_search(&candidate) {
+                        if let Some(candidate) = self.topology_candidate.as_ref() {
+                            if let Err(index) = topology.binary_search(&candidate.id) {
                                 topology
                                     .try_reserve(1)
                                     .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-                                topology.insert(index, candidate);
+                                topology.insert(index, candidate.id);
                             }
                         }
                         let mut request_topology = Vec::new();
@@ -582,17 +581,18 @@ impl<'host> HostedCoordinatorPortV1<'host> {
                             .map_err(|_| ErasureErrorV1::ScopeInvalid)
                             .and_then(|()| {
                                 for (request, manifest) in &request_heads {
-                                    let topology_observation = match self.topology_candidate {
-                                        Some(candidate) => self
-                                            .authority
-                                            .verified_topology_observation_for_candidate(
-                                                *request, *manifest, candidate,
+                                    let topology_observation =
+                                        match self.topology_candidate.as_ref() {
+                                            Some(candidate) => self
+                                                .authority
+                                                .verified_topology_observation_for_candidate(
+                                                    *request, *manifest, candidate,
+                                                )?,
+                                            None => self.authority.verified_topology_observation(
+                                                *request, *manifest,
                                             )?,
-                                        None => self
-                                            .authority
-                                            .verified_topology_observation(*request, *manifest)?,
-                                    }
-                                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                                        }
+                                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
                                     if topology_observation
                                         .bindings()
                                         .len()
@@ -1402,7 +1402,7 @@ impl ErasureExecutionHostV1 {
                 .verified_inventory_with_limits(limits)
                 .map_err(map_erasure_error)?
         };
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         self.install_inventory_with_limits(&mut query, limits)
     }
 
@@ -1613,7 +1613,7 @@ impl ErasureExecutionHostV1 {
         &mut self,
         request_count: usize,
         limits: ErasureRecoveryLimitsV1,
-        candidate: TimelineId,
+        candidate: &TimelineMeta,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         if request_count == 0 {
             let snapshot = self
@@ -1621,8 +1621,8 @@ impl ErasureExecutionHostV1 {
                 .host_store()
                 .complete_erasure_inventory_snapshot_with_limits(limits)?;
             let mut topology = snapshot.topology().to_vec();
-            if let Err(index) = topology.binary_search(&candidate) {
-                topology.insert(index, candidate);
+            if let Err(index) = topology.binary_search(&candidate.id) {
+                topology.insert(index, candidate.id);
             }
             let candidate_snapshot = ErasurePersistenceInventorySnapshotV1::new_with_limits(
                 snapshot.request_heads().to_vec(),
@@ -1684,7 +1684,7 @@ impl ErasureExecutionHostV1 {
         let candidate = match self.verify_unaffected_topology_candidate(
             request_count,
             limits,
-            candidate_timeline.id(),
+            &candidate_timeline.meta,
         ) {
             Ok(candidate) => candidate,
             Err(error) => return Err(UnaffectedTopologyTransitionError::Erasure(error)),
@@ -1709,6 +1709,9 @@ impl ErasureExecutionHostV1 {
                 )));
             }
         };
+        if transition.timeline.meta != candidate_timeline.meta {
+            return Err(UnaffectedTopologyTransitionError::UncertainPersistence);
+        }
         #[cfg(test)]
         if self.fail_inventory_publication {
             self.rollback_unaffected_topology_timeline(&transition.timeline, transition.created)?;
@@ -1901,6 +1904,7 @@ impl ErasureExecutionHostV1 {
                     input.parent,
                     input.at_seq,
                     input.name,
+                    input.current_inventory,
                 ) {
                     Ok(result) => result,
                     Err(error) => {
@@ -1959,9 +1963,17 @@ impl ErasureExecutionHostV1 {
         parent: TimelineId,
         at_seq: Seq,
         name: &str,
+        current_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<(TimelineMeta, Option<ErasureForkRecoveryV1>), ErasureHostErrorV1> {
-        let recovered = match self.store.host_store().recover_fork_admission(operation) {
+        let recovered = match self
+            .store
+            .host_store()
+            .recover_fork_admission(operation, current_inventory)
+        {
             Ok(recovered) => recovered,
+            Err(ErasureErrorV1::StaleGeneration) => {
+                return Err(ErasureHostErrorV1::StaleGeneration);
+            }
             Err(error) => {
                 self.poison();
                 return Err(map_erasure_error(error));
@@ -2256,7 +2268,7 @@ impl ErasureExecutionHostV1 {
                     .verified_inventory_with_limits(limits)
             })
             .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         Self::recover_from_verified_query_with_limits(store, &mut query, limits)
     }
 
@@ -2328,7 +2340,7 @@ impl ErasureExecutionHostV1 {
                     .verified_inventory_with_limits(limits)
             })
             .map_err(|_| ErasureHostErrorV1::RecoveryUnavailable)?;
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         Self::recover_gateway_from_verified_query_with_limits(store, &mut query, limits)
     }
 
@@ -2845,11 +2857,12 @@ impl ErasureCommandSenderV1<'_> {
         operation: ErasureReferenceV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
+        let (_, _, inventory) = self.host.ready_state()?;
         match self
             .host
             .store
             .host_store()
-            .recover_fork_admission(operation)
+            .recover_fork_admission(operation, &inventory)
         {
             Ok(result)
                 if result.as_ref().is_none_or(|recovered| {
@@ -2859,6 +2872,7 @@ impl ErasureCommandSenderV1<'_> {
                 Ok(result)
             }
             Ok(_) => Err(ErasureHostErrorV1::StaleGeneration),
+            Err(ErasureErrorV1::StaleGeneration) => Err(ErasureHostErrorV1::StaleGeneration),
             Err(error) => {
                 self.host.poison();
                 Err(map_erasure_error(error))
@@ -3376,6 +3390,10 @@ struct ErasureErrorDispositionV1 {
 
 const fn erasure_error_disposition(error: ErasureErrorV1) -> ErasureErrorDispositionV1 {
     match error {
+        ErasureErrorV1::StaleGeneration => ErasureErrorDispositionV1 {
+            host_error: ErasureHostErrorV1::StaleGeneration,
+            preserves_ready_host: true,
+        },
         ErasureErrorV1::Unauthorized => ErasureErrorDispositionV1 {
             host_error: ErasureHostErrorV1::AuthorizationDenied,
             preserves_ready_host: true,
@@ -3474,6 +3492,7 @@ mod tests {
         EventStore,
         DeleteTimeline,
         TransitionLookup,
+        MismatchedTopologyMetadata,
         Passthrough,
     }
 
@@ -3774,6 +3793,10 @@ mod tests {
             if self.fault == FaultModeV1::EventStore {
                 Err(CoreError::Storage("fault fork".to_owned()))
             } else {
+                let mut meta = meta;
+                if self.fault == FaultModeV1::MismatchedTopologyMetadata {
+                    meta.name = Some("adapter-substituted-fork-name".to_owned());
+                }
                 self.inner
                     .fork_for_host_transition_with_meta(permit, parent, at_seq, meta)
             }
@@ -3978,11 +4001,13 @@ mod tests {
         fn recover_fork_admission(
             &mut self,
             operation: ErasureReferenceV1,
+            successor_inventory: &ErasureVerifiedInventoryV1,
         ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
             if self.fault == FaultModeV1::Recovery {
                 Err(ErasureErrorV1::ProvenanceMissing)
             } else {
-                self.inner.recover_fork_admission(operation)
+                self.inner
+                    .recover_fork_admission(operation, successor_inventory)
             }
         }
     }
@@ -4250,6 +4275,7 @@ mod tests {
     #[derive(Default)]
     struct RejectedCoordinatorAuthorityV1 {
         unaffected: std::sync::Mutex<Vec<TimelineId>>,
+        candidate_metadata: std::sync::Mutex<Vec<TimelineMeta>>,
         candidate_missing: std::sync::atomic::AtomicBool,
     }
 
@@ -4301,8 +4327,12 @@ mod tests {
             &self,
             request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
-            candidate: TimelineId,
+            candidate: &TimelineMeta,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            self.candidate_metadata
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .push(candidate.clone());
             if self
                 .candidate_missing
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -4314,8 +4344,8 @@ mod tests {
                     .unaffected
                     .lock()
                     .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-                if !unaffected.contains(&candidate) {
-                    unaffected.push(candidate);
+                if !unaffected.contains(&candidate.id) {
+                    unaffected.push(candidate.id);
                 }
             }
             self.verified_topology_observation(request, manifest_digest)
@@ -4418,6 +4448,7 @@ mod tests {
     #[derive(Default)]
     struct ActiveTopologyAuthorityV1 {
         timelines: std::sync::Mutex<Vec<TimelineId>>,
+        candidate_metadata: std::sync::Mutex<Vec<TimelineMeta>>,
         frozen: std::sync::atomic::AtomicBool,
         fail_fork_scope_extension: std::sync::atomic::AtomicBool,
     }
@@ -4581,15 +4612,19 @@ mod tests {
             &self,
             request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
-            candidate: TimelineId,
+            candidate: &TimelineMeta,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+            self.candidate_metadata
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .push(candidate.clone());
             {
                 let mut timelines = self
                     .timelines
                     .lock()
                     .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-                if !timelines.contains(&candidate) {
-                    timelines.push(candidate);
+                if !timelines.contains(&candidate.id) {
+                    timelines.push(candidate.id);
                 }
             }
             self.verified_topology_observation(request, manifest_digest)
@@ -4911,8 +4946,9 @@ mod tests {
             .candidate_missing
             .store(true, std::sync::atomic::Ordering::Release);
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        let candidate = TimelineMeta::root("missing-candidate");
         let port = HostedCoordinatorPortV1::new(&mut store, &authority)
-            .with_topology_candidate(TimelineId::new());
+            .with_topology_candidate(&candidate);
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::ProvenanceMissing)
@@ -4923,9 +4959,14 @@ mod tests {
     fn hosted_coordinator_port_includes_a_verified_candidate_in_the_observation() {
         let authority = RejectedCoordinatorAuthorityV1::default();
         let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
-        let candidate = TimelineId::new();
-        let port =
-            HostedCoordinatorPortV1::new(&mut store, &authority).with_topology_candidate(candidate);
+        let candidate = TimelineMeta::forked_from(
+            TimelineId::new(),
+            Seq::from_u64(7),
+            "verified-fork-candidate",
+        );
+        let candidate_id = candidate.id;
+        let port = HostedCoordinatorPortV1::new(&mut store, &authority)
+            .with_topology_candidate(&candidate);
         let observation = port
             .complete_erasure_inventory_observation(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -4933,16 +4974,23 @@ mod tests {
             observation,
             ErasureInventoryObservationV1::new(
                 vec![(reference(34), reference(35))],
-                vec![candidate],
+                vec![candidate_id],
                 vec![(
                     reference(34),
                     ErasureVerifiedTopologyObservationV1::new(
                         reference(35),
                         Vec::new(),
-                        vec![candidate],
+                        vec![candidate_id],
                     ),
                 )],
             )
+        );
+        assert_eq!(
+            *authority
+                .candidate_metadata
+                .lock()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            vec![candidate]
         );
     }
 
@@ -4953,11 +5001,11 @@ mod tests {
         let existing = store
             .create_timeline("existing-topology")
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let candidate = TimelineId::new();
-        let mut expected = vec![existing.id(), candidate];
+        let candidate = TimelineMeta::root("candidate-root");
+        let mut expected = vec![existing.id(), candidate.id];
         expected.sort_unstable();
-        let port =
-            HostedCoordinatorPortV1::new(&mut store, &authority).with_topology_candidate(candidate);
+        let port = HostedCoordinatorPortV1::new(&mut store, &authority)
+            .with_topology_candidate(&candidate);
         let observation = port
             .complete_erasure_inventory_observation(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -4974,7 +5022,7 @@ mod tests {
                 &UnusedCoordinatorAuthorityV1::rejecting(),
                 reference(1),
                 reference(2),
-                TimelineId::new(),
+                &TimelineMeta::root("candidate"),
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
@@ -5673,12 +5721,12 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let limits = host.recovery_limits;
         assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits, TimelineId::new()),
+            host.verify_unaffected_topology_candidate(1, limits, &TimelineMeta::root("candidate"),),
             Err(ErasureErrorV1::Unauthorized)
         );
         host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits, TimelineId::new()),
+            host.verify_unaffected_topology_candidate(1, limits, &TimelineMeta::root("candidate"),),
             Err(ErasureErrorV1::Unauthorized)
         );
     }
@@ -5730,7 +5778,7 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let mut missing = ErasureExecutionHostV1::new_closed(Box::new(store))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         missing
             .install_inventory(&mut query, 4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -5770,6 +5818,27 @@ mod tests {
                     ))
                 },
             ),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
+    fn mismatched_persisted_topology_metadata_poisons_the_host() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(fault_store(FaultModeV1::MismatchedTopologyMetadata)),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("metadata-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+
+        assert_eq!(
+            host.command_sender().and_then(|mut sender| {
+                sender.fork_timeline(parent.id(), Seq::ZERO, "approved-fork-name")
+            }),
             Err(ErasureHostErrorV1::AdapterFailure)
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
@@ -6078,7 +6147,7 @@ mod tests {
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let inventory = verified_empty_inventory(snapshot, 4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         assert_eq!(
             host.install_inventory(&mut query, 4),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
@@ -6251,7 +6320,7 @@ mod tests {
         .unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("inventory failed: {error:?}")))
         });
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         assert!(query.verified_inventory(1).is_ok());
         assert_eq!(
             query.verified_inventory(1),
@@ -6275,7 +6344,7 @@ mod tests {
         let mut host =
             ErasureExecutionHostV1::new_closed(Box::new(MemoryStore::new().without_erasure_gate()))
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut query = OneShotInventoryV1(Some(inventory));
+        let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
 
         assert_eq!(
             host.install_inventory(&mut query, 4),
@@ -7171,6 +7240,7 @@ mod tests {
                     parent.id(),
                     Seq::ZERO,
                     "missing-recovery-child",
+                    &candidate,
                 ),
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
             );
@@ -7247,6 +7317,7 @@ mod tests {
                 .and_then(|mut sender| sender.recover_fork_admission(operation)),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]

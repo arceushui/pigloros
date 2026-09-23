@@ -52,9 +52,9 @@ use pos_core::{
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
     ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
-    KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureVerifiedInventoryV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -1488,8 +1488,9 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
     fn recover_fork_admission(
         &mut self,
         operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-        self.recover_fork_admission_impl(operation)
+        self.recover_fork_admission_impl(operation, successor_inventory)
     }
 }
 
@@ -1566,17 +1567,22 @@ impl MemoryStore {
     fn recover_fork_admission_impl(
         &self,
         operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
             return Ok(None);
         };
-        self.verify_memory_fork_child(&result)?;
         let proof = self
             .erasure_fork_recovery_proofs
             .get(&operation)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         proof.validate(&result)?;
         self.memory_fork_recovery_proof_is_exact(proof)?;
+        self.verify_memory_fork_child(&result)?;
+        if result.successor_generation() != successor_inventory.generation() {
+            return Err(ErasureErrorV1::StaleGeneration);
+        }
+        proof.validate_complete_for_inventory(&result, successor_inventory)?;
         Ok(Some(result))
     }
 }
@@ -1603,18 +1609,18 @@ impl MemoryStore {
         let Some(state) = self.timelines.get(&child.id) else {
             return Ok(false);
         };
-        crate::fork_child_is_exact(
-            child,
-            &state.timeline.meta,
-            state.timeline.head,
-            state.chain_head.as_bytes(),
+        crate::fork_child_is_exact(crate::ForkChildVerificationInput {
+            expected_meta: child,
+            actual_meta: &state.timeline.meta,
+            stored_head: state.timeline.head,
+            stored_chain_head: state.chain_head.as_bytes(),
             chain_head,
-            state
+            events: state
                 .events
                 .iter()
                 .map(|event| Ok((event.seq, event.id, event.payload.clone()))),
-            self.hasher.as_ref(),
-        )
+            hasher: self.hasher.as_ref(),
+        })
     }
 
     fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
@@ -3227,10 +3233,16 @@ impl EventStore for MemoryStore {
         &mut self,
         permit: &ErasureTopologyTransitionPermitV1,
         parent: TimelineId,
-        _at_seq: Seq,
+        at_seq: Seq,
         meta: TimelineMeta,
     ) -> Result<Timeline, CoreError> {
         self.ensure_host_transition_permit(permit)?;
+        if meta.fork_point != Some((parent, at_seq)) {
+            return Err(CoreError::Storage(
+                "preallocated Fork metadata does not match the requested parent and sequence"
+                    .to_owned(),
+            ));
+        }
         self.ensure_generic_timeline_visibility(parent)
             .and_then(|()| self.create_timeline_with_meta_unchecked(&meta))
     }
@@ -3585,6 +3597,30 @@ mod tests {
                 .find_timeline_by_name_for_host_transition(permit, "missing-host-name")
                 .test_ok()
                 .is_none());
+
+            let other_parent = store
+                .create_timeline_for_host_transition(permit, "host-other-parent")
+                .test_ok();
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(
+                        other_parent.id(),
+                        Seq::ZERO,
+                        "host-child-wrong-parent",
+                    ),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::from_u64(1),
+                    TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-wrong-sequence"),
+                )
+                .is_err());
 
             let child_meta = TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-meta");
             let child = store
@@ -7194,7 +7230,10 @@ mod coverage_entrypoints {
         let first = ok(inventory
             .clone()
             .prepare_fork_batch(first_input, Vec::new()));
-        let second = ok(inventory.prepare_fork_batch(second_input, Vec::new()));
+        let stale_inventory = inventory.clone();
+        let second = ok(inventory
+            .clone()
+            .prepare_fork_batch(second_input, Vec::new()));
         let expected = ok(first.recovery_result());
         let proof = ok(first.recovery_proof());
         let gate = Arc::clone(
@@ -7211,23 +7250,30 @@ mod coverage_entrypoints {
         ok(gate.install_from_verified_inventory_transition(&mut transition));
 
         assert_eq!(
-            ok(store.recover_fork_admission(operation)),
+            ok(store.recover_fork_admission(operation, &candidate)),
             Some(expected.clone())
         );
         store.erasure_fork_recovery_proofs.remove(&operation);
         assert_eq!(
-            store.recover_fork_admission(operation),
+            store.recover_fork_admission(operation, &stale_inventory),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         store
             .erasure_fork_recovery_proofs
             .insert(operation, ok(second.recovery_proof()));
         assert_eq!(
-            store.recover_fork_admission(operation),
+            store.recover_fork_admission(operation, &stale_inventory),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         store.erasure_fork_recovery_proofs.insert(operation, proof);
-        assert_eq!(ok(store.recover_fork_admission(operation)), Some(expected));
+        assert_eq!(
+            store.recover_fork_admission(operation, &stale_inventory),
+            Err(ErasureErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            ok(store.recover_fork_admission(operation, &candidate)),
+            Some(expected)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -7397,11 +7443,14 @@ mod coverage_entrypoints {
                 recovery_receipt,
             )),
         );
+        let recovery_inventory =
+            ok(recovery_store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS));
         fail_next_chain_hash_at_for_test();
         assert_eq!(
             ErasureForkPersistencePortV1::recover_fork_admission(
                 &mut recovery_store,
                 recovery_operation,
+                &recovery_inventory,
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );

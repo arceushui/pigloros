@@ -4416,16 +4416,19 @@ pub trait ErasureForkPersistencePortV1 {
     ///
     /// The adapter must validate the durable proof for the original binding
     /// and every committed ERSE1/mutation/effect/index side, then validate
-    /// that the receipt still names the exact persisted child before returning
-    /// it. Missing or corrupt result evidence fails closed rather than
-    /// allocating a replacement child.
+    /// that the proof contains every ERSE1 admission required by the supplied
+    /// complete successor inventory, and that the receipt still names the
+    /// exact persisted child before returning it. Missing or corrupt result
+    /// evidence fails closed rather than allocating a replacement child.
     ///
     /// # Errors
-    /// Returns a closed persistence or provenance error for malformed,
-    /// conflicting, or unreadable durable evidence.
+    /// Returns a stale-generation error when the supplied inventory no longer
+    /// represents this operation's successor, or a closed persistence or
+    /// provenance error for malformed, conflicting, or unreadable evidence.
     fn recover_fork_admission(
         &mut self,
         operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1>;
 }
 
@@ -6502,6 +6505,47 @@ impl ErasureForkRecoveryProofV1 {
         ) == self.binding_digest)
             .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    /// Validate that the proof contains every ERSE1 admission required by the
+    /// independently verified successor inventory.
+    ///
+    /// The batch digest alone cannot establish completeness: it can be
+    /// recomputed after an admission is omitted. The verified inventory
+    /// supplies the independent expected request/extension set.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::StaleGeneration`] when the supplied inventory
+    /// is no longer this operation's successor, or provenance failure when the
+    /// complete admission set differs from the recovered result.
+    pub fn validate_complete_for_inventory(
+        &self,
+        recovered: &ErasureForkRecoveryV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.validate(recovered)?;
+        if recovered.successor_generation() != successor_inventory.generation() {
+            return Err(ErasureErrorV1::StaleGeneration);
+        }
+        let (parent, _) = recovered.fork_point();
+        let requirements =
+            successor_inventory.fork_retry_scope_requirements(parent, recovered.child().id)?;
+        if self.admissions.len() != requirements.len()
+            || self
+                .admissions
+                .iter()
+                .zip(&requirements)
+                .any(|(admission, requirement)| {
+                    (admission.request, admission.extension)
+                        != (
+                            requirement.requirement().request(),
+                            requirement.extension().reference(),
+                        )
+                })
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(())
     }
 
     /// Return the stable operation identity.
@@ -9325,6 +9369,157 @@ mod coverage_paths {
         assert_recovery_objects_and_indexes_reject_malformed_fields(mutation)?;
         assert_recovery_proof_rejects_oversized_admissions(&proof)?;
         assert_recovery_proof_rejects_oversized_effect(&input, &extension)?;
+        Ok(())
+    }
+
+    #[test]
+    fn fork_recovery_proof_rejects_a_rebound_incomplete_admission_set() -> Result<(), ErasureErrorV1>
+    {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let request = reference(220);
+        let state = inventory_state(
+            request,
+            reference(221),
+            reference(222),
+            ErasureLifecycleV1::AccessFrozen,
+        )?;
+        let predecessor = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(
+                state.clone(),
+                ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                    state.manifest_digest(),
+                    vec![(parent, reference(222))],
+                    Vec::new(),
+                ),
+            )],
+            vec![parent],
+            4,
+        )?;
+        let child_scope = reference(223);
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(224),
+            expected_inventory_generation: predecessor.generation(),
+            child_scope,
+            child: crate::TimelineMeta {
+                id: child,
+                mode: crate::TimelineMode::Historical,
+                name: Some("complete-proof-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent, Seq::ZERO)),
+            },
+        };
+        let scope = state.scope().ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request,
+            scope_commitment: scope.reference(),
+            fork: child_scope,
+            lineage_rule: scope
+                .lineage_rule()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+            predecessor_extension: None,
+            admission_provenance: reference(225),
+        })?;
+        let mutation = PreparedErasureCasV1::new(
+            request,
+            Some(state.manifest_digest()),
+            StoredErasureManifestV1::from_stored(reference(226), vec![1, 2, 3]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ErasureCasEffectV1::None,
+        );
+        let admission = PreparedErasureForkAdmissionV1::new(input.clone(), extension, mutation)?;
+        let batch = predecessor.prepare_fork_batch(input, vec![admission])?;
+        let result = batch.recovery_result()?;
+        let proof = batch.recovery_proof()?;
+        let successor = batch.successor_inventory();
+
+        assert_eq!(
+            proof.validate_complete_for_inventory(&result, successor),
+            Ok(())
+        );
+
+        let unrelated_inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 4)?;
+        assert_ne!(
+            result.successor_generation(),
+            unrelated_inventory.generation()
+        );
+        assert_eq!(
+            proof.validate_complete_for_inventory(&result, &unrelated_inventory),
+            Err(ErasureErrorV1::StaleGeneration)
+        );
+
+        let mut incomplete_successor = successor.clone();
+        incomplete_successor.classifications.clear();
+        assert_eq!(
+            proof.validate_complete_for_inventory(&result, &incomplete_successor),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut mismatched_admission = proof.clone();
+        let admission = &mut mismatched_admission.admissions[0];
+        admission.extension = reference(227);
+        let predecessor_extension = admission
+            .predecessor
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        admission.binding_digest = fork_admission_binding_digest(
+            admission.operation,
+            admission.expected_inventory_generation,
+            admission.child_scope,
+            admission.extension,
+            admission.request,
+            predecessor_extension,
+            admission.next_manifest,
+            result.child(),
+        );
+        let admission_binding = admission.binding_digest;
+        mismatched_admission.binding_digest = fork_batch_binding_digest(
+            mismatched_admission.operation,
+            mismatched_admission.expected_inventory_generation,
+            mismatched_admission.child_scope,
+            mismatched_admission.successor_generation,
+            result.child(),
+            &[admission_binding],
+        );
+        let mismatched_result = ErasureForkRecoveryV1::new(
+            mismatched_admission.operation,
+            mismatched_admission.binding_digest,
+            mismatched_admission.expected_inventory_generation,
+            mismatched_admission.child_scope,
+            mismatched_admission.successor_generation,
+            result.child().clone(),
+        )?;
+        assert_eq!(mismatched_admission.validate(&mismatched_result), Ok(()));
+        assert_eq!(
+            mismatched_admission.validate_complete_for_inventory(&mismatched_result, successor),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut shortened = proof;
+        shortened.admissions.clear();
+        shortened.binding_digest = fork_batch_binding_digest(
+            shortened.operation,
+            shortened.expected_inventory_generation,
+            shortened.child_scope,
+            shortened.successor_generation,
+            result.child(),
+            &[],
+        );
+        let rebound_result = ErasureForkRecoveryV1::new(
+            shortened.operation,
+            shortened.binding_digest,
+            shortened.expected_inventory_generation,
+            shortened.child_scope,
+            shortened.successor_generation,
+            result.child().clone(),
+        )?;
+        assert_eq!(shortened.validate(&rebound_result), Ok(()));
+        assert_eq!(
+            shortened.validate_complete_for_inventory(&rebound_result, successor),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         Ok(())
     }
 }
