@@ -67,8 +67,11 @@ fn read_complete_world_replay(
         .logical_head(timeline)
         .map_err(host_error_to_core)?
         .as_u64();
+    if range.to.is_some_and(|to| to.as_u64() > head) {
+        return Err(CoreError::ArtifactUnavailable);
+    }
     let first = range.from.as_u64().max(1);
-    let last = range.to.map_or(head, |to| to.as_u64().min(head));
+    let last = range.to.map_or(head, pos_core::Seq::as_u64);
     let expected = if first > last { 0 } else { last - first + 1 };
     let expected = usize::try_from(expected).map_err(|_| CoreError::ArtifactUnavailable)?;
     if expected > bounds.max_events() {

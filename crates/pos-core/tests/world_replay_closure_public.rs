@@ -34,6 +34,12 @@ fn timeline(value: u128) -> TimelineId {
     TimelineId::from_ulid(Ulid::from(value))
 }
 
+fn scope() -> Hash {
+    let policy = policy();
+    let lease = lease(timeline(1), &policy);
+    WorldReplayClosureV1::artifact_scope(timeline(1), lease.digest())
+}
+
 fn policy() -> WorldRetentionPolicyV1 {
     test_ok(WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
         policy_revision: 1,
@@ -60,7 +66,7 @@ fn lease(timeline_id: TimelineId, policy: &WorldRetentionPolicyV1) -> WorldReten
 
 fn consumer_set(reducer: Hash, output_policy: Hash) -> WorldConsumerSetV1 {
     test_ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-        scope: hash(9),
+        scope: scope(),
         consumers: vec![test_ok(WorldConsumerV1::new(
             "entity-state".to_owned(),
             reducer,
@@ -223,7 +229,7 @@ fn closure_input() -> WorldReplayClosureInputV1 {
     let timeline_id = timeline(1);
     let retention_policy = policy();
     let retention_lease = lease(timeline_id, &retention_policy);
-    let scope = hash(9);
+    let scope = scope();
     WorldReplayClosureInputV1 {
         timeline_id,
         operation_identity: hash(60),
@@ -394,6 +400,31 @@ fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
 fn structural_validation_rejects_unbound_or_incomplete_closures() {
     let base = closure_input();
 
+    let mut caller_chosen_scope = base.clone();
+    let arbitrary_scope = hash(9);
+    caller_chosen_scope.consumer_set = test_ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope: arbitrary_scope,
+        consumers: caller_chosen_scope.consumer_set.consumers().to_vec(),
+        producers: caller_chosen_scope.consumer_set.producers().to_vec(),
+        optional_view_roots: caller_chosen_scope
+            .consumer_set
+            .optional_view_roots()
+            .to_vec(),
+    }));
+    caller_chosen_scope.artifacts = caller_chosen_scope
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            let mut input = artifact.as_input().clone();
+            input.scope = arbitrary_scope;
+            test_ok(WorldArtifactLeafV1::new(input))
+        })
+        .collect();
+    assert_eq!(
+        WorldReplayClosureV1::new(caller_chosen_scope),
+        Err(WorldReplayClosureErrorV1::ScopeMismatch)
+    );
+
     assert_eq!(
         WorldReplayClosureV1::new(WorldReplayClosureInputV1 {
             artifacts: Vec::new(),
@@ -436,7 +467,7 @@ fn structural_validation_rejects_unbound_or_incomplete_closures() {
 
     let mut unowned = base;
     unowned.artifacts[0] = leaf(
-        hash(9),
+        scope(),
         unowned.retention_lease.digest(),
         WorldArtifactKindV1::OutputPolicy,
         hash(43),
@@ -471,7 +502,7 @@ fn structural_validation_rejects_duplicate_digest_and_zero_length() {
 
     let mut duplicate_digest = base.clone();
     duplicate_digest.artifacts[1] = leaf(
-        hash(9),
+        scope(),
         duplicate_digest.retention_lease.digest(),
         WorldArtifactKindV1::ExecutableBudgetPolicy,
         hash(43),
@@ -489,7 +520,7 @@ fn structural_validation_rejects_duplicate_digest_and_zero_length() {
     let mut zero_length = base;
     let zero_length_lease_hash = zero_length.retention_lease.digest();
     zero_length.artifacts[0] = test_ok(WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-        scope: hash(9),
+        scope: scope(),
         kind: WorldArtifactKindV1::OutputPolicy,
         native_digest: hash(43),
         native_byte_length: 0,
@@ -521,7 +552,7 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
 
     let mut wrong_lease_source = base.clone();
     wrong_lease_source.artifacts[0] = leaf(
-        hash(9),
+        scope(),
         hash(99),
         WorldArtifactKindV1::OutputPolicy,
         hash(43),
@@ -551,7 +582,7 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
 
     let mut wrong_policy_leaf = base.clone();
     wrong_policy_leaf.artifacts[2] = leaf(
-        hash(9),
+        scope(),
         wrong_policy_leaf.retention_lease.digest(),
         WorldArtifactKindV1::RetentionPolicy,
         hash(98),
@@ -566,7 +597,7 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
 
     let mut wrong_lease_leaf = base.clone();
     wrong_lease_leaf.artifacts[3] = leaf(
-        hash(9),
+        scope(),
         wrong_lease_leaf.retention_lease.digest(),
         WorldArtifactKindV1::RetentionLease,
         hash(97),
@@ -599,6 +630,15 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
         .retain(|leaf| leaf.as_input().kind != WorldArtifactKindV1::OptionalView);
     assert_eq!(
         WorldReplayClosureV1::new(missing_optional_view),
+        Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
+    );
+
+    let mut required_view = closure_input();
+    let mut view_input = required_view.artifacts[13].as_input().clone();
+    view_input.optionality = ArtifactOptionalityV1::Required;
+    required_view.artifacts[13] = test_ok(WorldArtifactLeafV1::new(view_input));
+    assert_eq!(
+        WorldReplayClosureV1::new(required_view),
         Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
     );
 }
