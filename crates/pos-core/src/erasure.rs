@@ -2628,14 +2628,19 @@ impl ErasureVerifiedInventoryV1 {
     /// authority resolution during an identified retry and compare the
     /// resulting ERSE1 bytes without attempting another durable mutation.
     ///
+    /// Returns a lazy iterator over the committed extension requirements.
+    ///
     /// # Errors
     /// Returns a closed provenance error when the parent/child classification
-    /// or the committed extension chain is incomplete or inconsistent.
+    /// is missing. An inconsistent extension is reported by its iterator item.
     pub fn fork_retry_scope_requirements(
         &self,
         parent: TimelineId,
         child: TimelineId,
-    ) -> Result<Vec<ErasureForkRetryScopeRequirementV1>, ErasureErrorV1> {
+    ) -> Result<
+        impl Iterator<Item = Result<ErasureForkRetryScopeRequirementV1, ErasureErrorV1>> + '_,
+        ErasureErrorV1,
+    > {
         let parent_classifications = self
             .classification_for(parent)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
@@ -2647,60 +2652,67 @@ impl ErasureVerifiedInventoryV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        let mut retry_requirements = Vec::new();
-        for ((state, _), parent_classification) in self.members.iter().zip(parent_classifications) {
-            let request = state.request().reference();
-            if parent_classification.request != request {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            let parent_scope = parent_classification.membership.included_scope();
-            let child_classification = child_classifications
-                .iter()
-                .find(|classification| classification.request == request)
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let requirements = self.members.iter().zip(parent_classifications).filter_map(
+            move |((state, _), parent_classification)| {
+                let requirement = (|| {
+                    let request = state.request().reference();
+                    if parent_classification.request != request {
+                        return Err(ErasureErrorV1::ProvenanceMissing);
+                    }
+                    let parent_scope = parent_classification.membership.included_scope();
+                    let child_classification = child_classifications
+                        .iter()
+                        .find(|classification| classification.request == request)
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                    let child_scope = child_classification.membership.included_scope();
 
-            let Some(scope) = state.scope() else {
-                if parent_scope.is_some()
-                    || child_classification.membership.included_scope().is_some()
-                {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
+                    let Some(scope) = state.scope() else {
+                        return if parent_scope.is_none() && child_scope.is_none() {
+                            Ok(None)
+                        } else {
+                            Err(ErasureErrorV1::ProvenanceMissing)
+                        };
+                    };
+                    let Some(lineage_rule) = scope.lineage_rule() else {
+                        return if child_scope.is_none() {
+                            Ok(None)
+                        } else {
+                            Err(ErasureErrorV1::ProvenanceMissing)
+                        };
+                    };
+                    let Some(child_scope) = child_scope else {
+                        // The current request scope positively excludes this
+                        // already-persisted child. It cannot create a new
+                        // extension requirement for the historical operation.
+                        return Ok(None);
+                    };
+                    if parent_scope.is_none() {
+                        return Err(ErasureErrorV1::ProvenanceMissing);
+                    }
+                    let extension = state
+                        .scope_extensions()
+                        .iter()
+                        .find(|extension| extension.fork() == child_scope)
+                        .copied()
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                    Ok(Some(ErasureForkRetryScopeRequirementV1 {
+                        requirement: ErasureForkScopeRequirementV1 {
+                            request,
+                            scope_commitment: scope.reference(),
+                            lineage_rule,
+                            predecessor_extension: extension.predecessor_extension(),
+                        },
+                        extension,
+                    }))
+                })();
+                match requirement {
+                    Ok(Some(requirement)) => Some(Ok(requirement)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
                 }
-                continue;
-            };
-            let Some(lineage_rule) = scope.lineage_rule() else {
-                if child_classification.membership.included_scope().is_some() {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                }
-                continue;
-            };
-            if parent_scope.is_none() {
-                if child_classification.membership.included_scope().is_some() {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                }
-                continue;
-            }
-            let child_scope = child_classification
-                .membership
-                .included_scope()
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let extensions = state.scope_extensions();
-            let extension = extensions
-                .iter()
-                .find(|extension| extension.fork() == child_scope)
-                .copied()
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let requirement = ErasureForkScopeRequirementV1 {
-                request,
-                scope_commitment: scope.reference(),
-                lineage_rule,
-                predecessor_extension: extension.predecessor_extension(),
-            };
-            retry_requirements.push(ErasureForkRetryScopeRequirementV1 {
-                requirement,
-                extension,
-            });
-        }
-        Ok(retry_requirements)
+            },
+        );
+        Ok(requirements)
     }
 
     /// Prepare the complete successor inventory for one future-Fork command.
@@ -2715,8 +2727,9 @@ impl ErasureVerifiedInventoryV1 {
     /// # Errors
     /// Returns [`ErasureErrorV1::StaleGeneration`] when the supplied inventory
     /// generation is stale. Returns [`ErasureErrorV1::PolicyConflict`] for an
-    /// existing child, an omitted/duplicate/extraneous request mutation, or
-    /// inconsistent child metadata and ERSE1 evidence.
+    /// existing child, an omitted/duplicate/extraneous request mutation, a
+    /// repeated child-scope identity, or inconsistent child metadata and ERSE1
+    /// evidence.
     pub fn prepare_fork_batch(
         self,
         input: ErasureForkAdmissionInputV1,
@@ -2854,6 +2867,13 @@ impl ErasureVerifiedInventoryV1 {
                         .request_heads
                         .iter()
                         .any(|(request, _)| *request == admission.mutation.request())
+                    || self.members.iter().any(|(state, _)| {
+                        state.request().reference() == admission.mutation.request()
+                            && state
+                                .scope_extensions()
+                                .iter()
+                                .any(|extension| extension.fork() == input.child_scope)
+                    })
             })
         {
             return Err(ErasureErrorV1::PolicyConflict);
@@ -3666,6 +3686,7 @@ fn fork_admission_binding_digest(
     mutation: ErasureReferenceV1,
     predecessor: ErasureReferenceV1,
     next_manifest: ErasureReferenceV1,
+    persistence_evidence: ErasureReferenceV1,
     child: &crate::TimelineMeta,
 ) -> ErasureReferenceV1 {
     let Some((parent, at_seq)) = child.fork_point else {
@@ -3681,6 +3702,7 @@ fn fork_admission_binding_digest(
         mutation,
         predecessor,
         next_manifest,
+        persistence_evidence,
     ] {
         hasher.update(&reference.digest());
     }
@@ -3727,6 +3749,85 @@ fn fork_batch_binding_digest(
 
 fn bytes_digest(bytes: &[u8]) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest(*blake3::hash(bytes).as_bytes())
+}
+
+fn fork_admission_persistence_evidence_digest(
+    next_manifest_bytes: ErasureReferenceV1,
+    object_count: usize,
+    objects: impl Iterator<Item = (ErasureReferenceV1, ErasureReferenceV1)>,
+    state_count: usize,
+    states: impl Iterator<Item = (ErasureReferenceV1, ErasureReferenceV1)>,
+    index_inserts: &[ErasureIndexInsertV1],
+    effect: ErasureReferenceV1,
+    effect_bytes: ErasureReferenceV1,
+    effect_subject: Option<ErasureReferenceV1>,
+) -> ErasureReferenceV1 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/erasure-fork-persistence-evidence/v1");
+    hasher.update(&next_manifest_bytes.digest());
+    hasher.update(
+        &u64::try_from(object_count)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (reference, bytes) in objects {
+        hasher.update(&reference.digest());
+        hasher.update(&bytes.digest());
+    }
+    hasher.update(&u64::try_from(state_count).unwrap_or(u64::MAX).to_be_bytes());
+    for (reference, bytes) in states {
+        hasher.update(&reference.digest());
+        hasher.update(&bytes.digest());
+    }
+    hasher.update(
+        &u64::try_from(index_inserts.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for index in index_inserts {
+        let (kind, ordinal, reference) = match *index {
+            ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (0, ordinal, reference),
+            ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (1, ordinal, reference),
+            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
+                (2, ordinal, reference)
+            }
+        };
+        hasher.update(&[kind]);
+        hasher.update(&ordinal.to_be_bytes());
+        hasher.update(&reference.digest());
+    }
+    hasher.update(&effect.digest());
+    hasher.update(&effect_bytes.digest());
+    match effect_subject {
+        Some(subject) => {
+            hasher.update(&[1]);
+            hasher.update(&subject.digest());
+        }
+        None => hasher.update(&[0]),
+    }
+    ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+}
+
+fn fork_recovery_mutation_evidence_digest(
+    mutation: &ErasureForkRecoveryMutationV1,
+) -> ErasureReferenceV1 {
+    fork_admission_persistence_evidence_digest(
+        mutation.next_manifest_bytes,
+        mutation.objects.len(),
+        mutation
+            .objects
+            .iter()
+            .map(|object| (object.reference(), object.bytes())),
+        mutation.states.len(),
+        mutation
+            .states
+            .iter()
+            .map(|state| (state.reference(), state.bytes())),
+        &mutation.index_inserts,
+        mutation.effect,
+        mutation.effect_bytes,
+        mutation.effect_subject,
+    )
 }
 
 /// Durable, payload-free result of one committed future-Fork operation.
@@ -3920,7 +4021,7 @@ impl PreparedErasureForkAdmissionV1 {
             predecessor,
             parent,
             at_seq,
-        );
+        )?;
         Ok(Self {
             input,
             extension,
@@ -3936,7 +4037,25 @@ impl PreparedErasureForkAdmissionV1 {
         predecessor: ErasureReferenceV1,
         parent: TimelineId,
         at_seq: Seq,
-    ) -> ErasureReferenceV1 {
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        let effect_bytes = mutation.effect().to_canonical_cbor()?;
+        let persistence_evidence = fork_admission_persistence_evidence_digest(
+            bytes_digest(mutation.next_manifest().canonical_cbor()),
+            mutation.new_objects().len(),
+            mutation
+                .new_objects()
+                .iter()
+                .map(|object| (object.reference(), bytes_digest(object.canonical_cbor()))),
+            mutation.new_states().len(),
+            mutation
+                .new_states()
+                .iter()
+                .map(|state| (state.reference(), bytes_digest(state.canonical_cbor()))),
+            mutation.index_inserts(),
+            mutation.effect().identity(),
+            bytes_digest(&effect_bytes),
+            mutation.effect().subject(),
+        );
         let digest = fork_admission_binding_digest(
             input.operation,
             input.expected_inventory_generation,
@@ -3945,6 +4064,7 @@ impl PreparedErasureForkAdmissionV1 {
             mutation.request(),
             predecessor,
             mutation.next_manifest().digest(),
+            persistence_evidence,
             &input.child,
         );
         debug_assert_eq!(
@@ -3952,7 +4072,7 @@ impl PreparedErasureForkAdmissionV1 {
             Some((parent, at_seq)),
             "validated fork admission must use its child fork point"
         );
-        digest
+        Ok(digest)
     }
 
     /// Return the stable operation identity.
@@ -4312,6 +4432,7 @@ impl ErasureForkRecoveryProofV1 {
                     .predecessor
                     .ok_or(ErasureErrorV1::ProvenanceMissing)?,
                 admission.next_manifest,
+                fork_recovery_mutation_evidence_digest(admission),
                 recovered.child(),
             );
             if expected != admission.binding_digest {
@@ -4382,26 +4503,36 @@ impl ErasureForkRecoveryProofV1 {
         let is_original_successor =
             recovered.successor_generation() == current_inventory.generation();
         let (parent, _) = recovered.fork_point();
-        let requirements =
-            match current_inventory.fork_retry_scope_requirements(parent, recovered.child().id) {
-                Ok(requirements) => requirements,
-                Err(_) if !is_original_successor => {
-                    return Err(ErasureErrorV1::StaleGeneration);
-                }
-                Err(error) => return Err(error),
-            };
-        if self.admissions.len() != requirements.len()
-            || self
-                .admissions
-                .iter()
-                .zip(&requirements)
-                .any(|(admission, requirement)| {
-                    (admission.request, admission.extension)
-                        != (
-                            requirement.requirement().request(),
-                            requirement.extension().reference(),
-                        )
-                })
+        let stale_error = |error| {
+            if is_original_successor {
+                error
+            } else {
+                ErasureErrorV1::StaleGeneration
+            }
+        };
+        let mut requirements = current_inventory
+            .fork_retry_scope_requirements(parent, recovered.child().id)
+            .map_err(stale_error)?;
+        for admission in &self.admissions {
+            let requirement = requirements
+                .next()
+                .transpose()
+                .map_err(stale_error)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            if (admission.request, admission.extension)
+                != (
+                    requirement.requirement().request(),
+                    requirement.extension().reference(),
+                )
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        if requirements
+            .next()
+            .transpose()
+            .map_err(stale_error)?
+            .is_some()
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -6877,6 +7008,7 @@ mod coverage_paths {
                 reference(183),
                 reference(189),
                 reference(190),
+                fork_recovery_mutation_evidence_digest(&proof.admissions[0]),
                 result.child(),
             )
         );
@@ -6915,6 +7047,7 @@ mod coverage_paths {
                 reference(183),
                 reference(189),
                 reference(190),
+                fork_recovery_mutation_evidence_digest(&proof.admissions[0]),
                 result.child(),
             )
         );
@@ -6929,6 +7062,7 @@ mod coverage_paths {
                 reference(5),
                 reference(6),
                 reference(7),
+                reference(8),
                 &root,
             ),
             reference_zero()
@@ -7227,6 +7361,30 @@ mod coverage_paths {
             proof
         );
         assert_eq!(proof.validate(&result), Ok(()));
+        let mut missing_object = proof.clone();
+        missing_object.admissions[0].objects.pop();
+        assert_eq!(
+            missing_object.validate(&result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut missing_state = proof.clone();
+        missing_state.admissions[0].states.pop();
+        assert_eq!(
+            missing_state.validate(&result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut missing_index = proof.clone();
+        missing_index.admissions[0].index_inserts.pop();
+        assert_eq!(
+            missing_index.validate(&result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        let mut changed_manifest_bytes = proof.clone();
+        changed_manifest_bytes.admissions[0].next_manifest_bytes = reference(195);
+        assert_eq!(
+            changed_manifest_bytes.validate(&result),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         assert_recovery_proof_accessors(&proof, &result, state.state_digest())?;
         assert_recovery_proof_rejects_binding_changes(&proof, &result);
 
@@ -7391,6 +7549,7 @@ mod coverage_paths {
             admission.request,
             predecessor_extension,
             admission.next_manifest,
+            fork_recovery_mutation_evidence_digest(admission),
             result.child(),
         );
         let admission_binding = admission.binding_digest;
