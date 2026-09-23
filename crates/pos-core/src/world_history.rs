@@ -463,7 +463,7 @@ fn validate_history_branch(input: &WorldHistoryBranchInputV1) -> Result<(), Worl
     })
 }
 
-fn validate_range(
+const fn validate_range(
     first_logical_seq: u64,
     last_logical_seq: u64,
     event_count: u64,
@@ -488,7 +488,7 @@ fn validate_content_address(hash: Hash) -> Result<(), WorldHistoryErrorV1> {
     }
 }
 
-fn ensure_finished(parser: &Parser<'_>) -> Result<(), WorldHistoryErrorV1> {
+const fn ensure_finished(parser: &Parser<'_>) -> Result<(), WorldHistoryErrorV1> {
     if parser.finished() {
         Ok(())
     } else {
@@ -642,7 +642,7 @@ impl<'a> Parser<'a> {
         let mut last = 0;
         let mut rows = Vec::new();
         self.array_exact(6)
-            .and_then(|()| self.magic(WEP1_MAGIC))
+            .and_then(|()| self.magic(*WEP1_MAGIC))
             .and_then(|()| self.version())
             .and_then(|()| {
                 self.fixed::<16>(2, 16)
@@ -669,7 +669,7 @@ impl<'a> Parser<'a> {
         let mut event_count = 0;
         let mut children = Vec::new();
         self.array_exact(8)
-            .and_then(|()| self.magic(WHB1_MAGIC))
+            .and_then(|()| self.magic(*WHB1_MAGIC))
             .and_then(|()| self.version())
             .and_then(|()| {
                 self.fixed::<16>(2, 16)
@@ -836,9 +836,9 @@ impl<'a> Parser<'a> {
             .and_then(|()| WorldHistoryChildV1::new(first, last, count, node_hash))
     }
 
-    fn magic(&mut self, expected: &[u8; 4]) -> Result<(), WorldHistoryErrorV1> {
+    fn magic(&mut self, expected: [u8; 4]) -> Result<(), WorldHistoryErrorV1> {
         self.fixed::<4>(2, expected.len()).and_then(|actual| {
-            if &actual == expected {
+            if actual == expected {
                 Ok(())
             } else {
                 Err(WorldHistoryErrorV1::WrongMagic)
@@ -915,14 +915,14 @@ impl<'a> Parser<'a> {
             usize::try_from(encoded_length)
                 .map_err(|_| WorldHistoryErrorV1::FieldOutOfBounds)
                 .and_then(|length| {
-                    if length != expected_length {
-                        Err(WorldHistoryErrorV1::InvalidEncoding)
-                    } else {
+                    if length == expected_length {
                         self.take(length).and_then(|bytes| {
                             bytes
                                 .try_into()
                                 .map_err(|_| WorldHistoryErrorV1::InvalidEncoding)
                         })
+                    } else {
+                        Err(WorldHistoryErrorV1::InvalidEncoding)
                     }
                 })
         })
