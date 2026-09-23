@@ -533,7 +533,7 @@ fn event_signature_contract_rejects_incomplete_and_ineligible_bindings() {
 }
 
 #[test]
-fn generic_import_rejects_signed_events_before_stripping_identity() {
+fn generic_import_accepts_signed_source_as_unsigned_clone() {
     let mut event = event_at(Seq::from_u64(1));
     event.signature = Some(Signature::from_bytes([1; 64]));
     event.signature_identity = Some(KeyIdentityV1::new(
@@ -546,11 +546,7 @@ fn generic_import_rejects_signed_events_before_stripping_identity() {
         events: vec![event],
         parent_fork_hash: None,
     };
-    assert!(matches!(
-        pos_core::store::import_timeline(&mut MinimalStore::new(), export),
-        Err(CoreError::Storage(message))
-            if message.contains("generic import of signed events is disabled")
-    ));
+    assert!(pos_core::store::import_timeline(&mut MinimalStore::new(), export).is_ok());
 }
 
 #[test]
