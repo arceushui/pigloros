@@ -64,10 +64,8 @@ fn read_complete_world_replay(
     use pos_core::CoreError;
 
     let head = sender
-        .timeline(timeline)
+        .logical_head(timeline)
         .map_err(host_error_to_core)?
-        .ok_or(CoreError::ArtifactUnavailable)?
-        .head
         .as_u64();
     let first = range.from.as_u64().max(1);
     let last = range.to.map_or(head, |to| to.as_u64().min(head));

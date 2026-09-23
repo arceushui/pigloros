@@ -336,6 +336,34 @@ mod tests {
     }
 
     #[test]
+    fn public_replay_reads_a_complete_fork_in_timeline_order() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (fork, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let parent = commands.create_timeline("replay-parent").test_ok();
+            let entity = EntityId::new();
+            let shared = commands
+                .append(parent.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            let fork = commands
+                .fork_timeline(parent.id(), shared[1].seq, "replay-fork")
+                .test_ok();
+            commands.append(fork.id(), &[draft(entity)]).test_ok();
+            (fork.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, fork);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+
+        let events = super::replay(&mut reads, fork, &mut registry, &closure).test_ok();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2].seq, Seq::from_u64(3));
+        assert_eq!(count_for(&registry, &entity), 3);
+    }
+
+    #[test]
     fn public_replay_rolls_back_when_final_verification_fails() {
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
             .with_world_replay_verifier(Arc::new(ChangeBoundsOnSecondVerification {
