@@ -111,9 +111,10 @@ pub fn delete_owned_secret_key(
     ))
 }
 
-/// Persist pending destruction, delete the owned signing-key file, and then
-/// commit its immutable tombstone. Calling this again with the same request
-/// also resumes a pending request after a crash or an uncertain directory sync.
+/// Durably destroy an owned signing-key file and commit its tombstone.
+///
+/// Calling this again with the same request resumes a pending request after a
+/// crash or an uncertain directory sync.
 ///
 /// # Errors
 /// Returns the registry or owned-file error. A failure after the first commit
