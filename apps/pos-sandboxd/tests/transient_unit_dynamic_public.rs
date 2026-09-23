@@ -132,22 +132,6 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
-    for (property, expected) in
-        properties[33..40]
-            .iter()
-            .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
-    {
-        match property.value() {
-            SystemdTransientUnitValue::OperatingLimit(value) => {
-                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
-                let (decoded, consumed): (u64, usize) = encoded.deserialize()?;
-                assert_eq!(decoded, expected);
-                assert_eq!(decoded, *value);
-                assert_eq!(consumed, encoded.len());
-            }
-            _value => return Err("systemd service limit must have a t value".into()),
-        }
-    }
     match properties[40].value() {
         SystemdTransientUnitValue::FileDescriptorStoreMax(value) => {
             let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
@@ -175,6 +159,29 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
             assert_eq!(consumed, encoded.len());
         }
         _value => return Err("ExtraFileDescriptors must have an a(hs) value".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn elm1_service_limit_values_have_exact_dbus_encoding() -> Result<(), Box<dyn Error>> {
+    let request = request(LaunchMode::AirGapped)?;
+    let properties = request.requested_properties();
+    for (property, expected) in
+        properties[33..40]
+            .iter()
+            .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
+    {
+        match property.value() {
+            SystemdTransientUnitValue::OperatingLimit(value) => {
+                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+                let (decoded, consumed): (u64, usize) = encoded.deserialize()?;
+                assert_eq!(decoded, expected);
+                assert_eq!(decoded, *value);
+                assert_eq!(consumed, encoded.len());
+            }
+            _value => return Err("systemd service limit must have a t value".into()),
+        }
     }
     Ok(())
 }
