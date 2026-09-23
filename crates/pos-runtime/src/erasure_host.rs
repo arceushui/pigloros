@@ -2871,8 +2871,9 @@ impl ErasureCommandSenderV1<'_> {
             {
                 Ok(result)
             }
-            Ok(_) => Err(ErasureHostErrorV1::StaleGeneration),
-            Err(ErasureErrorV1::StaleGeneration) => Err(ErasureHostErrorV1::StaleGeneration),
+            Ok(_) | Err(ErasureErrorV1::StaleGeneration) => {
+                Err(ErasureHostErrorV1::StaleGeneration)
+            }
             Err(error) => {
                 self.host.poison();
                 Err(map_erasure_error(error))

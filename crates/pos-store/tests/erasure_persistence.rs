@@ -18,14 +18,15 @@ use pos_core::{
     ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryObservationV1,
     ErasureInventoryPersistencePortV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1,
-    ErasureVerifiedTopologyObservationV1, EventStore, Seq, TimelineId, TimelineMeta, TimelineMode,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, ErasureVerifiedTopologyObservationV1, EventStore, Seq, TimelineId,
+    TimelineMeta, TimelineMode, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES,
+    ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -1006,7 +1007,10 @@ where
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(shared.borrow().scope_index_count(request)?, 0);
-    assert!(successor_inventory.topology().contains(&child));
+    assert_eq!(
+        successor_inventory.require_unaffected_topology(child),
+        Ok(())
+    );
     shared.borrow_mut().append(
         child,
         &[pos_core::EventDraft::new(
@@ -1120,7 +1124,10 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 1);
-    assert!(successor_inventory.topology().contains(&child));
+    assert_eq!(
+        successor_inventory.require_unaffected_topology(child),
+        Ok(())
+    );
     let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     assert_ne!(
         stale_inventory.generation(),
@@ -2551,7 +2558,7 @@ fn sqlite_fork_recovery_returns_none_for_unknown_operation(
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let mut store = SqliteStore::open(path)?;
-    let inventory = store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     assert_eq!(
         recover_fork_admission(&mut store, reference(250), &inventory)?,
         None
