@@ -7134,32 +7134,6 @@ mod tests {
         let resolving_authority = UnusedCoordinatorAuthorityV1 {
             resolved_child_scope: Some(recovered.child_scope()),
         };
-        let stale_generation_input = IdentifiedForkTransitionInput {
-            operation,
-            parent,
-            child: recovered.child(),
-            current_generation: recovered.expected_inventory_generation(),
-            current_inventory: &current_inventory,
-            authority: &resolving_authority,
-            coordinator: reference(65),
-            recovered: Some(recovered.clone()),
-        };
-        let mut transition_failure = None;
-        assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(
-                &stale_generation_input,
-                &recovered,
-                &mut transition_failure,
-            ),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-        assert_eq!(
-            transition_failure,
-            Some(TransitionFailureV1::Host(
-                ErasureHostErrorV1::StaleGeneration
-            ))
-        );
-
         let missing_inventory_input = IdentifiedForkTransitionInput {
             operation,
             parent,
@@ -7210,6 +7184,56 @@ mod tests {
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert_eq!(transition_failure, Some(ErasureErrorV1::PolicyConflict));
+    }
+
+    #[test]
+    fn identified_fork_recovery_reports_stale_successor_generation() {
+        let parent = TimelineId::new();
+        let operation = reference(60);
+        let batch = empty_fork_batch(parent, TimelineId::new(), operation)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let recovered = batch
+            .recovery_result()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_ne!(
+            recovered.expected_inventory_generation(),
+            recovered.successor_generation()
+        );
+        let current_inventory = verified_empty_inventory(
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let authority = UnusedCoordinatorAuthorityV1 {
+            resolved_child_scope: Some(recovered.child_scope()),
+        };
+        let input = IdentifiedForkTransitionInput {
+            operation,
+            parent,
+            child: recovered.child(),
+            current_generation: recovered.expected_inventory_generation(),
+            current_inventory: &current_inventory,
+            authority: &authority,
+            coordinator: reference(65),
+            recovered: Some(recovered.clone()),
+        };
+        let mut transition_failure = None;
+
+        assert_eq!(
+            ErasureExecutionHostV1::recover_identified_fork(
+                &input,
+                &recovered,
+                &mut transition_failure,
+            ),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            transition_failure,
+            Some(TransitionFailureV1::Host(
+                ErasureHostErrorV1::StaleGeneration
+            ))
+        );
     }
 
     #[test]
