@@ -156,7 +156,7 @@ where
     }
 }
 
-/// One exact StopUnit job that completed successfully.
+/// One exact `StopUnit` job that completed successfully.
 ///
 /// This is a command observation, not unit absence, cgroup emptiness, or full
 /// attempt-cleanup evidence.
@@ -404,7 +404,8 @@ async fn stop_job_with_proxy(
 ) -> Result<SystemdStopJobCompleted, SystemdTransientUnitTransportError> {
     let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
     let completions = proxy.receive_job_removed().await;
-    stop_job_with_completions(&proxy, completions, unit_name).await
+    let result = stop_job_with_completions(&proxy, completions, unit_name).await;
+    result
 }
 
 async fn stop_job_with_completions(
@@ -429,10 +430,11 @@ async fn force_kill_with_proxy(
     unit_name: TransientServiceUnitName,
 ) -> Result<(), SystemdTransientUnitTransportError> {
     let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
-    proxy
+    let result = proxy
         .kill_unit(unit_name.as_str().to_owned(), KILL_WHOM.to_owned(), SIGKILL)
         .await
-        .map_err(SystemdTransientUnitTransportError::KillCall)
+        .map_err(SystemdTransientUnitTransportError::KillCall);
+    result
 }
 
 async fn submit_and_verify(
