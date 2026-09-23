@@ -167,7 +167,7 @@ fn destroy_key_rejects_invalid_flags_and_unknown_registry() -> Result<(), Box<dy
     }
     assert!(run(&valid).is_err());
     make_key(&key)?;
-    drop(open_store(&Source::Store(database.clone()), Some(&key))?);
+    drop(open_store(&Source::Store(database), Some(&key))?);
     let mut unknown_epoch = valid;
     let position = unknown_epoch
         .iter()
