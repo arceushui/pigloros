@@ -7,9 +7,8 @@ use zbus::{zvariant::OwnedObjectPath, Connection};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
-use crate::kernel_cgroup::CgroupRoot;
 use crate::{
-    AttemptCgroupError, BoundAttemptCgroup, SystemdHardeningProperty,
+    AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
     SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
     SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty,
     SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind,
