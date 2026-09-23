@@ -7447,8 +7447,11 @@ mod coverage_entrypoints {
                 recovery_receipt,
             )),
         );
-        let recovery_inventory =
+        let recovery_snapshot =
             ok(recovery_store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS));
+        let mut recovery_query = ErasureVerifiedEmptyInventoryQueryV1::new(recovery_snapshot);
+        let recovery_inventory =
+            ok(recovery_query.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS));
         fail_next_chain_hash_at_for_test();
         assert_eq!(
             ErasureForkPersistencePortV1::recover_fork_admission(
