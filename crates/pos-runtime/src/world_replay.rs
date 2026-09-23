@@ -369,6 +369,7 @@ mod tests {
             Vec::new(),
         )
         .test_ok();
+        assert_eq!(requested_use.operation(), ErasureProtectedOperationV1::Read);
         let exact = test_verified_world_replay(
             &closure,
             &requested_use,

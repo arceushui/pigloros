@@ -57,23 +57,29 @@ pub fn compare(
         let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
             comparison_outcome = registry_a.try_with_state_transaction(|candidate_a| {
                 registry_b.try_with_state_transaction(|candidate_b| {
-                    let read_bounds =
-                        require_comparison_artifacts(sender, closures, requested_uses)?;
-                    let diff = compare_with_sender(
-                        sender,
-                        a,
-                        b,
-                        fork_seq,
-                        candidate_a,
-                        candidate_b,
-                        read_bounds,
-                    )?;
-                    let final_bounds =
-                        require_comparison_artifacts(sender, closures, requested_uses)?;
-                    if final_bounds != read_bounds {
-                        return Err(CoreError::ArtifactUnavailable);
-                    }
-                    Ok(diff)
+                    require_comparison_artifacts(sender, closures, requested_uses).and_then(
+                        |read_bounds| {
+                            compare_with_sender(
+                                sender,
+                                a,
+                                b,
+                                fork_seq,
+                                candidate_a,
+                                candidate_b,
+                                read_bounds,
+                            )
+                            .and_then(|diff| {
+                                require_comparison_artifacts(sender, closures, requested_uses)
+                                    .and_then(|final_bounds| {
+                                        if final_bounds != read_bounds {
+                                            Err(CoreError::ArtifactUnavailable)
+                                        } else {
+                                            Ok(diff)
+                                        }
+                                    })
+                            })
+                        },
+                    )
                 })
             });
         };
@@ -103,10 +109,10 @@ fn require_comparison_artifacts(
 ) -> Result<[EventReadBounds; 2], CoreError> {
     let [closure_a, closure_b] = closures;
     let [requested_a, requested_b] = requested_uses;
-    Ok([
-        crate::require_world_replay(sender, closure_a, requested_a)?,
-        crate::require_world_replay(sender, closure_b, requested_b)?,
-    ])
+    crate::require_world_replay(sender, closure_a, requested_a).and_then(|bounds_a| {
+        crate::require_world_replay(sender, closure_b, requested_b)
+            .map(|bounds_b| [bounds_a, bounds_b])
+    })
 }
 
 fn comparison_use(
@@ -138,9 +144,15 @@ fn compare_with_sender(
     read_bounds: [EventReadBounds; 2],
 ) -> Result<ForkDiff, CoreError> {
     let post_fork_range = SeqRange::from_seq(fork_seq.next());
-    let events_a = crate::read_complete_world_replay(sender, a, post_fork_range, read_bounds[0])?;
-    let events_b = crate::read_complete_world_replay(sender, b, post_fork_range, read_bounds[1])?;
-    compare_events(a, b, fork_seq, registry_a, registry_b, events_a, events_b)
+    crate::read_complete_world_replay(sender, a, post_fork_range, read_bounds[0]).and_then(
+        |events_a| {
+            crate::read_complete_world_replay(sender, b, post_fork_range, read_bounds[1]).and_then(
+                |events_b| {
+                    compare_events(a, b, fork_seq, registry_a, registry_b, events_a, events_b)
+                },
+            )
+        },
+    )
 }
 
 fn compare_events(
@@ -349,6 +361,42 @@ mod tests {
     }
 
     // ── tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn public_compare_rejects_either_empty_consumer_selection() {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
+        let timelines = [TimelineId::new(), TimelineId::new()];
+        let mut empty_a = ProjectionRegistry::new();
+        let mut valid_b = make_registry();
+        assert!(matches!(
+            super::compare(
+                &mut reads,
+                timelines,
+                Seq::ZERO,
+                [&mut empty_a, &mut valid_b],
+                [&closure, &closure],
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        let mut valid_a = make_registry();
+        let mut empty_b = ProjectionRegistry::new();
+        assert!(matches!(
+            super::compare(
+                &mut reads,
+                timelines,
+                Seq::ZERO,
+                [&mut valid_a, &mut empty_b],
+                [&closure, &closure],
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

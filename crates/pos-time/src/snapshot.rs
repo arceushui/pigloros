@@ -72,15 +72,22 @@ fn snapshot_effect_with_rechecks(
     requested_use: &WorldReplayUseV1,
 ) -> Result<Snapshot, CoreError> {
     registry.try_with_state_transaction(|candidate| {
-        let read_bounds = crate::require_world_replay(sender, closure, requested_use)?;
-        let events =
-            crate::read_complete_world_replay(sender, timeline, SeqRange::all(), read_bounds)?;
-        let snapshot = snapshot_from_events(timeline, candidate, &events)?;
-        let final_bounds = crate::require_world_replay(sender, closure, requested_use)?;
-        if final_bounds != read_bounds {
-            return Err(CoreError::ArtifactUnavailable);
-        }
-        Ok(snapshot)
+        crate::require_world_replay(sender, closure, requested_use).and_then(|read_bounds| {
+            crate::read_complete_world_replay(sender, timeline, SeqRange::all(), read_bounds)
+                .and_then(|events| {
+                    snapshot_from_events(timeline, candidate, &events).and_then(|snapshot| {
+                        crate::require_world_replay(sender, closure, requested_use).and_then(
+                            |final_bounds| {
+                                if final_bounds != read_bounds {
+                                    Err(CoreError::ArtifactUnavailable)
+                                } else {
+                                    Ok(snapshot)
+                                }
+                            },
+                        )
+                    })
+                })
+        })
     })
 }
 
@@ -157,18 +164,37 @@ fn verify_snapshot_effect_with_rechecks(
     requested_use: &WorldReplayUseV1,
 ) -> Result<(), SnapshotError> {
     registry.try_with_state_transaction(|candidate| {
-        let read_bounds = crate::require_world_replay(sender, closure, requested_use)
-            .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-        let all_events =
-            crate::read_complete_world_replay(sender, snap.timeline, SeqRange::all(), read_bounds)?;
-        let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
-        verify_snapshot_event_sets(snap, candidate, &all_events[tail_start..], &all_events)?;
-        let final_bounds = crate::require_world_replay(sender, closure, requested_use)
-            .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-        if final_bounds != read_bounds {
-            return Err(SnapshotError::ArtifactUnavailable);
-        }
-        Ok(())
+        crate::require_world_replay(sender, closure, requested_use)
+            .map_err(|_| SnapshotError::ArtifactUnavailable)
+            .and_then(|read_bounds| {
+                crate::read_complete_world_replay(
+                    sender,
+                    snap.timeline,
+                    SeqRange::all(),
+                    read_bounds,
+                )
+                .map_err(SnapshotError::from)
+                .and_then(|all_events| {
+                    let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
+                    verify_snapshot_event_sets(
+                        snap,
+                        candidate,
+                        &all_events[tail_start..],
+                        &all_events,
+                    )
+                    .and_then(|()| {
+                        crate::require_world_replay(sender, closure, requested_use)
+                            .map_err(|_| SnapshotError::ArtifactUnavailable)
+                            .and_then(|final_bounds| {
+                                if final_bounds != read_bounds {
+                                    Err(SnapshotError::ArtifactUnavailable)
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                    })
+                })
+            })
     })
 }
 
@@ -532,6 +558,32 @@ mod tests {
     }
 
     // ── tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn public_snapshot_rejects_empty_consumer_selection() {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
+        let timeline = TimelineId::new();
+        let mut registry = ProjectionRegistry::new();
+        assert!(matches!(
+            super::snapshot(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        let snap = Snapshot {
+            timeline,
+            at_seq: Seq::ZERO,
+            registry: HashMap::new(),
+        };
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &snap, &mut registry, &closure),
+            Err(SnapshotError::ArtifactUnavailable)
+        ));
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
