@@ -1740,6 +1740,41 @@ mod tests {
         }
     }
 
+    struct InvalidObservationComponentBackend {
+        component: &'static str,
+    }
+
+    impl WorldBackend for InvalidObservationComponentBackend {
+        fn name(&self) -> &'static str {
+            "invalid-observation-component-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
+            bodies
+                .iter()
+                .map(|body| {
+                    let mut observed = WorldObservation {
+                        entity_id: body.entity_id,
+                        x: body.x,
+                        y: body.y,
+                        z: body.z,
+                        vx: body.vx,
+                        vy: body.vy,
+                        vz: body.vz,
+                    };
+                    match self.component {
+                        "z" => observed.z = f64::MAX,
+                        "vx" => observed.vx = f64::MAX,
+                        "vy" => observed.vy = f64::MAX,
+                        "vz" => observed.vz = f64::MAX,
+                        _ => unreachable!("test only supplies a known component"),
+                    }
+                    observed
+                })
+                .collect()
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_rejects_invalid_config_payload() {
@@ -1830,6 +1865,36 @@ mod tests {
             "unexpected coordinate error: {message}"
         );
         driver.abort_step();
+    }
+
+    #[test]
+    fn invalid_backend_observation_components_fail_closed_and_restore_step() {
+        for component in ["z", "vx", "vy", "vz"] {
+            let initial = Body {
+                entity_id: EntityId::new(),
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                vx: 4.0,
+                vy: 5.0,
+                vz: 6.0,
+            };
+            let mut driver = WorldDriver::new(
+                vec![initial.clone()],
+                Box::new(InvalidObservationComponentBackend { component }),
+                sample_config(),
+            );
+            let error = driver
+                .step(TimelineId::new(), ObservationView::empty())
+                .test_err();
+            assert!(error
+                .to_string()
+                .contains(&format!("non-representable {component} coordinate")));
+            assert_eq!(driver.entities, vec![initial]);
+            assert_eq!(driver.tick, 0);
+            assert!(!driver.config_emitted);
+            assert!(driver.staged_step.is_none());
+        }
     }
 
     #[test]

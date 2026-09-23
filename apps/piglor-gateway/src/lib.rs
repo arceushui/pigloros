@@ -6883,6 +6883,19 @@ mod tests {
                 Err(_) => {}
             }
         }
+
+        for overflow in [
+            serde_json::json!([f64::MAX, 0.0]),
+            serde_json::json!([0.0, -f64::MAX]),
+        ] {
+            let mut candidate = payload.clone();
+            candidate["params"] = overflow;
+            let action: GatewayWorldActionPayload = serde_json::from_value(candidate).test_ok();
+            assert!(matches!(
+                action.encode(),
+                Err(ActionRejected::DomainValidationFailed(_))
+            ));
+        }
     }
 
     #[tokio::test]
