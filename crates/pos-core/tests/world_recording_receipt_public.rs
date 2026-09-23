@@ -103,7 +103,7 @@ fn public_wcr1_decoder_rejects_truncated_trailing_and_oversized_input() {
     for prefix_length in 0..literal.len() {
         assert!(WorldRecordingReceiptV1::from_canonical_cbor(&literal[..prefix_length]).is_err());
     }
-    let mut trailing = literal.clone();
+    let mut trailing = literal;
     trailing.push(0);
     assert_eq!(
         WorldRecordingReceiptV1::from_canonical_cbor(&trailing),
