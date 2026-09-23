@@ -693,7 +693,7 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(
         (3, Value::Text("wrong-optional-reference".to_owned())),
         (4, Value::Bytes(vec![0_u8])),
         (5, Value::Text("wrong-error-code".to_owned())),
-        (5, Value::Integer(16_u64.into())),
+        (5, Value::Integer(17_u64.into())),
     ] {
         let mut malformed = fields.clone();
         malformed[index] = replacement;
