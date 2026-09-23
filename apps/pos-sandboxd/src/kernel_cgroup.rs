@@ -9,7 +9,7 @@ use rustix::io::Errno;
 use rustix::time::{clock_gettime, ClockId};
 use zbus::zvariant::OwnedObjectPath;
 
-use crate::TransientServiceUnitName;
+use crate::{CgroupRoot, TransientServiceUnitName};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
@@ -63,10 +63,6 @@ pub enum AttemptCgroupError {
     #[error("the attempt cgroup path disappeared without proven deletion")]
     DeletionUnproven,
 }
-
-/// The verified fixed cgroup v2 root, retained as a descriptor.
-#[derive(Debug)]
-pub(super) struct CgroupRoot(File);
 
 impl CgroupRoot {
     pub(crate) fn system() -> Result<Self, AttemptCgroupError> {
@@ -426,6 +422,12 @@ mod tests {
         assert_eq!(empty.unit_path(), "/org/freedesktop/systemd1/unit/test");
         assert!(empty.observed_monotonic().0 >= 0);
         let original_identity = empty.cgroup_identity();
+        // Fault injection models an I/O failure on the retained events handle.
+        bound.events = File::open(&directory)?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::EventsRead(_))
+        ));
         fs::remove_file(events)?;
         fs::remove_dir(&directory)?;
         let deleted = bound.observe_empty()?;

@@ -9,6 +9,9 @@ mod kernel_cgroup;
 mod system_bus;
 mod transient_unit;
 
+#[derive(Debug)]
+struct CgroupRoot(std::fs::File);
+
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
