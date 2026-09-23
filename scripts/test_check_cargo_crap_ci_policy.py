@@ -26,6 +26,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "examples/**",
     "src/selector/installation/tests/**",
     "src/erasure_tests.rs",
+    "src/system_bus/tests.rs",
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -171,6 +172,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/tests/engine.rs",
             "src/protocol_tests.rs",
             "src/examples/production.rs",
+            "src/system_bus/transport.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):

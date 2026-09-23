@@ -172,6 +172,10 @@ impl SystemdTransientUnitProperty {
     pub const fn value(&self) -> &SystemdTransientUnitValue {
         &self.value
     }
+
+    pub(crate) fn into_parts(self) -> (&'static str, SystemdTransientUnitValue) {
+        (self.name, self.value)
+    }
 }
 
 /// A typed observed transient-unit property used by the request verifier.
@@ -367,6 +371,10 @@ impl TransientUnitRequest {
     #[must_use]
     pub fn requested_properties(&self) -> &[SystemdTransientUnitProperty] {
         &self.properties
+    }
+
+    pub(crate) fn into_requested_properties(self) -> Vec<SystemdTransientUnitProperty> {
+        self.properties
     }
 
     /// Verify complete ordered typed manager readback for this compiled request.
