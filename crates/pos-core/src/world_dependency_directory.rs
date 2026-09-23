@@ -21,7 +21,7 @@ const DOMAIN: &[u8] = b"pigloros.world-evidence.dependency-branch.v1\0";
 
 /// Closed errors returned by the structural WDB1 codec.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorldDependencyDirectoryErrorV1 {
+pub enum WorldDependencyBranchErrorV1 {
     /// The CBOR item is malformed or has a field with the wrong type or width.
     InvalidEncoding,
     /// The record does not use the WDB1 magic.
@@ -44,7 +44,7 @@ pub enum WorldDependencyDirectoryErrorV1 {
     NonCanonicalEncoding,
 }
 
-impl fmt::Display for WorldDependencyDirectoryErrorV1 {
+impl fmt::Display for WorldDependencyBranchErrorV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidEncoding => "invalid WDB1 encoding",
@@ -61,7 +61,7 @@ impl fmt::Display for WorldDependencyDirectoryErrorV1 {
     }
 }
 
-impl std::error::Error for WorldDependencyDirectoryErrorV1 {}
+impl std::error::Error for WorldDependencyBranchErrorV1 {}
 
 /// One immutable WDB1 key, ordered by artifact kind code then raw digest bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,9 +78,9 @@ impl WorldDependencyKeyV1 {
     pub fn new(
         kind: WorldArtifactKindV1,
         native_digest: Hash,
-    ) -> Result<Self, WorldDependencyDirectoryErrorV1> {
+    ) -> Result<Self, WorldDependencyBranchErrorV1> {
         if native_digest == Hash::zero() {
-            return Err(WorldDependencyDirectoryErrorV1::ZeroContentAddress);
+            return Err(WorldDependencyBranchErrorV1::ZeroContentAddress);
         }
         Ok(Self {
             kind,
@@ -103,14 +103,14 @@ impl WorldDependencyKeyV1 {
 
 /// One immutable summary of a WDB1 child node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorldDependencyDirectoryChildV1 {
+pub struct WorldDependencyBranchChildV1 {
     first_key: WorldDependencyKeyV1,
     last_key: WorldDependencyKeyV1,
     leaf_count: u64,
     node_hash: Hash,
 }
 
-impl WorldDependencyDirectoryChildV1 {
+impl WorldDependencyBranchChildV1 {
     /// Construct one child summary with a positive, internally consistent range.
     ///
     /// # Errors
@@ -121,17 +121,18 @@ impl WorldDependencyDirectoryChildV1 {
         last_key: WorldDependencyKeyV1,
         leaf_count: u64,
         node_hash: Hash,
-    ) -> Result<Self, WorldDependencyDirectoryErrorV1> {
+    ) -> Result<Self, WorldDependencyBranchErrorV1> {
         let order = compare_keys(first_key, last_key);
         if leaf_count == 0
             || order == Ordering::Greater
             || (order == Ordering::Equal && leaf_count != 1)
             || (order == Ordering::Less && leaf_count < 2)
+            || !range_has_room(first_key, last_key, leaf_count)
         {
-            return Err(WorldDependencyDirectoryErrorV1::InvalidRange);
+            return Err(WorldDependencyBranchErrorV1::InvalidRange);
         }
         if node_hash == Hash::zero() {
-            return Err(WorldDependencyDirectoryErrorV1::ZeroContentAddress);
+            return Err(WorldDependencyBranchErrorV1::ZeroContentAddress);
         }
         Ok(Self {
             first_key,
@@ -168,27 +169,27 @@ impl WorldDependencyDirectoryChildV1 {
 
 /// Unvalidated fields supplied to construct one WDB1 branch.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorldDependencyDirectoryInputV1 {
+pub struct WorldDependencyBranchInputV1 {
     /// Owner scope for this directory node.
     pub scope: Hash,
     /// One for WAL1 leaf references, increasing toward the root.
     pub height: u8,
     /// Ordered child summaries. The node derives its endpoints and leaf count.
-    pub children: Vec<WorldDependencyDirectoryChildV1>,
+    pub children: Vec<WorldDependencyBranchChildV1>,
 }
 
 /// Immutable structurally validated WDB1 branch.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorldDependencyDirectoryV1 {
+pub struct WorldDependencyBranchV1 {
     scope: Hash,
     height: u8,
     first_key: WorldDependencyKeyV1,
     last_key: WorldDependencyKeyV1,
     leaf_count: u64,
-    children: Vec<WorldDependencyDirectoryChildV1>,
+    children: Vec<WorldDependencyBranchChildV1>,
 }
 
-impl WorldDependencyDirectoryV1 {
+impl WorldDependencyBranchV1 {
     /// Validate scope, height, ordered ranges, packed child counts, and the
     /// checked leaf-count sum.
     ///
@@ -200,40 +201,38 @@ impl WorldDependencyDirectoryV1 {
     /// # Errors
     /// Rejects zero scope, unsupported height, empty or oversized branches,
     /// invalid child summaries, unordered ranges, or an overflowing sum.
-    pub fn new(
-        input: WorldDependencyDirectoryInputV1,
-    ) -> Result<Self, WorldDependencyDirectoryErrorV1> {
+    pub fn new(input: WorldDependencyBranchInputV1) -> Result<Self, WorldDependencyBranchErrorV1> {
         if input.scope == Hash::zero() {
-            return Err(WorldDependencyDirectoryErrorV1::ZeroContentAddress);
+            return Err(WorldDependencyBranchErrorV1::ZeroContentAddress);
         }
         if input.height == 0 || input.height > MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1 {
-            return Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds);
+            return Err(WorldDependencyBranchErrorV1::FieldOutOfBounds);
         }
         if input.children.is_empty()
             || input.children.len() > MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1
         {
-            return Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds);
+            return Err(WorldDependencyBranchErrorV1::FieldOutOfBounds);
         }
         if input
             .children
             .windows(2)
             .any(|pair| compare_keys(pair[0].last_key, pair[1].first_key) != Ordering::Less)
         {
-            return Err(WorldDependencyDirectoryErrorV1::NonCanonicalOrder);
+            return Err(WorldDependencyBranchErrorV1::NonCanonicalOrder);
         }
         let child_capacity = subtree_capacity(input.height - 1);
         for (index, child) in input.children.iter().enumerate() {
             match child_capacity {
                 Some(capacity) if child.leaf_count > capacity => {
-                    return Err(WorldDependencyDirectoryErrorV1::InvalidRange);
+                    return Err(WorldDependencyBranchErrorV1::InvalidRange);
                 }
                 Some(capacity)
                     if index + 1 < input.children.len() && child.leaf_count != capacity =>
                 {
-                    return Err(WorldDependencyDirectoryErrorV1::InvalidRange);
+                    return Err(WorldDependencyBranchErrorV1::InvalidRange);
                 }
                 None if index + 1 < input.children.len() => {
-                    return Err(WorldDependencyDirectoryErrorV1::InvalidRange);
+                    return Err(WorldDependencyBranchErrorV1::InvalidRange);
                 }
                 _ => {}
             }
@@ -245,7 +244,7 @@ impl WorldDependencyDirectoryV1 {
             .iter()
             .try_fold(0_u64, |total, child| total.checked_add(child.leaf_count))
         else {
-            return Err(WorldDependencyDirectoryErrorV1::LeafCountOverflow);
+            return Err(WorldDependencyBranchErrorV1::LeafCountOverflow);
         };
         Ok(Self {
             scope: input.scope,
@@ -262,9 +261,9 @@ impl WorldDependencyDirectoryV1 {
     /// # Errors
     /// Rejects malformed, non-preferred, trailing, unsupported, or oversized
     /// records before allocating child storage beyond the fixed fanout bound.
-    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldDependencyDirectoryErrorV1> {
+    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldDependencyBranchErrorV1> {
         if bytes.as_slice().len() > MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1 {
-            return Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds);
+            return Err(WorldDependencyBranchErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
             bytes: bytes.as_slice(),
@@ -277,7 +276,7 @@ impl WorldDependencyDirectoryV1 {
                 if directory.encode().as_slice() == bytes.as_slice() {
                     Ok(directory)
                 } else {
-                    Err(WorldDependencyDirectoryErrorV1::NonCanonicalEncoding)
+                    Err(WorldDependencyBranchErrorV1::NonCanonicalEncoding)
                 }
             })
     }
@@ -347,7 +346,7 @@ impl WorldDependencyDirectoryV1 {
 
     /// Borrow the ordered child summaries.
     #[must_use]
-    pub fn children(&self) -> &[WorldDependencyDirectoryChildV1] {
+    pub fn children(&self) -> &[WorldDependencyBranchChildV1] {
         &self.children
     }
 }
@@ -358,6 +357,30 @@ fn compare_keys(left: WorldDependencyKeyV1, right: WorldDependencyKeyV1) -> Orde
             .as_bytes()
             .cmp(right.native_digest.as_bytes())
     })
+}
+
+fn range_has_room(first: WorldDependencyKeyV1, last: WorldDependencyKeyV1, count: u64) -> bool {
+    // Artifact kinds are the contiguous codes 0..=13. Advance the first
+    // digest by count - 1 valid keys, skipping the zero digest on a kind
+    // boundary. A u64 count can cross at most one 256-bit digest boundary.
+    let mut minimum_last = *first.native_digest.as_bytes();
+    let mut carry = count - 1;
+    for byte in minimum_last.iter_mut().rev() {
+        let (sum, overflow) = byte.overflowing_add(carry.to_le_bytes()[0]);
+        *byte = sum;
+        carry = (carry >> 8) + u64::from(overflow);
+    }
+    let minimum_kind = first.kind.code() + carry.to_le_bytes()[0];
+    if carry != 0 {
+        let mut increment = 1_u8;
+        for byte in minimum_last.iter_mut().rev() {
+            let (sum, overflow) = byte.overflowing_add(increment);
+            *byte = sum;
+            increment = u8::from(overflow);
+        }
+    }
+    minimum_kind < last.kind.code()
+        || (minimum_kind == last.kind.code() && minimum_last <= *last.native_digest.as_bytes())
 }
 
 fn subtree_capacity(height: u8) -> Option<u64> {
@@ -415,7 +438,7 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    fn directory(&mut self) -> Result<WorldDependencyDirectoryV1, WorldDependencyDirectoryErrorV1> {
+    fn directory(&mut self) -> Result<WorldDependencyBranchV1, WorldDependencyBranchErrorV1> {
         self.array(8)
             .and_then(|()| self.magic())
             .and_then(|()| self.version())
@@ -433,7 +456,7 @@ impl Reader<'_> {
             })
             .and_then(|(scope, height, first_key, last_key, leaf_count)| {
                 self.children().and_then(|children| {
-                    WorldDependencyDirectoryV1::new(WorldDependencyDirectoryInputV1 {
+                    WorldDependencyBranchV1::new(WorldDependencyBranchInputV1 {
                         scope,
                         height,
                         children,
@@ -445,39 +468,39 @@ impl Reader<'_> {
                         {
                             Ok(directory)
                         } else {
-                            Err(WorldDependencyDirectoryErrorV1::InvalidRange)
+                            Err(WorldDependencyBranchErrorV1::InvalidRange)
                         }
                     })
                 })
             })
     }
 
-    fn magic(&mut self) -> Result<(), WorldDependencyDirectoryErrorV1> {
+    fn magic(&mut self) -> Result<(), WorldDependencyBranchErrorV1> {
         self.blob::<4>().and_then(|magic| {
             if magic == *MAGIC {
                 Ok(())
             } else {
-                Err(WorldDependencyDirectoryErrorV1::WrongMagic)
+                Err(WorldDependencyBranchErrorV1::WrongMagic)
             }
         })
     }
 
-    fn version(&mut self) -> Result<(), WorldDependencyDirectoryErrorV1> {
+    fn version(&mut self) -> Result<(), WorldDependencyBranchErrorV1> {
         self.head(0).and_then(|version| {
             if version == u64::from(VERSION) {
                 Ok(())
             } else {
-                Err(WorldDependencyDirectoryErrorV1::UnsupportedVersion)
+                Err(WorldDependencyBranchErrorV1::UnsupportedVersion)
             }
         })
     }
 
-    fn key(&mut self) -> Result<WorldDependencyKeyV1, WorldDependencyDirectoryErrorV1> {
+    fn key(&mut self) -> Result<WorldDependencyKeyV1, WorldDependencyBranchErrorV1> {
         self.array(2)
             .and_then(|()| self.code())
             .and_then(|code| {
                 WorldArtifactKindV1::from_code(code)
-                    .map_err(|_| WorldDependencyDirectoryErrorV1::UnsupportedKind)
+                    .map_err(|_| WorldDependencyBranchErrorV1::UnsupportedKind)
             })
             .and_then(|kind| {
                 self.blob()
@@ -487,18 +510,16 @@ impl Reader<'_> {
 
     fn children(
         &mut self,
-    ) -> Result<Vec<WorldDependencyDirectoryChildV1>, WorldDependencyDirectoryErrorV1> {
+    ) -> Result<Vec<WorldDependencyBranchChildV1>, WorldDependencyBranchErrorV1> {
         self.bounded_count(1, MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1 as u64)
             .and_then(|count| {
                 (0..count)
                     .map(|_| self.child())
-                    .collect::<Result<Vec<_>, WorldDependencyDirectoryErrorV1>>()
+                    .collect::<Result<Vec<_>, WorldDependencyBranchErrorV1>>()
             })
     }
 
-    fn child(
-        &mut self,
-    ) -> Result<WorldDependencyDirectoryChildV1, WorldDependencyDirectoryErrorV1> {
+    fn child(&mut self) -> Result<WorldDependencyBranchChildV1, WorldDependencyBranchErrorV1> {
         self.array(4)
             .and_then(|()| self.key())
             .and_then(|first_key| self.key().map(|last_key| (first_key, last_key)))
@@ -508,7 +529,7 @@ impl Reader<'_> {
             })
             .and_then(|(first_key, last_key, leaf_count)| {
                 self.blob().and_then(|node_hash| {
-                    WorldDependencyDirectoryChildV1::new(
+                    WorldDependencyBranchChildV1::new(
                         first_key,
                         last_key,
                         leaf_count,
@@ -518,15 +539,15 @@ impl Reader<'_> {
             })
     }
 
-    const fn finish(&self) -> Result<(), WorldDependencyDirectoryErrorV1> {
+    const fn finish(&self) -> Result<(), WorldDependencyBranchErrorV1> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
-            Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
+            Err(WorldDependencyBranchErrorV1::InvalidEncoding)
         }
     }
 
-    fn take(&mut self, length: usize) -> Result<&[u8], WorldDependencyDirectoryErrorV1> {
+    fn take(&mut self, length: usize) -> Result<&[u8], WorldDependencyBranchErrorV1> {
         // The caller reads only fixed 1/8/32-byte fields after the complete
         // input has been capped at 65,536 bytes, so this addition is bounded.
         let end = self.offset + length;
@@ -535,11 +556,11 @@ impl Reader<'_> {
                 self.offset = end;
                 Ok(bytes)
             }
-            None => Err(WorldDependencyDirectoryErrorV1::InvalidEncoding),
+            None => Err(WorldDependencyBranchErrorV1::InvalidEncoding),
         }
     }
 
-    fn head(&mut self, expected_major: u8) -> Result<u64, WorldDependencyDirectoryErrorV1> {
+    fn head(&mut self, expected_major: u8) -> Result<u64, WorldDependencyBranchErrorV1> {
         self.take(1).map(|bytes| bytes[0]).and_then(|initial| {
             if initial >> 5 == expected_major {
                 match initial & 31 {
@@ -549,26 +570,26 @@ impl Reader<'_> {
                             .iter()
                             .fold(0, |value, byte| (value << 8) | u64::from(*byte))
                     }),
-                    _ => Err(WorldDependencyDirectoryErrorV1::InvalidEncoding),
+                    _ => Err(WorldDependencyBranchErrorV1::InvalidEncoding),
                 }
             } else {
-                Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
+                Err(WorldDependencyBranchErrorV1::InvalidEncoding)
             }
         })
     }
 
-    fn code(&mut self) -> Result<u8, WorldDependencyDirectoryErrorV1> {
+    fn code(&mut self) -> Result<u8, WorldDependencyBranchErrorV1> {
         self.head(0).and_then(|value| {
-            u8::try_from(value).map_err(|_| WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
+            u8::try_from(value).map_err(|_| WorldDependencyBranchErrorV1::FieldOutOfBounds)
         })
     }
 
-    fn array(&mut self, expected_count: u64) -> Result<(), WorldDependencyDirectoryErrorV1> {
+    fn array(&mut self, expected_count: u64) -> Result<(), WorldDependencyBranchErrorV1> {
         self.head(4).and_then(|actual_count| {
             if actual_count == expected_count {
                 Ok(())
             } else {
-                Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
+                Err(WorldDependencyBranchErrorV1::InvalidEncoding)
             }
         })
     }
@@ -577,20 +598,20 @@ impl Reader<'_> {
         &mut self,
         minimum: u64,
         maximum: u64,
-    ) -> Result<u64, WorldDependencyDirectoryErrorV1> {
+    ) -> Result<u64, WorldDependencyBranchErrorV1> {
         self.head(4).and_then(|count| {
             if count < minimum || count > maximum {
-                Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
+                Err(WorldDependencyBranchErrorV1::FieldOutOfBounds)
             } else {
                 Ok(count)
             }
         })
     }
 
-    fn blob<const N: usize>(&mut self) -> Result<[u8; N], WorldDependencyDirectoryErrorV1> {
+    fn blob<const N: usize>(&mut self) -> Result<[u8; N], WorldDependencyBranchErrorV1> {
         self.head(2).and_then(|length| {
             if length != N as u64 {
-                return Err(WorldDependencyDirectoryErrorV1::InvalidEncoding);
+                return Err(WorldDependencyBranchErrorV1::InvalidEncoding);
             }
             self.take(N).map(|bytes| {
                 let mut output = [0; N];

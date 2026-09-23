@@ -214,10 +214,9 @@ pub use world_consumer_set::{
     WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES, WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS,
 };
 pub use world_dependency_directory::{
-    WorldDependencyDirectoryChildV1, WorldDependencyDirectoryErrorV1,
-    WorldDependencyDirectoryInputV1, WorldDependencyDirectoryV1, WorldDependencyKeyV1,
-    MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1, MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1,
-    MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
+    WorldDependencyBranchChildV1, WorldDependencyBranchErrorV1, WorldDependencyBranchInputV1,
+    WorldDependencyBranchV1, WorldDependencyKeyV1, MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1,
+    MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1, MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
 };
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
