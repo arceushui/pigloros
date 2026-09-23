@@ -774,6 +774,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
+ "libc",
  "pos-core",
  "pos-crypto",
  "pos-plugin-ledger",
@@ -783,6 +784,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]
