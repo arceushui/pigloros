@@ -188,7 +188,7 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     fn implementation_artifact<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<u8> {
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let _ = plugin;
         match self {
             #[cfg(any(test, feature = "test-support"))]
