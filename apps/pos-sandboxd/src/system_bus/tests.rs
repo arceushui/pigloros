@@ -83,8 +83,15 @@ struct ObservedStart {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObservedControl {
-    Stop { name: String, mode: String },
-    Kill { name: String, whom: String, signal: i32 },
+    Stop {
+        name: String,
+        mode: String,
+    },
+    Kill {
+        name: String,
+        whom: String,
+        signal: i32,
+    },
 }
 
 struct RecordingManager {
@@ -270,10 +277,7 @@ impl RecordingManager {
                 &emitter,
                 382,
                 job.clone(),
-                self.behavior
-                    .completion_unit
-                    .clone()
-                    .unwrap_or(name),
+                self.behavior.completion_unit.clone().unwrap_or(name),
                 self.behavior.result.clone(),
             )
             .await
@@ -919,7 +923,10 @@ async fn stop_job_rejects_unit_substitution_and_manager_failure() -> Result<(), 
         .await
         .err()
         .ok_or("rejected StopUnit call was accepted")?;
-    assert!(matches!(error, SystemdTransientUnitTransportError::StopCall(_)));
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::StopCall(_)
+    ));
     Ok(())
 }
 
@@ -951,7 +958,10 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
         .await
         .err()
         .ok_or("rejected KillUnit call was accepted")?;
-    assert!(matches!(error, SystemdTransientUnitTransportError::KillCall(_)));
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::KillCall(_)
+    ));
     Ok(())
 }
 
@@ -1193,14 +1203,20 @@ async fn stop_and_kill_proxy_failures_are_classified() {
         TransientServiceUnitName("pigloros-attempt-test.service".to_owned()),
     )
     .await;
-    assert!(matches!(stop, Err(SystemdTransientUnitTransportError::Proxy(_))));
+    assert!(matches!(
+        stop,
+        Err(SystemdTransientUnitTransportError::Proxy(_))
+    ));
 
     let kill = force_kill_with_proxy(
         Err(zbus::Error::Failure("test kill proxy failure".to_owned())),
         TransientServiceUnitName("pigloros-attempt-test.service".to_owned()),
     )
     .await;
-    assert!(matches!(kill, Err(SystemdTransientUnitTransportError::Proxy(_))));
+    assert!(matches!(
+        kill,
+        Err(SystemdTransientUnitTransportError::Proxy(_))
+    ));
 }
 
 #[test]
