@@ -86,6 +86,30 @@ fn changed_wire(
     encoded(&value)
 }
 
+fn replace_top(bytes: &[u8], index: usize, replacement: Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    changed_wire(bytes, |value| {
+        if let Value::Array(fields) = value {
+            fields[index] = replacement;
+        }
+    })
+}
+
+fn replace_first_row(
+    bytes: &[u8],
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    changed_wire(bytes, |value| {
+        if let Value::Array(fields) = value {
+            if let Value::Array(rows) = &mut fields[4] {
+                if let Value::Array(row) = &mut rows[0] {
+                    row[index] = replacement;
+                }
+            }
+        }
+    })
+}
+
 #[test]
 fn literal_empty_catalog_and_binding_pin_exact_bytes_and_digest() -> TestResult {
     let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
@@ -620,5 +644,141 @@ fn wrong_receipt_cbor_shapes_and_pre_state_reject() -> TestResult {
         ManifestSlotAdmissionReceiptV1::from_canonical_cbor(&impossible_pair),
         Err(ManifestOwnerLinkErrorV1::InvalidPreState)
     );
+    Ok(())
+}
+
+#[test]
+fn catalog_decode_rejects_every_untrusted_field_and_excess_rows() -> TestResult {
+    let bytes = ManifestAdmissionCatalogV1::new(catalog_input())?.to_canonical_cbor();
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&[0xff]),
+        Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+    );
+    for (index, replacement) in [
+        (2, Value::Text("owner".into())),
+        (3, Value::Integer((-1).into())),
+        (4, Value::Text("rows".into())),
+    ] {
+        let wrong = replace_top(&bytes, index, replacement)?;
+        assert_eq!(
+            ManifestAdmissionCatalogV1::from_canonical_cbor(&wrong),
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        );
+    }
+    for (index, replacement) in [
+        (2, Value::Bytes(vec![1; 4])),
+        (3, Value::Bytes(vec![1; 4])),
+        (4, Value::Text("implementation".into())),
+        (5, Value::Text("policy".into())),
+        (6, Value::Integer(1.into())),
+    ] {
+        let wrong = replace_first_row(&bytes, index, replacement)?;
+        assert_eq!(
+            ManifestAdmissionCatalogV1::from_canonical_cbor(&wrong),
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        );
+    }
+    let excessive = replace_top(&bytes, 4, Value::Array(vec![Value::Null; 257]))?;
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&excessive),
+        Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+    );
+    let invalid_record = replace_top(&bytes, 3, Value::Integer(0.into()))?;
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&invalid_record),
+        Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn binding_decode_rejects_every_untrusted_field_and_excess_rows() -> TestResult {
+    let bytes = ManifestSlotBindingV1::new(binding_input())?.to_canonical_cbor();
+    for (index, replacement, expected) in [
+        (0, Value::Bytes(b"BAD1".to_vec()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (1, Value::Integer(2.into()), ManifestOwnerLinkErrorV1::UnsupportedVersion),
+        (2, Value::Text("scope".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (3, Value::Bytes(vec![1; 31]), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (4, Value::Text("rows".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+    ] {
+        let wrong = replace_top(&bytes, index, replacement)?;
+        assert_eq!(ManifestSlotBindingV1::from_canonical_cbor(&wrong), Err(expected));
+    }
+    for (index, replacement) in [
+        (0, Value::Bytes(b"first".to_vec())),
+        (1, Value::Bytes(vec![1; 15])),
+        (2, Value::Text("policy".into())),
+        (3, Value::Bool(true)),
+    ] {
+        let wrong = replace_first_row(&bytes, index, replacement)?;
+        assert_eq!(
+            ManifestSlotBindingV1::from_canonical_cbor(&wrong),
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        );
+    }
+    let excessive = replace_top(&bytes, 4, Value::Array(vec![Value::Null; 257]))?;
+    assert_eq!(
+        ManifestSlotBindingV1::from_canonical_cbor(&excessive),
+        Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+    );
+    let invalid_record = replace_top(&bytes, 2, Value::Bytes(vec![0; 32]))?;
+    assert_eq!(
+        ManifestSlotBindingV1::from_canonical_cbor(&invalid_record),
+        Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn receipt_decode_rejects_every_untrusted_field_and_nonpreferred_width() -> TestResult {
+    let receipt = ManifestSlotAdmissionReceiptV1::new(receipt_input())?;
+    assert_eq!(receipt.as_input().configuration_generation, 7);
+    let bytes = receipt.to_canonical_cbor();
+    for (index, replacement, expected) in [
+        (0, Value::Bytes(b"BAD1".to_vec()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (1, Value::Integer(2.into()), ManifestOwnerLinkErrorV1::UnsupportedVersion),
+        (2, Value::Text("owner".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (3, Value::Integer((-1).into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (4, Value::Text("scope".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (5, Value::Text("wcs1".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (6, Value::Text("mca1".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (7, Value::Text("operation".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (9, Value::Text("inventory".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (10, Value::Text("msb1".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (11, Value::Text("key".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+    ] {
+        let wrong = replace_top(&bytes, index, replacement)?;
+        assert_eq!(
+            ManifestSlotAdmissionReceiptV1::from_canonical_cbor(&wrong),
+            Err(expected)
+        );
+    }
+    let mut nonpreferred = bytes;
+    nonpreferred.splice(6..7, [0x18, 1]);
+    assert_eq!(
+        ManifestSlotAdmissionReceiptV1::from_canonical_cbor(&nonpreferred),
+        Err(ManifestOwnerLinkErrorV1::NonCanonical)
+    );
+    Ok(())
+}
+
+#[test]
+fn large_generation_widths_roundtrip_canonically() -> TestResult {
+    for generation in [65_536, u64::MAX] {
+        let mut catalog = catalog_input();
+        catalog.configuration_generation = generation;
+        let catalog = ManifestAdmissionCatalogV1::new(catalog)?;
+        assert_eq!(
+            ManifestAdmissionCatalogV1::from_canonical_cbor(&catalog.to_canonical_cbor())?,
+            catalog
+        );
+        let mut receipt = receipt_input();
+        receipt.configuration_generation = generation;
+        let receipt = ManifestSlotAdmissionReceiptV1::new(receipt)?;
+        assert_eq!(
+            ManifestSlotAdmissionReceiptV1::from_canonical_cbor(&receipt.to_canonical_cbor())?,
+            receipt
+        );
+    }
     Ok(())
 }

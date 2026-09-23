@@ -143,7 +143,7 @@ impl ManifestAdmissionCatalogV1 {
         let [magic, version, owner, generation, rows] =
             decode_array::<5>(bytes, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1)?;
         check_magic(magic, *b"MCA1")?;
-        check_version(version)?;
+        check_version(&version)?;
         let rows = take_array(rows)?;
         if rows.len() > MAX_MANIFEST_OWNER_PLUGINS_V1 {
             return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
@@ -269,7 +269,7 @@ impl ManifestSlotBindingV1 {
         let [magic, version, scope, wcs1, rows] =
             decode_array::<5>(bytes, MAX_MANIFEST_SLOT_BINDING_BYTES_V1)?;
         check_magic(magic, *b"MSB1")?;
-        check_version(version)?;
+        check_version(&version)?;
         let rows = take_array(rows)?;
         if rows.len() > MAX_MANIFEST_OWNER_PLUGINS_V1 {
             return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
@@ -407,7 +407,7 @@ impl ManifestSlotAdmissionReceiptV1 {
         let [magic, version, owner, generation, scope, wcs1, mca1, operation, previous_lcq1, inventory, msb1, key_evidence, signature] =
             decode_array::<13>(bytes, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1)?;
         check_magic(magic, *b"MSR1")?;
-        check_version(version)?;
+        check_version(&version)?;
         let record = Self::new(ManifestSlotAdmissionReceiptInputV1 {
             owner_id: take_bytes(owner)?,
             configuration_generation: take_uint(&generation)?,
@@ -556,8 +556,8 @@ fn check_magic(value: Value, expected: [u8; 4]) -> Result<(), ManifestOwnerLinkE
     }
 }
 
-fn check_version(value: Value) -> Result<(), ManifestOwnerLinkErrorV1> {
-    if take_uint(&value)? == 1 {
+fn check_version(value: &Value) -> Result<(), ManifestOwnerLinkErrorV1> {
+    if take_uint(value)? == 1 {
         Ok(())
     } else {
         Err(ManifestOwnerLinkErrorV1::UnsupportedVersion)
