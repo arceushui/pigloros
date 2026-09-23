@@ -1671,7 +1671,7 @@ fn assert_sqlite_fork_recovery_corruption_error(
             prepared.operation(),
             &stale_inventory,
         ),
-        Err(expected.clone())
+        Err(expected)
     );
     assert_eq!(
         recover_fork_admission(
@@ -1713,7 +1713,7 @@ fn assert_sqlite_fork_recovery_sql_error(
             prepared.operation(),
             &stale_inventory,
         ),
-        Err(expected.clone())
+        Err(expected)
     );
     assert_eq!(
         recover_fork_admission(
