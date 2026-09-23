@@ -6848,7 +6848,7 @@ mod coverage_entrypoints {
         }
     }
 
-    fn register_schema_failure_driver(registry: &mut PluginRegistry) {
+    fn register_unowned_output_driver(registry: &mut PluginRegistry) {
         let plugin_id = PluginId::new();
         let binding_plugin = CoveragePlugin { id: plugin_id };
         let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
@@ -7476,31 +7476,38 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn append_driver_drafts_aborts_on_schema_failure() {
+    fn append_driver_drafts_aborts_on_unowned_output() {
         let mut store = test_memory_store();
-        let timeline = ok(store.create_timeline("coverage-schema-failure"));
+        let timeline = ok(store.create_timeline("coverage-unowned-output"));
         let mut registry = test_registry();
-        register_schema_failure_driver(&mut registry);
-        assert!(append_driver_drafts(
+        register_unowned_output_driver(&mut registry);
+        let result = append_driver_drafts(
             &mut store,
             timeline.id(),
             &mut registry,
             pos_core::clock::Seq::ZERO,
-        )
-        .is_err());
+        );
+        assert!(matches!(
+            result,
+            Err(ExperimentError::Runtime(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            )))
+        ));
     }
 
     #[test]
-    fn session_step_boundary_aborts_on_schema_failure() {
+    fn session_step_boundary_aborts_on_unowned_output() {
         let mut session = ok(Experiment::new(config(
-            "coverage-session-schema-failure",
+            "coverage-session-unowned-output",
             StopCondition::MaxTicks(1),
         ))
         .start());
-        register_schema_failure_driver(&mut session.registry);
+        register_unowned_output_driver(&mut session.registry);
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::Runtime(_))
+            Err(ExperimentError::Runtime(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            )))
         ));
     }
 

@@ -61,47 +61,28 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn builtin_output_binding_reports_invalid_profile_budget_declaration_and_policy() {
+    fn builtin_output_binding_rejects_uninstalled_source_and_profile() {
         let plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
-        assert!(builtin_output_binding_with_inputs(
+        assert!(builtin_output_binding(
             &plugin,
-            "rule-agent.decision.v1",
-            [300_000, 150_000, 30_000],
-            &[],
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
             &[],
             "unknown-profile",
-            16_384,
         )
         .is_err());
-        assert!(builtin_output_binding_with_inputs(
+        assert!(builtin_output_binding(
             &plugin,
-            "rule-agent.decision.v1",
-            [u32::MAX; 3],
-            &[],
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
             &[],
             "deterministic-local-v1",
-            16_384,
-        )
-        .is_err());
-        assert!(builtin_output_binding_with_inputs(
-            &plugin,
-            "",
-            [300_000, 150_000, 30_000],
-            &[],
-            &[],
-            "deterministic-local-v1",
-            16_384,
         )
         .is_err());
 
-        assert!(builtin_output_binding_with_inputs(
+        assert!(builtin_output_binding(
             &InvalidVersionPlugin,
-            "rule-agent.decision.v1",
-            [300_000, 150_000, 30_000],
-            &[],
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
-            16_384,
         )
         .is_err());
     }
@@ -139,61 +120,17 @@ const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 100
 
 fn builtin_output_binding<P: Plugin + ?Sized>(
     plugin: &P,
-    event_type: &str,
-    cpu_reservations_us: [u32; 3],
-    implementation_artifact: &[u8],
-    configuration_details: &[u8],
-) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
-    builtin_output_binding_with_inputs(
-        plugin,
-        event_type,
-        cpu_reservations_us,
-        implementation_artifact,
-        configuration_details,
-        "deterministic-local-v1",
-        16_384,
-    )
-}
-
-fn builtin_output_binding_with_inputs<P: Plugin + ?Sized>(
-    plugin: &P,
-    event_type: &str,
-    cpu_reservations_us: [u32; 3],
-    _implementation_artifact: &[u8],
+    source: pos_runtime::InstalledOutputPolicySourceV1,
     configuration_details: &[u8],
     profile_id: &str,
-    max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
-    if event_type.is_empty()
-        || max_event_bytes == 0
-        || max_event_bytes > 16_384
-        || cpu_reservations_us[0] > 500_000
-        || cpu_reservations_us[1] > 250_000
-        || cpu_reservations_us[2] > 50_000
-    {
-        return Err(format!(
-            "Plugin '{}' output declaration exceeds the installed source bounds",
-            plugin.name()
-        )
-        .into());
-    }
-    let source = match plugin.name() {
-        "rule-agent" => pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
-        "synthetic-obs" => pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
-        _ => {
-            return Err(format!(
-                "no installed output source is registered for Plugin '{}'",
-                plugin.name()
-            )
-            .into());
-        }
-    };
-    Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
         source,
         configuration_details,
         profile_id,
-    )?)
+    )
+    .map_err(Into::into)
 }
 
 struct OpenedCliStore {
@@ -865,10 +802,9 @@ fn run_builtin_reference_experiment(
     result_pipeline! {
         builtin_output_binding(
             &agent_plugin,
-            pos_plugin_rule_agent::EVENT_TYPE_DECISION,
-            [300_000, 150_000, 30_000],
-            include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
             &agent_configuration,
+            "deterministic-local-v1",
         ) => |agent_closure|;
         exp.register_with_verified_output_policy(
             &agent_plugin,
@@ -881,10 +817,9 @@ fn run_builtin_reference_experiment(
         ).map_err(Into::into) => |()|;
         builtin_output_binding(
             &obs_plugin,
-            pos_plugin_synthetic_obs::EVENT_TYPE,
-            [200_000, 100_000, 20_000],
-            include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
             &obs_configuration,
+            "deterministic-local-v1",
         ) => |obs_closure|;
         exp.register_with_verified_output_policy(
             &obs_plugin,

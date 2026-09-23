@@ -64,12 +64,11 @@ fn gateway_output_binding_with_inputs<P: Plugin + ?Sized>(
     configuration_details: &[u8],
     profile_id: &str,
     event_type: &str,
-    max_event_bytes: u32,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    if event_type.is_empty() || max_event_bytes == 0 || max_event_bytes > 4_096 {
+    if event_type != EVENT_TYPE_ACTION {
         return Err(pos_runtime::RuntimeError::CapabilityMismatch {
             name: plugin.name().to_owned(),
-            reason: "Gateway output declaration exceeds the installed source bounds".to_owned(),
+            reason: "Gateway action kind does not match the installed output source".to_owned(),
         });
     }
     pos_runtime::OutputPolicyBindingV1::from_installed_source(
@@ -190,7 +189,7 @@ mod coverage_tests {
     }
 
     #[test]
-    fn output_binding_reports_each_structural_failure() {
+    fn output_binding_rejects_wrong_profile_kind_and_owner() {
         let plugin = GatewayActionPlugin {
             id: PluginId::new(),
         };
@@ -199,15 +198,6 @@ mod coverage_tests {
             &[],
             "unknown-profile",
             "world.action.v1",
-            4_096,
-        )
-        .is_err());
-        assert!(gateway_output_binding_with_inputs(
-            &plugin,
-            &[],
-            "deterministic-local-v1",
-            "world.action.v1",
-            0,
         )
         .is_err());
         assert!(gateway_output_binding_with_inputs(
@@ -215,7 +205,6 @@ mod coverage_tests {
             &[],
             "deterministic-local-v1",
             "",
-            4_096,
         )
         .is_err());
 
@@ -224,7 +213,6 @@ mod coverage_tests {
             &[],
             "deterministic-local-v1",
             "world.action.v1",
-            4_096,
         )
         .is_err());
     }
@@ -778,7 +766,6 @@ fn gateway_action_registry_builder_with_inputs(
         &configuration_details,
         profile_id,
         event_type,
-        4_096,
     )?;
     registry.register_with_verified_output_policy_and_approver(
         &descriptor,

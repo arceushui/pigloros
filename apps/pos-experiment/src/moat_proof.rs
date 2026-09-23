@@ -67,49 +67,10 @@ const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/s
 
 fn reviewed_output_binding<P: Plugin + ?Sized>(
     plugin: &P,
-    event_types: &[&str],
+    source: pos_runtime::InstalledOutputPolicySourceV1,
     profile_id: &str,
-    cpu_reservations_us: [u32; 3],
-    implementation_artifact: &[u8],
     configuration_details: &[u8],
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
-    reviewed_output_binding_with_limits(
-        plugin,
-        event_types,
-        profile_id,
-        cpu_reservations_us,
-        implementation_artifact,
-        configuration_details,
-        4_096,
-    )
-}
-
-fn reviewed_output_binding_with_limits<P: Plugin + ?Sized>(
-    plugin: &P,
-    event_types: &[&str],
-    profile_id: &str,
-    cpu_reservations_us: [u32; 3],
-    _implementation_artifact: &[u8],
-    configuration_details: &[u8],
-    max_event_bytes: u32,
-) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
-    if event_types.iter().any(|event_type| event_type.is_empty())
-        || max_event_bytes == 0
-        || max_event_bytes > 4_096
-        || cpu_reservations_us[0] > 500_000
-        || cpu_reservations_us[1] > 250_000
-        || cpu_reservations_us[2] > 50_000
-    {
-        return Err(RuntimeError::CapabilityMismatch {
-            name: plugin.name().to_owned(),
-            reason: "experiment output declaration exceeds the installed source bounds".to_owned(),
-        });
-    }
-    let source = match plugin.name() {
-        "world" => pos_runtime::InstalledOutputPolicySourceV1::World,
-        "society" => pos_runtime::InstalledOutputPolicySourceV1::Society,
-        _ => pos_runtime::InstalledOutputPolicySourceV1::Experiment,
-    };
     pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
         source,
@@ -146,16 +107,8 @@ fn world_output_binding_with_config(
     details.extend_from_slice(&body.inner().to_bytes());
     reviewed_output_binding(
         plugin,
-        &[
-            "world.action",
-            EVENT_TYPE_ACTION_V1,
-            "world.config.v1",
-            "world.observation",
-            EVENT_TYPE_OBSERVATION_V1,
-        ],
+        pos_runtime::InstalledOutputPolicySourceV1::World,
         profile_id,
-        [250_000, 125_000, 25_000],
-        include_bytes!("../../../plugins/world/src/lib.rs"),
         &details,
     )
 }
@@ -168,10 +121,8 @@ fn proof_agent_output_binding(
     let configuration_details = threshold.to_bits().to_be_bytes();
     reviewed_output_binding(
         plugin,
-        &[AGENT_EVENT_TYPE],
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
         profile_id,
-        [150_000, 75_000, 15_000],
-        include_bytes!("moat_proof.rs"),
         &configuration_details,
     )
 }
@@ -1729,18 +1680,14 @@ fn failure_probe(
     result_pipeline! {
         reviewed_output_binding(
             &sibling_plugin,
-            &["proof.failure.sibling"],
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
             profile_id,
-            [300_000, 150_000, 30_000],
-            include_bytes!("moat_proof.rs"),
             b"successful-sibling:v1",
         ).map_err(MoatProofError::from) => |sibling_closure|;
         reviewed_output_binding(
             &plugin,
-            &["proof.failure.probe"],
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
             profile_id,
-            [200_000, 100_000, 20_000],
-            include_bytes!("moat_proof.rs"),
             &failure_details,
         ).map_err(MoatProofError::from) => |failure_closure|;
         experiment.register_with_verified_output_policy(
@@ -2335,47 +2282,28 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_output_binding_reports_each_structural_failure() {
+    fn reviewed_output_binding_rejects_wrong_profile_and_source() {
         let plugin = ProofAgentPlugin::new();
-        assert!(reviewed_output_binding_with_limits(
+        assert!(reviewed_output_binding(
             &plugin,
-            &[AGENT_EVENT_TYPE],
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
             "unknown-profile",
-            [300_000, 150_000, 30_000],
             &[],
-            &[],
-            4_096,
         )
         .is_err());
-        assert!(reviewed_output_binding_with_limits(
+        assert!(reviewed_output_binding(
             &plugin,
-            &[AGENT_EVENT_TYPE],
+            pos_runtime::InstalledOutputPolicySourceV1::World,
             "deterministic-local-v1",
-            [300_000, 150_000, 30_000],
             &[],
-            &[],
-            0,
-        )
-        .is_err());
-        assert!(reviewed_output_binding_with_limits(
-            &plugin,
-            &[""],
-            "deterministic-local-v1",
-            [300_000, 150_000, 30_000],
-            &[],
-            &[],
-            4_096,
         )
         .is_err());
 
-        assert!(reviewed_output_binding_with_limits(
+        assert!(reviewed_output_binding(
             &InvalidVersionPlugin,
-            &[AGENT_EVENT_TYPE],
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
             "deterministic-local-v1",
-            [300_000, 150_000, 30_000],
             &[],
-            &[],
-            4_096,
         )
         .is_err());
     }
