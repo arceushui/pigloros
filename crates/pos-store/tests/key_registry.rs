@@ -739,3 +739,88 @@ fn memory_key_registry_public_contract_covers_persistence_and_authorization(
     assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
 }
+
+fn assert_owner_scoped_registry_isolation<S: EventStore>(
+    store: &mut S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    bind_test_erasure_gate(store)?;
+    let first = KeyIdentityV1::new("first-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+    let rotated = KeyIdentityV1::new("first-owner", KeyRoleV1::TimelineIntegritySigning, 2);
+    let second = KeyIdentityV1::new("second-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    for (identity, material, public_key) in [(first, 11, 12), (second, 13, 14)] {
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            Hash::from_bytes([material; 32]),
+            Some(pos_core::PublicKey::from_bytes([public_key; 32])),
+        ))?;
+    }
+    store.save_key_registry(&registry)?;
+    assert_eq!(store.load_key_registry()?, Some(registry.clone()));
+
+    registry.register_key(KeyRegistrationV1::new(
+        rotated,
+        Hash::from_bytes([15; 32]),
+        Some(pos_core::PublicKey::from_bytes([16; 32])),
+    ))?;
+    assert_eq!(
+        registry
+            .active_key(&second.owner_id, second.role)
+            .map(|key| key.identity),
+        Some(second)
+    );
+    store.save_key_registry(&registry)?;
+    let request = KeyDestructionRequestV1::new(
+        rotated,
+        Hash::from_bytes([15; 32]),
+        Hash::from_bytes([17; 32]),
+    );
+    let (_, mut persisted) = destroy_store(store, request)?;
+    assert_eq!(store.load_key_registry()?, Some(persisted.clone()));
+    assert!(persisted.active_key(&first.owner_id, first.role).is_none());
+    assert_eq!(
+        persisted
+            .active_key(&second.owner_id, second.role)
+            .map(|key| key.identity),
+        Some(second)
+    );
+    assert_eq!(
+        persisted.with_signing_authorization(
+            rotated,
+            Hash::from_bytes([15; 32]),
+            pos_core::PublicKey::from_bytes([16; 32]),
+            || "must not authorize",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::Destroyed)
+    );
+    assert_eq!(
+        persisted.with_signing_authorization(
+            second,
+            Hash::from_bytes([13; 32]),
+            pos_core::PublicKey::from_bytes([14; 32]),
+            || "authorized",
+        ),
+        Ok("authorized")
+    );
+    assert!(matches!(
+        persisted.register_key(KeyRegistrationV1::new(
+            first,
+            Hash::from_bytes([18; 32]),
+            Some(pos_core::PublicKey::from_bytes([19; 32])),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::StaleEpoch { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn owner_scoped_registry_isolation_survives_memory_persistence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_owner_scoped_registry_isolation(&mut MemoryStore::new())
+}
+
+#[test]
+fn owner_scoped_registry_isolation_survives_sqlite_persistence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_owner_scoped_registry_isolation(&mut SqliteStore::open_in_memory()?)
+}
