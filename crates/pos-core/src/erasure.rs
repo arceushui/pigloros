@@ -7280,18 +7280,16 @@ mod coverage_paths {
     fn recovery_proof_mutation_fields_mut(
         value: &mut Value,
     ) -> Result<&mut Vec<Value>, ErasureErrorV1> {
-        let fields = match value {
-            Value::Array(fields) => fields,
-            _ => return Err(ErasureErrorV1::InvalidEncoding),
+        let Value::Array(fields) = value else {
+            return Err(ErasureErrorV1::InvalidEncoding);
         };
-        let admissions = match fields.get_mut(7) {
-            Some(Value::Array(admissions)) => admissions,
-            _ => return Err(ErasureErrorV1::InvalidEncoding),
+        let Some(Value::Array(admissions)) = fields.get_mut(7) else {
+            return Err(ErasureErrorV1::InvalidEncoding);
         };
-        match admissions.first_mut() {
-            Some(Value::Array(mutation_fields)) => Ok(mutation_fields),
-            _ => Err(ErasureErrorV1::InvalidEncoding),
-        }
+        let Some(Value::Array(mutation_fields)) = admissions.first_mut() else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        Ok(mutation_fields)
     }
 
     fn recovery_proof_replacing_mutation_field(
@@ -7318,13 +7316,11 @@ mod coverage_paths {
     ) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
         decode_recovery_proof_after(proof, |value| {
             let mutation_fields = recovery_proof_mutation_fields_mut(value)?;
-            let items = match mutation_fields.get_mut(list_field) {
-                Some(Value::Array(items)) => items,
-                _ => return Err(ErasureErrorV1::InvalidEncoding),
+            let Some(Value::Array(items)) = mutation_fields.get_mut(list_field) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
             };
-            let item_fields = match items.get_mut(item) {
-                Some(Value::Array(item_fields)) => item_fields,
-                _ => return Err(ErasureErrorV1::InvalidEncoding),
+            let Some(Value::Array(item_fields)) = items.get_mut(item) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
             };
             let field = item_fields
                 .get_mut(item_field)
@@ -7364,13 +7360,10 @@ mod coverage_paths {
         Ok(())
     }
 
-    fn assert_recovery_mutation_rejects_malformed_fields(
-        proof: &ErasureForkRecoveryProofV1,
-    ) -> Result<(), ErasureErrorV1> {
+    fn assert_recovery_mutation_rejects_malformed_fields(proof: &ErasureForkRecoveryProofV1) {
         assert!(decode_recovery_proof_after(proof, |value| {
-            let fields = match value {
-                Value::Array(fields) => fields,
-                _ => return Err(ErasureErrorV1::InvalidEncoding),
+            let Value::Array(fields) = value else {
+                return Err(ErasureErrorV1::InvalidEncoding);
             };
             fields[7] = Value::Array(vec![Value::Text("wrong-mutation".to_owned())]);
             Ok(())
@@ -7419,12 +7412,11 @@ mod coverage_paths {
             )
             .is_err());
         }
-        Ok(())
     }
 
     fn assert_recovery_objects_and_indexes_reject_malformed_fields(
         proof: &ErasureForkRecoveryProofV1,
-    ) -> Result<(), ErasureErrorV1> {
+    ) {
         assert!(recovery_proof_replacing_mutation_field(
             proof,
             8,
@@ -7472,7 +7464,6 @@ mod coverage_paths {
             ),
             Err(ErasureErrorV1::InvalidEncoding)
         );
-        Ok(())
     }
 
     fn assert_recovery_proof_rejects_oversized_admissions(
@@ -7614,8 +7605,8 @@ mod coverage_paths {
             Err(ErasureErrorV1::InvalidEncoding)
         );
         assert_recovery_proof_rejects_malformed_headers(&proof)?;
-        assert_recovery_mutation_rejects_malformed_fields(&proof)?;
-        assert_recovery_objects_and_indexes_reject_malformed_fields(&proof)?;
+        assert_recovery_mutation_rejects_malformed_fields(&proof);
+        assert_recovery_objects_and_indexes_reject_malformed_fields(&proof);
         assert_recovery_proof_rejects_oversized_admissions(&proof)?;
         assert_fork_admission_rejects_oversized_effect(&input, &extension);
         Ok(())
