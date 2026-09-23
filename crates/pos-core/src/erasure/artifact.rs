@@ -236,7 +236,7 @@ pub enum SignatureEvidenceV1 {
     PublicKeyMissing,
 }
 
-/// Evidence connecting one registered Replay or ReproManifest artifact
+/// Evidence connecting one registered Replay or `ReproManifest` artifact
 /// dependency to a destruction fact in the authoritative key registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyDestructionArtifactEvidenceV1 {
