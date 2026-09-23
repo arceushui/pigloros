@@ -1207,6 +1207,7 @@ impl ErasureErrorV1 {
             Self::ReceiptCommitFailed => 13,
             Self::TrustSnapshotInvalid => 14,
             Self::ProvenanceMissing => 15,
+            Self::StaleGeneration => 16,
         }
     }
 
@@ -1233,6 +1234,7 @@ impl ErasureErrorV1 {
             13 => Ok(Self::ReceiptCommitFailed),
             14 => Ok(Self::TrustSnapshotInvalid),
             15 => Ok(Self::ProvenanceMissing),
+            16 => Ok(Self::StaleGeneration),
             _ => Err(Self::InvalidEncoding),
         }
     }
