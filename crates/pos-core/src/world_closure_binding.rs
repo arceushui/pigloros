@@ -372,8 +372,7 @@ impl Reader<'_> {
     }
 
     fn head(&mut self, major: u8) -> Result<u64, WorldClosureBindingErrorV1> {
-        self.take(1).and_then(|bytes| {
-            let initial = bytes[0];
+        self.take(1).map(|bytes| bytes[0]).and_then(|initial| {
             if initial >> 5 != major {
                 return Err(WorldClosureBindingErrorV1::InvalidEncoding);
             }
