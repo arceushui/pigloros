@@ -292,9 +292,7 @@ impl WorldReplayClosureV1 {
         ) {
             return Err(WorldReplayClosureErrorV1::PolicyMismatch);
         }
-        if let Err(error) = validate_consumer_references(&artifacts, &input.consumer_set) {
-            return Err(error);
-        }
+        validate_consumer_set_references(&artifacts, &input.consumer_set)?;
         Ok(Self {
             timeline_id: input.timeline_id,
             operation_identity: input.operation_identity,
@@ -624,7 +622,7 @@ fn has_leaf_address(
         .any(|leaf| leaf.as_input().kind == kind && leaf.digest() == address)
 }
 
-fn validate_consumer_references(
+fn validate_consumer_set_references(
     artifacts: &[WorldArtifactLeafV1],
     consumer_set: &WorldConsumerSetV1,
 ) -> Result<(), WorldReplayClosureErrorV1> {
