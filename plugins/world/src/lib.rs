@@ -513,35 +513,65 @@ impl WorldObservationV1 {
     /// Returns [`WorldCodecError::NonFiniteFloat`] if any float is non-finite.
     /// Returns [`WorldCodecError::PayloadTooLarge`] if `sensor_value` exceeds `MAX_SENSOR_VALUE_BYTES`.
     pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
+        self.validate_encoding().map(|()| self.encode_validated())
+    }
+
+    fn validate_encoding(&self) -> Result<(), WorldCodecError> {
         if self.sensor_value.len() > MAX_SENSOR_VALUE_BYTES {
             return Err(WorldCodecError::PayloadTooLarge {
                 size: self.sensor_value.len(),
                 max: MAX_SENSOR_VALUE_BYTES,
             });
         }
+        if [
+            self.pos_x,
+            self.pos_y,
+            self.pos_z,
+            self.orient_w,
+            self.orient_x,
+            self.orient_y,
+            self.orient_z,
+            self.vel_lin_x,
+            self.vel_lin_y,
+            self.vel_lin_z,
+            self.vel_ang_x,
+            self.vel_ang_y,
+            self.vel_ang_z,
+        ]
+        .into_iter()
+        .any(|component| !component.is_finite())
+        {
+            return Err(WorldCodecError::NonFiniteFloat);
+        }
+        Ok(())
+    }
+
+    // Only call after the public validation above or after the Driver checked
+    // backend floats and supplied fixed finite orientation/sensor fields.
+    fn encode_validated(&self) -> CanonicalBytes {
         let arr = ciborium::Value::Array(vec![
             cbor_magic(*MAGIC_WOB1),
             cbor_u8(VERSION_V1),
             cbor_id(self.body_entity_id),
             cbor_u64(self.tick),
             cbor_u64(self.step_index),
-            cbor_f32(self.pos_x)?,
-            cbor_f32(self.pos_y)?,
-            cbor_f32(self.pos_z)?,
-            cbor_f32(self.orient_w)?,
-            cbor_f32(self.orient_x)?,
-            cbor_f32(self.orient_y)?,
-            cbor_f32(self.orient_z)?,
-            cbor_f32(self.vel_lin_x)?,
-            cbor_f32(self.vel_lin_y)?,
-            cbor_f32(self.vel_lin_z)?,
-            cbor_f32(self.vel_ang_x)?,
-            cbor_f32(self.vel_ang_y)?,
-            cbor_f32(self.vel_ang_z)?,
+            ciborium::Value::Float(f64::from(self.pos_x)),
+            ciborium::Value::Float(f64::from(self.pos_y)),
+            ciborium::Value::Float(f64::from(self.pos_z)),
+            ciborium::Value::Float(f64::from(self.orient_w)),
+            ciborium::Value::Float(f64::from(self.orient_x)),
+            ciborium::Value::Float(f64::from(self.orient_y)),
+            ciborium::Value::Float(f64::from(self.orient_z)),
+            ciborium::Value::Float(f64::from(self.vel_lin_x)),
+            ciborium::Value::Float(f64::from(self.vel_lin_y)),
+            ciborium::Value::Float(f64::from(self.vel_lin_z)),
+            ciborium::Value::Float(f64::from(self.vel_ang_x)),
+            ciborium::Value::Float(f64::from(self.vel_ang_y)),
+            ciborium::Value::Float(f64::from(self.vel_ang_z)),
             cbor_u8(self.sensor_kind),
             cbor_bytes(&self.sensor_value),
         ]);
-        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
+        CanonicalBytes::from_vec(cbor_encode(&arr))
     }
 
     /// Decode from canonical CBOR bytes.
@@ -1142,6 +1172,19 @@ impl WorldDriver {
         })
     }
 
+    fn validate_quantized_positions(value: &WorldObservationV1) -> Result<(), RuntimeError> {
+        if [value.pos_x, value.pos_y, value.pos_z]
+            .into_iter()
+            .any(|position| !position.is_finite())
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "sensor quantization produced a non-finite position".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     fn config_draft(&mut self) -> Result<Option<pos_core::event::EventDraft>, RuntimeError> {
         if self.config_emitted {
             return Ok(None);
@@ -1227,7 +1270,7 @@ impl WorldDriver {
                     })
                 })
                 .and_then(|[x, y, z, vx, vy, vz]| {
-                    WorldObservationV1 {
+                    let value = WorldObservationV1 {
                         body_entity_id: observation.entity_id,
                         tick: self.tick,
                         step_index: self.step_index,
@@ -1246,13 +1289,9 @@ impl WorldDriver {
                         vel_ang_z: 0.0,
                         sensor_kind: SensorKindV1::Proximity.as_u8(),
                         sensor_value: vec![],
-                    }
-                    .encode()
-                    .map_err(|error| RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                        reason: error.to_string(),
-                    })
-                    .map(|payload| {
+                    };
+                    Self::validate_quantized_positions(&value).map(|()| {
+                        let payload = value.encode_validated();
                         let mut draft = pos_core::event::EventDraft::new(
                             observation.entity_id,
                             Kind::new(EVENT_TYPE_OBSERVATION_V1),
@@ -1797,6 +1836,7 @@ mod tests {
         Vx,
         Vy,
         Vz,
+        QuantizationOverflowX,
     }
 
     struct InvalidObservationComponentBackend {
@@ -1831,6 +1871,9 @@ mod tests {
                             InvalidObservationComponent::Vx => observed.vx = f64::MAX,
                             InvalidObservationComponent::Vy => observed.vy = f64::MAX,
                             InvalidObservationComponent::Vz => observed.vz = f64::MAX,
+                            InvalidObservationComponent::QuantizationOverflowX => {
+                                observed.x = f64::from(f32::MAX);
+                            }
                         }
                     }
                     observed
@@ -1933,11 +1976,27 @@ mod tests {
 
     #[test]
     fn invalid_backend_observation_components_fail_closed_and_restore_step() {
-        for (component, axis) in [
-            (InvalidObservationComponent::Z, "z"),
-            (InvalidObservationComponent::Vx, "vx"),
-            (InvalidObservationComponent::Vy, "vy"),
-            (InvalidObservationComponent::Vz, "vz"),
+        for (component, reason) in [
+            (
+                InvalidObservationComponent::Z,
+                "non-representable z coordinate",
+            ),
+            (
+                InvalidObservationComponent::Vx,
+                "non-representable vx coordinate",
+            ),
+            (
+                InvalidObservationComponent::Vy,
+                "non-representable vy coordinate",
+            ),
+            (
+                InvalidObservationComponent::Vz,
+                "non-representable vz coordinate",
+            ),
+            (
+                InvalidObservationComponent::QuantizationOverflowX,
+                "sensor quantization produced a non-finite position",
+            ),
         ] {
             let initial = Body {
                 entity_id: EntityId::new(),
@@ -1959,9 +2018,7 @@ mod tests {
             let error = driver
                 .step(TimelineId::new(), ObservationView::empty())
                 .test_err();
-            assert!(error
-                .to_string()
-                .contains(&format!("non-representable {axis} coordinate")));
+            assert!(error.to_string().contains(reason));
 
             let output = driver
                 .step(TimelineId::new(), ObservationView::empty())
@@ -2881,6 +2938,27 @@ mod tests {
                 &[unknown_target],
             )
             .is_err());
+
+        let mismatched_catalogue = WorldActionV1 {
+            body_entity_id: body,
+            catalogue_version: 2,
+            ..unknown_target_action
+        };
+        let mismatched_catalogue = make_versioned_event(
+            1,
+            body,
+            EVENT_TYPE_ACTION_V1,
+            mismatched_catalogue.encode().test_ok(),
+        );
+        let error = registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[mismatched_catalogue],
+            )
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("action catalogue version differs from pinned world configuration"));
 
         let mut unknown_observation = sample_observation();
         unknown_observation.body_entity_id = EntityId::new();
