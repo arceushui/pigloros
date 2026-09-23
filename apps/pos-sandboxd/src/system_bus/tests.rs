@@ -2,7 +2,10 @@ use std::{
     error::Error,
     fs::File,
     os::fd::OwnedFd as StdOwnedFd,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use pos_conformance::SandboxSyscallSetV1;
@@ -10,6 +13,7 @@ use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
 use zbus::{
     connection::{socket::channel::Channel, Builder},
     fdo,
+    object_server::SignalEmitter,
     zvariant::{OwnedFd, OwnedObjectPath, OwnedValue, Structure},
     Guid,
 };
@@ -24,6 +28,10 @@ const X86_64: &[u8] = include_bytes!(
 );
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const JOB_PATH: &str = "/org/freedesktop/systemd1/job/381";
+const UNRELATED_JOB_PATH: &str = "/org/freedesktop/systemd1/job/999";
+const UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/pigloros_2dattempt_2dtest_2eservice";
+const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
+const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
 const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 35] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
@@ -74,20 +82,77 @@ struct ObservedStart {
 
 struct RecordingManager {
     observed: Arc<Mutex<Option<ObservedStart>>>,
+    subscribed: Arc<AtomicBool>,
+    behavior: ManagerBehavior,
+}
+
+#[derive(Clone)]
+struct ManagerBehavior {
+    subscription: SubscriptionBehavior,
     reject: bool,
+    unit_lookup: UnitLookupBehavior,
+    result: String,
+    emit_unrelated: bool,
+    completion_unit: Option<String>,
+    emit_completion: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+enum SubscriptionBehavior {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Clone, Copy, Default)]
+enum UnitLookupBehavior {
+    #[default]
+    Resolve,
+    Reject,
+}
+
+impl Default for ManagerBehavior {
+    fn default() -> Self {
+        Self {
+            subscription: SubscriptionBehavior::default(),
+            reject: false,
+            unit_lookup: UnitLookupBehavior::default(),
+            result: "done".to_owned(),
+            emit_unrelated: false,
+            completion_unit: None,
+            emit_completion: true,
+        }
+    }
 }
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl RecordingManager {
+    #[zbus(name = "Subscribe")]
+    fn subscribe(&self) -> fdo::Result<()> {
+        if matches!(self.behavior.subscription, SubscriptionBehavior::Reject) {
+            return Err(fdo::Error::AccessDenied(
+                "test subscription rejection".to_owned(),
+            ));
+        }
+        self.subscribed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     #[zbus(name = "StartTransientUnit")]
-    fn start_transient_unit(
+    async fn start_transient_unit(
         &self,
         name: String,
         mode: String,
         properties: Vec<(String, OwnedValue)>,
         auxiliary: Vec<(String, Vec<(String, OwnedValue)>)>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
-        if self.reject {
+        if !self.subscribed.load(Ordering::SeqCst) {
+            return Err(fdo::Error::Failed(
+                "StartTransientUnit arrived before Subscribe".to_owned(),
+            ));
+        }
+        if self.behavior.reject {
             return Err(fdo::Error::AccessDenied("test rejection".to_owned()));
         }
         let property_names = properties
@@ -109,7 +174,7 @@ impl RecordingManager {
         // The generated D-Bus interface owns every decoded wire argument.
         drop(auxiliary);
         let call = ObservedStart {
-            unit_name: name,
+            unit_name: name.clone(),
             mode,
             property_names,
             property_signatures,
@@ -120,7 +185,285 @@ impl RecordingManager {
             .lock()
             .map_err(|error| fdo::Error::Failed(error.to_string()))?
             .replace(call);
-        OwnedObjectPath::try_from(JOB_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
+        let job_path = OwnedObjectPath::try_from(JOB_PATH)
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        if self.behavior.emit_unrelated {
+            let unrelated = OwnedObjectPath::try_from(UNRELATED_JOB_PATH)
+                .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+            Self::job_removed(
+                &emitter,
+                999,
+                unrelated,
+                "unrelated.service".to_owned(),
+                "failed".to_owned(),
+            )
+            .await
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        }
+        if self.behavior.emit_completion {
+            Self::job_removed(
+                &emitter,
+                381,
+                job_path.clone(),
+                self.behavior
+                    .completion_unit
+                    .clone()
+                    .unwrap_or_else(|| name.clone()),
+                self.behavior.result.clone(),
+            )
+            .await
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        }
+        Ok(job_path)
+    }
+
+    #[zbus(name = "GetUnit")]
+    fn get_unit(&self, name: String) -> fdo::Result<OwnedObjectPath> {
+        let _ = (&self.observed, name);
+        if matches!(self.behavior.unit_lookup, UnitLookupBehavior::Reject) {
+            return Err(fdo::Error::Failed("test lookup rejection".to_owned()));
+        }
+        OwnedObjectPath::try_from(UNIT_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
+    }
+
+    #[zbus(signal, name = "JobRemoved")]
+    async fn job_removed(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        job: OwnedObjectPath,
+        unit: String,
+        result: String,
+    ) -> zbus::Result<()>;
+}
+
+struct RecordingService {
+    system_call_filter: Vec<String>,
+    root_directory: String,
+    property_reads: Arc<AtomicUsize>,
+    fail_root_directory: bool,
+    fail_root_image_policy: bool,
+}
+
+impl RecordingService {
+    fn exact(system_call_filter: Vec<String>) -> Self {
+        Self {
+            system_call_filter,
+            root_directory: ROOT_DIRECTORY.to_owned(),
+            property_reads: Arc::new(AtomicUsize::new(0)),
+            fail_root_directory: false,
+            fail_root_image_policy: false,
+        }
+    }
+
+    fn fixed<T>(&self, value: T) -> T {
+        self.record_read();
+        value
+    }
+
+    fn record_read(&self) {
+        self.property_reads.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[zbus::interface(name = "org.freedesktop.systemd1.Service")]
+impl RecordingService {
+    #[zbus(property, name = "Type")]
+    fn type_property(&self) -> &'static str {
+        self.fixed("exec")
+    }
+
+    #[zbus(property, name = "RootDirectory")]
+    fn root_directory(&self) -> fdo::Result<&str> {
+        self.record_read();
+        if self.fail_root_directory {
+            Err(fdo::Error::Failed("test readback failure".to_owned()))
+        } else {
+            Ok(&self.root_directory)
+        }
+    }
+
+    #[zbus(property, name = "BindReadOnlyPaths")]
+    fn bind_read_only_paths(&self) -> Vec<(String, String, bool, u64)> {
+        self.fixed(vec![(
+            "/usr/lib/pigloros/release-launcher".to_owned(),
+            "/.pigloros/release-launcher".to_owned(),
+            false,
+            0,
+        )])
+    }
+
+    #[zbus(property, name = "DynamicUser")]
+    fn dynamic_user(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "NoNewPrivileges")]
+    fn no_new_privileges(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "PrivateDevices")]
+    fn private_devices(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "PrivateIPC")]
+    fn private_ipc(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "PrivateMounts")]
+    fn private_mounts(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "PrivateNetwork")]
+    fn private_network(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "PrivatePIDs")]
+    fn private_pi_ds(&self) -> &'static str {
+        self.fixed("yes")
+    }
+
+    #[zbus(property, name = "PrivateUsersEx")]
+    fn private_users_ex(&self) -> &'static str {
+        self.fixed("self")
+    }
+
+    #[zbus(property, name = "CapabilityBoundingSet")]
+    fn capability_bounding_set(&self) -> u64 {
+        self.fixed(0)
+    }
+
+    #[zbus(property, name = "AmbientCapabilities")]
+    fn ambient_capabilities(&self) -> u64 {
+        self.fixed(0)
+    }
+
+    #[zbus(property, name = "ProtectSystem")]
+    fn protect_system(&self) -> &'static str {
+        self.fixed("strict")
+    }
+
+    #[zbus(property, name = "ProtectHome")]
+    fn protect_home(&self) -> &'static str {
+        self.fixed("yes")
+    }
+
+    #[zbus(property, name = "ProtectControlGroupsEx")]
+    fn protect_control_groups_ex(&self) -> &'static str {
+        self.fixed("strict")
+    }
+
+    #[zbus(property, name = "ProtectKernelTunables")]
+    fn protect_kernel_tunables(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "ProtectKernelModules")]
+    fn protect_kernel_modules(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "ProtectKernelLogs")]
+    fn protect_kernel_logs(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "ProtectClock")]
+    fn protect_clock(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "ProtectHostname")]
+    fn protect_hostname(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "ProtectProc")]
+    fn protect_proc(&self) -> &'static str {
+        self.fixed("invisible")
+    }
+
+    #[zbus(property, name = "ProcSubset")]
+    fn proc_subset(&self) -> &'static str {
+        self.fixed("pid")
+    }
+
+    #[zbus(property, name = "RestrictNamespaces")]
+    fn restrict_namespaces(&self) -> u64 {
+        self.fixed(0x7e02_0080)
+    }
+
+    #[zbus(property, name = "RestrictSUIDSGID")]
+    fn restrict_suidsgid(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "RestrictRealtime")]
+    fn restrict_realtime(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "LockPersonality")]
+    fn lock_personality(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "SystemCallArchitectures")]
+    fn system_call_architectures(&self) -> Vec<String> {
+        self.fixed(vec!["native".to_owned()])
+    }
+
+    #[zbus(property, name = "SystemCallFilter")]
+    fn system_call_filter(&self) -> (bool, Vec<String>) {
+        self.record_read();
+        (true, self.system_call_filter.clone())
+    }
+
+    #[zbus(property, name = "RestrictAddressFamilies")]
+    fn restrict_address_families(&self) -> (bool, Vec<String>) {
+        self.fixed((true, vec!["AF_UNIX".to_owned()]))
+    }
+
+    #[zbus(property, name = "UMask")]
+    fn u_mask(&self) -> u32 {
+        self.fixed(0o077)
+    }
+
+    #[zbus(property, name = "KillMode")]
+    fn kill_mode(&self) -> &'static str {
+        self.fixed("control-group")
+    }
+
+    #[zbus(property, name = "SendSIGKILL")]
+    fn send_sigkill(&self) -> bool {
+        self.fixed(true)
+    }
+
+    #[zbus(property, name = "FileDescriptorStoreMax")]
+    fn file_descriptor_store_max(&self) -> u32 {
+        self.fixed(0)
+    }
+
+    #[zbus(property, name = "ExtraFileDescriptorNames")]
+    fn extra_file_descriptor_names(&self) -> Vec<String> {
+        self.fixed(vec![
+            "piglor-host-service-v1".to_owned(),
+            "piglor-release-v1".to_owned(),
+        ])
+    }
+
+    #[zbus(property, name = "RootImagePolicy")]
+    fn root_image_policy(&self) -> fdo::Result<&'static str> {
+        self.record_read();
+        if self.fail_root_image_policy {
+            Err(fdo::Error::Failed("test readback failure".to_owned()))
+        } else {
+            Ok(ROOT_IMAGE_POLICY)
+        }
     }
 }
 
@@ -144,22 +487,40 @@ fn descriptor_names(value: OwnedValue) -> fdo::Result<Vec<String>> {
 #[tokio::test]
 async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dyn Error>> {
     let observed = Arc::new(Mutex::new(None));
-    let (transport, _server) = transport(Arc::clone(&observed), false).await?;
+    let behavior = ManagerBehavior {
+        emit_unrelated: true,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::clone(&observed), behavior, service).await?;
     let name = TransientServiceUnitName::from_attempt_id([0xab; 16])?;
     assert_eq!(
         name.as_str(),
         "pigloros-attempt-abababababababababababababababab.service"
     );
 
-    let job = transport
+    let verified = transport
         .start(
-            name,
+            name.clone(),
             request(LaunchMode::Local {
                 host_service: descriptor()?,
             })?,
         )
         .await?;
-    assert_eq!(job.as_str(), JOB_PATH);
+    assert_eq!(verified.unit_name(), &name);
+    assert_eq!(verified.job().as_str(), JOB_PATH);
+    assert_eq!(verified.unit_path(), UNIT_PATH);
+    assert_eq!(verified.requested_readback().len(), 35);
+    assert_eq!(verified.requested_readback()[0].name(), "Type");
+    assert_eq!(
+        verified.requested_readback()[34].name(),
+        "ExtraFileDescriptors"
+    );
+    assert_eq!(
+        verified.manager_readback().property(),
+        SystemdManagerReadbackOnlyProperty::RootImagePolicy
+    );
+    assert_eq!(verified.manager_readback().value(), ROOT_IMAGE_POLICY);
 
     let call = observed
         .lock()
@@ -188,7 +549,12 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
 
 #[tokio::test]
 async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Error>> {
-    let (transport, _server) = transport(Arc::new(Mutex::new(None)), true).await?;
+    let behavior = ManagerBehavior {
+        reject: true,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let result = transport
         .start(
             TransientServiceUnitName::from_attempt_id([0x01; 16])?,
@@ -203,15 +569,211 @@ async fn generated_proxy_preserves_manager_rejection() -> Result<(), Box<dyn Err
     Ok(())
 }
 
+#[tokio::test]
+async fn manager_subscription_rejection_is_classified() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        subscription: SubscriptionBehavior::Reject,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let error = transport(Arc::new(Mutex::new(None)), behavior, service)
+        .await
+        .err()
+        .ok_or("manager subscription rejection was accepted")?;
+    assert_eq!(
+        error.to_string(),
+        "failed to subscribe the systemd manager connection"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_unit_lookup_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        unit_lookup: UnitLookupBehavior::Reject,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x06; 16])?,
+            request(LaunchMode::AirGapped)?,
+        )
+        .await
+        .err()
+        .ok_or("failed completed-unit lookup was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::UnitLookup(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_non_successful_job_result_fails_closed() -> Result<(), Box<dyn Error>> {
+    let cases = [
+        ("canceled", SystemdJobFailure::Canceled),
+        ("timeout", SystemdJobFailure::Timeout),
+        ("failed", SystemdJobFailure::Failed),
+        ("dependency", SystemdJobFailure::Dependency),
+        ("skipped", SystemdJobFailure::Skipped),
+        (
+            "future-result",
+            SystemdJobFailure::Unknown("future-result".to_owned()),
+        ),
+    ];
+    for (result, expected) in cases {
+        let behavior = ManagerBehavior {
+            result: result.to_owned(),
+            ..ManagerBehavior::default()
+        };
+        let service = RecordingService::exact(expected_system_call_filter()?);
+        let property_reads = Arc::clone(&service.property_reads);
+        let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+        let error = transport
+            .start(
+                TransientServiceUnitName::from_attempt_id([0x02; 16])?,
+                request(LaunchMode::AirGapped)?,
+            )
+            .await
+            .err()
+            .ok_or("failed job result was accepted")?;
+        let SystemdTransientUnitTransportError::JobFailed(actual) = error else {
+            return Err("failed job result had the wrong error class".into());
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(property_reads.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn matching_job_path_cannot_substitute_the_unit_name() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        completion_unit: Some("substituted.service".to_owned()),
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let expected = TransientServiceUnitName::from_attempt_id([0x03; 16])?;
+    let error = transport
+        .start(expected.clone(), request(LaunchMode::AirGapped)?)
+        .await
+        .err()
+        .ok_or("substituted completion unit was accepted")?;
+    let SystemdTransientUnitTransportError::JobIdentityMismatch {
+        expected: observed_expected,
+        actual,
+    } = error
+    else {
+        return Err("substituted completion unit had the wrong error class".into());
+    };
+    assert_eq!(observed_expected, expected.as_str());
+    assert_eq!(actual, "substituted.service");
+    Ok(())
+}
+
+#[tokio::test]
+async fn unequal_typed_property_readback_fails_closed() -> Result<(), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    service.root_directory = "/run/pigloros/substituted/root".to_owned();
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x04; 16])?,
+            request(LaunchMode::Local {
+                host_service: descriptor()?,
+            })?,
+        )
+        .await
+        .err()
+        .ok_or("unequal property readback was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::Readback(TransientUnitRequestError::ReadbackMismatch)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_property_read_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    service.fail_root_directory = true;
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x05; 16])?,
+            request(LaunchMode::Local {
+                host_service: descriptor()?,
+            })?,
+        )
+        .await
+        .err()
+        .ok_or("failed property read was accepted")?;
+    let SystemdTransientUnitTransportError::PropertyReadback { property, .. } = error else {
+        return Err("failed property read had the wrong error class".into());
+    };
+    assert_eq!(property, "RootDirectory");
+    Ok(())
+}
+
+#[tokio::test]
+async fn manager_only_property_read_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    service.fail_root_image_policy = true;
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x07; 16])?,
+            request(LaunchMode::Local {
+                host_service: descriptor()?,
+            })?,
+        )
+        .await
+        .err()
+        .ok_or("failed manager-only property read was accepted")?;
+    let SystemdTransientUnitTransportError::PropertyReadback { property, .. } = error else {
+        return Err("failed manager-only property read had the wrong error class".into());
+    };
+    assert_eq!(property, "RootImagePolicy");
+    Ok(())
+}
+
 async fn transport(
     observed: Arc<Mutex<Option<ObservedStart>>>,
-    reject: bool,
+    behavior: ManagerBehavior,
+    service: RecordingService,
 ) -> Result<(SystemdTransientUnitTransport, zbus::Connection), Box<dyn Error>> {
     let guid = Guid::generate();
     let (server_socket, client_socket) = Channel::pair();
+    let subscribed = Arc::new(AtomicBool::new(false));
     let server = Builder::authenticated_socket(server_socket, guid.clone())?
         .p2p()
-        .serve_at(MANAGER_PATH, RecordingManager { observed, reject })?
+        .serve_at(
+            MANAGER_PATH,
+            RecordingManager {
+                observed,
+                subscribed,
+                behavior,
+            },
+        )?
+        .serve_at(UNIT_PATH, service)?
         .build();
     let client = Builder::authenticated_socket(client_socket, guid)?
         .p2p()
@@ -219,10 +781,15 @@ async fn transport(
     let (server, client) = tokio::join!(server, client);
     let server = server?;
     let client = client?;
-    Ok((
-        SystemdTransientUnitTransport::from_connection(client),
-        server,
-    ))
+    let transport =
+        SystemdTransientUnitTransport::connect_with(std::future::ready(Ok(client))).await?;
+    Ok((transport, server))
+}
+
+fn expected_system_call_filter() -> Result<Vec<String>, Box<dyn Error>> {
+    SandboxSyscallSetV1::from_canonical_cbor(X86_64)
+        .map(|authority| authority.expected_effective_names)
+        .map_err(Into::into)
 }
 
 fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
@@ -270,22 +837,168 @@ fn call_serialization_failure_is_classified() {
 }
 
 #[tokio::test]
-async fn pre_submission_failures_are_classified() {
-    let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
-    let property_error =
-        SystemdTransientUnitTransportError::Serialization(zvariant::Error::IncorrectType);
-    let name = TransientServiceUnitName("test.service".to_owned());
-    let error = submit(Err(proxy_error), Err(property_error), name).await;
-    assert_eq!(
-        error.as_ref().err().map(ToString::to_string),
-        Some("failed to serialize the typed transient-unit request".to_owned())
-    );
-
+async fn manager_proxy_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
     let proxy_error = zbus::Error::Failure("test proxy failure".to_owned());
     let name = TransientServiceUnitName("test.service".to_owned());
-    let error = submit(Err(proxy_error), Ok(Vec::new()), name).await;
+    let request = request(LaunchMode::AirGapped)?;
+    let error = submit_and_verify(
+        Err(proxy_error),
+        Vec::new(),
+        name,
+        &request,
+        &transport.connection,
+    )
+    .await;
     assert_eq!(
         error.as_ref().err().map(ToString::to_string),
         Some("failed to construct the typed systemd manager proxy".to_owned())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn connection_and_manager_proxy_failures_are_classified() -> Result<(), Box<dyn Error>> {
+    let connection_error = SystemdTransientUnitTransport::connect_with(std::future::ready(Err(
+        zbus::Error::Failure("test connection failure".to_owned()),
+    )))
+    .await;
+    assert!(matches!(
+        connection_error,
+        Err(SystemdTransientUnitTransportError::Connect(_))
+    ));
+
+    let proxy_error = SystemdTransientUnitTransport::subscribe_manager(Err(zbus::Error::Failure(
+        "test proxy failure".to_owned(),
+    )))
+    .await;
+    assert!(matches!(
+        proxy_error,
+        Err(SystemdTransientUnitTransportError::Proxy(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn preparation_and_encoding_failures_are_classified() -> Result<(), Box<dyn Error>> {
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let prepared_error = transport
+        .start_with_prepared(
+            TransientServiceUnitName("prepared.service".to_owned()),
+            request(LaunchMode::AirGapped)?,
+            Err(zvariant::Error::IncorrectType),
+        )
+        .await;
+    assert!(matches!(
+        prepared_error,
+        Err(SystemdTransientUnitTransportError::Serialization(_))
+    ));
+
+    let encoded_error = transport
+        .start_with_encoded(
+            TransientServiceUnitName("encoded.service".to_owned()),
+            request(LaunchMode::AirGapped)?,
+            Err(SystemdTransientUnitTransportError::Serialization(
+                zvariant::Error::IncorrectType,
+            )),
+        )
+        .await;
+    assert!(matches!(
+        encoded_error,
+        Err(SystemdTransientUnitTransportError::Serialization(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn signal_subscription_and_stream_failures_are_classified() -> Result<(), Box<dyn Error>> {
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let proxy = ManagerProxy::new(&transport.connection).await?;
+    let request = request(LaunchMode::AirGapped)?;
+    let subscription_error = submit_with_completions(
+        &proxy,
+        Err(zbus::Error::Failure(
+            "test signal subscription failure".to_owned(),
+        )),
+        Vec::new(),
+        TransientServiceUnitName("subscription.service".to_owned()),
+        &request,
+        &transport.connection,
+    )
+    .await;
+    assert!(matches!(
+        subscription_error,
+        Err(SystemdTransientUnitTransportError::JobSignalSubscribe(_))
+    ));
+
+    let job = SystemdStartJob(OwnedObjectPath::try_from(JOB_PATH)?);
+    let mut ended = futures_util::stream::empty::<
+        Result<SystemdJobCompletion, SystemdTransientUnitTransportError>,
+    >();
+    let ended_error = await_job_completion(&mut ended, &job, "ended.service".to_owned()).await;
+    assert!(matches!(
+        ended_error,
+        Err(SystemdTransientUnitTransportError::JobSignalEnded)
+    ));
+
+    let signal_error = SystemdTransientUnitTransportError::JobSignal(zbus::Error::Failure(
+        "test malformed signal".to_owned(),
+    ));
+    let mut malformed = futures_util::stream::once(std::future::ready(Err(signal_error)));
+    let malformed_error =
+        await_job_completion(&mut malformed, &job, "malformed.service".to_owned()).await;
+    assert!(matches!(
+        malformed_error,
+        Err(SystemdTransientUnitTransportError::JobSignal(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn malformed_signal_arguments_are_classified() {
+    let result = decode_job_completion(Err(zbus::Error::Failure(
+        "test malformed arguments".to_owned(),
+    )));
+    assert!(matches!(
+        result,
+        Err(SystemdTransientUnitTransportError::JobSignal(_))
+    ));
+}
+
+#[tokio::test]
+async fn service_proxy_build_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let request = request(LaunchMode::AirGapped)?;
+    let result = verify_service(
+        Err(zbus::Error::Failure(
+            "test service proxy failure".to_owned(),
+        )),
+        TransientServiceUnitName("service-proxy.service".to_owned()),
+        SystemdStartJob(OwnedObjectPath::try_from(JOB_PATH)?),
+        OwnedObjectPath::try_from(UNIT_PATH)?,
+        &request,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SystemdTransientUnitTransportError::ServiceProxy(_))
+    ));
+    Ok(())
 }

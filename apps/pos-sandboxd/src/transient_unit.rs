@@ -1,10 +1,11 @@
 //! Typed dynamic systemd transient-unit launch properties.
 
-use zvariant::OwnedFd;
+use zvariant::{Fd, OwnedFd};
 
 use crate::{
     SystemCallFilter, SystemdHardeningProperty, SystemdHardeningReadbackValue,
-    SystemdHardeningValue, TransientUnitHardening,
+    SystemdHardeningValue, SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind,
+    TransientUnitHardening,
 };
 
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
@@ -147,24 +148,45 @@ impl SystemdTransientUnitValue {
             Self::ExtraFileDescriptors(_) => "a(hs)",
         }
     }
+
+    fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
+        match self {
+            Self::Static(value) => Ok(Self::Static(*value)),
+            Self::RootDirectory(value) => Ok(Self::RootDirectory(value.clone())),
+            Self::BindReadOnlyPaths(value) => Ok(Self::BindReadOnlyPaths(value.clone())),
+            Self::SystemCallFilter(value) => Ok(Self::SystemCallFilter(value.clone())),
+            Self::RestrictAddressFamilies(value) => {
+                Ok(Self::RestrictAddressFamilies(value.clone()))
+            }
+            Self::FileDescriptorStoreMax(value) => Ok(Self::FileDescriptorStoreMax(*value)),
+            Self::ExtraFileDescriptors(value) => value
+                .iter()
+                .map(|(descriptor, name)| {
+                    let descriptor = Fd::from(descriptor).try_to_owned().map(OwnedFd::from)?;
+                    Ok((descriptor, name.clone()))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::ExtraFileDescriptors),
+        }
+    }
 }
 
 /// One named typed property ready for `StartTransientUnit` serialization.
 #[derive(Debug)]
 pub struct SystemdTransientUnitProperty {
-    name: &'static str,
+    kind: SystemdTransientUnitPropertyKind,
     value: SystemdTransientUnitValue,
 }
 
 impl SystemdTransientUnitProperty {
-    const fn new(name: &'static str, value: SystemdTransientUnitValue) -> Self {
-        Self { name, value }
+    const fn new(kind: SystemdTransientUnitPropertyKind, value: SystemdTransientUnitValue) -> Self {
+        Self { kind, value }
     }
 
     /// Return the exact systemd property name.
     #[must_use]
     pub const fn name(&self) -> &'static str {
-        self.name
+        self.kind.name()
     }
 
     /// Return the typed property value.
@@ -173,8 +195,28 @@ impl SystemdTransientUnitProperty {
         &self.value
     }
 
-    pub(crate) fn into_parts(self) -> (&'static str, SystemdTransientUnitValue) {
-        (self.name, self.value)
+    fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
+        Self::from_cloned_value(self.kind, self.value.try_clone_for_submission())
+    }
+
+    fn from_cloned_value(
+        kind: SystemdTransientUnitPropertyKind,
+        value: Result<SystemdTransientUnitValue, zvariant::Error>,
+    ) -> Result<Self, zvariant::Error> {
+        Ok(Self {
+            kind,
+            value: value?,
+        })
+    }
+}
+
+impl SystemdTransientUnitPropertyAccess for SystemdTransientUnitProperty {
+    fn kind(&self) -> SystemdTransientUnitPropertyKind {
+        self.kind
+    }
+
+    fn into_parts(self) -> (&'static str, SystemdTransientUnitValue) {
+        (self.kind.name(), self.value)
     }
 }
 
@@ -223,6 +265,18 @@ impl SystemdTransientUnitReadback {
             name: name.into(),
             value,
         }
+    }
+
+    /// Return the exact systemd property name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Return the typed observed value.
+    #[must_use]
+    pub const fn value(&self) -> &SystemdTransientUnitReadbackValue {
+        &self.value
     }
 }
 
@@ -322,16 +376,16 @@ impl TransientUnitRequest {
             Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 6);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
-                property.name(),
+                SystemdTransientUnitPropertyKind::Hardening(*property),
                 SystemdTransientUnitValue::Static(property.value()),
             ));
             if *property == SystemdHardeningProperty::TypeExec {
                 properties.push(SystemdTransientUnitProperty::new(
-                    "RootDirectory",
+                    SystemdTransientUnitPropertyKind::RootDirectory,
                     SystemdTransientUnitValue::RootDirectory(root_directory.as_str().to_owned()),
                 ));
                 properties.push(SystemdTransientUnitProperty::new(
-                    "BindReadOnlyPaths",
+                    SystemdTransientUnitPropertyKind::BindReadOnlyPaths,
                     SystemdTransientUnitValue::BindReadOnlyPaths(vec![(
                         launcher_source.as_str().to_owned(),
                         LAUNCHER_DESTINATION.to_owned(),
@@ -342,23 +396,23 @@ impl TransientUnitRequest {
             }
             if *property == SystemdHardeningProperty::SystemCallArchitectures {
                 properties.push(SystemdTransientUnitProperty::new(
-                    "SystemCallFilter",
+                    SystemdTransientUnitPropertyKind::SystemCallFilter,
                     SystemdTransientUnitValue::SystemCallFilter(
                         system_call_filter.requested_property(),
                     ),
                 ));
                 properties.push(SystemdTransientUnitProperty::new(
-                    "RestrictAddressFamilies",
+                    SystemdTransientUnitPropertyKind::RestrictAddressFamilies,
                     SystemdTransientUnitValue::RestrictAddressFamilies(address_families.clone()),
                 ));
             }
         }
         properties.push(SystemdTransientUnitProperty::new(
-            "FileDescriptorStoreMax",
+            SystemdTransientUnitPropertyKind::FileDescriptorStoreMax,
             SystemdTransientUnitValue::FileDescriptorStoreMax(0),
         ));
         properties.push(SystemdTransientUnitProperty::new(
-            "ExtraFileDescriptors",
+            SystemdTransientUnitPropertyKind::ExtraFileDescriptors,
             SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
         ));
         Self {
@@ -373,8 +427,13 @@ impl TransientUnitRequest {
         &self.properties
     }
 
-    pub(crate) fn into_requested_properties(self) -> Vec<SystemdTransientUnitProperty> {
+    pub(crate) fn requested_properties_for_submission(
+        &self,
+    ) -> Result<Vec<SystemdTransientUnitProperty>, zvariant::Error> {
         self.properties
+            .iter()
+            .map(SystemdTransientUnitProperty::try_clone_for_submission)
+            .collect()
     }
 
     /// Verify complete ordered typed manager readback for this compiled request.
@@ -406,7 +465,7 @@ impl TransientUnitRequest {
         observed: &SystemdTransientUnitReadback,
         requested: &SystemdTransientUnitProperty,
     ) -> bool {
-        observed.name == requested.name
+        observed.name == requested.name()
             && match (&requested.value, &observed.value) {
                 (
                     SystemdTransientUnitValue::FileDescriptorStoreMax(expected),
@@ -451,4 +510,18 @@ fn is_normalized_absolute_path(path: &str) -> bool {
             .split('/')
             .skip(1)
             .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn property_clone_propagates_value_failure() {
+        let result = SystemdTransientUnitProperty::from_cloned_value(
+            SystemdTransientUnitPropertyKind::FileDescriptorStoreMax,
+            Err(zvariant::Error::IncorrectType),
+        );
+        assert!(matches!(result, Err(zvariant::Error::IncorrectType)));
+    }
 }
