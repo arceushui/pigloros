@@ -110,7 +110,6 @@ struct ManagerBehavior {
     completion_unit: Option<String>,
     emit_completion: bool,
     control_calls: Arc<Mutex<Vec<ObservedControl>>>,
-    kill_reject: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -138,7 +137,6 @@ impl Default for ManagerBehavior {
             completion_unit: None,
             emit_completion: true,
             control_calls: Arc::new(Mutex::new(Vec::new())),
-            kill_reject: false,
         }
     }
 }
@@ -288,7 +286,7 @@ impl RecordingManager {
 
     #[zbus(name = "KillUnit")]
     fn kill_unit(&self, name: String, whom: String, signal: i32) -> fdo::Result<()> {
-        if self.behavior.kill_reject {
+        if self.behavior.reject {
             return Err(fdo::Error::AccessDenied("test kill rejection".to_owned()));
         }
         self.behavior
@@ -951,7 +949,7 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
     );
 
     let behavior = ManagerBehavior {
-        kill_reject: true,
+        reject: true,
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
