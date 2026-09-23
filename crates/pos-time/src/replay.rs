@@ -73,14 +73,22 @@ fn replay_range(
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
         outcome = registry.try_with_state_transaction(|candidate| {
-            let read_bounds = crate::require_world_replay(sender, closure, &requested_use)?;
-            let events = crate::read_complete_world_replay(sender, timeline, range, read_bounds)?;
-            candidate.fold_events(&events);
-            let final_bounds = crate::require_world_replay(sender, closure, &requested_use)?;
-            if final_bounds != read_bounds {
-                return Err(CoreError::ArtifactUnavailable);
-            }
-            Ok(events)
+            crate::require_world_replay(sender, closure, &requested_use).and_then(|read_bounds| {
+                crate::read_complete_world_replay(sender, timeline, range, read_bounds).and_then(
+                    |events| {
+                        candidate.fold_events(&events);
+                        crate::require_world_replay(sender, closure, &requested_use).and_then(
+                            |final_bounds| {
+                                if final_bounds != read_bounds {
+                                    Err(CoreError::ArtifactUnavailable)
+                                } else {
+                                    Ok(events)
+                                }
+                            },
+                        )
+                    },
+                )
+            })
         });
     };
     sender
@@ -393,6 +401,22 @@ mod tests {
             Err(CoreError::ArtifactUnavailable)
         ));
         assert_eq!(registry.state_for_reducer("count", &entity), None);
+    }
+
+    #[test]
+    fn public_replay_rejects_empty_consumer_selection() {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
+        let mut registry = ProjectionRegistry::new();
+        assert!(matches!(
+            super::replay(&mut reads, TimelineId::new(), &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     #[test]
