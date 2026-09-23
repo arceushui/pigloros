@@ -5786,33 +5786,13 @@ impl ErasureForkRetryScopeRequirementV1 {
     }
 }
 
-fn update_fork_child_identity(hasher: &mut blake3::Hasher, child: &crate::TimelineMeta) {
+fn update_fork_child_identity(
+    hasher: &mut blake3::Hasher,
+    child: &crate::TimelineMeta,
+    mode_encoding: &[u8],
+) {
     hasher.update(&child.id.inner().to_bytes());
-    hasher.update(b"historical");
-    match &child.name {
-        Some(name) => {
-            hasher.update(&[1]);
-            hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
-            hasher.update(name.as_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-    match child.owner {
-        Some(owner) => {
-            hasher.update(&[1]);
-            hasher.update(&owner.inner().to_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-}
-
-fn update_fork_admission_child_identity(hasher: &mut blake3::Hasher, child: &crate::TimelineMeta) {
-    hasher.update(&child.id.inner().to_bytes());
-    hasher.update(&[0]);
+    hasher.update(mode_encoding);
     match &child.name {
         Some(name) => {
             hasher.update(&[1]);
@@ -5860,7 +5840,7 @@ fn fork_admission_binding_digest(
     ] {
         hasher.update(&reference.digest());
     }
-    update_fork_admission_child_identity(&mut hasher, child);
+    update_fork_child_identity(&mut hasher, child, &[0]);
     hasher.update(&parent.inner().to_bytes());
     hasher.update(&at_seq.as_u64().to_be_bytes());
     ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
@@ -5887,7 +5867,7 @@ fn fork_batch_binding_digest(
     ] {
         hasher.update(&reference.digest());
     }
-    update_fork_child_identity(&mut hasher, child);
+    update_fork_child_identity(&mut hasher, child, b"historical");
     hasher.update(&parent.inner().to_bytes());
     hasher.update(&at_seq.as_u64().to_be_bytes());
     hasher.update(
@@ -6002,7 +5982,7 @@ impl ErasureForkRecoveryV1 {
         hasher.update(&expected_inventory_generation.digest());
         hasher.update(&child_scope.digest());
         hasher.update(&successor_generation.digest());
-        update_fork_child_identity(&mut hasher, child);
+        update_fork_child_identity(&mut hasher, child, b"historical");
         let (parent, at_seq) = fork_point;
         hasher.update(&parent.inner().to_bytes());
         hasher.update(&at_seq.as_u64().to_be_bytes());
@@ -6523,7 +6503,34 @@ impl ErasureForkRecoveryProofV1 {
         recovered: &ErasureForkRecoveryV1,
         successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<(), ErasureErrorV1> {
+        self.validate_complete_for_inventory_with_persisted_state(
+            recovered,
+            successor_inventory,
+            || Ok(()),
+        )
+    }
+
+    /// Validate the proof and adapter-persisted recovery before classifying a
+    /// successor inventory generation as stale or checking its complete scope.
+    ///
+    /// `validate_persisted_state` must verify the durable proof records and
+    /// recovered Fork child using the adapter's own storage boundary. Running
+    /// this check before stale-generation classification ensures stale input
+    /// cannot hide missing or inconsistent durable evidence.
+    ///
+    /// # Errors
+    /// Returns a provenance error when either the proof or persisted state is
+    /// inconsistent, [`ErasureErrorV1::StaleGeneration`] when the verified
+    /// inventory is not the operation's successor, or a provenance error when
+    /// the proof's admissions do not match the complete required scope.
+    pub fn validate_complete_for_inventory_with_persisted_state(
+        &self,
+        recovered: &ErasureForkRecoveryV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
+        validate_persisted_state: impl FnOnce() -> Result<(), ErasureErrorV1>,
+    ) -> Result<(), ErasureErrorV1> {
         self.validate(recovered)?;
+        validate_persisted_state()?;
         if recovered.successor_generation() != successor_inventory.generation() {
             return Err(ErasureErrorV1::StaleGeneration);
         }
@@ -9450,6 +9457,19 @@ mod coverage_paths {
             proof.validate_complete_for_inventory(&result, &unrelated_inventory),
             Err(ErasureErrorV1::StaleGeneration)
         );
+        let mut persisted_validation_ran = false;
+        assert_eq!(
+            proof.validate_complete_for_inventory_with_persisted_state(
+                &result,
+                &unrelated_inventory,
+                || {
+                    persisted_validation_ran = true;
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                },
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert!(persisted_validation_ran);
 
         let mut incomplete_successor = successor.clone();
         incomplete_successor.classifications.clear();

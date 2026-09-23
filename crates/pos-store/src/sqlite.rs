@@ -5447,20 +5447,21 @@ fn sqlite_recover_fork_admission_impl(
         return Ok(None);
     };
     let recovered = receipt.recover(operation)?;
-    let proof = sqlite_fork_recovery_proof(conn, operation, &recovered)?;
-    sqlite_recovery_proof_is_exact(conn, &proof)?;
-    sqlite_verify_recovered_fork_child(conn, hasher, &recovered)?;
-    if recovered.successor_generation() != successor_inventory.generation() {
-        return Err(ErasureErrorV1::StaleGeneration);
-    }
-    proof.validate_complete_for_inventory(&recovered, successor_inventory)?;
+    let proof = sqlite_fork_recovery_proof(conn, operation)?;
+    proof.validate_complete_for_inventory_with_persisted_state(
+        &recovered,
+        successor_inventory,
+        || {
+            sqlite_recovery_proof_is_exact(conn, &proof)?;
+            sqlite_verify_recovered_fork_child(conn, hasher, &recovered)
+        },
+    )?;
     Ok(Some(recovered))
 }
 
 fn sqlite_fork_recovery_proof(
     conn: &Connection,
     operation: ErasureReferenceV1,
-    recovered: &ErasureForkRecoveryV1,
 ) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
     let (proof_digest, proof_cbor) = conn
         .query_row(
@@ -5478,7 +5479,6 @@ fn sqlite_fork_recovery_proof(
     if canonical.as_slice() != proof_cbor.as_slice() || proof.content_digest()? != proof_digest {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
-    proof.validate(recovered)?;
     Ok(proof)
 }
 
@@ -5819,10 +5819,12 @@ fn sqlite_fork_admission_is_exact_impl(
     if recovered != admission.recovery_result()? {
         return Ok(false);
     }
-    let Ok(stored_proof) = sqlite_fork_recovery_proof(conn, admission.operation(), &recovered)
-    else {
+    let Ok(stored_proof) = sqlite_fork_recovery_proof(conn, admission.operation()) else {
         return Ok(false);
     };
+    if stored_proof.validate(&recovered).is_err() {
+        return Ok(false);
+    }
     if stored_proof != admission.recovery_proof()? {
         return Ok(false);
     }

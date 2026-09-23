@@ -1513,7 +1513,7 @@ impl MemoryStore {
 
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
             let exact_child = self.memory_fork_child_is_exact(&child, chain_head)?;
-            let exact_manifest = self.erasure_fork_batch_is_exact(admission);
+            let exact_manifest = self.persisted_fork_erasure_mutations_are_exact(admission);
             let exact_proof = self.erasure_fork_recovery_proofs.get(&operation) == Some(&proof);
             return ((
                 stored_result.binding_digest(),
@@ -1576,13 +1576,14 @@ impl MemoryStore {
             .erasure_fork_recovery_proofs
             .get(&operation)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        proof.validate(&result)?;
-        self.memory_fork_recovery_proof_is_exact(proof)?;
-        self.verify_memory_fork_child(&result)?;
-        if result.successor_generation() != successor_inventory.generation() {
-            return Err(ErasureErrorV1::StaleGeneration);
-        }
-        proof.validate_complete_for_inventory(&result, successor_inventory)?;
+        proof.validate_complete_for_inventory_with_persisted_state(
+            &result,
+            successor_inventory,
+            || {
+                self.memory_fork_recovery_proof_is_exact(proof)?;
+                self.verify_memory_fork_child(&result)
+            },
+        )?;
         Ok(Some(result))
     }
 }
@@ -1623,7 +1624,10 @@ impl MemoryStore {
         })
     }
 
-    fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
+    fn persisted_fork_erasure_mutations_are_exact(
+        &self,
+        admission: &PreparedErasureForkBatchV1,
+    ) -> bool {
         admission.admissions().iter().all(|prepared| {
             let mutation = prepared.mutation();
             self.erasure_records
