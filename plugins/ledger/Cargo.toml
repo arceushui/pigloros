@@ -20,7 +20,7 @@ url = { workspace = true }
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-store = { path = "../../crates/pos-store" }
-pos-runtime = { path = "../../crates/pos-runtime" }
+pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

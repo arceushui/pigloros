@@ -70,8 +70,8 @@ pub enum OutputAdmissionErrorV1 {
 /// same-name or caller-authored fixture types before policy construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstalledOutputPolicySourceV1 {
-    /// The bounded generated source used only by debug registration fixtures.
-    #[cfg(debug_assertions)]
+    /// The bounded generated source available only to explicit test-support fixtures.
+    #[cfg(any(test, feature = "test-support"))]
     Generated,
     /// The Gateway composition root.
     Gateway,
@@ -138,7 +138,7 @@ impl OutputPolicyArtifactInputV1 {
 impl InstalledOutputPolicySourceV1 {
     fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
         let name_matches = match self {
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Generated => true,
             Self::Gateway => plugin.name() == "gateway-world-actions",
             Self::World => plugin.name() == "world",
@@ -158,7 +158,7 @@ impl InstalledOutputPolicySourceV1 {
         if !name_matches {
             return false;
         }
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
@@ -170,7 +170,7 @@ impl InstalledOutputPolicySourceV1 {
 
     const fn native_plugin_type_names(self) -> &'static [&'static str] {
         match self {
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Generated => &[],
             Self::Gateway => &["piglor_gateway::GatewayActionPlugin"],
             Self::World => &["pos_plugin_world::WorldPlugin"],
@@ -191,7 +191,7 @@ impl InstalledOutputPolicySourceV1 {
         #[cfg(not(debug_assertions))]
         let _ = plugin;
         match self {
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Generated => generated_implementation_artifact_v1(plugin),
             Self::Gateway => source_artifact_bundle(&[
                 (
@@ -280,7 +280,7 @@ impl InstalledOutputPolicySourceV1 {
 
     fn event_types<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<String> {
         let mut event_types = match self {
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Generated => plugin
                 .capability()
                 .owned_event_types
@@ -316,7 +316,7 @@ impl InstalledOutputPolicySourceV1 {
 
     const fn workload_profile(self) -> WorkloadProfileV1 {
         match self {
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Generated => WorkloadProfileV1::Interactive,
             Self::Gateway | Self::Agent => WorkloadProfileV1::Interactive,
             Self::RuleAgent | Self::SyntheticObservation => WorkloadProfileV1::Research,
@@ -416,11 +416,11 @@ impl InstalledOutputPolicySourceV1 {
     }
 }
 
-/// Deterministic implementation bytes for the debug generated source.
+/// Deterministic implementation bytes for the test-support generated source.
 ///
-/// This remains a bounded fixture source; release registration has no generated
-/// fallback and must select one of the installed composition roots above.
-#[cfg(debug_assertions)]
+/// This remains a bounded fixture source; ordinary registration has no
+/// generated fallback and must select an installed composition root above.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn generated_implementation_artifact_v1<P: Plugin + ?Sized>(plugin: &P) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"pigloros.generated-implementation.v1\0");
@@ -451,7 +451,7 @@ fn source_artifact_bundle(parts: &[(&str, &[u8])]) -> Vec<u8> {
     bytes
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-support"))]
 fn hash_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     output.extend_from_slice(bytes);

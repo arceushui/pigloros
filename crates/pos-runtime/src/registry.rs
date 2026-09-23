@@ -18,7 +18,7 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::output_admission::InstalledOutputPolicySourceV1;
 use crate::{
     composition::{
@@ -990,13 +990,13 @@ struct PluginEntry {
     output_admission: Option<OutputAdmissionV1>,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-support"))]
 struct GeneratedDriverPlugin {
     id: PluginId,
     name: &'static str,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-support"))]
 impl Plugin for GeneratedDriverPlugin {
     fn id(&self) -> PluginId {
         self.id
@@ -2425,7 +2425,7 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns policy-construction or registration errors.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn register_generated(
         &mut self,
@@ -2437,7 +2437,7 @@ impl PluginRegistry {
         self.register_with_verified_output_policy(plugin, binding, reducer, driver)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding(
         plugin: &dyn Plugin,
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
@@ -2457,7 +2457,7 @@ impl PluginRegistry {
         )?)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_configuration_details(
         plugin: &dyn Plugin,
         configuration_details: &[u8],
@@ -2481,7 +2481,7 @@ impl PluginRegistry {
         )?)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
         pos_core::ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -2521,7 +2521,7 @@ impl PluginRegistry {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -2541,7 +2541,7 @@ impl PluginRegistry {
         )
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_budget_input_for_profile(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -2563,7 +2563,7 @@ impl PluginRegistry {
         )
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_budget_input_for_profile_with_details(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -2646,7 +2646,7 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn register_pinned_generated(
         &mut self,
@@ -2669,7 +2669,7 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn register_pinned_generated_with_approver(
         &mut self,
@@ -2696,7 +2696,7 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns policy-construction, capability, or registration errors.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn register_generated_with_approver(
         &mut self,
@@ -3115,17 +3115,16 @@ impl PluginRegistry {
         })
     }
 
-    /// Register a direct driver in a debug-only test harness.
+    /// Register a direct driver in an explicit test-support harness.
     ///
-    /// Release builds still require output admission even when this helper is
-    /// called by an external crate.
-    #[cfg(debug_assertions)]
+    /// Ordinary builds cannot call this helper without the test-support feature.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {
         self.register_test_driver_with_configuration_details(driver, &[]);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     fn register_test_driver_with_configuration_details(
         &mut self,
         driver: Box<dyn Driver>,
@@ -3155,10 +3154,10 @@ impl PluginRegistry {
 
     /// Register a direct fixture driver with a host-verified output binding.
     ///
-    /// This debug-only helper is for integration fixtures that exercise the
+    /// This test-support helper is for integration fixtures that exercise the
     /// production admission path without defining a full Plugin descriptor.
     /// The binding retains the complete closure before the driver is visible.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn register_test_driver_with_verified_output_policy(
         &mut self,
