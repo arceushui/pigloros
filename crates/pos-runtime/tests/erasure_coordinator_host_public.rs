@@ -2175,8 +2175,8 @@ fn assert_exact_durable_fork_retry_preserves_current_inventory(
 }
 
 #[test]
-fn exact_durable_fork_retry_preserves_current_inventory(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn exact_durable_fork_retry_preserves_current_inventory() -> Result<(), Box<dyn std::error::Error>>
+{
     assert_exact_durable_fork_retry_preserves_current_inventory(StoreConfig::Memory)
 }
 

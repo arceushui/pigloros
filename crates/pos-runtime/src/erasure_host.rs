@@ -2021,7 +2021,7 @@ impl ErasureExecutionHostV1 {
         transition_failure: &mut Option<TransitionFailureV1>,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
         if let Some(recovered) = input.recovered.as_ref() {
-            return Self::recover_identified_fork(input, recovered, transition_failure);
+            return Self::recover_identified_fork(input, recovered);
         }
         self.prepare_identified_fork(input, permit)
     }
@@ -2029,7 +2029,6 @@ impl ErasureExecutionHostV1 {
     fn recover_identified_fork(
         input: &IdentifiedForkTransitionInput<'_>,
         recovered: &ErasureForkRecoveryV1,
-        transition_failure: &mut Option<TransitionFailureV1>,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
         let recovered_child = recovered.child();
         if recovered_child.mode != input.child.mode
@@ -2037,12 +2036,6 @@ impl ErasureExecutionHostV1 {
             || recovered_child.owner != input.child.owner
             || recovered_child.fork_point != input.child.fork_point
         {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if recovered.successor_generation() != input.current_generation {
-            *transition_failure = Some(TransitionFailureV1::Host(
-                ErasureHostErrorV1::StaleGeneration,
-            ));
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let retry_child = recovered_child.clone();
@@ -2864,16 +2857,8 @@ impl ErasureCommandSenderV1<'_> {
             .host_store()
             .recover_fork_admission(operation, &inventory)
         {
-            Ok(result)
-                if result.as_ref().is_none_or(|recovered| {
-                    recovered.successor_generation() == self.generation
-                }) =>
-            {
-                Ok(result)
-            }
-            Ok(_) | Err(ErasureErrorV1::StaleGeneration) => {
-                Err(ErasureHostErrorV1::StaleGeneration)
-            }
+            Ok(result) => Ok(result),
+            Err(ErasureErrorV1::StaleGeneration) => Err(ErasureHostErrorV1::StaleGeneration),
             Err(error) => {
                 self.host.poison();
                 Err(map_erasure_error(error))
@@ -3683,24 +3668,6 @@ mod tests {
             }
         }
 
-        fn create_timeline_for_host_transition(
-            &mut self,
-            permit: &ErasureTopologyTransitionPermitV1,
-            name: &str,
-        ) -> Result<Timeline, CoreError> {
-            if self.fault == FaultModeV1::EventStore {
-                Err(CoreError::Storage("fault create".to_owned()))
-            } else {
-                let timeline = self
-                    .inner
-                    .create_timeline_for_host_transition(permit, name)?;
-                if let Some(hook) = &self.timeline_created_hook {
-                    hook(timeline.id());
-                }
-                Ok(timeline)
-            }
-        }
-
         fn create_timeline_for_host_transition_with_meta(
             &mut self,
             permit: &ErasureTopologyTransitionPermitV1,
@@ -3761,21 +3728,6 @@ mod tests {
                 Err(CoreError::Storage("fault fork".to_owned()))
             } else {
                 self.inner.fork(parent, at_seq, name)
-            }
-        }
-
-        fn fork_for_host_transition(
-            &mut self,
-            permit: &ErasureTopologyTransitionPermitV1,
-            parent: TimelineId,
-            at_seq: Seq,
-            name: &str,
-        ) -> Result<Timeline, CoreError> {
-            if self.fault == FaultModeV1::EventStore {
-                Err(CoreError::Storage("fault fork".to_owned()))
-            } else {
-                self.inner
-                    .fork_for_host_transition(permit, parent, at_seq, name)
             }
         }
 
@@ -3861,24 +3813,6 @@ mod tests {
                 Err(CoreError::Storage("fault key registry".to_owned()))
             } else {
                 self.inner.load_key_registry()
-            }
-        }
-
-        fn initialize_timeline_with_key_registry_for_host_transition(
-            &mut self,
-            permit: &ErasureTopologyTransitionPermitV1,
-            name: &str,
-            expected_registry: &KeyRegistryStateV1,
-        ) -> Result<(Timeline, bool), CoreError> {
-            if self.fault == FaultModeV1::EventStore {
-                Err(CoreError::Storage("fault ledger initialization".to_owned()))
-            } else {
-                self.inner
-                    .initialize_timeline_with_key_registry_for_host_transition(
-                        permit,
-                        name,
-                        expected_registry,
-                    )
             }
         }
 

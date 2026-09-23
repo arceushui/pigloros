@@ -3958,15 +3958,6 @@ impl EventStore for SqliteStore {
         Ok(timeline)
     }
 
-    fn create_timeline_for_host_transition(
-        &mut self,
-        permit: &ErasureTopologyTransitionPermitV1,
-        name: &str,
-    ) -> Result<Timeline, CoreError> {
-        self.ensure_host_transition_permit(permit)?;
-        self.create_timeline(name)
-    }
-
     fn create_timeline_for_host_transition_with_meta(
         &mut self,
         permit: &ErasureTopologyTransitionPermitV1,
@@ -4028,21 +4019,6 @@ impl EventStore for SqliteStore {
         let result =
             self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
         finish_immediate_transaction(&self.conn, result).map(|(timeline, _)| timeline)
-    }
-
-    fn initialize_timeline_with_key_registry_for_host_transition(
-        &mut self,
-        permit: &ErasureTopologyTransitionPermitV1,
-        name: &str,
-        expected_registry: &KeyRegistryStateV1,
-    ) -> Result<(Timeline, bool), CoreError> {
-        self.ensure_host_transition_permit(permit)?;
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result =
-            self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
-        finish_immediate_transaction(&self.conn, result)
     }
 
     fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
@@ -4493,18 +4469,6 @@ impl EventStore for SqliteStore {
                 .ensure_generic_timeline_visibility(parent)
                 .and_then(|()| store.fork_unchecked(parent, at_seq, name))
         })
-    }
-
-    fn fork_for_host_transition(
-        &mut self,
-        permit: &ErasureTopologyTransitionPermitV1,
-        parent: TimelineId,
-        at_seq: Seq,
-        name: &str,
-    ) -> Result<Timeline, CoreError> {
-        self.ensure_host_transition_permit(permit)?;
-        self.ensure_generic_timeline_visibility(parent)
-            .and_then(|()| self.fork_unchecked(parent, at_seq, name))
     }
 
     fn fork_for_host_transition_with_meta(
@@ -6852,7 +6816,10 @@ mod tests {
         let gate = ErasureContainmentGateV1::new_test_open();
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
             assert!(unbound
-                .create_timeline_for_host_transition(permit, "unbound-transition")
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("unbound-transition"),
+                )
                 .is_err());
             Ok((inventory.clone(), ()))
         };
@@ -6867,7 +6834,10 @@ mod tests {
     ) {
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
             let root = store
-                .create_timeline_for_host_transition(permit, "host-root")
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-root"),
+                )
                 .test_ok();
             let meta_root = store
                 .create_timeline_for_host_transition_with_meta(
@@ -6889,7 +6859,10 @@ mod tests {
                 .is_none());
 
             let other_parent = store
-                .create_timeline_for_host_transition(permit, "host-other-parent")
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-other-parent"),
+                )
                 .test_ok();
             assert!(store
                 .fork_for_host_transition_with_meta(
@@ -6918,22 +6891,28 @@ mod tests {
                 .test_ok();
             assert_eq!(child.meta.fork_point, Some((root.id(), Seq::ZERO)));
             let ordinary_child = store
-                .fork_for_host_transition(permit, root.id(), Seq::ZERO, "host-child")
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child"),
+                )
                 .test_ok();
             assert_eq!(ordinary_child.meta.fork_point, Some((root.id(), Seq::ZERO)));
 
+            let ledger_meta = TimelineMeta::root("host-ledger-existing");
             let existing = store
-                .initialize_timeline_with_key_registry_for_host_transition(
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
                     permit,
-                    "host-ledger-existing",
+                    &ledger_meta,
                     &KeyRegistryStateV1::new(),
                 )
                 .test_ok();
             assert!(existing.1);
             let reused = store
-                .initialize_timeline_with_key_registry_for_host_transition(
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
                     permit,
-                    "host-ledger-existing",
+                    &ledger_meta,
                     &KeyRegistryStateV1::new(),
                 )
                 .test_ok();
@@ -6960,7 +6939,10 @@ mod tests {
         let foreign_gate = ErasureContainmentGateV1::new_test_open();
         let mut rejected = |permit: &ErasureTopologyTransitionPermitV1| {
             assert!(store
-                .create_timeline_for_host_transition(permit, "foreign-root")
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("foreign-root"),
+                )
                 .is_err());
             assert!(store
                 .create_timeline_for_host_transition_with_meta(
@@ -6969,7 +6951,12 @@ mod tests {
                 )
                 .is_err());
             assert!(store
-                .fork_for_host_transition(permit, TimelineId::new(), Seq::ZERO, "foreign-child")
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::ZERO, "foreign-child",),
+                )
                 .is_err());
             assert!(store
                 .fork_for_host_transition_with_meta(
@@ -6986,9 +6973,9 @@ mod tests {
                 .find_timeline_by_name_for_host_transition(permit, "foreign-name")
                 .is_err());
             assert!(store
-                .initialize_timeline_with_key_registry_for_host_transition(
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
                     permit,
-                    "foreign-ledger",
+                    &TimelineMeta::root("foreign-ledger"),
                     &KeyRegistryStateV1::new(),
                 )
                 .is_err());
@@ -7025,7 +7012,10 @@ mod tests {
         );
         let mut duplicate_transition = |permit: &ErasureTopologyTransitionPermitV1| {
             let root = duplicate
-                .create_timeline_for_host_transition(permit, "duplicate-root")
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("duplicate-root"),
+                )
                 .test_ok();
             let mut duplicate_meta = TimelineMeta::root("duplicate-meta");
             duplicate_meta.id = root.id();

@@ -6488,30 +6488,33 @@ impl ErasureForkRecoveryProofV1 {
     }
 
     /// Validate that the proof contains every ERSE1 admission required by the
-    /// independently verified successor inventory.
+    /// independently verified current inventory.
     ///
     /// The batch digest alone cannot establish completeness: it can be
     /// recomputed after an admission is omitted. The verified inventory
-    /// supplies the independent expected request/extension set.
+    /// supplies the independent expected request/extension set. Its generation
+    /// may have advanced since this operation when a later topology change did
+    /// not alter the affected Fork scope.
     ///
     /// # Errors
-    /// Returns [`ErasureErrorV1::StaleGeneration`] when the supplied inventory
-    /// is no longer this operation's successor, or provenance failure when the
-    /// complete admission set differs from the recovered result.
+    /// Returns [`ErasureErrorV1::StaleGeneration`] when a different-generation
+    /// inventory does not contain enough current Fork topology to validate the
+    /// receipt, or provenance failure when the complete admission set differs
+    /// from the recovered result.
     pub fn validate_complete_for_inventory(
         &self,
         recovered: &ErasureForkRecoveryV1,
-        successor_inventory: &ErasureVerifiedInventoryV1,
+        current_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<(), ErasureErrorV1> {
         self.validate_complete_for_inventory_with_persisted_state(
             recovered,
-            successor_inventory,
+            current_inventory,
             || Ok(()),
         )
     }
 
     /// Validate the proof and adapter-persisted recovery before classifying a
-    /// successor inventory generation as stale or checking its complete scope.
+    /// predecessor inventory as stale or checking the current complete scope.
     ///
     /// `validate_persisted_state` must verify the durable proof records and
     /// recovered Fork child using the adapter's own storage boundary. Running
@@ -6521,22 +6524,28 @@ impl ErasureForkRecoveryProofV1 {
     /// # Errors
     /// Returns a provenance error when either the proof or persisted state is
     /// inconsistent, [`ErasureErrorV1::StaleGeneration`] when the verified
-    /// inventory is not the operation's successor, or a provenance error when
-    /// the proof's admissions do not match the complete required scope.
+    /// inventory is from before this Fork and no longer contains its topology,
+    /// or a provenance error when the proof's admissions do not match the
+    /// current complete required scope.
     pub fn validate_complete_for_inventory_with_persisted_state(
         &self,
         recovered: &ErasureForkRecoveryV1,
-        successor_inventory: &ErasureVerifiedInventoryV1,
+        current_inventory: &ErasureVerifiedInventoryV1,
         validate_persisted_state: impl FnOnce() -> Result<(), ErasureErrorV1>,
     ) -> Result<(), ErasureErrorV1> {
         self.validate(recovered)?;
         validate_persisted_state()?;
-        if recovered.successor_generation() != successor_inventory.generation() {
-            return Err(ErasureErrorV1::StaleGeneration);
-        }
+        let is_original_successor =
+            recovered.successor_generation() == current_inventory.generation();
         let (parent, _) = recovered.fork_point();
         let requirements =
-            successor_inventory.fork_retry_scope_requirements(parent, recovered.child().id)?;
+            match current_inventory.fork_retry_scope_requirements(parent, recovered.child().id) {
+                Ok(requirements) => requirements,
+                Err(_) if !is_original_successor => {
+                    return Err(ErasureErrorV1::StaleGeneration);
+                }
+                Err(error) => return Err(error),
+            };
         if self.admissions.len() != requirements.len()
             || self
                 .admissions

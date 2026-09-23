@@ -238,12 +238,7 @@ where
     let mut expected_chain_head = chain_head;
     for event in events {
         let (seq, event_id, payload) = event?;
-        let expected_seq = expected_head
-            .as_u64()
-            .checked_add(1)
-            .map(pos_core::Seq::from_u64)
-            .ok_or(pos_core::ErasureErrorV1::ProvenanceMissing)?;
-        if seq != expected_seq {
+        if seq.as_u64().saturating_sub(expected_head.as_u64()) != 1 {
             return Ok(false);
         }
         expected_chain_head = hasher.hash_event(
