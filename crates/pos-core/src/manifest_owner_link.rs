@@ -1,7 +1,7 @@
 //! Portable ADR-088/089 owner-link records, without native admission authority.
 //!
 //! A matching digest or decoded receipt cannot establish that an actual owner
-//! admitted, retained, or selected these bytes for a committed WorldCut.
+//! admitted, retained, or selected these bytes for a committed `WorldCut`.
 
 use std::{collections::HashSet, io::Cursor};
 
@@ -142,7 +142,7 @@ impl ManifestAdmissionCatalogV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
         let [magic, version, owner, generation, rows] =
             decode_array::<5>(bytes, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1)?;
-        check_magic(magic, b"MCA1")?;
+        check_magic(magic, *b"MCA1")?;
         check_version(version)?;
         let rows = take_array(rows)?;
         if rows.len() > MAX_MANIFEST_OWNER_PLUGINS_V1 {
@@ -166,7 +166,7 @@ impl ManifestAdmissionCatalogV1 {
             .collect::<Result<Vec<_>, ManifestOwnerLinkErrorV1>>()?;
         let record = Self::new(ManifestAdmissionCatalogInputV1 {
             owner_id: take_bytes(owner)?,
-            configuration_generation: take_uint(generation)?,
+            configuration_generation: take_uint(&generation)?,
             rows,
         })?;
         check_canonical(bytes, &record.to_canonical_cbor())?;
@@ -268,7 +268,7 @@ impl ManifestSlotBindingV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
         let [magic, version, scope, wcs1, rows] =
             decode_array::<5>(bytes, MAX_MANIFEST_SLOT_BINDING_BYTES_V1)?;
-        check_magic(magic, b"MSB1")?;
+        check_magic(magic, *b"MSB1")?;
         check_version(version)?;
         let rows = take_array(rows)?;
         if rows.len() > MAX_MANIFEST_OWNER_PLUGINS_V1 {
@@ -406,11 +406,11 @@ impl ManifestSlotAdmissionReceiptV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
         let [magic, version, owner, generation, scope, wcs1, mca1, operation, previous_lcq1, inventory, msb1, key_evidence, signature] =
             decode_array::<13>(bytes, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1)?;
-        check_magic(magic, b"MSR1")?;
+        check_magic(magic, *b"MSR1")?;
         check_version(version)?;
         let record = Self::new(ManifestSlotAdmissionReceiptInputV1 {
             owner_id: take_bytes(owner)?,
-            configuration_generation: take_uint(generation)?,
+            configuration_generation: take_uint(&generation)?,
             scope: take_hash(scope)?,
             wcs1_hash: take_hash(wcs1)?,
             mca1_hash: take_hash(mca1)?,
@@ -445,17 +445,17 @@ fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     let tag = major << 5;
     match value {
         0..=23 => out.push(tag | bytes[7]),
-        24..=255 => out.extend_from_slice(&[tag | 24, bytes[7]]),
+        24..=255 => out.extend_from_slice(&[tag | 0x18, bytes[7]]),
         256..=65_535 => {
-            out.push(tag | 25);
+            out.push(tag | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
         65_536..=4_294_967_295 => {
-            out.push(tag | 26);
+            out.push(tag | 0x1a);
             out.extend_from_slice(&bytes[4..]);
         }
         _ => {
-            out.push(tag | 27);
+            out.push(tag | 0x1b);
             out.extend_from_slice(&bytes);
         }
     }
@@ -524,10 +524,10 @@ fn take_text(value: Value) -> Result<String, ManifestOwnerLinkErrorV1> {
     }
 }
 
-fn take_uint(value: Value) -> Result<u64, ManifestOwnerLinkErrorV1> {
+fn take_uint(value: &Value) -> Result<u64, ManifestOwnerLinkErrorV1> {
     match value {
         Value::Integer(value) => {
-            u64::try_from(value).map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)
+            u64::try_from(*value).map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)
         }
         _ => Err(ManifestOwnerLinkErrorV1::InvalidEncoding),
     }
@@ -548,8 +548,8 @@ fn take_plugin_id(value: Value) -> Result<PluginId, ManifestOwnerLinkErrorV1> {
     take_bytes(value).map(|bytes| PluginId::from_ulid(ulid::Ulid::from_bytes(bytes)))
 }
 
-fn check_magic(value: Value, expected: &[u8; 4]) -> Result<(), ManifestOwnerLinkErrorV1> {
-    if take_bytes::<4>(value)? == *expected {
+fn check_magic(value: Value, expected: [u8; 4]) -> Result<(), ManifestOwnerLinkErrorV1> {
+    if take_bytes::<4>(value)? == expected {
         Ok(())
     } else {
         Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
@@ -557,7 +557,7 @@ fn check_magic(value: Value, expected: &[u8; 4]) -> Result<(), ManifestOwnerLink
 }
 
 fn check_version(value: Value) -> Result<(), ManifestOwnerLinkErrorV1> {
-    if take_uint(value)? == 1 {
+    if take_uint(&value)? == 1 {
         Ok(())
     } else {
         Err(ManifestOwnerLinkErrorV1::UnsupportedVersion)
