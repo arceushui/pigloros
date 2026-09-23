@@ -190,13 +190,7 @@ impl BoundAttemptCgroup {
         unit_path: OwnedObjectPath,
         control_group: String,
     ) -> Result<Self, AttemptCgroupError> {
-        Self::open_with_metadata(
-            root,
-            unit_name,
-            unit_path,
-            control_group,
-            File::metadata,
-        )
+        Self::open_with_metadata(root, unit_name, unit_path, control_group, File::metadata)
     }
 
     fn open_with_metadata(
@@ -282,8 +276,8 @@ impl BoundAttemptCgroup {
             }
             Err(error) => return Err(AttemptCgroupError::PathOpen(error)),
             Ok(current) => {
-                let metadata = read_metadata(&File::from(current))
-                    .map_err(AttemptCgroupError::Metadata)?;
+                let metadata =
+                    read_metadata(&File::from(current)).map_err(AttemptCgroupError::Metadata)?;
                 if metadata.dev() != self.device || metadata.ino() != self.inode {
                     return Err(AttemptCgroupError::PathReused);
                 }
@@ -423,12 +417,9 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         let error = CgroupRoot::verify(File::open(temporary.path())?).err();
         assert!(matches!(error, Some(AttemptCgroupError::WrongFilesystem)));
-        let error = CgroupRoot::verify_with(File::open(temporary.path())?, |_| Err(Errno::BADF))
-            .err();
-        assert!(matches!(
-            error,
-            Some(AttemptCgroupError::RootFilesystem(_))
-        ));
+        let error =
+            CgroupRoot::verify_with(File::open(temporary.path())?, |_| Err(Errno::BADF)).err();
+        assert!(matches!(error, Some(AttemptCgroupError::RootFilesystem(_))));
         Ok(())
     }
 
