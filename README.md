@@ -57,6 +57,15 @@ directory with private permissions first (for example, `mkdir -m 700 .secrets`).
 The command warns that the output must remain outside version control; verify
 the chosen path explicitly with `git check-ignore -- .secrets/ledger.key`.
 
+For a store-backed ledger, `piglor-ledger destroy-key --source store:ledger.db
+--key .secrets/ledger.key --epoch 1 --authorization-digest HEX` records
+`DestructionPending`, removes the owned key file, synchronizes its containing
+directory, and commits an immutable tombstone. `HEX` is the 32-byte
+authorization/provenance digest encoded as 64 hexadecimal characters. Retrying
+the same request resumes pending deletion after a failure or restart. The key
+can no longer be used for new ledger signatures; its public verification
+material remains in the registry for historical signatures.
+
 Ancestor checks and path-based file creation cannot be one atomic operation
 using safe standard-library APIs. Keep the key in a stable private directory;
 the final filename itself is protected atomically with create-new semantics.

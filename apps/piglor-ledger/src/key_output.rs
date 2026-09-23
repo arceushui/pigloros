@@ -16,6 +16,120 @@ use std::path::Path;
 
 use crate::CliError;
 
+/// Delete the application-owned signing-key file after registry authorization
+/// has entered `DestructionPending`.
+///
+/// The exact file bytes are checked against the pending material digest before
+/// removal. Success requires synchronizing both the file and its containing
+/// directory; an absent file is idempotent only after the directory sync.
+/// This removes the supported path to the private bytes. Filesystem snapshots
+/// and copies held outside this owner are outside this deletion boundary.
+///
+/// # Errors
+/// Returns a closed storage error when the path is unsafe, the file does not
+/// match the pending material, or durable deletion cannot be confirmed.
+#[cfg(unix)]
+pub fn delete_owned_secret_key(
+    path: &Path,
+    request: pos_core::KeyDestructionRequestV1,
+) -> Result<pos_core::Hash, pos_core::CoreError> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let storage_error = |error: &dyn std::fmt::Display| {
+        pos_core::CoreError::Storage(format!("owned signing-key deletion: {error}"))
+    };
+    let absolute = absolute_output(path).map_err(|error| storage_error(&error))?;
+    let parent_path = absolute.parent().ok_or_else(|| {
+        pos_core::CoreError::Storage("owned signing-key path has no parent".to_owned())
+    })?;
+    validate_ancestors(&absolute, parent_path).map_err(|error| storage_error(&error))?;
+    let parent = std::fs::File::open(parent_path).map_err(|error| storage_error(&error))?;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&absolute);
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            parent.sync_all().map_err(|error| storage_error(&error))?;
+            return Ok(pos_core::deletion_receipt(&request));
+        }
+        Err(error) => return Err(storage_error(&error)),
+    };
+    let metadata = file.metadata().map_err(|error| storage_error(&error))?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+        return Err(pos_core::CoreError::Storage(
+            "owned signing-key file is not a private single-link regular file".to_owned(),
+        ));
+    }
+    if metadata.len() > 128 {
+        return Err(pos_core::CoreError::Storage(
+            "owned signing-key file exceeds the supported size".to_owned(),
+        ));
+    }
+    let mut encoded = zeroize::Zeroizing::new(Vec::new());
+    file.read_to_end(&mut encoded)
+        .map_err(|error| storage_error(&error))?;
+    let text = std::str::from_utf8(&encoded).map_err(|error| storage_error(&error))?;
+    let decoded = zeroize::Zeroizing::new(
+        crate::hex::hex_decode(text.trim()).map_err(|error| storage_error(&error))?,
+    );
+    let seed = zeroize::Zeroizing::new(
+        <[u8; 32]>::try_from(decoded.as_slice()).map_err(|error| storage_error(&error))?,
+    );
+    if pos_crypto::key_roles::key_material_digest(&seed) != request.expected_material_digest {
+        return Err(pos_core::CoreError::Storage(
+            "owned signing-key file does not match the pending material digest".to_owned(),
+        ));
+    }
+    file.sync_all().map_err(|error| storage_error(&error))?;
+    let current = std::fs::symlink_metadata(&absolute).map_err(|error| storage_error(&error))?;
+    if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+        return Err(pos_core::CoreError::Storage(
+            "owned signing-key file changed before deletion".to_owned(),
+        ));
+    }
+    std::fs::remove_file(&absolute).map_err(|error| storage_error(&error))?;
+    file.sync_all().map_err(|error| storage_error(&error))?;
+    parent.sync_all().map_err(|error| storage_error(&error))?;
+    Ok(pos_core::deletion_receipt(&request))
+}
+
+/// Non-Unix platforms have no confirmed durable file-deletion adapter.
+///
+/// # Errors
+/// Always returns an unsupported storage error.
+#[cfg(not(unix))]
+pub fn delete_owned_secret_key(
+    _path: &Path,
+    _request: pos_core::KeyDestructionRequestV1,
+) -> Result<pos_core::Hash, pos_core::CoreError> {
+    Err(pos_core::CoreError::Storage(
+        "owned signing-key file deletion is unsupported on this platform".to_owned(),
+    ))
+}
+
+/// Persist pending destruction, delete the owned signing-key file, and then
+/// commit its immutable tombstone. Calling this again with the same request
+/// also resumes a pending request after a crash or an uncertain directory sync.
+///
+/// # Errors
+/// Returns the registry or owned-file error. A failure after the first commit
+/// leaves `DestructionPending` and cannot restore signing authorization.
+pub fn destroy_owned_secret_key<S: pos_core::EventStore + ?Sized>(
+    store: &mut S,
+    path: &Path,
+    request: pos_core::KeyDestructionRequestV1,
+) -> Result<pos_core::KeyDestructionOutcomeV1, pos_core::CoreError> {
+    store.begin_key_registry_destruction(request)?;
+    let receipt = delete_owned_secret_key(path, request)?;
+    store
+        .complete_key_registry_destruction(request, receipt)
+        .map(|(outcome, _)| outcome)
+}
+
 #[cfg(unix)]
 const NO_OUTPUT: &str = "no output was created; retry is safe";
 
