@@ -571,9 +571,7 @@ fn exact_readback(
                 }
                 SystemdTransientUnitValue::Numeric(
                     SystemdTransientUnitNumericValue::OperatingLimit(value),
-                ) => {
-                    SystemdTransientUnitReadbackValue::U64(*value)
-                }
+                ) => SystemdTransientUnitReadbackValue::U64(*value),
                 SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                     SystemdTransientUnitReadbackValue::StringArray(
                         value.iter().map(|(_, name)| name.clone()).collect(),
@@ -581,9 +579,7 @@ fn exact_readback(
                 }
                 SystemdTransientUnitValue::Numeric(
                     SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value),
-                ) => {
-                    SystemdTransientUnitReadbackValue::U32(*value)
-                }
+                ) => SystemdTransientUnitReadbackValue::U32(*value),
             };
             SystemdTransientUnitReadback::new(property.name(), value)
         })

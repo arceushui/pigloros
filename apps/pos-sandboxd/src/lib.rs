@@ -28,8 +28,8 @@ pub use system_bus::{
 pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,
     SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
-    SystemdTransientUnitProperty, SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue,
-    SystemdTransientUnitNumericValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
+    SystemdTransientUnitNumericValue, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
+    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
     TransientUnitRequest, TransientUnitRequestError,
 };
 

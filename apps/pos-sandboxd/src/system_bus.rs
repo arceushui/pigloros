@@ -7,7 +7,6 @@ use zbus::{proxy::CacheProperties, zvariant::OwnedObjectPath, Connection};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
-use crate::{SystemdDynamicPropertyKind, SystemdOperatingLimitProperty};
 use crate::{
     AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
     SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
@@ -16,6 +15,7 @@ use crate::{
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
     TransientUnitRequest, TransientUnitRequestError,
 };
+use crate::{SystemdDynamicPropertyKind, SystemdOperatingLimitProperty};
 
 const START_JOB_MODE: &str = "fail";
 // A stop must displace a conflicting queued start job for the same attempt unit.
