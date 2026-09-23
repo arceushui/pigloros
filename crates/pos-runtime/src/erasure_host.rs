@@ -7037,13 +7037,8 @@ mod tests {
             coordinator: reference(61),
             recovered: Some(recovered.clone()),
         };
-        let mut transition_failure = None;
         assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(
-                &changed_input,
-                &recovered,
-                &mut transition_failure,
-            ),
+            ErasureExecutionHostV1::recover_identified_fork(&changed_input, &recovered),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
@@ -7066,13 +7061,8 @@ mod tests {
             coordinator: reference(62),
             recovered: Some(recovered.clone()),
         };
-        let mut transition_failure = None;
         assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(
-                &missing_inventory_input,
-                &recovered,
-                &mut transition_failure,
-            ),
+            ErasureExecutionHostV1::recover_identified_fork(&missing_inventory_input, &recovered),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
