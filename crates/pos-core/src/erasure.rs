@@ -226,7 +226,7 @@ impl ErasureRecoveryLimitsV1 {
     }
 }
 
-/// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
+/// Closed, payload-safe failures exposed by erasure lifecycle and persistence ports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureErrorV1 {
     /// Malformed CBOR or closed enum value.
@@ -239,6 +239,8 @@ pub enum ErasureErrorV1 {
     ScopeInvalid,
     /// Lifecycle or policy evidence conflicts.
     PolicyConflict,
+    /// The verified inventory or durable predecessor generation is stale.
+    StaleGeneration,
     /// Access could not be frozen.
     AccessFreezeFailed,
     /// Key registry is unavailable.
