@@ -6969,21 +6969,22 @@ mod coverage_entrypoints {
         )
     }
 
-    fn memory_recovery_proof_fixture(
+    fn memory_recovery_reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    fn memory_recovery_proof_cbor(
         extension: u8,
         object_reference: u8,
-    ) -> (MemoryStore, ErasureForkRecoveryProofV1) {
-        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        manifest_bytes: &[u8],
+        object_bytes: &[u8],
+        state_bytes: &[u8],
+        effect_reference: &ErasureReferenceV1,
+        effect_bytes: &[u8],
+    ) -> Vec<u8> {
+        let reference = memory_recovery_reference;
         let digest_value =
             |value| ciborium::value::Value::Bytes(reference(value).digest().to_vec());
-        let manifest_bytes = vec![0xA1, 0xB2];
-        let object_bytes = vec![0xC3, 0xD4];
-        let state_bytes = vec![0xE5, 0xF6];
-        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
-            receipt: reference(13),
-        };
-        let effect_reference = effect.identity();
-        let effect_bytes = ok(effect.to_canonical_cbor());
         let proof_value = ciborium::value::Value::Array(vec![
             ciborium::value::Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
             ciborium::value::Value::Integer(1.into()),
@@ -7001,14 +7002,14 @@ mod coverage_entrypoints {
                 digest_value(8),
                 digest_value(9),
                 ciborium::value::Value::Bytes(
-                    ErasureForkRecoveryProofV1::bytes_digest(&manifest_bytes)
+                    ErasureForkRecoveryProofV1::bytes_digest(manifest_bytes)
                         .digest()
                         .to_vec(),
                 ),
                 ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
                     digest_value(object_reference),
                     ciborium::value::Value::Bytes(
-                        ErasureForkRecoveryProofV1::bytes_digest(&object_bytes)
+                        ErasureForkRecoveryProofV1::bytes_digest(object_bytes)
                             .digest()
                             .to_vec(),
                     ),
@@ -7016,7 +7017,7 @@ mod coverage_entrypoints {
                 ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
                     digest_value(11),
                     ciborium::value::Value::Bytes(
-                        ErasureForkRecoveryProofV1::bytes_digest(&state_bytes)
+                        ErasureForkRecoveryProofV1::bytes_digest(state_bytes)
                             .digest()
                             .to_vec(),
                     ),
@@ -7040,7 +7041,7 @@ mod coverage_entrypoints {
                 ]),
                 ciborium::value::Value::Bytes(effect_reference.digest().to_vec()),
                 ciborium::value::Value::Bytes(
-                    ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)
+                    ErasureForkRecoveryProofV1::bytes_digest(effect_bytes)
                         .digest()
                         .to_vec(),
                 ),
@@ -7050,6 +7051,31 @@ mod coverage_entrypoints {
         ]);
         let mut encoded = Vec::new();
         ok(ciborium::into_writer(&proof_value, &mut encoded));
+        encoded
+    }
+
+    fn memory_recovery_proof_fixture(
+        extension: u8,
+        object_reference: u8,
+    ) -> (MemoryStore, ErasureForkRecoveryProofV1) {
+        let manifest_bytes = vec![0xA1, 0xB2];
+        let object_bytes = vec![0xC3, 0xD4];
+        let state_bytes = vec![0xE5, 0xF6];
+        let reference = memory_recovery_reference;
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: reference(13),
+        };
+        let effect_reference = effect.identity();
+        let effect_bytes = ok(effect.to_canonical_cbor());
+        let encoded = memory_recovery_proof_cbor(
+            extension,
+            object_reference,
+            &manifest_bytes,
+            &object_bytes,
+            &state_bytes,
+            &effect_reference,
+            &effect_bytes,
+        );
         let proof = ok(ErasureForkRecoveryProofV1::from_canonical_cbor(&encoded));
 
         let mut store = new_store();
