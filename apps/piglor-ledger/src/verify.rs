@@ -482,6 +482,7 @@ mod tests {
             format!("ledger-owner/2/1={key}"),
             format!("bGVkZ2VyLW93bmVy=/2/1={key}"),
             format!("YR/2/1={key}"),
+            format!("!A/2/1={key}"),
             format!("bGVkZ2VyLW93bmVy/02/1={key}"),
             format!("bGVkZ2VyLW93bmVy/2/01={key}"),
             format!("bGVkZ2VyLW93bmVy/0/1={key}"),
