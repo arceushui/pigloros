@@ -5,8 +5,8 @@ use zvariant::{Fd, OwnedFd};
 
 use crate::{
     SystemCallFilter, SystemdHardeningProperty, SystemdHardeningReadbackValue,
-    SystemdHardeningValue, SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind,
-    TransientUnitHardening,
+    SystemdHardeningValue, SystemdOperatingLimitProperty, SystemdTransientUnitPropertyAccess,
+    SystemdTransientUnitPropertyKind, TransientUnitHardening,
 };
 
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
@@ -14,54 +14,6 @@ const LAUNCHER_DESTINATION: &str = "/.pigloros/release-launcher";
 const RELEASE_DESCRIPTOR_NAME: &str = "piglor-release-v1";
 const HOST_SERVICE_DESCRIPTOR_NAME: &str = "piglor-host-service-v1";
 const ELM1_LIMIT_COUNT: usize = 17;
-
-/// The seven ELM1 limit IDs enforced by systemd service properties.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SystemdOperatingLimitProperty {
-    MemoryMax,
-    MemorySwapMax,
-    TasksMax,
-    CpuQuotaPerSecUSec,
-    RuntimeMaxUSec,
-    LimitNofile,
-    LimitFsize,
-}
-
-impl SystemdOperatingLimitProperty {
-    pub(super) const ALL: [Self; 7] = [
-        Self::MemoryMax,
-        Self::MemorySwapMax,
-        Self::TasksMax,
-        Self::CpuQuotaPerSecUSec,
-        Self::RuntimeMaxUSec,
-        Self::LimitNofile,
-        Self::LimitFsize,
-    ];
-
-    pub(super) const fn name(self) -> &'static str {
-        match self {
-            Self::MemoryMax => "MemoryMax",
-            Self::MemorySwapMax => "MemorySwapMax",
-            Self::TasksMax => "TasksMax",
-            Self::CpuQuotaPerSecUSec => "CPUQuotaPerSecUSec",
-            Self::RuntimeMaxUSec => "RuntimeMaxUSec",
-            Self::LimitNofile => "LimitNOFILE",
-            Self::LimitFsize => "LimitFSIZE",
-        }
-    }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::MemoryMax => 0,
-            Self::MemorySwapMax => 1,
-            Self::TasksMax => 2,
-            Self::CpuQuotaPerSecUSec => 3,
-            Self::RuntimeMaxUSec => 4,
-            Self::LimitNofile => 5,
-            Self::LimitFsize => 6,
-        }
-    }
-}
 
 /// The systemd-owned portion of one complete, already authorized ELM1 limit set.
 ///
