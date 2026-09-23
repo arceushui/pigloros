@@ -60,6 +60,20 @@ fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::
     Ok((registry, identity, material_digest))
 }
 
+fn next_epoch_registry(
+    registry: &KeyRegistryStateV1,
+    identity: KeyIdentityV1,
+) -> Result<KeyRegistryStateV1, pos_core::KeyRegistryErrorV1> {
+    let mut rotated = registry.clone();
+    let next = KeyIdentityV1::new(identity.owner_id, identity.role, identity.epoch + 1);
+    rotated.register_key(KeyRegistrationV1::new(
+        next,
+        Hash::from_bytes([5; 32]),
+        Some(pos_core::PublicKey::from_bytes([6; 32])),
+    ))?;
+    Ok(rotated)
+}
+
 fn destroy_store<S: EventStore>(
     store: &mut S,
     request: KeyDestructionRequestV1,
@@ -352,13 +366,7 @@ fn sqlite_key_registry_signing_and_rotation_are_ordered_across_handles(
     let mut rotation_store = SqliteStore::open(path)?;
     bind_test_erasure_gate(&mut signing_store)?;
     bind_test_erasure_gate(&mut rotation_store)?;
-    let mut rotated_registry = registry.clone();
-    let rotated = KeyIdentityV1::new(identity.owner_id, identity.role, identity.epoch + 1);
-    rotated_registry.register_key(KeyRegistrationV1::new(
-        rotated,
-        Hash::from_bytes([5; 32]),
-        Some(pos_core::PublicKey::from_bytes([6; 32])),
-    ))?;
+    let rotated_registry = next_epoch_registry(&registry, identity)?;
     let signing_expected_registry = registry.clone();
     let expected_after_rotation = rotated_registry.clone();
     let (callback_entered_tx, callback_entered_rx) = std::sync::mpsc::channel();
