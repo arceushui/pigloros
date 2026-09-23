@@ -7217,9 +7217,10 @@ mod coverage_entrypoints {
                 .insert(key, (ErasureReferenceV1::from_digest([18; 32]), bytes));
         });
         assert_memory_recovery_proof_error_kind(ErasureErrorV1::InvalidEncoding, 10, 10, |store| {
-            let key = ErasureReferenceV1::from_digest([9; 32]);
-            let (_, bytes) = store.erasure_effects.get_mut(&key).expect("fixture effect");
-            *bytes = vec![0x17, 0x28];
+            store.erasure_effects.insert(
+                ErasureReferenceV1::from_digest([9; 32]),
+                (ErasureReferenceV1::from_digest([18; 32]), vec![0x17, 0x28]),
+            );
         });
         assert_memory_recovery_proof_error(10, 10, |store| {
             store
