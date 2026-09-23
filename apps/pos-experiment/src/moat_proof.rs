@@ -233,13 +233,12 @@ impl MoatProofRun {
             compare(&baseline, &counterfactual).map_err(MoatProofError::from) => |divergence|;
             verify_independent_fixture_reproduction(&baseline, &counterfactual, &divergence) => |()|;
             compare_with_reference(&baseline, &counterfactual, &divergence) => |()|;
-            let physical_reaction = projection_changed(&baseline, &counterfactual, "world");
-            let agent_reaction = projection_changed(&baseline, &counterfactual, "proof-agent");
-            let society_signal_changed = projection_changed(&baseline, &counterfactual, "society");
-            comparable_proof_evidence(&baseline, &baseline_events) => |comparable_baseline|;
-            comparable_proof_evidence(&counterfactual, &counterfactual_events)
-                => |comparable_counterfactual|;
+            comparable_pair(&baseline, &baseline_events, &counterfactual, &counterfactual_events)
+                => |(comparable_baseline, comparable_counterfactual)|;
             let report = MoatProofReport {
+                physical_reaction: projection_changed(&baseline, &counterfactual, "world").into(),
+                agent_reaction: projection_changed(&baseline, &counterfactual, "proof-agent").into(),
+                society_signal_changed: projection_changed(&baseline, &counterfactual, "society").into(),
                 baseline,
                 counterfactual,
                 comparable_baseline,
@@ -247,9 +246,6 @@ impl MoatProofRun {
                 baseline_cbor,
                 counterfactual_cbor,
                 divergence,
-                physical_reaction: physical_reaction.into(),
-                agent_reaction: agent_reaction.into(),
-                society_signal_changed: society_signal_changed.into(),
                 prefix_identical_through_fork: prefix_identical_through_fork.into(),
                 suffix_recomputed: suffix_recomputed.into(),
                 failure_probes,
@@ -605,6 +601,17 @@ fn comparable_proof_evidence(
         }
     }
     Ok(comparable)
+}
+
+fn comparable_pair(
+    baseline: &MoatProofEvidenceV1,
+    baseline_events: &[Event],
+    counterfactual: &MoatProofEvidenceV1,
+    counterfactual_events: &[Event],
+) -> Result<(MoatProofEvidenceV1, MoatProofEvidenceV1), MoatProofError> {
+    let baseline = comparable_proof_evidence(baseline, baseline_events)?;
+    let counterfactual = comparable_proof_evidence(counterfactual, counterfactual_events)?;
+    Ok((baseline, counterfactual))
 }
 
 fn normalize_world_provenance(
