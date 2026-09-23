@@ -102,6 +102,92 @@ fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, Co
 }
 
 #[test]
+fn memory_key_registry_public_contract_covers_transaction_boundaries(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (registry, identity, material_digest) = registry()?;
+    let mut store = MemoryStore::new();
+    bind_test_erasure_gate(&mut store)?;
+    let request =
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
+    let mut absent_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    };
+    assert!(matches!(
+        store.append_signed_authorized(TimelineId::new(), &registry, &mut absent_callback),
+        Err(CoreError::Storage(_))
+    ));
+    assert!(matches!(
+        store.begin_key_registry_destruction(request),
+        Err(CoreError::Storage(_))
+    ));
+    assert!(matches!(
+        store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request)),
+        Err(CoreError::Storage(_))
+    ));
+
+    store.save_key_registry(&registry)?;
+    let timeline = store.create_timeline("memory-registry-contract")?;
+    let mut seed = store
+        .append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                pos_core::Kind::new("registry.seed"),
+                pos_core::CanonicalBytes::from_static(b"seed"),
+            )],
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CoreError::Storage("seed append returned no event".to_owned()))?;
+    assert!(matches!(
+        store.append_signed_authorized(
+            timeline.id(),
+            &KeyRegistryStateV1::new(),
+            &mut absent_callback
+        ),
+        Err(CoreError::Storage(_))
+    ));
+    assert!(matches!(
+        store.append_signed_authorized(TimelineId::new(), &registry, &mut absent_callback),
+        Err(CoreError::TimelineNotFound(_))
+    ));
+    assert!(matches!(
+        store.append_signed_authorized(timeline.id(), &registry, &mut absent_callback),
+        Err(CoreError::Storage(_))
+    ));
+    seed.id = EventId::new();
+    let mut success = move |_registry: &KeyRegistryStateV1, seq: Seq| {
+        seed.seq = seq;
+        Ok::<Event, CoreError>(seed.clone())
+    };
+    store.append_signed_authorized(timeline.id(), &registry, &mut success)?;
+    assert!(store
+        .append_signed_authorized(timeline.id(), &registry, &mut success)
+        .is_err());
+
+    let invalid_request = KeyDestructionRequestV1::new(
+        identity,
+        Hash::from_bytes([9; 32]),
+        Hash::from_bytes([2; 32]),
+    );
+    assert!(matches!(
+        store.begin_key_registry_destruction(invalid_request),
+        Err(CoreError::Storage(_))
+    ));
+    let (_, pending) = store.begin_key_registry_destruction(request)?;
+    assert_ne!(pending, registry);
+    assert!(matches!(
+        store.complete_key_registry_destruction(request, Hash::from_bytes([9; 32])),
+        Err(CoreError::Storage(_))
+    ));
+    let (_, destroyed) =
+        store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))?;
+    assert!(destroyed.tombstone(identity).is_some());
+    assert_eq!(store.load_key_registry()?, Some(destroyed));
+    Ok(())
+}
+
+#[test]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registry()?;
