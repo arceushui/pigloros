@@ -62,6 +62,32 @@ fn page() -> Result<WorldEventPageV1, WorldHistoryErrorV1> {
     WorldEventPageV1::new(timeline(1), vec![row(1, 5, 3)?])
 }
 
+fn history_child(
+    first: u64,
+    last: u64,
+    count: u64,
+    address_byte: u8,
+) -> Result<WorldHistoryChildV1, WorldHistoryErrorV1> {
+    WorldHistoryChildV1::new(first, last, count, hash(address_byte))
+}
+
+fn history_branch(
+    height: u8,
+    first: u64,
+    last: u64,
+    count: u64,
+    children: Vec<WorldHistoryChildV1>,
+) -> Result<WorldHistoryBranchV1, WorldHistoryErrorV1> {
+    WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
+        timeline_id: timeline(1),
+        height,
+        first_logical_seq: first,
+        last_logical_seq: last,
+        event_count: count,
+        children,
+    })
+}
+
 fn uint(value: u64) -> ciborium::value::Value {
     ciborium::value::Value::Integer(value.into())
 }
@@ -298,7 +324,7 @@ fn public_wep1_checks_page_bounds_sequence_and_source_identity(
         Err(WorldHistoryErrorV1::InvalidRange)
     );
     assert_eq!(
-        WorldEventPageV1::new(timeline(1), vec![row(1, 1, 1)?, row(2, 1, 1)?]),
+        WorldEventPageV1::new(timeline(1), vec![row(1, 1, 1)?, row(2, 2, 1)?]),
         Err(WorldHistoryErrorV1::DuplicateSourceEvent)
     );
     let mut fork_segment_row = row_input(2, 1, 2);
@@ -366,183 +392,209 @@ fn public_whb1_matches_independent_cbor_and_round_trips() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn public_whb1_validates_partition_bounds_and_maximum_sequence(
+fn public_whb1_rejects_invalid_child_fields_and_branch_bounds(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let child = |first, last, count, byte| WorldHistoryChildV1::new(first, last, count, hash(byte));
-    let page_capacity = u64::try_from(MAX_WORLD_EVENT_PAGE_ROWS_V1).unwrap_or(u64::MAX);
-    let branch_capacity =
-        u64::try_from(MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1).unwrap_or(u64::MAX) * page_capacity;
-    assert_eq!(child(0, 1, 1, 1), Err(WorldHistoryErrorV1::InvalidRange));
-    assert_eq!(child(2, 1, 1, 1), Err(WorldHistoryErrorV1::InvalidRange));
-    assert_eq!(child(1, 1, 0, 1), Err(WorldHistoryErrorV1::InvalidRange));
     assert_eq!(
-        child(1, 1, 1, 0),
+        history_child(0, 1, 1, 1),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
+    assert_eq!(
+        history_child(2, 1, 1, 1),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
+    assert_eq!(
+        history_child(1, 1, 0, 1),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
+    assert_eq!(
+        history_child(1, 1, 1, 0),
         Err(WorldHistoryErrorV1::ZeroContentAddress)
     );
+    assert_eq!(
+        history_branch(0, 1, 1, 1, vec![history_child(1, 1, 1, 1)?]),
+        Err(WorldHistoryErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        history_branch(9, 1, 1, 1, vec![history_child(1, 1, 1, 1)?]),
+        Err(WorldHistoryErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        history_branch(1, 1, 1, 1, Vec::new()),
+        Err(WorldHistoryErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
 
-    let make_branch = |height, first, last, count, children| {
-        WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-            timeline_id: timeline(1),
-            height,
-            first_logical_seq: first,
-            last_logical_seq: last,
-            event_count: count,
-            children,
-        })
-    };
+#[test]
+fn public_whb1_enforces_contiguous_nonoverlapping_partitions(
+) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
-        make_branch(0, 1, 1, 1, vec![child(1, 1, 1, 1)?]),
-        Err(WorldHistoryErrorV1::FieldOutOfBounds)
-    );
-    assert_eq!(
-        make_branch(9, 1, 1, 1, vec![child(1, 1, 1, 1)?]),
-        Err(WorldHistoryErrorV1::FieldOutOfBounds)
-    );
-    assert_eq!(
-        make_branch(1, 1, 1, 1, Vec::new()),
-        Err(WorldHistoryErrorV1::FieldOutOfBounds)
-    );
-    assert_eq!(
-        make_branch(
+        history_branch(
             1,
             1,
             66,
             66,
-            vec![child(1, 64, 64, 1)?, child(66, 66, 1, 2)?]
+            vec![history_child(1, 64, 64, 1)?, history_child(66, 66, 1, 2)?]
         ),
         Err(WorldHistoryErrorV1::InvalidRange)
     );
     assert_eq!(
-        make_branch(
+        history_branch(
             1,
             1,
             64,
             64,
-            vec![child(1, 64, 64, 1)?, child(64, 64, 1, 2)?]
+            vec![history_child(1, 64, 64, 1)?, history_child(64, 64, 1, 2)?]
         ),
         Err(WorldHistoryErrorV1::InvalidRange)
     );
-    assert!(make_branch(
+    assert!(history_branch(
         1,
         1,
         65,
         65,
-        vec![child(1, 64, 64, 1)?, child(65, 65, 1, 2)?]
+        vec![history_child(1, 64, 64, 1)?, history_child(65, 65, 1, 2)?]
     )
     .is_ok());
     assert_eq!(
-        make_branch(
+        history_branch(
             1,
             1,
             65,
             64,
-            vec![child(1, 64, 64, 1)?, child(65, 65, 1, 2)?]
+            vec![history_child(1, 64, 64, 1)?, history_child(65, 65, 1, 2)?]
         ),
         Err(WorldHistoryErrorV1::InvalidRange)
     );
     assert_eq!(
-        make_branch(
+        history_branch(
+            1,
+            1,
+            64,
+            64,
+            vec![history_child(1, 64, 64, 1)?, history_child(65, 65, 1, 2)?]
+        ),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
+    assert_eq!(
+        history_branch(
+            1,
+            1,
+            65,
+            65,
+            vec![history_child(1, 64, 64, 1)?, history_child(65, 65, 1, 1)?]
+        ),
+        Err(WorldHistoryErrorV1::InvalidRange)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_whb1_enforces_height_derived_child_capacity() -> Result<(), Box<dyn std::error::Error>> {
+    let page_capacity = u64::try_from(MAX_WORLD_EVENT_PAGE_ROWS_V1).unwrap_or(u64::MAX);
+    let branch_capacity =
+        u64::try_from(MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1).unwrap_or(u64::MAX) * page_capacity;
+    assert_eq!(
+        history_branch(
             1,
             1,
             branch_capacity + 1,
             branch_capacity + 1,
-            vec![child(1, branch_capacity + 1, branch_capacity + 1, 1)?]
+            vec![history_child(
+                1,
+                branch_capacity + 1,
+                branch_capacity + 1,
+                1
+            )?]
         ),
         Err(WorldHistoryErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        make_branch(
+        history_branch(
             1,
             1,
             page_capacity + 1,
             page_capacity + 1,
-            vec![child(1, page_capacity + 1, page_capacity + 1, 1)?]
+            vec![history_child(1, page_capacity + 1, page_capacity + 1, 1)?]
         ),
         Err(WorldHistoryErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        make_branch(
+        history_branch(
             2,
             1,
             branch_capacity + 1,
             branch_capacity + 1,
-            vec![child(1, branch_capacity + 1, branch_capacity + 1, 1)?]
+            vec![history_child(
+                1,
+                branch_capacity + 1,
+                branch_capacity + 1,
+                1
+            )?]
         ),
         Err(WorldHistoryErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        make_branch(
+        history_branch(
             2,
             1,
             branch_capacity + 1,
             branch_capacity + 1,
-            vec![child(1, branch_capacity + 1, branch_capacity + 1, 9)?]
+            vec![history_child(
+                1,
+                branch_capacity + 1,
+                branch_capacity + 1,
+                9
+            )?]
         ),
         Err(WorldHistoryErrorV1::FieldOutOfBounds)
     );
     assert_eq!(
-        make_branch(
+        history_branch(
             2,
             1,
-            page_capacity * u64::try_from(MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1).unwrap_or(u64::MAX)
-                + 1,
-            page_capacity * u64::try_from(MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1).unwrap_or(u64::MAX)
-                + 1,
+            branch_capacity + 1,
+            branch_capacity + 1,
             vec![
-                child(1, branch_capacity - 1, branch_capacity - 1, 1)?,
-                child(branch_capacity, branch_capacity + 1, 2, 2)?,
+                history_child(1, branch_capacity - 1, branch_capacity - 1, 1)?,
+                history_child(branch_capacity, branch_capacity + 1, 2, 2)?,
             ]
         ),
         Err(WorldHistoryErrorV1::InvalidRange)
     );
-    assert_eq!(
-        make_branch(
-            1,
-            1,
-            64,
-            64,
-            vec![child(1, 64, 64, 1)?, child(65, 65, 1, 2)?]
-        ),
-        Err(WorldHistoryErrorV1::InvalidRange)
-    );
-    assert_eq!(
-        make_branch(
-            1,
-            1,
-            65,
-            65,
-            vec![child(1, 64, 64, 1)?, child(65, 65, 1, 1)?]
-        ),
-        Err(WorldHistoryErrorV1::InvalidRange)
-    );
+    Ok(())
+}
 
-    let near_max = make_branch(
+#[test]
+fn public_whb1_handles_maximum_sequence_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+    let near_max = history_branch(
         1,
         u64::MAX - 127,
         u64::MAX,
         128,
         vec![
-            child(u64::MAX - 127, u64::MAX - 64, 64, 1)?,
-            child(u64::MAX - 63, u64::MAX, 64, 2)?,
+            history_child(u64::MAX - 127, u64::MAX - 64, 64, 1)?,
+            history_child(u64::MAX - 63, u64::MAX, 64, 2)?,
         ],
     );
     assert!(near_max.is_ok());
+
     let child_capacity = (u64::MAX >> 2) + 1;
-    assert!(make_branch(
+    assert!(history_branch(
         8,
         1,
         u64::MAX,
         u64::MAX,
         vec![
-            child(1, child_capacity, child_capacity, 3)?,
-            child(child_capacity + 1, child_capacity * 2, child_capacity, 4)?,
-            child(
+            history_child(1, child_capacity, child_capacity, 3)?,
+            history_child(child_capacity + 1, child_capacity * 2, child_capacity, 4)?,
+            history_child(
                 child_capacity * 2 + 1,
                 child_capacity * 3,
                 child_capacity,
                 5
             )?,
-            child(
+            history_child(
                 child_capacity * 3 + 1,
                 u64::MAX,
                 u64::MAX - child_capacity * 3,
@@ -552,14 +604,14 @@ fn public_whb1_validates_partition_bounds_and_maximum_sequence(
     )
     .is_ok());
     assert_eq!(
-        make_branch(
+        history_branch(
             1,
             u64::MAX,
             u64::MAX,
             1,
             vec![
-                child(u64::MAX, u64::MAX, 1, 3)?,
-                child(u64::MAX, u64::MAX, 1, 4)?,
+                history_child(u64::MAX, u64::MAX, 1, 3)?,
+                history_child(u64::MAX, u64::MAX, 1, 4)?,
             ],
         ),
         Err(WorldHistoryErrorV1::InvalidRange)
@@ -568,8 +620,7 @@ fn public_whb1_validates_partition_bounds_and_maximum_sequence(
 }
 
 #[test]
-fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn std::error::Error>>
-{
+fn public_whb1_validates_resolved_event_page_scope() -> Result<(), Box<dyn std::error::Error>> {
     let event_page = page()?;
     let event_child = WorldHistoryChildV1::new(
         event_page.first_logical_seq(),
@@ -577,14 +628,7 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         u64::try_from(event_page.rows().len()).unwrap_or(u64::MAX),
         event_page.digest(),
     )?;
-    let page_parent = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 1,
-        last_logical_seq: 1,
-        event_count: 1,
-        children: vec![event_child],
-    })?;
+    let page_parent = history_branch(1, 1, 1, 1, vec![event_child])?;
     assert_eq!(
         page_parent.validate_resolved_children(
             timeline(1),
@@ -605,19 +649,18 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
     );
 
     let wrong_timeline_page = WorldEventPageV1::new(timeline(2), vec![row(1, 5, 3)?])?;
-    let wrong_timeline_parent = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 1,
-        last_logical_seq: 1,
-        event_count: 1,
-        children: vec![WorldHistoryChildV1::new(
+    let wrong_timeline_parent = history_branch(
+        1,
+        1,
+        1,
+        1,
+        vec![WorldHistoryChildV1::new(
             1,
             1,
             1,
             wrong_timeline_page.digest(),
         )?],
-    })?;
+    )?;
     assert_eq!(
         wrong_timeline_parent.validate_resolved_children(
             timeline(1),
@@ -627,7 +670,20 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
+    Ok(())
+}
 
+#[test]
+fn public_whb1_validates_resolved_event_page_digest_and_range(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event_page = page()?;
+    let page_parent = history_branch(
+        1,
+        1,
+        1,
+        1,
+        vec![WorldHistoryChildV1::new(1, 1, 1, event_page.digest())?],
+    )?;
     let different_page = WorldEventPageV1::new(timeline(1), vec![row(1, 5, 4)?])?;
     assert_eq!(
         page_parent.validate_resolved_children(
@@ -636,14 +692,14 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
-    let wrong_first_parent = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 2,
-        last_logical_seq: 2,
-        event_count: 1,
-        children: vec![WorldHistoryChildV1::new(2, 2, 1, event_page.digest())?],
-    })?;
+
+    let wrong_first_parent = history_branch(
+        1,
+        2,
+        2,
+        1,
+        vec![WorldHistoryChildV1::new(2, 2, 1, event_page.digest())?],
+    )?;
     assert_eq!(
         wrong_first_parent.validate_resolved_children(
             timeline(1),
@@ -651,14 +707,13 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
-    let wrong_range_parent = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 1,
-        last_logical_seq: 2,
-        event_count: 2,
-        children: vec![WorldHistoryChildV1::new(1, 2, 2, event_page.digest())?],
-    })?;
+    let wrong_range_parent = history_branch(
+        1,
+        1,
+        2,
+        2,
+        vec![WorldHistoryChildV1::new(1, 2, 2, event_page.digest())?],
+    )?;
     assert_eq!(
         wrong_range_parent.validate_resolved_children(
             timeline(1),
@@ -667,14 +722,7 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
 
-    let lower_branch = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 1,
-        last_logical_seq: 1,
-        event_count: 1,
-        children: vec![WorldHistoryChildV1::new(1, 1, 1, hash(9))?],
-    })?;
+    let lower_branch = history_branch(1, 1, 1, 1, vec![history_child(1, 1, 1, 9)?])?;
     assert_eq!(
         page_parent.validate_resolved_children(
             timeline(1),
@@ -682,16 +730,19 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
+    Ok(())
+}
 
-    let branch_child = WorldHistoryChildV1::new(1, 1, 1, lower_branch.digest())?;
-    let parent = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 2,
-        first_logical_seq: 1,
-        last_logical_seq: 1,
-        event_count: 1,
-        children: vec![branch_child],
-    })?;
+#[test]
+fn public_whb1_accepts_resolved_history_branch_child() -> Result<(), Box<dyn std::error::Error>> {
+    let lower_branch = history_branch(1, 1, 1, 1, vec![history_child(1, 1, 1, 9)?])?;
+    let parent = history_branch(
+        2,
+        1,
+        1,
+        1,
+        vec![WorldHistoryChildV1::new(1, 1, 1, lower_branch.digest())?],
+    )?;
     assert_eq!(
         parent.validate_resolved_children(
             timeline(1),
@@ -699,7 +750,20 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         ),
         Ok(())
     );
+    Ok(())
+}
 
+#[test]
+fn public_whb1_rejects_resolved_history_branch_scope_and_range_mismatches(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lower_branch = history_branch(1, 1, 1, 1, vec![history_child(1, 1, 1, 9)?])?;
+    let parent = history_branch(
+        2,
+        1,
+        1,
+        1,
+        vec![WorldHistoryChildV1::new(1, 1, 1, lower_branch.digest())?],
+    )?;
     let wrong_timeline_branch = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
         timeline_id: timeline(2),
         height: 1,
@@ -712,56 +776,47 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         parent.validate_resolved_children(
             timeline(1),
             &[WorldHistoryChildRecordRefV1::HistoryBranch(
-                &wrong_timeline_branch,
+                &wrong_timeline_branch
             )],
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
 
-    let wrong_first_branch = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 2,
-        last_logical_seq: 2,
-        event_count: 1,
-        children: vec![WorldHistoryChildV1::new(2, 2, 1, hash(13))?],
-    })?;
+    let wrong_first_branch = history_branch(1, 2, 2, 1, vec![history_child(2, 2, 1, 13)?])?;
     assert_eq!(
         parent.validate_resolved_children(
             timeline(1),
             &[WorldHistoryChildRecordRefV1::HistoryBranch(
-                &wrong_first_branch,
+                &wrong_first_branch
             )],
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
-
-    let wrong_last_branch = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 1,
-        last_logical_seq: 2,
-        event_count: 2,
-        children: vec![WorldHistoryChildV1::new(1, 2, 2, hash(14))?],
-    })?;
+    let wrong_last_branch = history_branch(1, 1, 2, 2, vec![history_child(1, 2, 2, 14)?])?;
     assert_eq!(
         parent.validate_resolved_children(
             timeline(1),
             &[WorldHistoryChildRecordRefV1::HistoryBranch(
-                &wrong_last_branch,
+                &wrong_last_branch
             )],
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
+    Ok(())
+}
 
-    let wrong_digest_branch = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 1,
-        first_logical_seq: 1,
-        last_logical_seq: 1,
-        event_count: 1,
-        children: vec![WorldHistoryChildV1::new(1, 1, 1, hash(12))?],
-    })?;
+#[test]
+fn public_whb1_rejects_resolved_history_branch_digest_and_level_mismatches(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lower_branch = history_branch(1, 1, 1, 1, vec![history_child(1, 1, 1, 9)?])?;
+    let parent = history_branch(
+        2,
+        1,
+        1,
+        1,
+        vec![WorldHistoryChildV1::new(1, 1, 1, lower_branch.digest())?],
+    )?;
+    let wrong_digest_branch = history_branch(1, 1, 1, 1, vec![history_child(1, 1, 1, 12)?])?;
     assert_eq!(
         parent.validate_resolved_children(
             timeline(1),
@@ -772,19 +827,12 @@ fn public_whb1_validates_resolved_child_scope_and_level() -> Result<(), Box<dyn 
         Err(WorldHistoryErrorV1::InvalidChildReference)
     );
 
-    let wrong_level_branch = WorldHistoryBranchV1::new(WorldHistoryBranchInputV1 {
-        timeline_id: timeline(1),
-        height: 2,
-        first_logical_seq: 1,
-        last_logical_seq: 1,
-        event_count: 1,
-        children: vec![WorldHistoryChildV1::new(1, 1, 1, hash(10))?],
-    })?;
+    let wrong_level_branch = history_branch(2, 1, 1, 1, vec![history_child(1, 1, 1, 10)?])?;
     assert_eq!(
         parent.validate_resolved_children(
             timeline(1),
             &[WorldHistoryChildRecordRefV1::HistoryBranch(
-                &wrong_level_branch,
+                &wrong_level_branch
             )],
         ),
         Err(WorldHistoryErrorV1::InvalidChildReference)
