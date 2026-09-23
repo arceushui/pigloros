@@ -222,14 +222,18 @@ struct TrustedPublicKey {
 }
 
 fn parse_public_key_hex(value: &str) -> Result<pos_core::PublicKey, CliError> {
-    let bytes =
-        hex_decode(value).map_err(|error| CliError::BadKey(format!("--pubkey: {error}")))?;
-    let array: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
+    let array = decode_public_key_hex(value)?;
     require_canonical_public_key_hex(value, &array)?;
     Ok(pos_core::PublicKey::from_bytes(array))
+}
+
+fn decode_public_key_hex(value: &str) -> Result<[u8; 32], CliError> {
+    let bytes =
+        hex_decode(value).map_err(|error| CliError::BadKey(format!("--pubkey: {error}")))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))
 }
 
 fn require_canonical_public_key_hex(value: &str, bytes: &[u8; 32]) -> Result<(), CliError> {
@@ -291,9 +295,10 @@ fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
 fn parse_supplied_public_keys(
     pubkey_hex: Option<&str>,
 ) -> Result<Option<Vec<TrustedPublicKey>>, CliError> {
-    let Some(value) = pubkey_hex else {
-        return Ok(None);
-    };
+    pubkey_hex.map(parse_anchor_list).transpose()
+}
+
+fn parse_anchor_list(value: &str) -> Result<Vec<TrustedPublicKey>, CliError> {
     let anchors = value
         .split(',')
         .map(|entry| {
@@ -348,7 +353,7 @@ fn parse_supplied_public_keys(
         })
         .collect::<Result<Vec<_>, _>>()?;
     require_distinct_anchor_identities(&anchors)?;
-    Ok(Some(anchors))
+    Ok(anchors)
 }
 
 fn require_distinct_anchor_identities(anchors: &[TrustedPublicKey]) -> Result<(), CliError> {

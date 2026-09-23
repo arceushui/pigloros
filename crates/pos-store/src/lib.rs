@@ -564,19 +564,28 @@ where
             return Err(CoreError::SignatureVerificationFailed);
         }
     }
-    let registry = if export.events.is_empty() {
-        None
-    } else {
-        Some(store.load_key_registry()?.ok_or_else(|| {
-            CoreError::Storage(
-                "verified Timeline import requires a persisted key registry".to_owned(),
-            )
-        })?)
-    };
+    let registry = load_import_registry(store, &export)?;
     for event in &export.events {
         verify_import_event(event, &anchors, registry.as_ref(), &mut verify_event)?;
     }
     import_timeline_with_id(store, export)
+}
+
+fn load_import_registry(
+    store: &mut dyn EventStore,
+    export: &TimelineExport,
+) -> Result<Option<pos_core::KeyRegistryStateV1>, CoreError> {
+    if export.events.is_empty() {
+        return Ok(None);
+    }
+    store
+        .load_key_registry()?
+        .ok_or_else(|| {
+            CoreError::Storage(
+                "verified Timeline import requires a persisted key registry".to_owned(),
+            )
+        })
+        .map(Some)
 }
 
 fn verify_import_event<F>(
