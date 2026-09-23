@@ -73,9 +73,8 @@ fn snapshot_effect_with_rechecks(
 ) -> Result<Snapshot, CoreError> {
     registry.try_with_state_transaction(|candidate| {
         let read_bounds = crate::require_world_replay(sender, closure, requested_use)?;
-        let events = sender
-            .read_bounded(timeline, SeqRange::all(), read_bounds)
-            .map_err(crate::host_error_to_core)?;
+        let events =
+            crate::read_complete_world_replay(sender, timeline, SeqRange::all(), read_bounds)?;
         let snapshot = snapshot_from_events(timeline, candidate, &events)?;
         let final_bounds = crate::require_world_replay(sender, closure, requested_use)?;
         if final_bounds != read_bounds {
@@ -160,9 +159,8 @@ fn verify_snapshot_effect_with_rechecks(
     registry.try_with_state_transaction(|candidate| {
         let read_bounds = crate::require_world_replay(sender, closure, requested_use)
             .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-        let all_events = sender
-            .read_bounded(snap.timeline, SeqRange::all(), read_bounds)
-            .map_err(crate::host_error_to_core)?;
+        let all_events =
+            crate::read_complete_world_replay(sender, snap.timeline, SeqRange::all(), read_bounds)?;
         let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
         verify_snapshot_event_sets(snap, candidate, &all_events[tail_start..], &all_events)?;
         let final_bounds = crate::require_world_replay(sender, closure, requested_use)

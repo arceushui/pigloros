@@ -73,9 +73,7 @@ fn replay_range(
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
         outcome = registry.try_with_state_transaction(|candidate| {
             let read_bounds = crate::require_world_replay(sender, closure, &requested_use)?;
-            let events = sender
-                .read_bounded(timeline, range, read_bounds)
-                .map_err(crate::host_error_to_core)?;
+            let events = crate::read_complete_world_replay(sender, timeline, range, read_bounds)?;
             candidate.fold_events(&events);
             let final_bounds = crate::require_world_replay(sender, closure, &requested_use)?;
             if final_bounds != read_bounds {
