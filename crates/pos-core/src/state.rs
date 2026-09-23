@@ -118,8 +118,8 @@ mod tests {
             false
         }
 
-        fn apply(&self, _state: &mut State, _event: &Event) {
-            panic!("rejected event reached reducer");
+        fn apply(&self, state: &mut State, _event: &Event) {
+            state.set("unexpected", serde_json::json!(true));
         }
     }
 
