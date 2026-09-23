@@ -79,10 +79,10 @@ fn replay_range(
                         candidate.fold_events(&events);
                         crate::require_world_replay(sender, closure, &requested_use).and_then(
                             |final_bounds| {
-                                if final_bounds != read_bounds {
-                                    Err(CoreError::ArtifactUnavailable)
-                                } else {
+                                if final_bounds == read_bounds {
                                     Ok(events)
+                                } else {
+                                    Err(CoreError::ArtifactUnavailable)
                                 }
                             },
                         )

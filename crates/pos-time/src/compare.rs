@@ -71,10 +71,10 @@ pub fn compare(
                             .and_then(|diff| {
                                 require_comparison_artifacts(sender, closures, requested_uses)
                                     .and_then(|final_bounds| {
-                                        if final_bounds != read_bounds {
-                                            Err(CoreError::ArtifactUnavailable)
-                                        } else {
+                                        if final_bounds == read_bounds {
                                             Ok(diff)
+                                        } else {
+                                            Err(CoreError::ArtifactUnavailable)
                                         }
                                     })
                             })
