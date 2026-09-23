@@ -29,6 +29,7 @@ pub mod hasher;
 pub mod ids;
 pub mod key_registry;
 pub mod manifest;
+pub mod manifest_owner_link;
 pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
@@ -46,6 +47,14 @@ pub mod world_history;
 pub mod world_recording_receipt;
 pub mod world_transform;
 
+pub use manifest_owner_link::{
+    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+    ManifestOwnerLinkErrorV1, ManifestSlotAdmissionReceiptInputV1,
+    ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
+    ManifestSlotBindingV1, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1,
+    MAX_MANIFEST_OWNER_PLUGINS_V1, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1,
+    MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
 pub use world_artifact::{
     WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
     WorldArtifactLeafInputV1, WorldArtifactLeafV1, MAX_WORLD_ARTIFACT_CHILDREN_V1,

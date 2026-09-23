@@ -12,7 +12,7 @@ pub const MAX_WORLD_ARTIFACT_KEYS_V1: usize = 16;
 /// Maximum complete native dependency node addresses in one leaf.
 pub const MAX_WORLD_ARTIFACT_CHILDREN_V1: usize = 256;
 
-/// Closed native artifact meanings from accepted ADR-081 Revision 1.
+/// Closed native artifact meanings from ADR-081 Revision 1 and ADR-089 Revision 4.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum WorldArtifactKindV1 {
@@ -44,6 +44,8 @@ pub enum WorldArtifactKindV1 {
     TimelinePayload,
     /// Separately admitted optional derived view.
     OptionalView,
+    /// Exact retained OPC1 output-policy closure; native verification is separate.
+    OutputPolicyClosure,
 }
 
 impl WorldArtifactKindV1 {
@@ -65,13 +67,14 @@ impl WorldArtifactKindV1 {
             Self::KeyDependencyEvidence => 11,
             Self::TimelinePayload => 12,
             Self::OptionalView => 13,
+            Self::OutputPolicyClosure => 14,
         }
     }
 
     /// Decode only the accepted closed artifact kinds.
     ///
     /// # Errors
-    /// Rejects unknown kind codes, including unapproved proposed extensions.
+    /// Rejects unknown kind codes; recognizing a code grants no native authority.
     pub const fn from_code(code: u8) -> Result<Self, WorldArtifactErrorV1> {
         match code {
             0 => Ok(Self::OutputPolicy),
@@ -88,6 +91,7 @@ impl WorldArtifactKindV1 {
             11 => Ok(Self::KeyDependencyEvidence),
             12 => Ok(Self::TimelinePayload),
             13 => Ok(Self::OptionalView),
+            14 => Ok(Self::OutputPolicyClosure),
             _ => Err(WorldArtifactErrorV1::UnsupportedValue),
         }
     }
