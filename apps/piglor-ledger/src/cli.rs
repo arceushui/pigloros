@@ -63,17 +63,21 @@ impl Source {
 /// Returns [`CliError::BadKey`] on read or hex-decode failure.
 fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> {
     let encoded = read_signing_key_bytes(path)?;
-    let text = std::str::from_utf8(&encoded)
+    let bytes = decode_signing_key_bytes(&encoded)?;
+    Ok(ed25519_dalek::SigningKey::from_bytes(&bytes))
+}
+
+fn decode_signing_key_bytes(encoded: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>, CliError> {
+    let text = std::str::from_utf8(encoded)
         .map_err(|error| CliError::BadKey(error.to_string()))?
         .trim();
     let bytes = zeroize::Zeroizing::new(
         hex_decode(text).map_err(|error| CliError::BadKey(format!("hex decode: {error}")))?,
     );
-    let arr = zeroize::Zeroizing::new(
+    Ok(zeroize::Zeroizing::new(
         <[u8; 32]>::try_from(bytes.as_slice())
             .map_err(|_| CliError::BadKey("expected 32 bytes".to_owned()))?,
-    );
-    Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
+    ))
 }
 
 fn read_signing_key_bytes(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, CliError> {
