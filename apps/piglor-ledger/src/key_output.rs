@@ -16,6 +16,21 @@ use std::path::Path;
 
 use crate::CliError;
 
+#[cfg(all(test, unix))]
+macro_rules! deletion_fault {
+    ($path:expr_2021, $stage:expr_2021) => {
+        injected_fault_result($path, $stage)
+    };
+}
+
+#[cfg(all(not(test), unix))]
+macro_rules! deletion_fault {
+    ($path:expr_2021, $stage:expr_2021) => {{
+        let _ = ($path, $stage);
+        Ok::<(), std::io::Error>(())
+    }};
+}
+
 /// Delete the application-owned signing-key file after registry authorization
 /// has entered `DestructionPending`.
 ///
@@ -44,21 +59,29 @@ pub fn delete_owned_secret_key(
         pos_core::CoreError::Storage("owned signing-key path has no parent".to_owned())
     })?;
     validate_ancestors(&absolute, parent_path).map_err(|error| storage_error(&error))?;
-    let parent = std::fs::File::open(parent_path).map_err(|error| storage_error(&error))?;
-    let opened = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&absolute);
+    let parent = deletion_fault!(&absolute, FaultStage::DeleteOpenParent)
+        .and_then(|()| std::fs::File::open(parent_path))
+        .map_err(|error| storage_error(&error))?;
+    let opened = deletion_fault!(&absolute, FaultStage::DeleteOpenFile).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&absolute)
+    });
     let mut file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            parent.sync_all().map_err(|error| storage_error(&error))?;
+            deletion_fault!(&absolute, FaultStage::DeleteAbsentDirectorySync)
+                .and_then(|()| parent.sync_all())
+                .map_err(|error| storage_error(&error))?;
             return Ok(pos_core::deletion_receipt(&request));
         }
         Err(error) => return Err(storage_error(&error)),
     };
-    let metadata = file.metadata().map_err(|error| storage_error(&error))?;
+    let metadata = deletion_fault!(&absolute, FaultStage::DeleteMetadata)
+        .and_then(|()| file.metadata())
+        .map_err(|error| storage_error(&error))?;
     if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
         return Err(pos_core::CoreError::Storage(
             "owned signing-key file is not a private single-link regular file".to_owned(),
@@ -70,7 +93,8 @@ pub fn delete_owned_secret_key(
         ));
     }
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
-    file.read_to_end(&mut encoded)
+    deletion_fault!(&absolute, FaultStage::DeleteRead)
+        .and_then(|()| file.read_to_end(&mut encoded))
         .map_err(|error| storage_error(&error))?;
     let text = std::str::from_utf8(&encoded).map_err(|error| storage_error(&error))?;
     let decoded = zeroize::Zeroizing::new(
@@ -84,16 +108,26 @@ pub fn delete_owned_secret_key(
             "owned signing-key file does not match the pending material digest".to_owned(),
         ));
     }
-    file.sync_all().map_err(|error| storage_error(&error))?;
-    let current = std::fs::symlink_metadata(&absolute).map_err(|error| storage_error(&error))?;
+    deletion_fault!(&absolute, FaultStage::DeletePreRemoveFileSync)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| storage_error(&error))?;
+    let current = deletion_fault!(&absolute, FaultStage::DeleteInspectCurrent)
+        .and_then(|()| std::fs::symlink_metadata(&absolute))
+        .map_err(|error| storage_error(&error))?;
     if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
         return Err(pos_core::CoreError::Storage(
             "owned signing-key file changed before deletion".to_owned(),
         ));
     }
-    std::fs::remove_file(&absolute).map_err(|error| storage_error(&error))?;
-    file.sync_all().map_err(|error| storage_error(&error))?;
-    parent.sync_all().map_err(|error| storage_error(&error))?;
+    deletion_fault!(&absolute, FaultStage::DeleteRemove)
+        .and_then(|()| std::fs::remove_file(&absolute))
+        .map_err(|error| storage_error(&error))?;
+    deletion_fault!(&absolute, FaultStage::DeletePostRemoveFileSync)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| storage_error(&error))?;
+    deletion_fault!(&absolute, FaultStage::DeleteDirectorySync)
+        .and_then(|()| parent.sync_all())
+        .map_err(|error| storage_error(&error))?;
     Ok(pos_core::deletion_receipt(&request))
 }
 
@@ -137,6 +171,16 @@ const NO_OUTPUT: &str = "no output was created; retry is safe";
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultStage {
+    DeleteOpenParent,
+    DeleteOpenFile,
+    DeleteAbsentDirectorySync,
+    DeleteMetadata,
+    DeleteRead,
+    DeletePreRemoveFileSync,
+    DeleteInspectCurrent,
+    DeleteRemove,
+    DeletePostRemoveFileSync,
+    DeleteDirectorySync,
     ResolveRelative,
     InspectAncestor,
     OpenParent,
@@ -452,5 +496,72 @@ fn unsafe_key(path: &Path, reason: String, cleanup: impl Into<String>) -> CliErr
         path: path.display().to_string(),
         reason,
         cleanup: cleanup.into(),
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod deletion_tests {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::Path;
+
+    use super::{clear_faults, delete_owned_secret_key, install_faults, FaultStage};
+    use pos_core::{Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRoleV1};
+
+    fn request() -> KeyDestructionRequestV1 {
+        KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1),
+            pos_crypto::key_roles::key_material_digest(&[9; 32]),
+            Hash::from_bytes([7; 32]),
+        )
+    }
+
+    fn write_owned_key(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(crate::hex_encode(&[9; 32]).as_bytes())?;
+        Ok(())
+    }
+
+    #[test]
+    fn injected_deletion_storage_failures_leave_no_success_receipt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let relative = Path::new("injected-deletion-relative.key");
+        install_faults(relative, &[FaultStage::ResolveRelative]);
+        assert!(delete_owned_secret_key(relative, request()).is_err());
+        clear_faults();
+
+        for stage in [
+            FaultStage::InspectAncestor,
+            FaultStage::DeleteOpenParent,
+            FaultStage::DeleteOpenFile,
+            FaultStage::DeleteMetadata,
+            FaultStage::DeleteRead,
+            FaultStage::DeletePreRemoveFileSync,
+            FaultStage::DeleteInspectCurrent,
+            FaultStage::DeleteRemove,
+            FaultStage::DeletePostRemoveFileSync,
+            FaultStage::DeleteDirectorySync,
+        ] {
+            let directory = tempfile::TempDir::new()?;
+            let key = directory.path().join("secret.key");
+            write_owned_key(&key)?;
+            install_faults(&key, &[stage]);
+            let result = delete_owned_secret_key(&key, request());
+            clear_faults();
+            assert!(result.is_err(), "{stage:?}");
+        }
+
+        let directory = tempfile::TempDir::new()?;
+        let missing = directory.path().join("missing.key");
+        install_faults(&missing, &[FaultStage::DeleteAbsentDirectorySync]);
+        let result = delete_owned_secret_key(&missing, request());
+        clear_faults();
+        assert!(result.is_err());
+        Ok(())
     }
 }
