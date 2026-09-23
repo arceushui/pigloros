@@ -877,7 +877,7 @@ async fn stop_job_ignores_canceled_start_and_matches_stop() -> Result<(), Box<dy
         calls.lock().map_err(|error| error.to_string())?.as_slice(),
         &[ObservedControl::Stop {
             name: name.as_str().to_owned(),
-            mode: STOP_JOB_MODE.to_owned(),
+            mode: "replace".to_owned(),
         }]
     );
     Ok(())
@@ -968,8 +968,8 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
         calls.lock().map_err(|error| error.to_string())?.as_slice(),
         &[ObservedControl::Kill {
             name: name.as_str().to_owned(),
-            whom: KILL_WHOM.to_owned(),
-            signal: SIGKILL,
+            whom: "all".to_owned(),
+            signal: 9,
         }]
     );
 
@@ -1253,7 +1253,7 @@ async fn stop_job_rejects_ended_and_error_streams() -> Result<(), Box<dyn Error>
 
     let expected = ObservedControl::Stop {
         name: name.as_str().to_owned(),
-        mode: STOP_JOB_MODE.to_owned(),
+        mode: "replace".to_owned(),
     };
     assert_eq!(
         calls.lock().map_err(|error| error.to_string())?.as_slice(),
