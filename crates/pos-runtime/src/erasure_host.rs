@@ -1725,13 +1725,6 @@ impl ErasureExecutionHostV1 {
             inventory
                 .require_unaffected_topology(parent)
                 .map_err(map_erasure_error)?;
-            if inventory.request_count() == 0 {
-                self.store
-                    .host_store()
-                    .get_timeline(parent)
-                    .map_store_error()?
-                    .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
-            }
         }
         let limits = self.recovery_limits;
         if inventory.request_count() != 0
@@ -1742,10 +1735,20 @@ impl ErasureExecutionHostV1 {
         let request_count = inventory.request_count();
         let gate = Arc::clone(&self.gate);
         let mut transition_failure = None;
+        let mut fenced_preflight =
+            |permit: &ErasureTopologyTransitionPermitV1, store: &mut dyn ErasureHostStore| {
+                if let Some(parent) = parent {
+                    store
+                        .get_timeline_for_host_transition(permit, parent)
+                        .map_store_error()?
+                        .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+                }
+                preflight(permit, store)
+            };
         let publication = {
             let mut fenced_transition = |permit: &ErasureTopologyTransitionPermitV1| match self
                 .prepare_unaffected_topology_transition(
-                    &mut preflight,
+                    &mut fenced_preflight,
                     &mut change,
                     permit,
                     request_count,
@@ -1972,7 +1975,7 @@ impl ErasureExecutionHostV1 {
             if inventory.request_count() != 0 {
                 return Err(ErasureHostErrorV1::Conflict);
             }
-            None
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
             Some(recovered_child)
