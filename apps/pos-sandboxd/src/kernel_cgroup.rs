@@ -66,9 +66,13 @@ pub enum AttemptCgroupError {
 
 impl CgroupRoot {
     pub(crate) fn system() -> Result<Self, AttemptCgroupError> {
+        Self::open_path(CGROUP_ROOT)
+    }
+
+    fn open_path(path: &str) -> Result<Self, AttemptCgroupError> {
         let root = openat2(
             CWD,
-            CGROUP_ROOT,
+            path,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
             ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
@@ -334,10 +338,13 @@ fn parse_populated(raw: &[u8]) -> Result<bool, AttemptCgroupError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::error::Error;
     use std::fs;
+    use std::os::fd::OwnedFd;
     use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixStream;
 
     use super::*;
 
@@ -350,6 +357,7 @@ mod tests {
         assert_eq!(parse_populated(b"frozen 0\npopulated 1\n").ok(), Some(true));
         for malformed in [
             b"".as_slice(),
+            b"\n".as_slice(),
             b"frozen 0\n".as_slice(),
             b"populated 2\n".as_slice(),
             b"populated 0\npopulated 1\n".as_slice(),
@@ -393,6 +401,16 @@ mod tests {
     }
 
     #[test]
+    fn fixed_mount_opens_and_missing_root_fails_closed() -> Result<(), Box<dyn Error>> {
+        CgroupRoot::system()?;
+        let temporary = tempfile::tempdir()?;
+        let missing = temporary.path().join("missing-cgroup-root");
+        let error = CgroupRoot::open_path(missing.to_str().ok_or("non-UTF-8 path")?).err();
+        assert!(matches!(error, Some(AttemptCgroupError::RootOpen(_))));
+        Ok(())
+    }
+
+    #[test]
     fn retained_handle_distinguishes_populated_empty_and_deleted() -> Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
         let relative = "system.slice/test.service";
@@ -428,6 +446,12 @@ mod tests {
             bound.observe_empty(),
             Err(AttemptCgroupError::EventsRead(_))
         ));
+        let (socket, _peer) = UnixStream::pair()?;
+        bound.events = File::from(OwnedFd::from(socket));
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::EventsRead(_))
+        ));
         fs::remove_file(events)?;
         fs::remove_dir(&directory)?;
         let deleted = bound.observe_empty()?;
@@ -450,11 +474,30 @@ mod tests {
             OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
             "/system.slice/test.service".to_owned(),
         )?;
+        let original_device = bound.device;
+        bound.device = original_device.wrapping_add(1);
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::PathReused)
+        ));
+        bound.device = original_device;
+        bound.control_group = "/".to_owned();
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::InvalidPath)
+        ));
+        bound.control_group = "/system.slice/test.service".to_owned();
         fs::rename(&directory, parent.join("moved.service"))?;
         assert!(matches!(
             bound.observe_empty(),
             Err(AttemptCgroupError::DeletionUnproven)
         ));
+        symlink(parent.join("moved.service"), &directory)?;
+        assert!(matches!(
+            bound.observe_empty(),
+            Err(AttemptCgroupError::PathOpen(_))
+        ));
+        fs::remove_file(&directory)?;
         fs::create_dir(&directory)?;
         fs::write(directory.join("cgroup.events"), b"populated 0\n")?;
         assert!(matches!(
@@ -531,6 +574,22 @@ mod tests {
             bound.observe_empty(),
             Err(AttemptCgroupError::EventsTooLong)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_initial_events_fail_closed() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let directory = temporary.path().join("system.slice/test.service");
+        fs::create_dir_all(directory.join("cgroup.events"))?;
+        let error = BoundAttemptCgroup::open(
+            CgroupRoot::for_test(File::open(temporary.path())?),
+            TransientServiceUnitName::from_attempt_id([6; 16])?,
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
+            "/system.slice/test.service".to_owned(),
+        )
+        .err();
+        assert!(matches!(error, Some(AttemptCgroupError::EventsRead(_))));
         Ok(())
     }
 }

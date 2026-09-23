@@ -3,6 +3,7 @@
 //! This library does not implement the provider daemon or grant admission.
 //! The existing signed admission boundary must supply the selected SCS1 digest
 //! and architecture before these requested-state components are used.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 mod hardening;
 mod kernel_cgroup;
