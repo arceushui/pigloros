@@ -671,6 +671,12 @@ mod tests {
             ("params", json!([0xc0, 0xf9, 0x7e, 0])),
             ("params", json!([0xa2, 2, 2, 1, 1])),
             ("params", json!([0xa2, 1, 1, 1, 2])),
+            ("params", json!([1, 0.0])),
+            ("params", json!([1.0, "0.0"])),
+            ("params", json!([1.0])),
+            ("params", json!([1.0, 0.0, 0.0])),
+            ("params", json!([f64::MAX, 0.0])),
+            ("params", json!([0.0, -f64::MAX])),
             ("tick", json!(-1)),
             ("unexpected", json!(true)),
         ] {
@@ -679,11 +685,19 @@ mod tests {
             let (status, _) = json_request(app.clone(), "POST", &path, Some(rejected)).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}");
         }
-        for params in [json!([1.0, 0.0]), json!([0.333_333_333_333_333_3, -0.0])] {
+        for (params, encoded) in [
+            (json!([1.0, 0.0]), json!([130, 249, 60, 0, 249, 0, 0])),
+            (json!([1.0, -0.0]), json!([130, 249, 60, 0, 249, 128, 0])),
+            (
+                json!([0.333_333_333_333_333_3, -0.0]),
+                json!([130, 250, 62, 170, 170, 171, 249, 128, 0]),
+            ),
+        ] {
             let mut accepted = request.clone();
             accepted["payload"]["params"] = params;
-            let (status, _) = json_request(app.clone(), "POST", &path, Some(accepted)).await;
+            let (status, event) = json_request(app.clone(), "POST", &path, Some(accepted)).await;
             assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(event["payload"][5], encoded);
         }
     }
 
