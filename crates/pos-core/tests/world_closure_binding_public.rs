@@ -9,7 +9,7 @@ const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
-fn baseline_input() -> WorldClosureBindingInputV1 {
+const fn baseline_input() -> WorldClosureBindingInputV1 {
     WorldClosureBindingInputV1 {
         timeline_id: TimelineId::from_ulid(Ulid::nil()),
         operation_id: hash(1),
@@ -112,8 +112,7 @@ fn public_wcb1_roundtrips_numeric_boundaries_and_optional_references(
 }
 
 #[test]
-fn public_constructor_enforces_addresses_history_and_finite_limits(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_constructor_enforces_addresses_history_and_finite_limits() {
     let mut input = baseline_input();
     input.retention_lease_leaf_hash = Hash::zero();
     assert_eq!(
@@ -176,7 +175,6 @@ fn public_constructor_enforces_addresses_history_and_finite_limits(
             Err(WorldClosureBindingErrorV1::FieldOutOfBounds)
         );
     }
-    Ok(())
 }
 
 #[test]
