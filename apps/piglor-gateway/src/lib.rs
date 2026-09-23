@@ -34,9 +34,9 @@ use pos_core::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError,
-    ErasureContainmentGateV1, Plugin, ProposedAction,
+    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1, Plugin,
+    ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -603,24 +603,6 @@ struct GatewayActionPlugin {
     id: PluginId,
 }
 
-struct GatewayWorldActionApprover(WorldPlugin);
-
-impl ActionApprover for GatewayWorldActionApprover {
-    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
-        WorldActionV1::decode(&proposal.payload)
-            .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
-            .and_then(|action| encode_world_action(&action))
-            .and_then(|canonical| {
-                if canonical != proposal.payload {
-                    return Err(ActionRejected::DomainValidationFailed(
-                        "non-canonical world.action.v1 payload".to_owned(),
-                    ));
-                }
-                self.0.approve(proposal)
-            })
-    }
-}
-
 impl Plugin for GatewayActionPlugin {
     fn id(&self) -> PluginId {
         self.id
@@ -670,9 +652,7 @@ fn gateway_action_registry_builder(
         &descriptor,
         None,
         None,
-        Some(Box::new(GatewayWorldActionApprover(
-            WorldPlugin::new().with_bodies(bodies),
-        ))),
+        Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
         [Kind::new(EVENT_TYPE_ACTION)],
     ));
     if let Some(authority) = authority {

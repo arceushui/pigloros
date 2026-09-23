@@ -250,10 +250,7 @@ fn cbor_encode(value: &ciborium::Value) -> Vec<u8> {
     buf
 }
 
-fn cbor_decode_array(
-    bytes: &[u8],
-    expected_len: usize,
-) -> Result<Vec<ciborium::Value>, WorldCodecError> {
+fn decode_canonical_record(bytes: &[u8]) -> Result<ciborium::Value, WorldCodecError> {
     let mut cursor = std::io::Cursor::new(bytes);
     let value: ciborium::Value =
         ciborium::from_reader(&mut cursor).map_err(|_| WorldCodecError::CborError)?;
@@ -263,6 +260,14 @@ fn cbor_decode_array(
     if cbor_encode(&value).as_slice() != bytes {
         return Err(WorldCodecError::NonCanonicalRecord);
     }
+    Ok(value)
+}
+
+fn cbor_decode_array(
+    bytes: &[u8],
+    expected_len: usize,
+) -> Result<Vec<ciborium::Value>, WorldCodecError> {
+    let value = decode_canonical_record(bytes)?;
     match value {
         ciborium::Value::Array(items) if items.len() == expected_len => Ok(items),
         ciborium::Value::Array(_) => Err(WorldCodecError::WrongArrayLength),
@@ -281,6 +286,14 @@ fn validate_canonical_params(bytes: &[u8]) -> Result<(), WorldCodecError> {
         return Err(WorldCodecError::NonCanonicalParamsCbor);
     }
     Ok(())
+}
+
+fn decode_canonical_action_params_field(
+    value: &ciborium::Value,
+) -> Result<Vec<u8>, WorldCodecError> {
+    let params = decode_bytes_max(value, MAX_ACTION_BYTES)?;
+    validate_canonical_params(&params)?;
+    Ok(params)
 }
 
 fn canonical_params_value(value: &ciborium::Value) -> bool {
@@ -415,12 +428,11 @@ impl WorldActionV1 {
         let kind_str = decode_tstr(&items[4])?;
         let action_kind =
             ActionKindV1::from_str(&kind_str).ok_or(WorldCodecError::UnknownActionKind)?;
-        let params_cbor = decode_bytes_max(&items[5], MAX_ACTION_BYTES)?;
+        let params_cbor = decode_canonical_action_params_field(&items[5])?;
         let action_scope = decode_u8(&items[6])?;
         if action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
         }
-        validate_canonical_params(&params_cbor)?;
         let catalogue_version = decode_u32(&items[7])?;
         let tick = decode_u64(&items[8])?;
         Ok(Self {
