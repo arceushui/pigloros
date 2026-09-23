@@ -7,6 +7,7 @@ use zbus::{proxy::CacheProperties, zvariant::OwnedObjectPath, Connection};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
+use crate::SystemdOperatingLimitProperty;
 use crate::{
     AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
     SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
@@ -692,6 +693,11 @@ async fn read_property(
             .restrict_address_families()
             .await
             .map(SystemdTransientUnitReadbackValue::BoolStringArray),
+        SystemdTransientUnitPropertyKind::OperatingLimit(property) => {
+            read_operating_limit(service, property)
+                .await
+                .map(SystemdTransientUnitReadbackValue::U64)
+        }
         SystemdTransientUnitPropertyKind::FileDescriptorStoreMax => service
             .file_descriptor_store_max()
             .await
@@ -700,6 +706,23 @@ async fn read_property(
             .extra_file_descriptor_names()
             .await
             .map(SystemdTransientUnitReadbackValue::StringArray),
+    }
+}
+
+async fn read_operating_limit(
+    service: &ServiceProxy<'_>,
+    property: SystemdOperatingLimitProperty,
+) -> Result<u64, zbus::Error> {
+    match property {
+        SystemdOperatingLimitProperty::MemoryMax => service.memory_max().await,
+        SystemdOperatingLimitProperty::MemorySwapMax => service.memory_swap_max().await,
+        SystemdOperatingLimitProperty::TasksMax => service.tasks_max().await,
+        SystemdOperatingLimitProperty::CpuQuotaPerSecUSec => {
+            service.cpu_quota_per_sec_u_sec().await
+        }
+        SystemdOperatingLimitProperty::RuntimeMaxUSec => service.runtime_max_u_sec().await,
+        SystemdOperatingLimitProperty::LimitNofile => service.limit_nofile().await,
+        SystemdOperatingLimitProperty::LimitFsize => service.limit_fsize().await,
     }
 }
 
@@ -836,6 +859,7 @@ fn property_value(value: SystemdTransientUnitValue) -> Value<'static> {
         SystemdTransientUnitValue::BindReadOnlyPaths(value) => Value::from(value),
         SystemdTransientUnitValue::SystemCallFilter(value)
         | SystemdTransientUnitValue::RestrictAddressFamilies(value) => Value::from(value),
+        SystemdTransientUnitValue::OperatingLimit(value) => Value::from(value),
         SystemdTransientUnitValue::FileDescriptorStoreMax(value) => Value::from(value),
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
             extra_file_descriptors_value(value)

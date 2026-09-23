@@ -1,5 +1,6 @@
 //! Typed dynamic systemd transient-unit launch properties.
 
+use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use zvariant::{Fd, OwnedFd};
 
 use crate::{
@@ -12,6 +13,116 @@ const MAX_PROVIDER_PATH_BYTES: usize = 4096;
 const LAUNCHER_DESTINATION: &str = "/.pigloros/release-launcher";
 const RELEASE_DESCRIPTOR_NAME: &str = "piglor-release-v1";
 const HOST_SERVICE_DESCRIPTOR_NAME: &str = "piglor-host-service-v1";
+const ELM1_LIMIT_COUNT: usize = 17;
+
+/// The seven ELM1 limit IDs enforced by systemd service properties.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SystemdOperatingLimitProperty {
+    MemoryMax,
+    MemorySwapMax,
+    TasksMax,
+    CpuQuotaPerSecUSec,
+    RuntimeMaxUSec,
+    LimitNofile,
+    LimitFsize,
+}
+
+impl SystemdOperatingLimitProperty {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::MemoryMax,
+        Self::MemorySwapMax,
+        Self::TasksMax,
+        Self::CpuQuotaPerSecUSec,
+        Self::RuntimeMaxUSec,
+        Self::LimitNofile,
+        Self::LimitFsize,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::MemoryMax => "MemoryMax",
+            Self::MemorySwapMax => "MemorySwapMax",
+            Self::TasksMax => "TasksMax",
+            Self::CpuQuotaPerSecUSec => "CPUQuotaPerSecUSec",
+            Self::RuntimeMaxUSec => "RuntimeMaxUSec",
+            Self::LimitNofile => "LimitNOFILE",
+            Self::LimitFsize => "LimitFSIZE",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::MemoryMax => 0,
+            Self::MemorySwapMax => 1,
+            Self::TasksMax => 2,
+            Self::CpuQuotaPerSecUSec => 3,
+            Self::RuntimeMaxUSec => 4,
+            Self::LimitNofile => 5,
+            Self::LimitFsize => 6,
+        }
+    }
+}
+
+/// The systemd-owned portion of one complete, already authorized ELM1 limit set.
+///
+/// This validates representation and preserves exact requested values; it does
+/// not authenticate ELM1, grant admission, or prove kernel enforcement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemdServiceLimits {
+    requested: [u64; 7],
+}
+
+/// Failure to represent the exact ELM1 service limits on pinned systemd.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SystemdServiceLimitsError {
+    /// ELM1 must contain exactly one record for every ID 0 through 16 in order.
+    #[error("effective limits are not the complete ordered ELM1 set")]
+    InvalidEffectiveLimits,
+    /// The specified exact capacity would be rejected or interpreted as infinity.
+    #[error("ELM1 limit ID {0} cannot be enforced exactly by systemd")]
+    UnenforceableLimit(u8),
+    /// The watchdog milliseconds cannot be represented as systemd microseconds.
+    #[error("ELM1 watchdog milliseconds overflow systemd microseconds")]
+    WatchdogOverflow,
+}
+
+impl SystemdServiceLimits {
+    /// Compile exact systemd values from one complete, already authorized ELM1.
+    ///
+    /// The caller must obtain these records from the authenticated provider
+    /// admission boundary. This method only checks shape and representability.
+    ///
+    /// # Errors
+    /// Rejects missing, duplicate, unordered, or unknown IDs, values that
+    /// systemd rejects or treats as infinity, and watchdog conversion overflow.
+    pub fn from_effective_limits(
+        limits: &[SandboxLimit],
+    ) -> Result<Self, SystemdServiceLimitsError> {
+        if limits.len() != ELM1_LIMIT_COUNT
+            || limits
+                .iter()
+                .enumerate()
+                .any(|(id, limit)| usize::from(limit.limit_id) != id)
+        {
+            return Err(SystemdServiceLimitsError::InvalidEffectiveLimits);
+        }
+        let mut requested = [0; 7];
+        for (id, limit) in limits.iter().take(requested.len()).enumerate() {
+            if limit.value == u64::MAX || ([0, 2, 3, 4].contains(&id) && limit.value == 0) {
+                return Err(SystemdServiceLimitsError::UnenforceableLimit(limit.limit_id));
+            }
+            requested[id] = limit.value;
+        }
+        requested[4] = requested[4]
+            .checked_mul(1_000)
+            .ok_or(SystemdServiceLimitsError::WatchdogOverflow)?;
+        Ok(Self { requested })
+    }
+
+    pub(crate) const fn value(&self, property: SystemdOperatingLimitProperty) -> u64 {
+        self.requested[property.index()]
+    }
+}
 
 /// A bounded provider-owned path to the activated admitted SIM1 root beneath `/run`.
 ///
@@ -129,6 +240,8 @@ pub enum SystemdTransientUnitValue {
     SystemCallFilter((bool, Vec<String>)),
     /// A D-Bus `(bas)` address-family value.
     RestrictAddressFamilies((bool, Vec<String>)),
+    /// One exact ELM1-derived D-Bus `t` service limit.
+    OperatingLimit(u64),
     /// A D-Bus `u` descriptor-store limit.
     FileDescriptorStoreMax(u32),
     /// A D-Bus `a(hs)` descriptor array: Unix FD before descriptor name.
@@ -144,6 +257,7 @@ impl SystemdTransientUnitValue {
             Self::RootDirectory(_) => "s",
             Self::BindReadOnlyPaths(_) => "a(ssbt)",
             Self::SystemCallFilter(_) | Self::RestrictAddressFamilies(_) => "(bas)",
+            Self::OperatingLimit(_) => "t",
             Self::FileDescriptorStoreMax(_) => "u",
             Self::ExtraFileDescriptors(_) => "a(hs)",
         }
@@ -158,6 +272,7 @@ impl SystemdTransientUnitValue {
             Self::RestrictAddressFamilies(value) => {
                 Ok(Self::RestrictAddressFamilies(value.clone()))
             }
+            Self::OperatingLimit(value) => Ok(Self::OperatingLimit(*value)),
             Self::FileDescriptorStoreMax(value) => Ok(Self::FileDescriptorStoreMax(*value)),
             Self::ExtraFileDescriptors(value) => value
                 .iter()
@@ -295,6 +410,8 @@ pub enum SystemdTransientUnitReadbackValue {
     StringArray(Vec<String>),
     /// A D-Bus `u` value.
     U32(u32),
+    /// A D-Bus `t` value.
+    U64(u64),
 }
 
 /// A manager property that is observed but never sent in this request.
@@ -338,9 +455,9 @@ pub enum TransientUnitRequestError {
 
 /// One complete typed systemd transient-unit request.
 ///
-/// It composes static hardening, selected SCS1 syscall filtering, and the
-/// per-attempt dynamic fields without a D-Bus connection, process execution,
-/// descriptor acquisition, or admission decision.
+/// It composes static hardening, selected SCS1 syscall filtering, exact ELM1
+/// service limits, and per-attempt dynamic fields without a D-Bus connection,
+/// process execution, descriptor acquisition, or admission decision.
 pub struct TransientUnitRequest {
     properties: Vec<SystemdTransientUnitProperty>,
     system_call_filter: SystemCallFilter,
@@ -352,6 +469,7 @@ impl TransientUnitRequest {
     pub fn compile(
         inputs: TransientUnitLaunchInputs,
         system_call_filter: SystemCallFilter,
+        service_limits: SystemdServiceLimits,
     ) -> Self {
         let TransientUnitLaunchInputs {
             root_directory,
@@ -373,7 +491,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 6);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 13);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::Hardening(*property),
@@ -406,6 +524,12 @@ impl TransientUnitRequest {
                     SystemdTransientUnitValue::RestrictAddressFamilies(address_families.clone()),
                 ));
             }
+        }
+        for limit in SystemdOperatingLimitProperty::ALL {
+            properties.push(SystemdTransientUnitProperty::new(
+                SystemdTransientUnitPropertyKind::OperatingLimit(limit),
+                SystemdTransientUnitValue::OperatingLimit(service_limits.value(limit)),
+            ));
         }
         properties.push(SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::FileDescriptorStoreMax,
@@ -490,6 +614,10 @@ impl TransientUnitRequest {
                 (
                     SystemdTransientUnitValue::RestrictAddressFamilies(expected),
                     SystemdTransientUnitReadbackValue::BoolStringArray(actual),
+                ) => expected == actual,
+                (
+                    SystemdTransientUnitValue::OperatingLimit(expected),
+                    SystemdTransientUnitReadbackValue::U64(actual),
                 ) => expected == actual,
                 (
                     SystemdTransientUnitValue::ExtraFileDescriptors(expected),

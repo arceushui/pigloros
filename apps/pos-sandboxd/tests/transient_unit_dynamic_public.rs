@@ -1,12 +1,12 @@
 use std::{error::Error, fs::File, os::fd::OwnedFd as StdOwnedFd};
 
 use pos_conformance::SandboxSyscallSetV1;
-use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
+use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit};
 use pos_sandboxd::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter, SystemdManagerReadback,
-    SystemdManagerReadbackOnlyProperty, SystemdTransientUnitReadback,
-    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
-    TransientUnitRequest, TransientUnitRequestError,
+    SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
+    SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
+    TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
 };
 use zvariant::{serialized::Context, to_bytes, OwnedFd, Type, LE};
 
@@ -14,7 +14,7 @@ const X86_64: &[u8] = include_bytes!(
     "../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
 
-const EXPECTED_PROPERTY_NAMES: [&str; 35] = [
+const EXPECTED_PROPERTY_NAMES: [&str; 42] = [
     "Type",
     "RootDirectory",
     "BindReadOnlyPaths",
@@ -48,6 +48,13 @@ const EXPECTED_PROPERTY_NAMES: [&str; 35] = [
     "UMask",
     "KillMode",
     "SendSIGKILL",
+    "MemoryMax",
+    "MemorySwapMax",
+    "TasksMax",
+    "CPUQuotaPerSecUSec",
+    "RuntimeMaxUSec",
+    "LimitNOFILE",
+    "LimitFSIZE",
     "FileDescriptorStoreMax",
     "ExtraFileDescriptors",
 ];
@@ -71,8 +78,11 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     assert_eq!(properties[2].value().dbus_signature(), "a(ssbt)");
     assert_eq!(properties[28].value().dbus_signature(), "(bas)");
     assert_eq!(properties[29].value().dbus_signature(), "(bas)");
-    assert_eq!(properties[33].value().dbus_signature(), "u");
-    assert_eq!(properties[34].value().dbus_signature(), "a(hs)");
+    for property in &properties[33..40] {
+        assert_eq!(property.value().dbus_signature(), "t");
+    }
+    assert_eq!(properties[40].value().dbus_signature(), "u");
+    assert_eq!(properties[41].value().dbus_signature(), "a(hs)");
 
     match properties[1].value() {
         SystemdTransientUnitValue::RootDirectory(value) => {
@@ -122,7 +132,22 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
-    match properties[33].value() {
+    for (property, expected) in properties[33..40]
+        .iter()
+        .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
+    {
+        match property.value() {
+            SystemdTransientUnitValue::OperatingLimit(value) => {
+                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+                let (decoded, consumed): (u64, usize) = encoded.deserialize()?;
+                assert_eq!(decoded, expected);
+                assert_eq!(decoded, *value);
+                assert_eq!(consumed, encoded.len());
+            }
+            _value => return Err("systemd service limit must have a t value".into()),
+        }
+    }
+    match properties[40].value() {
         SystemdTransientUnitValue::FileDescriptorStoreMax(value) => {
             let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
             let (decoded, consumed): (u32, usize) = encoded.deserialize()?;
@@ -132,7 +157,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("FileDescriptorStoreMax must have a u value".into()),
     }
-    match properties[34].value() {
+    match properties[41].value() {
         SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
             assert_eq!(
                 <Vec<(OwnedFd, String)> as Type>::SIGNATURE.to_string(),
@@ -169,7 +194,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
             }
             _value => return Err("RestrictAddressFamilies must have a (bas) value".into()),
         }
-        match properties[34].value() {
+        match properties[41].value() {
             SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                 assert_eq!(value.len(), 1);
                 assert_eq!(value[0].1, "piglor-release-v1");
@@ -274,17 +299,17 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
     );
     let mut nonzero_descriptor_store =
         exact_readback(&request, &authority.expected_effective_names);
-    nonzero_descriptor_store[33] = SystemdTransientUnitReadback::new(
+    nonzero_descriptor_store[40] = SystemdTransientUnitReadback::new(
         "FileDescriptorStoreMax",
         SystemdTransientUnitReadbackValue::U32(1),
     );
     let mut missing_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    missing_descriptor[34] = SystemdTransientUnitReadback::new(
+    missing_descriptor[41] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(Vec::new()),
     );
     let mut extra_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    extra_descriptor[34] = SystemdTransientUnitReadback::new(
+    extra_descriptor[41] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-host-service-v1".to_owned(),
@@ -293,7 +318,7 @@ fn verifier_rejects_reordered_missing_extra_and_request_readback_substitutions(
         ]),
     );
     let mut reordered_descriptor = exact_readback(&request, &authority.expected_effective_names);
-    reordered_descriptor[34] = SystemdTransientUnitReadback::new(
+    reordered_descriptor[41] = SystemdTransientUnitReadback::new(
         "ExtraFileDescriptors",
         SystemdTransientUnitReadbackValue::StringArray(vec![
             "piglor-release-v1".to_owned(),
@@ -375,6 +400,96 @@ fn manager_only_root_image_policy_is_not_a_request_property() -> Result<(), Box<
     Ok(())
 }
 
+#[test]
+fn service_limits_require_the_complete_ordered_elm1_and_exact_systemd_values() {
+    let source = complete_effective_limits();
+    assert!(SystemdServiceLimits::from_effective_limits(&source).is_ok());
+
+    let mut missing = source.clone();
+    missing.pop();
+    let mut duplicate = source.clone();
+    duplicate[16].limit_id = 15;
+    let mut unknown = source.clone();
+    unknown[16].limit_id = 17;
+    let mut reordered = source.clone();
+    reordered.swap(0, 1);
+    for invalid in [missing, duplicate, unknown, reordered] {
+        assert_eq!(
+            SystemdServiceLimits::from_effective_limits(&invalid),
+            Err(SystemdServiceLimitsError::InvalidEffectiveLimits)
+        );
+    }
+
+    for limit_id in [0, 2, 3, 4] {
+        let mut zero = source.clone();
+        zero[usize::from(limit_id)].value = 0;
+        assert_eq!(
+            SystemdServiceLimits::from_effective_limits(&zero),
+            Err(SystemdServiceLimitsError::UnenforceableLimit(limit_id))
+        );
+    }
+    for limit_id in 0..=6 {
+        let mut infinite = source.clone();
+        infinite[usize::from(limit_id)].value = u64::MAX;
+        assert_eq!(
+            SystemdServiceLimits::from_effective_limits(&infinite),
+            Err(SystemdServiceLimitsError::UnenforceableLimit(limit_id))
+        );
+    }
+    let mut overflow = source.clone();
+    overflow[4].value = u64::MAX / 1_000 + 1;
+    assert_eq!(
+        SystemdServiceLimits::from_effective_limits(&overflow),
+        Err(SystemdServiceLimitsError::WatchdogOverflow)
+    );
+
+    let mut permitted_zero = source;
+    for limit_id in [1, 5, 6] {
+        permitted_zero[limit_id].value = 0;
+    }
+    assert!(SystemdServiceLimits::from_effective_limits(&permitted_zero).is_ok());
+}
+
+#[test]
+fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Box<dyn Error>> {
+    let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
+    let request = request(LaunchMode::AirGapped)?;
+    let mut missing = exact_readback(&request, &authority.expected_effective_names);
+    missing.remove(33);
+    let mut extra = exact_readback(&request, &authority.expected_effective_names);
+    let duplicated = extra[33].clone();
+    extra.insert(34, duplicated);
+    let mut reordered = exact_readback(&request, &authority.expected_effective_names);
+    reordered.swap(33, 34);
+    for readback in [missing, extra, reordered] {
+        assert_eq!(
+            request.verify_readback(&readback),
+            Err(TransientUnitRequestError::ReadbackMismatch)
+        );
+    }
+    for index in 33..40 {
+        let mut readback = exact_readback(&request, &authority.expected_effective_names);
+        readback[index] = SystemdTransientUnitReadback::new(
+            EXPECTED_PROPERTY_NAMES[index],
+            SystemdTransientUnitReadbackValue::U64(u64::MAX),
+        );
+        assert_eq!(
+            request.verify_readback(&readback),
+            Err(TransientUnitRequestError::ReadbackMismatch)
+        );
+    }
+    let mut mistyped = exact_readback(&request, &authority.expected_effective_names);
+    mistyped[33] = SystemdTransientUnitReadback::new(
+        "MemoryMax",
+        SystemdTransientUnitReadbackValue::U32(134_217_728),
+    );
+    assert_eq!(
+        request.verify_readback(&mistyped),
+        Err(TransientUnitRequestError::ReadbackMismatch)
+    );
+    Ok(())
+}
+
 fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
     let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
     let filter = SystemCallFilter::from_selected_record(
@@ -388,7 +503,26 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         mode,
         descriptor()?,
     );
-    Ok(TransientUnitRequest::compile(inputs, filter))
+    let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
+    Ok(TransientUnitRequest::compile(inputs, filter, limits))
+}
+
+fn complete_effective_limits() -> Vec<SandboxLimit> {
+    (0..=16)
+        .map(|limit_id| SandboxLimit {
+            limit_id,
+            value: match limit_id {
+                0 => 134_217_728,
+                1 => 0,
+                2 => 16,
+                3 => 500_000,
+                4 => 5_000,
+                5 => 64,
+                6 => 4_096,
+                _ => 1_000,
+            },
+        })
+        .collect()
 }
 
 fn descriptor() -> Result<OwnedFd, std::io::Error> {
@@ -421,6 +555,9 @@ fn exact_readback(
                 }
                 SystemdTransientUnitValue::RestrictAddressFamilies(value) => {
                     SystemdTransientUnitReadbackValue::BoolStringArray(value.clone())
+                }
+                SystemdTransientUnitValue::OperatingLimit(value) => {
+                    SystemdTransientUnitReadbackValue::U64(*value)
                 }
                 SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                     SystemdTransientUnitReadbackValue::StringArray(

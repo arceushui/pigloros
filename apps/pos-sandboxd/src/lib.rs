@@ -27,10 +27,13 @@ pub use system_bus::{
 };
 pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,
-    SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
-    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
-    TransientUnitRequest, TransientUnitRequestError,
+    SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
+    SystemdTransientUnitProperty, SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue,
+    SystemdTransientUnitValue, TransientUnitLaunchInputs, TransientUnitRequest,
+    TransientUnitRequestError,
 };
+
+use transient_unit::SystemdOperatingLimitProperty;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SystemdTransientUnitPropertyKind {
@@ -39,6 +42,7 @@ enum SystemdTransientUnitPropertyKind {
     BindReadOnlyPaths,
     SystemCallFilter,
     RestrictAddressFamilies,
+    OperatingLimit(SystemdOperatingLimitProperty),
     FileDescriptorStoreMax,
     ExtraFileDescriptors,
 }
@@ -51,6 +55,7 @@ impl SystemdTransientUnitPropertyKind {
             Self::BindReadOnlyPaths => "BindReadOnlyPaths",
             Self::SystemCallFilter => "SystemCallFilter",
             Self::RestrictAddressFamilies => "RestrictAddressFamilies",
+            Self::OperatingLimit(property) => property.name(),
             Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
         }
