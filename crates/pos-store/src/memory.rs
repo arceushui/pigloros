@@ -1528,11 +1528,10 @@ impl MemoryStore {
         let generation = self
             .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
             .generation();
-        if (
-            generation == admission.expected_inventory_generation(),
-            self.timelines.contains_key(&child.id),
-        ) != (true, false)
-        {
+        if generation != admission.expected_inventory_generation() {
+            return Err(ErasureErrorV1::StaleGeneration);
+        }
+        if self.timelines.contains_key(&child.id) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
 

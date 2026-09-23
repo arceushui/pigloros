@@ -5244,11 +5244,10 @@ impl SqliteStore {
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?
             .generation();
-            if (
-                generation == admission.expected_inventory_generation(),
-                sqlite_timeline_exists(&self.conn, child.id)?,
-            ) != (true, false)
-            {
+            if generation != admission.expected_inventory_generation() {
+                return Err(ErasureErrorV1::StaleGeneration);
+            }
+            if sqlite_timeline_exists(&self.conn, child.id)? {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
 

@@ -4870,9 +4870,10 @@ impl ErasureVerifiedInventoryV1 {
     /// commit for a non-empty inventory.
     ///
     /// # Errors
-    /// Returns a closed conflict for a stale generation, an existing child,
-    /// an omitted/duplicate/extraneous request mutation, or inconsistent child
-    /// metadata and ERSE1 evidence.
+    /// Returns [`ErasureErrorV1::StaleGeneration`] when the supplied inventory
+    /// generation is stale. Returns [`ErasureErrorV1::PolicyConflict`] for an
+    /// existing child, an omitted/duplicate/extraneous request mutation, or
+    /// inconsistent child metadata and ERSE1 evidence.
     pub fn prepare_fork_batch(
         self,
         input: ErasureForkAdmissionInputV1,
@@ -4881,10 +4882,13 @@ impl ErasureVerifiedInventoryV1 {
         let Some((parent, _)) = input.child.fork_point else {
             return Err(ErasureErrorV1::PolicyConflict);
         };
-        if input.child.mode != crate::TimelineMode::Historical
-            || input.expected_inventory_generation != self.generation
-            || self.classification_for(input.child.id).is_some()
-        {
+        if input.child.mode != crate::TimelineMode::Historical {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if input.expected_inventory_generation != self.generation {
+            return Err(ErasureErrorV1::StaleGeneration);
+        }
+        if self.classification_for(input.child.id).is_some() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let successor_timelines = self.classifications.len().saturating_add(1);
@@ -8242,6 +8246,35 @@ mod coverage_paths {
         assert_eq!(
             incomplete_proof.prepare_fork_batch(input, Vec::new()),
             Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_batch_rejects_a_stale_predecessor_generation() -> Result<(), ErasureErrorV1> {
+        let parent = TimelineId::new();
+        let current =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
+        let stale =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 3)?
+                .generation();
+        assert_ne!(current.generation(), stale);
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(67),
+            expected_inventory_generation: stale,
+            child_scope: reference(68),
+            child: crate::TimelineMeta {
+                id: TimelineId::new(),
+                mode: crate::TimelineMode::Historical,
+                name: Some("stale-generation-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+
+        assert_eq!(
+            current.prepare_fork_batch(input, Vec::new()),
+            Err(ErasureErrorV1::StaleGeneration)
         );
         Ok(())
     }
