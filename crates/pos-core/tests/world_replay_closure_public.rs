@@ -241,7 +241,7 @@ fn closure_input() -> WorldReplayClosureInputV1 {
         operation_identity: hash(60),
         source_head: hash(61),
         inventory_generation: hash(62),
-        retention_policy: retention_policy.clone(),
+        retention_policy,
         retention_lease,
         consumer_set: consumers,
         artifacts,
@@ -546,7 +546,7 @@ fn structural_validation_rejects_duplicate_digest_and_zero_length() {
 }
 
 #[test]
-fn structural_validation_rejects_bad_bindings_and_consumer_references() {
+fn structural_validation_rejects_native_wal_references() {
     let base = closure_input();
 
     let mut native_address_reference = base.clone();
@@ -571,6 +571,11 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
         WorldReplayClosureV1::new(native_view_reference),
         Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
     );
+}
+
+#[test]
+fn structural_validation_rejects_bad_bindings_and_consumer_references() {
+    let base = closure_input();
     let policy = policy();
     let other_lease = lease(timeline(2), &policy);
     let mut wrong_timeline = base.clone();
@@ -670,7 +675,10 @@ fn structural_validation_rejects_bad_bindings_and_consumer_references() {
         WorldReplayClosureV1::new(missing_optional_view),
         Err(WorldReplayClosureErrorV1::MissingConsumerArtifact)
     );
+}
 
+#[test]
+fn structural_validation_rejects_misclassified_optional_view() {
     let mut required_view = closure_input();
     let mut view_input = required_view.artifacts[13].as_input().clone();
     view_input.optionality = ArtifactOptionalityV1::Required;
