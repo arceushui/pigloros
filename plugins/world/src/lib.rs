@@ -702,14 +702,6 @@ impl WorldConfigV1 {
 }
 
 // ---------------------------------------------------------------------------
-// Action folding helpers
-// ---------------------------------------------------------------------------
-
-fn decode_horizontal_velocity_params(params: &[u8]) -> Option<(f32, f32)> {
-    decode_actuator_pair_v1(params).ok()
-}
-
-// ---------------------------------------------------------------------------
 // World backend trait (physics seam)
 // ---------------------------------------------------------------------------
 
@@ -2103,10 +2095,7 @@ mod tests {
     #[test]
     fn velocity_parameter_decoder_accepts_a_canonical_pair() {
         let params = encode_horizontal_velocity_params(1.25, -2.5);
-        assert_eq!(
-            decode_horizontal_velocity_params(&params),
-            Some((1.25, -2.5))
-        );
+        assert_eq!(decode_actuator_pair_v1(&params).ok(), Some((1.25, -2.5)));
     }
 
     #[test]
@@ -2115,19 +2104,19 @@ mod tests {
             ciborium::Value::Float(f64::NAN),
             ciborium::Value::Float(0.0),
         ]));
-        assert_eq!(decode_horizontal_velocity_params(&invalid_first), None);
+        assert!(decode_actuator_pair_v1(&invalid_first).is_err());
 
         let invalid_second = cbor_encode(&ciborium::Value::Array(vec![
             ciborium::Value::Float(0.0),
             ciborium::Value::Float(f64::INFINITY),
         ]));
-        assert_eq!(decode_horizontal_velocity_params(&invalid_second), None);
+        assert!(decode_actuator_pair_v1(&invalid_second).is_err());
     }
 
     #[test]
     fn actuator_pair_normalizes_float_sources_and_preserves_signed_zero() {
         let params = encode_actuator_pair_v1(1.0 / 3.0, -0.0).test_ok();
-        let (x, z) = decode_horizontal_velocity_params(&params).test_ok();
+        let (x, z) = decode_actuator_pair_v1(&params).test_ok();
         assert_eq!(x.to_bits(), 0.333_333_34_f32.to_bits());
         assert_eq!(z.to_bits(), (-0.0_f32).to_bits());
         assert_eq!(
@@ -2148,10 +2137,7 @@ mod tests {
         let midpoint = f64::midpoint(f64::from(one), f64::from(next));
         let tie = encode_actuator_pair_v1(midpoint, 0.0).test_ok();
         assert_eq!(
-            decode_horizontal_velocity_params(&tie)
-                .test_ok()
-                .0
-                .to_bits(),
+            decode_actuator_pair_v1(&tie).test_ok().0.to_bits(),
             one.to_bits()
         );
 
