@@ -327,6 +327,21 @@ fn public_wep1_checks_page_bounds_sequence_and_source_identity(
         WorldEventPageV1::new(timeline(1), vec![row(1, 1, 1)?, row(2, 2, 1)?]),
         Err(WorldHistoryErrorV1::DuplicateSourceEvent)
     );
+    let mut intervening_source_row = row_input(2, 1, 2);
+    intervening_source_row.source_timeline_id = timeline(3);
+    let mut repeated_source_position = row_input(3, 1, 3);
+    repeated_source_position.source_timeline_id = timeline(2);
+    assert_eq!(
+        WorldEventPageV1::new(
+            timeline(1),
+            vec![
+                row(1, 1, 1)?,
+                WorldEventRowV1::new(intervening_source_row)?,
+                WorldEventRowV1::new(repeated_source_position)?,
+            ]
+        ),
+        Err(WorldHistoryErrorV1::DuplicateSourceEvent)
+    );
     let mut fork_segment_row = row_input(2, 1, 2);
     fork_segment_row.source_timeline_id = timeline(3);
     assert!(WorldEventPageV1::new(
