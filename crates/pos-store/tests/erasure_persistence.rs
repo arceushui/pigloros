@@ -122,32 +122,26 @@ fn assert_host_managed_topology_requires_verified_transitions<S: EventStore>(
     let existing = store.create_timeline("topology-guard-existing")?;
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
 
-    assert_eq!(
-        store.create_timeline("topology-guard-root").err(),
-        Some(CoreError::ErasureContainmentUnavailable)
-    );
-    assert_eq!(
-        store
-            .create_timeline_with_meta(TimelineMeta::root("topology-guard-import"))
-            .err(),
-        Some(CoreError::ErasureContainmentUnavailable)
-    );
-    assert_eq!(
-        store
-            .fork(existing.id(), Seq::ZERO, "topology-guard-fork")
-            .err(),
-        Some(CoreError::ErasureContainmentUnavailable)
-    );
-    assert_eq!(
+    assert!(matches!(
+        store.create_timeline("topology-guard-root"),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.create_timeline_with_meta(TimelineMeta::root("topology-guard-import")),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.fork(existing.id(), Seq::ZERO, "topology-guard-fork"),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
         store.delete_timeline(existing.id()),
         Err(CoreError::ErasureContainmentUnavailable)
-    );
-    assert_eq!(
-        store
-            .import_committed(TimelineMeta::root("topology-guard-committed"), &[])
-            .err(),
-        Some(CoreError::ErasureContainmentUnavailable)
-    );
+    ));
+    assert!(matches!(
+        store.import_committed(TimelineMeta::root("topology-guard-committed"), &[]),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
     Ok(())
 }
 

@@ -168,28 +168,32 @@ impl Default for TestAuthority {
 
 impl TestAuthority {
     fn set_timeline(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
-        let mut timelines = self
-            .timelines
-            .lock()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        if let Some((_, scope)) = timelines
-            .iter_mut()
-            .find(|(candidate, _)| *candidate == timeline)
         {
-            *scope = reference(9);
-        } else {
-            timelines.push((timeline, reference(9)));
+            let mut timelines = self
+                .timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            if let Some((_, scope)) = timelines
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == timeline)
+            {
+                *scope = reference(9);
+            } else {
+                timelines.push((timeline, reference(9)));
+            }
         }
         Ok(())
     }
 
     fn set_timeline_unaffected(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
-        let mut unaffected = self
-            .unaffected_timelines
-            .lock()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        if !unaffected.contains(&timeline) {
-            unaffected.push(timeline);
+        {
+            let mut unaffected = self
+                .unaffected_timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            if !unaffected.contains(&timeline) {
+                unaffected.push(timeline);
+            }
         }
         Ok(())
     }
@@ -905,7 +909,7 @@ fn assert_active_unaffected_topology_parity(
             .lock()
             .map(|candidates| candidates.clone()),
     )?;
-    assert_eq!(candidates, vec![root.meta.clone(), child.meta.clone()]);
+    assert_eq!(candidates, vec![root.meta, child.meta]);
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
 }
@@ -2346,6 +2350,71 @@ enum LaterRequestChildMembership {
     Unaffected,
 }
 
+fn assert_retried_fork_membership(
+    commands: &mut pos_runtime::ErasureCommandSenderV1<'_>,
+    authority: &TestAuthority,
+    child_membership: LaterRequestChildMembership,
+    operation: ErasureReferenceV1,
+    parent: TimelineId,
+    original_child: TimelineId,
+    intervening: TimelineId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let later_child = if matches!(child_membership, LaterRequestChildMembership::Included) {
+        // Reuse the original child's fork-scope reference to prove that a
+        // later extension is not confused with the original receipt when this
+        // request already included that child directly.
+        authority.set_fork_child_scope(19);
+        Some(test_stage(
+            "admit a later Fork into the directly including scope",
+            commands.fork_timeline_identified(
+                reference(46),
+                parent,
+                pos_core::Seq::ZERO,
+                "later-child-same-scope",
+            ),
+        )?)
+    } else {
+        None
+    };
+
+    let retried_child = test_stage(
+        "retry original Fork after later request freeze",
+        commands.fork_timeline_identified(
+            operation,
+            parent,
+            pos_core::Seq::ZERO,
+            "pre-freeze-child",
+        ),
+    )?;
+    assert_eq!(retried_child.id(), original_child);
+    if let Some(later_child) = later_child {
+        assert_eq!(
+            commands.timeline(later_child.id()),
+            Err(ErasureHostErrorV1::AccessFrozen)
+        );
+    }
+    assert_eq!(
+        commands
+            .timeline(intervening)?
+            .map(|timeline| timeline.id()),
+        Some(intervening)
+    );
+    if matches!(child_membership, LaterRequestChildMembership::Included) {
+        assert_eq!(
+            commands.timeline(original_child),
+            Err(ErasureHostErrorV1::AccessFrozen)
+        );
+    } else {
+        assert_eq!(
+            commands
+                .timeline(original_child)?
+                .map(|timeline| timeline.id()),
+            Some(original_child)
+        );
+    }
+    Ok(())
+}
+
 fn assert_exact_fork_retry_after_later_request(
     config: StoreConfig,
     child_membership: LaterRequestChildMembership,
@@ -2415,60 +2484,15 @@ fn assert_exact_fork_retry_after_later_request(
             "freeze parent while excluding pre-existing child",
             commands.freeze_access(request_reference, &freeze_transition()),
         )?;
-
-        let later_child = if matches!(child_membership, LaterRequestChildMembership::Included) {
-            // Reuse the original child's fork-scope reference to prove that
-            // a later extension is not confused with the original receipt
-            // when this request already included that child directly.
-            authority.set_fork_child_scope(19);
-            Some(test_stage(
-                "admit a later Fork into the directly including scope",
-                commands.fork_timeline_identified(
-                    reference(46),
-                    parent.id(),
-                    pos_core::Seq::ZERO,
-                    "later-child-same-scope",
-                ),
-            )?)
-        } else {
-            None
-        };
-
-        let retried_child = test_stage(
-            "retry original Fork after later request freeze",
-            commands.fork_timeline_identified(
-                operation,
-                parent.id(),
-                pos_core::Seq::ZERO,
-                "pre-freeze-child",
-            ),
+        assert_retried_fork_membership(
+            &mut commands,
+            &authority,
+            child_membership,
+            operation,
+            parent.id(),
+            original_child.id(),
+            intervening.id(),
         )?;
-        assert_eq!(retried_child.id(), original_child.id());
-        if let Some(later_child) = later_child {
-            assert_eq!(
-                commands.timeline(later_child.id()),
-                Err(ErasureHostErrorV1::AccessFrozen)
-            );
-        }
-        assert_eq!(
-            commands
-                .timeline(intervening.id())?
-                .map(|timeline| timeline.id()),
-            Some(intervening.id())
-        );
-        if matches!(child_membership, LaterRequestChildMembership::Included) {
-            assert_eq!(
-                commands.timeline(original_child.id()),
-                Err(ErasureHostErrorV1::AccessFrozen)
-            );
-        } else {
-            assert_eq!(
-                commands
-                    .timeline(original_child.id())?
-                    .map(|timeline| timeline.id()),
-                Some(original_child.id())
-            );
-        }
     }
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
