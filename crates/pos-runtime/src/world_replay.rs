@@ -275,7 +275,7 @@ pub fn test_verified_world_replay(
 /// that explicitly enables the `test-support` feature.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub fn test_verified_world_replay_with_fields(
+pub const fn test_verified_world_replay_with_fields(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
@@ -298,7 +298,7 @@ pub fn test_verified_world_replay_with_fields(
 /// downstream seam tests.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub fn test_verified_world_replay_with_fields_and_bounds(
+pub const fn test_verified_world_replay_with_fields_and_bounds(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
