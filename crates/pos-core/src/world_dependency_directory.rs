@@ -240,13 +240,12 @@ impl WorldDependencyDirectoryV1 {
         }
         let first_key = input.children[0].first_key;
         let last_key = input.children[input.children.len() - 1].last_key;
-        let leaf_count = match input
+        let Some(leaf_count) = input
             .children
             .iter()
             .try_fold(0_u64, |total, child| total.checked_add(child.leaf_count))
-        {
-            Some(total) => total,
-            None => return Err(WorldDependencyDirectoryErrorV1::LeafCountOverflow),
+        else {
+            return Err(WorldDependencyDirectoryErrorV1::LeafCountOverflow);
         };
         Ok(Self {
             scope: input.scope,
@@ -542,9 +541,7 @@ impl Reader<'_> {
 
     fn head(&mut self, expected_major: u8) -> Result<u64, WorldDependencyDirectoryErrorV1> {
         self.take(1).map(|bytes| bytes[0]).and_then(|initial| {
-            if initial >> 5 != expected_major {
-                Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
-            } else {
+            if initial >> 5 == expected_major {
                 match initial & 31 {
                     value @ 0..=23 => Ok(u64::from(value)),
                     argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
@@ -554,6 +551,8 @@ impl Reader<'_> {
                     }),
                     _ => Err(WorldDependencyDirectoryErrorV1::InvalidEncoding),
                 }
+            } else {
+                Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
             }
         })
     }
