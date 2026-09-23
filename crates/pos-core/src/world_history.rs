@@ -440,7 +440,7 @@ fn validate_event_page_rows(rows: &[WorldEventRowV1]) -> Result<(u64, u64), Worl
     }
     let mut event_ids = Vec::with_capacity(rows.len());
     let mut source_positions = Vec::with_capacity(rows.len());
-    let mut last_source_sequences = Vec::with_capacity(rows.len());
+    let mut last_source_sequences: Vec<(TimelineId, u64)> = Vec::with_capacity(rows.len());
     let mut first_logical_seq = 0;
     let mut last_logical_seq = 0;
     for (index, row) in rows.iter().enumerate() {
