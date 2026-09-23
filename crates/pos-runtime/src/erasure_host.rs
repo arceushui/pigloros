@@ -7092,15 +7092,19 @@ mod tests {
         host.state = HostStateV1::Closed;
         let gate = Arc::clone(&host.gate);
         let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let context = IdentifiedForkContext {
+                operation: reference(250),
+                parent: parent.id(),
+                at_seq: Seq::ZERO,
+                name: "missing-recovery-child",
+                current_generation: candidate.generation(),
+                maximum_requests: 4,
+                current_inventory: &candidate,
+                authority: &UNUSED_COORDINATOR_AUTHORITY,
+                coordinator: reference(251),
+            };
             assert_eq!(
-                host.recover_identified_fork_child(
-                    permit,
-                    reference(250),
-                    parent.id(),
-                    Seq::ZERO,
-                    "missing-recovery-child",
-                    &candidate,
-                ),
+                host.recover_identified_fork_child(permit, &context),
                 Err(ErasureHostErrorV1::RecoveryUnavailable)
             );
             Ok::<_, ErasureErrorV1>((candidate.clone(), ()))
