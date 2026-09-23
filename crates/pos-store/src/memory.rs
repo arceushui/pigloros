@@ -7110,24 +7110,35 @@ mod coverage_entrypoints {
         );
     }
 
-    fn memory_recovery_proof_checks_manifest_and_state() {
-        assert_memory_recovery_proof_error(10, 10, |store| {
+    fn assert_memory_recovery_proof_survives_manifest_change(
+        mutate: impl FnOnce(&mut MemoryStore),
+    ) {
+        let (mut store, proof) = memory_recovery_proof_fixture(10, 10);
+        mutate(&mut store);
+        assert_eq!(store.memory_fork_recovery_proof_is_exact(&proof), Ok(()));
+    }
+
+    fn memory_recovery_proof_ignores_mutable_manifest_head() {
+        assert_memory_recovery_proof_survives_manifest_change(|store| {
             store
                 .erasure_records
                 .remove(&ErasureReferenceV1::from_digest([7; 32]));
         });
-        assert_memory_recovery_proof_error(10, 10, |store| {
+        assert_memory_recovery_proof_survives_manifest_change(|store| {
             store.erasure_records.insert(
                 ErasureReferenceV1::from_digest([7; 32]),
                 (ErasureReferenceV1::from_digest([18; 32]), vec![0xA1, 0xB2]),
             );
         });
-        assert_memory_recovery_proof_error(10, 10, |store| {
+        assert_memory_recovery_proof_survives_manifest_change(|store| {
             store.erasure_records.insert(
                 ErasureReferenceV1::from_digest([7; 32]),
                 (ErasureReferenceV1::from_digest([9; 32]), vec![0xBA, 0xDB]),
             );
         });
+    }
+
+    fn memory_recovery_proof_checks_objects_and_state() {
         assert_memory_recovery_proof_error(99, 10, |_| {});
         assert_memory_recovery_proof_error(10, 10, |store| {
             store
@@ -7219,7 +7230,8 @@ mod coverage_entrypoints {
     fn memory_fork_recovery_proof_checks_every_persisted_side() {
         let (store, proof) = memory_recovery_proof_fixture(10, 10);
         assert_eq!(store.memory_fork_recovery_proof_is_exact(&proof), Ok(()));
-        memory_recovery_proof_checks_manifest_and_state();
+        memory_recovery_proof_ignores_mutable_manifest_head();
+        memory_recovery_proof_checks_objects_and_state();
         memory_recovery_proof_checks_indexes_and_effects();
     }
 
