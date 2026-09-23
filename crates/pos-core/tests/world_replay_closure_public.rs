@@ -407,7 +407,7 @@ fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
 }
 
 #[test]
-fn required_view_redaction_preserves_authoritative_replay() -> TestResult {
+fn required_base_configuration_redaction_admits_test_support_claim() -> TestResult {
     let mut input = closure_input();
     let mut revised_leaf = input.artifacts[4].as_input().clone();
     revised_leaf.transition = ArtifactTransitionRuleV1::RedactViews;
