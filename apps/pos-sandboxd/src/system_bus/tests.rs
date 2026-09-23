@@ -900,9 +900,10 @@ async fn stop_job_rejects_unit_substitution_and_manager_failure() -> Result<(), 
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
-    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let (first_transport, _server) =
+        transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let name = TransientServiceUnitName::from_attempt_id([0x0a; 16])?;
-    let error = transport
+    let error = first_transport
         .stop_job(name.clone())
         .await
         .err()
@@ -917,8 +918,9 @@ async fn stop_job_rejects_unit_substitution_and_manager_failure() -> Result<(), 
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
-    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
-    let error = transport
+    let (rejected_transport, _server) =
+        transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let error = rejected_transport
         .stop_job(name)
         .await
         .err()
@@ -935,9 +937,10 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
     let behavior = ManagerBehavior::default();
     let calls = Arc::clone(&behavior.control_calls);
     let service = RecordingService::exact(expected_system_call_filter()?);
-    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let (first_transport, _server) =
+        transport(Arc::new(Mutex::new(None)), behavior, service).await?;
     let name = TransientServiceUnitName::from_attempt_id([0x0b; 16])?;
-    transport.force_kill(name.clone()).await?;
+    first_transport.force_kill(name.clone()).await?;
     assert_eq!(
         calls.lock().map_err(|error| error.to_string())?.as_slice(),
         &[ObservedControl::Kill {
@@ -952,8 +955,9 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
         ..ManagerBehavior::default()
     };
     let service = RecordingService::exact(expected_system_call_filter()?);
-    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
-    let error = transport
+    let (rejected_transport, _server) =
+        transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let error = rejected_transport
         .force_kill(name)
         .await
         .err()
