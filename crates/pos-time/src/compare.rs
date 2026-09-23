@@ -99,7 +99,7 @@ pub fn compare(
         )
         .map_err(crate::host_error_to_core)
         .and_then(|()| second_timeline_fence_result)
-        .and_then(|()| comparison_outcome)
+        .and(comparison_outcome)
 }
 
 fn require_comparison_artifacts(
