@@ -4,8 +4,7 @@
 //! Events, source chains, Fork lineage, native dependencies, or Replay use.
 
 use crate::{
-    CanonicalBytes, CorrelationId, EntityId, EventId, Hash, Kind, SchemaVersion, Signature,
-    TimelineId,
+    CanonicalBytes, CorrelationId, EntityId, EventId, Hash, SchemaVersion, Signature, TimelineId,
 };
 use ulid::Ulid;
 
