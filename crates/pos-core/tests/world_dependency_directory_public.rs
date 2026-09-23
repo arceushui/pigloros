@@ -104,15 +104,15 @@ fn wire() -> Result<Value, WorldDependencyDirectoryErrorV1> {
     ))
 }
 
-fn encode(value: Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(&value, &mut bytes)?;
+    ciborium::into_writer(value, &mut bytes)?;
     Ok(bytes)
 }
 
 #[test]
 fn public_wdb1_matches_independent_preferred_cbor_and_digest_oracles() -> TestResult {
-    let expected = encode(wire()?)?;
+    let expected = encode(&wire()?)?;
     let directory = record()?;
     assert_eq!(directory.encode().as_slice(), expected);
     assert_eq!(
@@ -136,14 +136,13 @@ fn public_wdb1_matches_independent_preferred_cbor_and_digest_oracles() -> TestRe
 }
 
 #[test]
-fn public_constructor_enforces_scope_height_fanout_order_and_ranges() -> TestResult {
+fn public_constructor_enforces_leaf_scope_height_and_bounds() -> TestResult {
     assert_eq!(MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1, 256);
     assert_eq!(MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1, 31);
     assert_eq!(MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1, 65_536);
 
     let first = key(WorldArtifactKindV1::OutputPolicy, hash(1))?;
     let second = key(WorldArtifactKindV1::OutputPolicy, hash(2))?;
-    let third = key(WorldArtifactKindV1::RetentionPolicy, hash(3))?;
     assert_eq!(
         key(WorldArtifactKindV1::OutputPolicy, Hash::zero()),
         Err(WorldDependencyDirectoryErrorV1::ZeroContentAddress)
@@ -201,6 +200,24 @@ fn public_constructor_enforces_scope_height_fanout_order_and_ranges() -> TestRes
         Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
     );
 
+    let excessive = vec![leaf; MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1 + 1];
+    assert_eq!(
+        WorldDependencyDirectoryV1::new(WorldDependencyDirectoryInputV1 {
+            scope: hash(1),
+            height: 1,
+            children: excessive,
+        }),
+        Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_constructor_enforces_order_and_packed_ranges() -> TestResult {
+    let first = key(WorldArtifactKindV1::OutputPolicy, hash(1))?;
+    let second = key(WorldArtifactKindV1::OutputPolicy, hash(2))?;
+    let third = key(WorldArtifactKindV1::RetentionPolicy, hash(3))?;
+    let leaf = child(first, first, 1, hash(40))?;
     let wide_child = child(first, second, 2, hash(41))?;
     assert_eq!(
         WorldDependencyDirectoryV1::new(WorldDependencyDirectoryInputV1 {
@@ -257,15 +274,6 @@ fn public_constructor_enforces_scope_height_fanout_order_and_ranges() -> TestRes
         Err(WorldDependencyDirectoryErrorV1::InvalidRange)
     );
 
-    let excessive = vec![leaf; MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1 + 1];
-    assert_eq!(
-        WorldDependencyDirectoryV1::new(WorldDependencyDirectoryInputV1 {
-            scope: hash(1),
-            height: 1,
-            children: excessive,
-        }),
-        Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
-    );
     Ok(())
 }
 
@@ -350,7 +358,7 @@ fn public_directory_checks_child_count_sums_and_all_uint_widths() -> TestResult 
             children,
         })?;
         let fixture = wire_with(hash(1), 8, first_key, last_key, leaf_count, child_values);
-        let expected = encode(fixture)?;
+        let expected = encode(&fixture)?;
         assert_eq!(directory.encode().as_slice(), expected);
         assert_eq!(
             WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(expected))?,
@@ -393,7 +401,7 @@ fn public_wdb1_roundtrips_maximum_fanout_and_height() -> TestResult {
 
 #[test]
 fn public_decoder_rejects_noncanonical_malformed_and_hostile_inputs() -> TestResult {
-    let expected = encode(wire()?)?;
+    let expected = encode(&wire()?)?;
     let decode =
         |bytes: Vec<u8>| WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(bytes));
 
@@ -463,7 +471,7 @@ fn public_decoder_rejects_noncanonical_malformed_and_hostile_inputs() -> TestRes
     let first = key(WorldArtifactKindV1::OutputPolicy, hash(10))?;
     let second = key(WorldArtifactKindV1::RetentionPolicy, hash(11))?;
     assert_eq!(
-        decode(encode(wire_with(
+        decode(encode(&wire_with(
             hash(1),
             1,
             first,
@@ -477,11 +485,18 @@ fn public_decoder_rejects_noncanonical_malformed_and_hostile_inputs() -> TestRes
         Err(WorldDependencyDirectoryErrorV1::InvalidRange)
     );
     assert_eq!(
-        decode(encode(wire_with(hash(1), 1, first, second, 2, Vec::new()))?),
+        decode(encode(&wire_with(
+            hash(1),
+            1,
+            first,
+            second,
+            2,
+            Vec::new()
+        ))?),
         Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
     );
 
-    let mut wrong_digest_length = expected.clone();
+    let mut wrong_digest_length = expected;
     wrong_digest_length[45] = 31;
     assert_eq!(
         decode(wrong_digest_length),
@@ -492,14 +507,14 @@ fn public_decoder_rejects_noncanonical_malformed_and_hostile_inputs() -> TestRes
         .map(|_| child_value(first, first, 1, hash(50)))
         .collect();
     assert_eq!(
-        decode(encode(wire_with(hash(1), 1, first, first, 1, too_many))?),
+        decode(encode(&wire_with(hash(1), 1, first, first, 1, too_many))?),
         Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
     );
     Ok(())
 }
 
 #[test]
-fn public_decoder_rejects_unknown_kinds_zero_addresses_and_bad_child_shapes() -> TestResult {
+fn public_decoder_rejects_unknown_and_out_of_range_kinds() -> TestResult {
     let first = key(WorldArtifactKindV1::OutputPolicy, hash(10))?;
     let second = key(WorldArtifactKindV1::RetentionPolicy, hash(11))?;
     let unknown_kind = Value::Array(vec![
@@ -507,7 +522,7 @@ fn public_decoder_rejects_unknown_kinds_zero_addresses_and_bad_child_shapes() ->
         Value::Bytes(hash(10).as_bytes().to_vec()),
     ]);
     assert_eq!(
-        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(wire_with(
+        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(&wire_with(
             hash(1),
             1,
             first,
@@ -531,7 +546,7 @@ fn public_decoder_rejects_unknown_kinds_zero_addresses_and_bad_child_shapes() ->
         Value::Bytes(hash(10).as_bytes().to_vec()),
     ]);
     assert_eq!(
-        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(wire_with(
+        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(&wire_with(
             hash(1),
             1,
             first,
@@ -550,9 +565,16 @@ fn public_decoder_rejects_unknown_kinds_zero_addresses_and_bad_child_shapes() ->
         Err(WorldDependencyDirectoryErrorV1::FieldOutOfBounds)
     );
 
+    Ok(())
+}
+
+#[test]
+fn public_decoder_rejects_zero_addresses_and_bad_child_shapes() -> TestResult {
+    let first = key(WorldArtifactKindV1::OutputPolicy, hash(10))?;
+    let second = key(WorldArtifactKindV1::RetentionPolicy, hash(11))?;
     let zero_digest = Value::Array(vec![Value::Integer(0.into()), Value::Bytes(vec![0; 32])]);
     assert_eq!(
-        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(wire_with(
+        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(&wire_with(
             hash(1),
             1,
             first,
@@ -572,7 +594,7 @@ fn public_decoder_rejects_unknown_kinds_zero_addresses_and_bad_child_shapes() ->
     );
 
     assert_eq!(
-        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(wire_with(
+        WorldDependencyDirectoryV1::decode(&CanonicalBytes::from_vec(encode(&wire_with(
             hash(1),
             1,
             first,
@@ -590,6 +612,11 @@ fn public_decoder_rejects_unknown_kinds_zero_addresses_and_bad_child_shapes() ->
         Err(WorldDependencyDirectoryErrorV1::InvalidEncoding)
     );
 
+    Ok(())
+}
+
+#[test]
+fn public_error_display_is_nonempty() {
     let errors = [
         WorldDependencyDirectoryErrorV1::InvalidEncoding,
         WorldDependencyDirectoryErrorV1::WrongMagic,
@@ -605,5 +632,4 @@ fn public_decoder_rejects_unknown_kinds_zero_addresses_and_bad_child_shapes() ->
     for error in errors {
         assert!(!error.to_string().is_empty());
     }
-    Ok(())
 }
