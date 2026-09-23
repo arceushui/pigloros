@@ -1404,34 +1404,40 @@ impl Driver for WorldDriver {
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         self.staged_step = Some(self.state());
-        let mut drafts = Vec::new();
-        if let Some(config) = self.config_draft()? {
-            drafts.push(config);
-        }
-        self.apply_observed_actions(observations.events())?;
-
-        let step_obs = self
-            .backend
-            .step(&self.entities, self.config.timestep_micros);
-        for obs in &step_obs {
-            if let Some(body) = self
-                .entities
-                .iter_mut()
-                .find(|b| b.entity_id == obs.entity_id)
-            {
-                body.x = obs.x;
-                body.y = obs.y;
-                body.z = obs.z;
-                body.vx = obs.vx;
-                body.vy = obs.vy;
-                body.vz = obs.vz;
+        let result = (|| {
+            let mut drafts = Vec::new();
+            if let Some(config) = self.config_draft()? {
+                drafts.push(config);
             }
-        }
+            self.apply_observed_actions(observations.events())?;
 
-        drafts.extend(self.emit_observations(&step_obs)?);
-        self.tick = self.tick.wrapping_add(1);
-        self.step_index = self.step_index.wrapping_add(1);
-        Ok(StepOutput::new(drafts))
+            let step_obs = self
+                .backend
+                .step(&self.entities, self.config.timestep_micros);
+            for obs in &step_obs {
+                if let Some(body) = self
+                    .entities
+                    .iter_mut()
+                    .find(|b| b.entity_id == obs.entity_id)
+                {
+                    body.x = obs.x;
+                    body.y = obs.y;
+                    body.z = obs.z;
+                    body.vx = obs.vx;
+                    body.vy = obs.vy;
+                    body.vz = obs.vz;
+                }
+            }
+
+            drafts.extend(self.emit_observations(&step_obs)?);
+            self.tick = self.tick.wrapping_add(1);
+            self.step_index = self.step_index.wrapping_add(1);
+            Ok(StepOutput::new(drafts))
+        })();
+        if result.is_err() {
+            self.abort_step();
+        }
+        result
     }
 }
 
@@ -1965,7 +1971,7 @@ mod tests {
     fn actuator_pair_normalizes_float_sources_and_preserves_signed_zero() {
         let params = encode_actuator_pair_v1(1.0 / 3.0, -0.0).test_ok();
         let (x, z) = decode_velocity_params(&params).test_ok();
-        assert_eq!(x, 0.333_333_34_f32);
+        assert_eq!(x.to_bits(), 0.333_333_34_f32.to_bits());
         assert_eq!(z.to_bits(), (-0.0_f32).to_bits());
         assert_eq!(
             encode_actuator_pair_v1(f64::MIN_POSITIVE, -f64::MIN_POSITIVE).test_ok(),
@@ -3772,10 +3778,10 @@ mod tests {
         // Position floor does not apply to velocity.
         assert!((obs.pos_x - 1.5_f32).abs() < 0.15);
         assert!((obs.pos_z - 2.0_f32).abs() < 0.15);
-        assert_eq!(obs.pos_y, 0.0);
-        assert_eq!(obs.vel_lin_x, 1.5);
-        assert_eq!(obs.vel_lin_y, 0.0);
-        assert_eq!(obs.vel_lin_z, 2.0);
+        assert_eq!(obs.pos_y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_x.to_bits(), 1.5_f32.to_bits());
+        assert_eq!(obs.vel_lin_y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_z.to_bits(), 2.0_f32.to_bits());
 
         // The host supplies the complete committed prefix on every Tick. The
         // same impulse must not be applied a second time when that prefix is
@@ -3792,7 +3798,7 @@ mod tests {
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         assert!((obs.pos_x - 3.0_f32).abs() < 0.15);
         assert!((obs.pos_z - 4.0_f32).abs() < 0.15);
-        assert_eq!(obs.pos_y, 0.0);
+        assert_eq!(obs.pos_y.to_bits(), 0.0_f32.to_bits());
     }
 
     #[test]
@@ -3840,9 +3846,9 @@ mod tests {
         assert!((obs.pos_x - 2.0_f32).abs() < 0.15);
         assert!((obs.pos_z - 0.5_f32).abs() < 0.15);
         assert!((obs.pos_y - 10.0_f32).abs() < 0.15);
-        assert_eq!(obs.vel_lin_x, 2.0);
-        assert_eq!(obs.vel_lin_y, 10.0);
-        assert_eq!(obs.vel_lin_z, 0.5);
+        assert_eq!(obs.vel_lin_x.to_bits(), 2.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_y.to_bits(), 10.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_z.to_bits(), 0.5_f32.to_bits());
     }
 
     #[test]
@@ -3879,14 +3885,14 @@ mod tests {
             )
             .test_ok();
         let body = &driver.entities[0];
-        assert_eq!(body.x, 0.015625);
-        assert_eq!(body.y, 3.25);
-        assert_eq!(body.z, -0.03125);
-        assert_eq!(body.vy, 1.0);
+        assert_eq!(body.x.to_bits(), 0.015625_f64.to_bits());
+        assert_eq!(body.y.to_bits(), 3.25_f64.to_bits());
+        assert_eq!(body.z.to_bits(), (-0.03125_f64).to_bits());
+        assert_eq!(body.vy.to_bits(), 1.0_f64.to_bits());
         let observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
-        assert_eq!(observation.vel_lin_x, 0.0625);
-        assert_eq!(observation.vel_lin_y, 1.0);
-        assert_eq!(observation.vel_lin_z, -0.125);
+        assert_eq!(observation.vel_lin_x.to_bits(), 0.0625_f32.to_bits());
+        assert_eq!(observation.vel_lin_y.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(observation.vel_lin_z.to_bits(), (-0.125_f32).to_bits());
     }
 
     #[test]
@@ -3980,6 +3986,49 @@ mod tests {
             other => std::panic::resume_unwind(Box::new(format!("unexpected error: {other:?}"))),
         }
         driver.abort_step();
+    }
+
+    #[test]
+    fn failed_action_batch_restores_body_and_step_state_immediately() {
+        let body_id = EntityId::new();
+        let initial = Body {
+            entity_id: body_id,
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            vx: 0.0,
+            vy: 4.0,
+            vz: 0.0,
+        };
+        let mut driver = WorldDriver::new(
+            vec![initial.clone()],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+        let action = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: body_id,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_actuator_pair_v1(1.0, 2.0).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let accepted = make_action_event_from(body_id, &action);
+        let mut malformed = make_action_event_from(body_id, &action);
+        malformed.seq = Seq::from_u64(1);
+        malformed.payload = CanonicalBytes::from_static(b"malformed");
+        assert!(driver
+            .step(
+                TimelineId::new(),
+                ObservationView::from_events(&[accepted, malformed]),
+            )
+            .is_err());
+        assert_eq!(driver.entities, vec![initial]);
+        assert_eq!(driver.tick, 0);
+        assert!(!driver.config_emitted);
+        assert!(driver.applied_action_seqs.is_empty());
+        assert!(driver.staged_step.is_none());
     }
 
     #[test]

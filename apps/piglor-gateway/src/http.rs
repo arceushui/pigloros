@@ -679,25 +679,12 @@ mod tests {
             let (status, _) = json_request(app.clone(), "POST", &path, Some(rejected)).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}");
         }
-        for params in [
-            vec![0x81, 1],
-            vec![0xa1, 1, 2],
-            vec![0xa2, 1, 1, 2, 2],
-            vec![0xa2, 0x20, 2, 0x18, 24, 1],
-            vec![0xc0, 1],
-            vec![0xf9, 0x3c, 0],
-        ] {
+        for params in [json!([1.0, 0.0]), json!([0.333_333_333_333_333_3, -0.0])] {
             let mut accepted = request.clone();
-            accepted["payload"]["params"] = json!(params);
+            accepted["payload"]["params"] = params;
             let (status, _) = json_request(app.clone(), "POST", &path, Some(accepted)).await;
             assert_eq!(status, StatusCode::CREATED);
         }
-        let mut oversized = request;
-        let mut params = vec![0x59, 0x13, 0x88];
-        params.extend(vec![0; 5000]);
-        oversized["payload"]["params"] = json!(params);
-        let (status, _) = json_request(app, "POST", &path, Some(oversized)).await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     fn spectator_test_app() -> Router {

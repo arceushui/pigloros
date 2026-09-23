@@ -2749,7 +2749,7 @@ impl GatewayWorldActionPayload {
         }
         .ok_or_else(|| ActionRejected::DomainValidationFailed("unknown action kind".to_owned()))
         .and_then(|action_kind| {
-            encode_world_action(&WorldActionV1 {
+            WorldActionV1 {
                 actor_entity_id: self.actor_entity_id,
                 body_entity_id: self.body_entity_id,
                 action_kind,
@@ -2757,18 +2757,11 @@ impl GatewayWorldActionPayload {
                 action_scope: self.action_scope,
                 catalogue_version: self.catalogue_version,
                 tick: self.tick,
-            })
+            }
+            .encode()
+            .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
         })
     }
-}
-
-fn encode_world_action(action: &WorldActionV1) -> Result<CanonicalBytes, ActionRejected> {
-    action.encode().map_err(|error| match error {
-        pos_plugin_world::WorldCodecError::PayloadTooLarge { size, max } => {
-            ActionRejected::PayloadTooLarge { size, max }
-        }
-        error => ActionRejected::DomainValidationFailed(error.to_string()),
-    })
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
