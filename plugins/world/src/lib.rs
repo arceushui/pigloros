@@ -1989,7 +1989,7 @@ mod tests {
 
         let one = f32::from_bits(0x3f80_0000);
         let next = f32::from_bits(0x3f80_0001);
-        let midpoint = (f64::from(one) + f64::from(next)) / 2.0;
+        let midpoint = f64::midpoint(f64::from(one), f64::from(next));
         let tie = encode_actuator_pair_v1(midpoint, 0.0).test_ok();
         assert_eq!(
             decode_horizontal_velocity_params(&tie)
@@ -3904,7 +3904,7 @@ mod tests {
             )
             .test_ok();
         let body = &driver.entities[0];
-        assert_eq!(body.x.to_bits(), 0.015625_f64.to_bits());
+        assert_eq!(body.x.to_bits(), 0.015_625_f64.to_bits());
         assert_eq!(body.y.to_bits(), 3.25_f64.to_bits());
         assert_eq!(body.z.to_bits(), (-0.03125_f64).to_bits());
         assert_eq!(body.vy.to_bits(), 1.0_f64.to_bits());
