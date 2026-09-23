@@ -1740,8 +1740,16 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum InvalidObservationComponent {
+        Z,
+        Vx,
+        Vy,
+        Vz,
+    }
+
     struct InvalidObservationComponentBackend {
-        component: &'static str,
+        component: InvalidObservationComponent,
     }
 
     impl WorldBackend for InvalidObservationComponentBackend {
@@ -1763,11 +1771,10 @@ mod tests {
                         vz: body.vz,
                     };
                     match self.component {
-                        "z" => observed.z = f64::MAX,
-                        "vx" => observed.vx = f64::MAX,
-                        "vy" => observed.vy = f64::MAX,
-                        "vz" => observed.vz = f64::MAX,
-                        _ => unreachable!("test only supplies a known component"),
+                        InvalidObservationComponent::Z => observed.z = f64::MAX,
+                        InvalidObservationComponent::Vx => observed.vx = f64::MAX,
+                        InvalidObservationComponent::Vy => observed.vy = f64::MAX,
+                        InvalidObservationComponent::Vz => observed.vz = f64::MAX,
                     }
                     observed
                 })
@@ -1869,7 +1876,12 @@ mod tests {
 
     #[test]
     fn invalid_backend_observation_components_fail_closed_and_restore_step() {
-        for component in ["z", "vx", "vy", "vz"] {
+        for (component, axis) in [
+            (InvalidObservationComponent::Z, "z"),
+            (InvalidObservationComponent::Vx, "vx"),
+            (InvalidObservationComponent::Vy, "vy"),
+            (InvalidObservationComponent::Vz, "vz"),
+        ] {
             let initial = Body {
                 entity_id: EntityId::new(),
                 x: 1.0,
@@ -1889,7 +1901,7 @@ mod tests {
                 .test_err();
             assert!(error
                 .to_string()
-                .contains(&format!("non-representable {component} coordinate")));
+                .contains(&format!("non-representable {axis} coordinate")));
             assert_eq!(driver.entities, vec![initial]);
             assert_eq!(driver.tick, 0);
             assert!(!driver.config_emitted);
