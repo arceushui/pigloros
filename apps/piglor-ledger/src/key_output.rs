@@ -111,6 +111,8 @@ pub fn delete_owned_secret_key(
     deletion_fault!(&absolute, FaultStage::DeletePreRemoveFileSync)
         .and_then(|()| file.sync_all())
         .map_err(|error| storage_error(&error))?;
+    #[cfg(test)]
+    swap_deletion_target_for_test(&absolute);
     let current = deletion_fault!(&absolute, FaultStage::DeleteInspectCurrent)
         .and_then(|()| std::fs::symlink_metadata(&absolute))
         .map_err(|error| storage_error(&error))?;
@@ -177,6 +179,7 @@ pub enum FaultStage {
     DeleteMetadata,
     DeleteRead,
     DeletePreRemoveFileSync,
+    DeleteSwapBeforeInspect,
     DeleteInspectCurrent,
     DeleteRemove,
     DeletePostRemoveFileSync,
@@ -251,6 +254,16 @@ fn injected_fault_result(path: &Path, stage: FaultStage) -> std::io::Result<()> 
         )))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn swap_deletion_target_for_test(path: &Path) {
+    if injected_fault::take(path, FaultStage::DeleteSwapBeforeInspect) {
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, b"replacement").expect("write replacement key fixture");
+        std::fs::rename(replacement, path).expect("swap key fixture");
     }
 }
 
@@ -534,6 +547,7 @@ mod deletion_tests {
             FaultStage::DeleteMetadata,
             FaultStage::DeleteRead,
             FaultStage::DeletePreRemoveFileSync,
+            FaultStage::DeleteSwapBeforeInspect,
             FaultStage::DeleteInspectCurrent,
             FaultStage::DeleteRemove,
             FaultStage::DeletePostRemoveFileSync,

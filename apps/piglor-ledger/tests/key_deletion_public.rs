@@ -87,6 +87,18 @@ fn deletion_rejects_unsafe_paths_and_file_shapes() -> Result<(), Box<dyn std::er
     let missing_parent = directory.path().join("missing").join("secret.key");
     assert!(piglor_ledger::key_output::delete_owned_secret_key(&missing_parent, request).is_err());
 
+    let ancestor = directory.path().join("ancestor");
+    std::os::unix::fs::symlink(directory.path(), &ancestor)?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(
+        &ancestor.join("secret.key"),
+        request
+    )
+    .is_err());
+    std::fs::remove_file(&ancestor)?;
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777))?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+
     let link = directory.path().join("link.key");
     std::os::unix::fs::symlink(&key, &link)?;
     assert!(piglor_ledger::key_output::delete_owned_secret_key(&link, request).is_err());
@@ -199,6 +211,16 @@ fn wrong_owned_file_leaves_pending_and_startup_recovers_with_the_correct_file(
     make_key(&key)?;
     make_key(&wrong)?;
     drop(open_store(&Source::Store(database.clone()), Some(&key))?);
+
+    let mut store = authorized_store(&database)?;
+    assert!(piglor_ledger::key_output::destroy_owned_secret_key(
+        &mut store,
+        &key,
+        deletion_request(&[0; 32]),
+    )
+    .is_err());
+    assert!(key.exists());
+    drop(store);
 
     assert!(run(&destroy_args(&database, &wrong)).is_err());
     assert!(key.exists());
