@@ -406,7 +406,7 @@ fn public_directory_checks_child_count_sums_and_all_uint_widths() -> TestResult 
             }
             let child_leaves = remaining.min(child_capacity);
             let child_first_index = index * child_capacity + 1;
-            let child_last_index = child_first_index + child_leaves - 1;
+            let child_last_index = child_first_index + (child_leaves - 1);
             let child_first = key(
                 WorldArtifactKindV1::OutputPolicy,
                 indexed_hash(child_first_index),
