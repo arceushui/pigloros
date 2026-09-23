@@ -64,18 +64,8 @@ pub enum ErasureHostStatusV1 {
     Poisoned,
 }
 
-struct IdentifiedForkTransitionInput<'a> {
-    operation: ErasureReferenceV1,
-    parent: TimelineId,
-    child: &'a TimelineMeta,
-    current_generation: ErasureReferenceV1,
-    current_inventory: &'a ErasureVerifiedInventoryV1,
-    authority: &'a dyn ErasureCoordinatorAuthorityV1,
-    coordinator: ErasureReferenceV1,
-    recovered: Option<ErasureForkRecoveryV1>,
-}
-
-struct IdentifiedForkApplicationInput<'a> {
+#[derive(Clone, Copy)]
+struct IdentifiedForkContext<'a> {
     operation: ErasureReferenceV1,
     parent: TimelineId,
     at_seq: Seq,
@@ -85,6 +75,12 @@ struct IdentifiedForkApplicationInput<'a> {
     current_inventory: &'a ErasureVerifiedInventoryV1,
     authority: &'a dyn ErasureCoordinatorAuthorityV1,
     coordinator: ErasureReferenceV1,
+}
+
+struct IdentifiedForkTransitionInput<'a> {
+    context: IdentifiedForkContext<'a>,
+    child: &'a TimelineMeta,
+    recovered: Option<ErasureForkRecoveryV1>,
 }
 
 struct SingleUseVerifiedInventoryQueryV1(Option<ErasureVerifiedInventoryV1>);
@@ -1864,7 +1860,7 @@ impl ErasureExecutionHostV1 {
         let coordinator = self
             .coordinator
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        let input = IdentifiedForkApplicationInput {
+        let input = IdentifiedForkContext {
             operation,
             parent,
             at_seq,
@@ -1880,20 +1876,13 @@ impl ErasureExecutionHostV1 {
 
     fn apply_identified_fork_with_recovery(
         &mut self,
-        input: &IdentifiedForkApplicationInput<'_>,
+        input: &IdentifiedForkContext<'_>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let gate = Arc::clone(&self.gate);
         let mut transition_failure = None;
         let publication = {
             let mut fenced_transition = |permit: &ErasureTopologyTransitionPermitV1| {
-                let (child, recovered) = match self.recover_identified_fork_child(
-                    permit,
-                    input.operation,
-                    input.parent,
-                    input.at_seq,
-                    input.name,
-                    input.current_inventory,
-                ) {
+                let (child, recovered) = match self.recover_identified_fork_child(permit, input) {
                     Ok(result) => result,
                     Err(error) => {
                         transition_failure = Some(TransitionFailureV1::Host(error));
@@ -1901,13 +1890,8 @@ impl ErasureExecutionHostV1 {
                     }
                 };
                 let transition = IdentifiedForkTransitionInput {
-                    operation: input.operation,
-                    parent: input.parent,
+                    context: *input,
                     child: &child,
-                    current_generation: input.current_generation,
-                    current_inventory: input.current_inventory,
-                    authority: input.authority,
-                    coordinator: input.coordinator,
                     recovered,
                 };
                 let result = self.run_identified_fork_transition(&transition, permit);
@@ -1943,16 +1927,12 @@ impl ErasureExecutionHostV1 {
     fn recover_identified_fork_child(
         &mut self,
         permit: &ErasureTopologyTransitionPermitV1,
-        operation: ErasureReferenceV1,
-        parent: TimelineId,
-        at_seq: Seq,
-        name: &str,
-        current_inventory: &ErasureVerifiedInventoryV1,
+        input: &IdentifiedForkContext<'_>,
     ) -> Result<(TimelineMeta, Option<ErasureForkRecoveryV1>), ErasureHostErrorV1> {
         let recovered = match self
             .store
             .host_store()
-            .recover_fork_admission(operation, current_inventory)
+            .recover_fork_admission(input.operation, input.current_inventory)
         {
             Ok(recovered) => recovered,
             Err(ErasureErrorV1::StaleGeneration) => {
@@ -1966,7 +1946,7 @@ impl ErasureExecutionHostV1 {
         let parent_owner = if let Some(parent) = self
             .store
             .host_store()
-            .get_timeline_for_host_transition(permit, parent)
+            .get_timeline_for_host_transition(permit, input.parent)
             .map_store_error()?
         {
             parent.meta.owner
@@ -1980,8 +1960,8 @@ impl ErasureExecutionHostV1 {
         let child = match recovered.as_ref().map(ErasureForkRecoveryV1::child) {
             Some(recovered_child)
                 if recovered_child.mode == TimelineMode::Historical
-                    && recovered_child.name.as_deref() == Some(name)
-                    && recovered_child.fork_point == Some((parent, at_seq))
+                    && recovered_child.name.as_deref() == Some(input.name)
+                    && recovered_child.fork_point == Some((input.parent, input.at_seq))
                     && recovered_child.owner == parent_owner =>
             {
                 recovered_child.clone()
@@ -1990,9 +1970,9 @@ impl ErasureExecutionHostV1 {
             None => TimelineMeta {
                 id: TimelineId::new(),
                 mode: TimelineMode::Historical,
-                name: Some(name.to_owned()),
+                name: Some(input.name.to_owned()),
                 owner: parent_owner,
-                fork_point: Some((parent, at_seq)),
+                fork_point: Some((input.parent, input.at_seq)),
             },
         };
         Ok((child, recovered))
@@ -2023,28 +2003,30 @@ impl ErasureExecutionHostV1 {
         }
         let retry_child = recovered_child.clone();
         let child_scope = input
+            .context
             .authority
-            .resolve_fork_child_scope(input.parent, &retry_child)?;
+            .resolve_fork_child_scope(input.context.parent, &retry_child)?;
         if child_scope != recovered.child_scope() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let retry_input = ErasureForkAdmissionInputV1 {
-            operation: input.operation,
+            operation: input.context.operation,
             expected_inventory_generation: recovered.expected_inventory_generation(),
             child_scope,
             child: retry_child,
         };
         let stale_error = |error| {
-            if input.current_generation == recovered.successor_generation() {
+            if input.context.current_generation == recovered.successor_generation() {
                 error
             } else {
                 ErasureErrorV1::StaleGeneration
             }
         };
         let requirements = input
+            .context
             .current_inventory
             .fork_retry_scope_requirements(
-                input.parent,
+                input.context.parent,
                 recovered_child.id,
                 recovered.child_scope(),
             )
@@ -2052,6 +2034,7 @@ impl ErasureExecutionHostV1 {
         for requirement in requirements {
             let requirement = requirement.map_err(stale_error)?;
             let extension = input
+                .context
                 .authority
                 .resolve_fork_scope_extension(requirement.requirement(), &retry_input)?;
             if extension != *requirement.extension() {
@@ -2059,7 +2042,7 @@ impl ErasureExecutionHostV1 {
             }
         }
         Ok((
-            input.current_inventory.clone(),
+            input.context.current_inventory.clone(),
             Timeline::new(recovered_child.clone()),
         ))
     }
@@ -2070,24 +2053,29 @@ impl ErasureExecutionHostV1 {
         permit: &ErasureTopologyTransitionPermitV1,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
         let requirements = input
+            .context
             .current_inventory
-            .fork_scope_requirements(input.parent)?;
+            .fork_scope_requirements(input.context.parent)?;
         let child_scope = input
+            .context
             .authority
-            .resolve_fork_child_scope(input.parent, input.child)?;
+            .resolve_fork_child_scope(input.context.parent, input.child)?;
         let admission_input = ErasureForkAdmissionInputV1 {
-            operation: input.operation,
-            expected_inventory_generation: input.current_generation,
+            operation: input.context.operation,
+            expected_inventory_generation: input.context.current_generation,
             child_scope,
             child: input.child.clone(),
         };
         let admissions = {
-            let port = HostedCoordinatorPortV1::new(self.store.host_store(), input.authority);
-            let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, input.coordinator);
+            let port =
+                HostedCoordinatorPortV1::new(self.store.host_store(), input.context.authority);
+            let mut state_machine =
+                ErasureCoordinatorStateMachineV1::new(port, input.context.coordinator);
             requirements
                 .into_iter()
                 .map(|requirement| {
                     input
+                        .context
                         .authority
                         .resolve_fork_scope_extension(requirement, &admission_input)
                         .and_then(|extension| {
@@ -2101,6 +2089,7 @@ impl ErasureExecutionHostV1 {
                 .collect::<Result<Vec<_>, _>>()?
         };
         let batch = input
+            .context
             .current_inventory
             .clone()
             .prepare_fork_batch(admission_input, admissions)?;
@@ -6965,13 +6954,18 @@ mod tests {
         let mut changed_child = recovered.child().clone();
         changed_child.name = Some("changed-on-retry".to_owned());
         let changed_input = IdentifiedForkTransitionInput {
-            operation,
-            parent,
+            context: IdentifiedForkContext {
+                operation,
+                parent,
+                at_seq: Seq::ZERO,
+                name: "changed-on-retry",
+                current_generation: recovered.successor_generation(),
+                maximum_requests: 4,
+                current_inventory: &current_inventory,
+                authority: &UNUSED_COORDINATOR_AUTHORITY,
+                coordinator: reference(61),
+            },
             child: &changed_child,
-            current_generation: recovered.successor_generation(),
-            current_inventory: &current_inventory,
-            authority: &UNUSED_COORDINATOR_AUTHORITY,
-            coordinator: reference(61),
             recovered: Some(recovered.clone()),
         };
         assert_eq!(
@@ -6989,13 +6983,18 @@ mod tests {
             resolved_child_scope: Some(recovered.child_scope()),
         };
         let missing_inventory_input = IdentifiedForkTransitionInput {
-            operation,
-            parent,
+            context: IdentifiedForkContext {
+                operation,
+                parent,
+                at_seq: Seq::ZERO,
+                name: "recovered",
+                current_generation: recovered.successor_generation(),
+                maximum_requests: 4,
+                current_inventory: &no_parent_inventory,
+                authority: &resolving_authority,
+                coordinator: reference(62),
+            },
             child: recovered.child(),
-            current_generation: recovered.successor_generation(),
-            current_inventory: &no_parent_inventory,
-            authority: &resolving_authority,
-            coordinator: reference(62),
             recovered: Some(recovered.clone()),
         };
         assert_eq!(
@@ -7010,13 +7009,18 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let prepare_child = TimelineMeta::forked_from(parent, Seq::ZERO, "stale-generation");
         let prepare_input = IdentifiedForkTransitionInput {
-            operation: reference(63),
-            parent,
+            context: IdentifiedForkContext {
+                operation: reference(63),
+                parent,
+                at_seq: Seq::ZERO,
+                name: "stale-generation",
+                current_generation: reference(254),
+                maximum_requests: 4,
+                current_inventory: &current_inventory,
+                authority: &resolving_authority,
+                coordinator: reference(64),
+            },
             child: &prepare_child,
-            current_generation: reference(254),
-            current_inventory: &current_inventory,
-            authority: &resolving_authority,
-            coordinator: reference(64),
             recovered: None,
         };
         let gate = Arc::clone(&host.gate);

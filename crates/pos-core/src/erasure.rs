@@ -6670,7 +6670,8 @@ impl ErasureForkRecoveryProofV1 {
     /// inventory does not contain enough current Fork topology to validate the
     /// receipt, or provenance failure when the complete admission set differs
     /// from the recovered result.
-    pub fn validate_complete_for_inventory(
+    #[cfg(test)]
+    fn validate_complete_for_inventory(
         &self,
         recovered: &ErasureForkRecoveryV1,
         current_inventory: &ErasureVerifiedInventoryV1,

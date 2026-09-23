@@ -61,6 +61,19 @@ pub use pos_core::{
     WallTime,
 };
 
+pub(crate) fn issue_erasure_topology_store_binding(
+    already_bound: bool,
+    gate: &pos_core::ErasureContainmentGateV1,
+) -> Result<pos_core::ErasureTopologyStoreBindingV1, CoreError> {
+    if already_bound {
+        return Err(CoreError::Storage(
+            "erasure containment gate is already bound".to_owned(),
+        ));
+    }
+    gate.issue_topology_store_binding()
+        .map_err(|_| CoreError::ErasureContainmentUnavailable)
+}
+
 /// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
 ///
 /// The adapter stores the proof's exact canonical bytes under its content
@@ -662,6 +675,17 @@ mod tests {
                 )))
             })
         }
+    }
+
+    #[test]
+    fn erasure_topology_binding_rejects_an_already_bound_store() {
+        let gate = pos_core::ErasureContainmentGateV1::new_test_open();
+        issue_erasure_topology_store_binding(false, &gate).test_ok();
+        assert!(matches!(
+            issue_erasure_topology_store_binding(true, &gate),
+            Err(CoreError::Storage(message))
+                if message == "erasure containment gate is already bound"
+        ));
     }
 
     impl<T> TestValueExt<T> for Option<T> {

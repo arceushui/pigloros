@@ -2887,14 +2887,7 @@ impl MemoryStore {
         &mut self,
         gate: Arc<ErasureContainmentGateV1>,
     ) -> Result<(), CoreError> {
-        if self.erasure_gate_bound {
-            return Err(CoreError::Storage(
-                "erasure containment gate is already bound".to_owned(),
-            ));
-        }
-        let binding = gate
-            .issue_topology_store_binding()
-            .map_err(|_| CoreError::ErasureContainmentUnavailable)?;
+        let binding = crate::issue_erasure_topology_store_binding(self.erasure_gate_bound, &gate)?;
         self.erasure_topology_requires_permit = binding.requires_transition_permit();
         self.erasure_gate = Some(gate);
         self.erasure_topology_store_binding = Some(binding);

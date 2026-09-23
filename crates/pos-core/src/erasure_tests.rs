@@ -1024,7 +1024,7 @@ fn assert_empty_fork_batch_proof_round_trip(parent: TimelineId) -> Result<(), Er
     );
     assert_eq!(
         ErasureForkRecoveryProofV1::bytes_digest(b"proof"),
-        ErasureForkRecoveryProofV1::bytes_digest(b"proof")
+        ErasureReferenceV1::from_digest(*blake3::hash(b"proof").as_bytes())
     );
     Ok(())
 }
