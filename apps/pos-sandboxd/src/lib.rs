@@ -5,7 +5,7 @@
 //! and architecture before these requested-state components are used.
 
 mod hardening;
-mod kernel_cgroup;
+pub(crate) mod kernel_cgroup;
 mod system_bus;
 mod transient_unit;
 
