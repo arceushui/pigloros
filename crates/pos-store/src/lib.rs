@@ -572,7 +572,7 @@ where
 }
 
 fn load_import_registry(
-    store: &mut dyn EventStore,
+    store: &dyn EventStore,
     export: &TimelineExport,
 ) -> Result<Option<pos_core::KeyRegistryStateV1>, CoreError> {
     if export.events.is_empty() {
