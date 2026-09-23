@@ -7102,11 +7102,25 @@ mod coverage_entrypoints {
         object_reference: u8,
         mutate: impl FnOnce(&mut MemoryStore),
     ) {
+        assert_memory_recovery_proof_error_kind(
+            ErasureErrorV1::ProvenanceMissing,
+            extension,
+            object_reference,
+            mutate,
+        );
+    }
+
+    fn assert_memory_recovery_proof_error_kind(
+        expected_error: ErasureErrorV1,
+        extension: u8,
+        object_reference: u8,
+        mutate: impl FnOnce(&mut MemoryStore),
+    ) {
         let (mut store, proof) = memory_recovery_proof_fixture(extension, object_reference);
         mutate(&mut store);
         assert_eq!(
             store.memory_fork_recovery_proof_is_exact(&proof),
-            Err(ErasureErrorV1::ProvenanceMissing)
+            Err(expected_error)
         );
     }
 
@@ -7196,16 +7210,16 @@ mod coverage_entrypoints {
                 .remove(&ErasureReferenceV1::from_digest([9; 32]));
         });
         assert_memory_recovery_proof_error(10, 10, |store| {
-            store.erasure_effects.insert(
-                ErasureReferenceV1::from_digest([9; 32]),
-                (ErasureReferenceV1::from_digest([18; 32]), vec![0x17, 0x28]),
-            );
+            let key = ErasureReferenceV1::from_digest([9; 32]);
+            let (_, bytes) = store.erasure_effects[&key].clone();
+            store
+                .erasure_effects
+                .insert(key, (ErasureReferenceV1::from_digest([18; 32]), bytes));
         });
-        assert_memory_recovery_proof_error(10, 10, |store| {
-            store.erasure_effects.insert(
-                ErasureReferenceV1::from_digest([9; 32]),
-                (ErasureReferenceV1::from_digest([12; 32]), vec![0xBA, 0xDB]),
-            );
+        assert_memory_recovery_proof_error_kind(ErasureErrorV1::InvalidEncoding, 10, 10, |store| {
+            let key = ErasureReferenceV1::from_digest([9; 32]);
+            let (_, bytes) = store.erasure_effects.get_mut(&key).expect("fixture effect");
+            *bytes = vec![0x17, 0x28];
         });
         assert_memory_recovery_proof_error(10, 10, |store| {
             store
