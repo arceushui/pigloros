@@ -1922,11 +1922,7 @@ impl ErasureExecutionHostV1 {
                     coordinator: input.coordinator,
                     recovered,
                 };
-                let result = self.run_identified_fork_transition(
-                    &transition,
-                    permit,
-                    &mut transition_failure,
-                );
+                let result = self.run_identified_fork_transition(&transition, permit);
                 if let Err(error) = result {
                     if transition_failure.is_none() {
                         transition_failure = Some(TransitionFailureV1::ErasureBeforeCommit(error));
@@ -2018,7 +2014,6 @@ impl ErasureExecutionHostV1 {
         &mut self,
         input: &IdentifiedForkTransitionInput<'_>,
         permit: &ErasureTopologyTransitionPermitV1,
-        transition_failure: &mut Option<TransitionFailureV1>,
     ) -> Result<(ErasureVerifiedInventoryV1, Timeline), ErasureErrorV1> {
         if let Some(recovered) = input.recovered.as_ref() {
             return Self::recover_identified_fork(input, recovered);
