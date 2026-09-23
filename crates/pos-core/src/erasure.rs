@@ -9572,7 +9572,7 @@ mod coverage_paths {
     fn assert_fork_admission_rejects_oversized_effect(
         input: &ErasureForkAdmissionInputV1,
         extension: &ErasureScopeExtensionV1,
-    ) -> Result<(), ErasureErrorV1> {
+    ) {
         let command = ErasureDestructionCommandV1 {
             obligation: reference(198),
             category: ErasureInventoryCategoryV1::Artifact,
@@ -9605,7 +9605,6 @@ mod coverage_paths {
             PreparedErasureForkAdmissionV1::new(input.clone(), *extension, mutation),
             Err(ErasureErrorV1::ScopeInvalid)
         );
-        Ok(())
     }
 
     #[test]
@@ -9699,7 +9698,7 @@ mod coverage_paths {
         assert_recovery_mutation_rejects_malformed_fields(mutation);
         assert_recovery_objects_and_indexes_reject_malformed_fields(mutation)?;
         assert_recovery_proof_rejects_oversized_admissions(&proof)?;
-        assert_fork_admission_rejects_oversized_effect(&input, &extension)?;
+        assert_fork_admission_rejects_oversized_effect(&input, &extension);
         Ok(())
     }
 
