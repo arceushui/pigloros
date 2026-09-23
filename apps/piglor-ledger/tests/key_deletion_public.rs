@@ -5,7 +5,8 @@ use std::path::Path;
 
 use piglor_ledger::{open_store, run, Source};
 use pos_core::{
-    ErasureContainmentGateV1, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRoleV1,
+    ErasureContainmentGateV1, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistrationV1, KeyRoleV1, PublicKey,
 };
 use pos_store::sqlite::SqliteStore;
 
@@ -178,6 +179,37 @@ fn destroy_key_rejects_invalid_flags_and_unknown_registry() -> Result<(), Box<dy
 }
 
 #[test]
+fn startup_requires_explicit_recovery_for_multiple_pending_ledger_keys(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    let mut state = pos_core::KeyRegistryStateV1::new();
+    for (epoch, byte) in [(1, 1_u8), (2, 2_u8)] {
+        let identity =
+            KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, epoch);
+        state.register_key(KeyRegistrationV1::new(
+            identity,
+            Hash::from_bytes([byte; 32]),
+            Some(PublicKey::from_bytes([byte; 32])),
+        ))?;
+    }
+    for (epoch, byte) in [(1, 1_u8), (2, 2_u8)] {
+        state.begin_key_destruction(KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, epoch),
+            Hash::from_bytes([byte; 32]),
+            Hash::from_bytes([7; 32]),
+        ))?;
+    }
+    let mut store = authorized_store(&database)?;
+    store.save_key_registry(&state)?;
+    drop(store);
+    assert!(open_store(&Source::Store(database), Some(&key)).is_err());
+    assert_eq!(state.pending_destruction_requests().count(), 2);
+    Ok(())
+}
+
+#[test]
 fn destroyed_secret_file_is_absent_after_reopen_and_retry() -> Result<(), Box<dyn std::error::Error>>
 {
     let directory = tempfile::TempDir::new()?;
@@ -226,6 +258,13 @@ fn wrong_owned_file_leaves_pending_and_startup_recovers_with_the_correct_file(
     assert!(key.exists());
     assert!(wrong.exists());
     let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1);
+    assert_eq!(
+        registry(&database)?.pending_destruction_requests().count(),
+        1
+    );
+
+    assert!(open_store(&Source::Store(database.clone()), Some(&wrong)).is_err());
+    assert!(wrong.exists());
     assert_eq!(
         registry(&database)?.pending_destruction_requests().count(),
         1
