@@ -20,8 +20,8 @@ use zbus::{
 
 use super::*;
 use crate::{
-    ActivatedRootDirectory, AttemptCgroupEmptyBasis, LaunchMode, LauncherSource,
-    SystemCallFilter, TransientUnitLaunchInputs,
+    ActivatedRootDirectory, AttemptCgroupEmptyBasis, LaunchMode, LauncherSource, SystemCallFilter,
+    TransientUnitLaunchInputs,
 };
 
 const X86_64: &[u8] = include_bytes!(
@@ -355,7 +355,9 @@ impl RecordingManager {
         let unit = match self.behavior.cgroup_lookup {
             CgroupLookupBehavior::Resolve => UNIT_PATH,
             CgroupLookupBehavior::Reject => {
-                return Err(fdo::Error::Failed("test cgroup lookup rejection".to_owned()));
+                return Err(fdo::Error::Failed(
+                    "test cgroup lookup rejection".to_owned(),
+                ));
             }
             CgroupLookupBehavior::Substitute => UNRELATED_UNIT_PATH,
         };
@@ -422,9 +424,9 @@ impl RecordingService {
         let reads = self.control_group_reads.fetch_add(1, Ordering::SeqCst);
         match self.control_group_behavior {
             ControlGroupBehavior::Stable => Ok(self.control_group.clone()),
-            ControlGroupBehavior::Reject => {
-                Err(fdo::Error::Failed("test ControlGroup read failure".to_owned()))
-            }
+            ControlGroupBehavior::Reject => Err(fdo::Error::Failed(
+                "test ControlGroup read failure".to_owned(),
+            )),
             ControlGroupBehavior::ChangeOnSecondRead if reads > 0 => {
                 Ok("/system.slice/substituted.service".to_owned())
             }
@@ -1054,26 +1056,35 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
 }
 
 #[tokio::test]
-async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed(
-) -> Result<(), Box<dyn Error>> {
+async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<(), Box<dyn Error>>
+{
     let behavior = ManagerBehavior::default();
     let lookups = Arc::clone(&behavior.cgroup_lookups);
     let service = RecordingService::exact(expected_system_call_filter()?);
     let (transport, _server, verified, temporary) =
         started_cgroup_transport(behavior, service).await?;
     let mut bound = transport
-        .bind_cgroup_with_root(&verified, CgroupRoot::for_test(File::open(temporary.path())?))
+        .bind_cgroup_with_root(
+            &verified,
+            CgroupRoot::for_test(File::open(temporary.path())?),
+        )
         .await?;
     assert_eq!(bound.control_group(), CONTROL_GROUP_PATH);
     assert_eq!(
-        lookups.lock().map_err(|error| error.to_string())?.as_slice(),
+        lookups
+            .lock()
+            .map_err(|error| error.to_string())?
+            .as_slice(),
         &[CONTROL_GROUP_PATH.to_owned(), CONTROL_GROUP_PATH.to_owned()]
     );
     let observed = bound.observe_empty()?;
     assert_eq!(observed.unit_name(), verified.unit_name());
     assert_eq!(observed.unit_path(), UNIT_PATH);
     assert_eq!(observed.basis(), AttemptCgroupEmptyBasis::Events);
-    assert_eq!(observed.raw_events(), Some(b"populated 0\nfrozen 0\n".as_slice()));
+    assert_eq!(
+        observed.raw_events(),
+        Some(b"populated 0\nfrozen 0\n".as_slice())
+    );
     Ok(())
 }
 
@@ -1086,7 +1097,10 @@ async fn cgroup_binding_rejects_unit_substitution_before_property_read(
         started_cgroup_transport(ManagerBehavior::default(), service).await?;
     verified.unit_path = OwnedObjectPath::try_from(UNRELATED_UNIT_PATH)?;
     let error = transport
-        .bind_cgroup_with_root(&verified, CgroupRoot::for_test(File::open(temporary.path())?))
+        .bind_cgroup_with_root(
+            &verified,
+            CgroupRoot::for_test(File::open(temporary.path())?),
+        )
         .await
         .err()
         .ok_or("unit substitution was accepted")?;
@@ -1101,7 +1115,10 @@ async fn cgroup_binding_rejects_unit_substitution_before_property_read(
 #[tokio::test]
 async fn cgroup_binding_rejects_reverse_lookup_failure_and_substitution(
 ) -> Result<(), Box<dyn Error>> {
-    for cgroup_lookup in [CgroupLookupBehavior::Reject, CgroupLookupBehavior::Substitute] {
+    for cgroup_lookup in [
+        CgroupLookupBehavior::Reject,
+        CgroupLookupBehavior::Substitute,
+    ] {
         let behavior = ManagerBehavior {
             cgroup_lookup,
             ..ManagerBehavior::default()
@@ -1110,7 +1127,10 @@ async fn cgroup_binding_rejects_reverse_lookup_failure_and_substitution(
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(behavior, service).await?;
         let error = transport
-            .bind_cgroup_with_root(&verified, CgroupRoot::for_test(File::open(temporary.path())?))
+            .bind_cgroup_with_root(
+                &verified,
+                CgroupRoot::for_test(File::open(temporary.path())?),
+            )
             .await
             .err()
             .ok_or("bad reverse lookup was accepted")?;
@@ -1134,7 +1154,10 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(ManagerBehavior::default(), service).await?;
         let error = transport
-            .bind_cgroup_with_root(&verified, CgroupRoot::for_test(File::open(temporary.path())?))
+            .bind_cgroup_with_root(
+                &verified,
+                CgroupRoot::for_test(File::open(temporary.path())?),
+            )
             .await
             .err()
             .ok_or("failed or changed ControlGroup was accepted")?;
@@ -1155,7 +1178,10 @@ async fn cgroup_binding_rejects_invalid_and_missing_kernel_paths() -> Result<(),
         let (transport, _server, verified, temporary) =
             started_cgroup_transport(ManagerBehavior::default(), service).await?;
         let error = transport
-            .bind_cgroup_with_root(&verified, CgroupRoot::for_test(File::open(temporary.path())?))
+            .bind_cgroup_with_root(
+                &verified,
+                CgroupRoot::for_test(File::open(temporary.path())?),
+            )
             .await
             .err()
             .ok_or("invalid or missing cgroup was accepted")?;
