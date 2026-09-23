@@ -3,13 +3,14 @@
 use std::future::Future;
 
 use futures_util::{Stream, StreamExt};
-use zbus::{zvariant::OwnedObjectPath, Connection};
+use zbus::{proxy::CacheProperties, zvariant::OwnedObjectPath, Connection};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
 use crate::{
-    SystemdHardeningProperty, SystemdHardeningReadbackValue, SystemdHardeningValue,
-    SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty,
+    AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
+    SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
+    SystemdManagerReadbackOnlyProperty, SystemdTransientUnitProperty,
     SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind,
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
     TransientUnitRequest, TransientUnitRequestError,
@@ -269,6 +270,18 @@ pub enum SystemdTransientUnitTransportError {
     /// The generated typed service proxy could not be constructed.
     #[error("failed to construct the typed systemd service proxy")]
     ServiceProxy(#[source] zbus::Error),
+    /// The exact attempt unit could not be identified at cgroup binding time.
+    #[error("systemd attempt-unit identity changed before cgroup binding")]
+    CgroupUnitMismatch,
+    /// The typed service `ControlGroup` property could not be read.
+    #[error("failed to read the exact systemd attempt ControlGroup")]
+    CgroupReadback(#[source] zbus::Error),
+    /// The manager could not reverse-map `ControlGroup` to its unit object.
+    #[error("failed to reverse-map the systemd attempt ControlGroup")]
+    CgroupReverseLookup(#[source] zbus::Error),
+    /// The manager-bound cgroup could not be safely opened or observed.
+    #[error(transparent)]
+    CgroupKernel(#[from] AttemptCgroupError),
     /// One typed systemd service property could not be read.
     #[error("failed to read systemd transient-unit property {property}")]
     PropertyReadback {
@@ -374,6 +387,96 @@ impl SystemdTransientUnitTransport {
         unit_name: TransientServiceUnitName,
     ) -> Result<(), SystemdTransientUnitTransportError> {
         force_kill_with_proxy(ManagerProxy::new(&self.connection).await, unit_name).await
+    }
+
+    /// Bind the exact verified attempt unit to its kernel cgroup before termination.
+    ///
+    /// This read-only operation verifies the manager-to-cgroup mapping in both
+    /// directions and retains the kernel handle. It does not prove enforcement,
+    /// process emptiness, or complete attempt cleanup.
+    ///
+    /// # Errors
+    /// Rejects unavailable, substituted, changed, malformed, or unsafe unit and
+    /// kernel cgroup identities.
+    pub async fn bind_cgroup(
+        &self,
+        verified: &SystemdVerifiedStart,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        self.bind_cgroup_with_root_result(verified, CgroupRoot::system())
+            .await
+    }
+
+    async fn bind_cgroup_with_root_result(
+        &self,
+        verified: &SystemdVerifiedStart,
+        root: Result<CgroupRoot, AttemptCgroupError>,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        let root = root?;
+        self.bind_cgroup_with_root(verified, root).await
+    }
+
+    async fn bind_cgroup_with_root(
+        &self,
+        verified: &SystemdVerifiedStart,
+        root: CgroupRoot,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        let manager = ManagerProxy::new(&self.connection)
+            .await
+            .map_err(SystemdTransientUnitTransportError::Proxy)?;
+        let current_unit = manager
+            .get_unit(verified.unit_name.as_str().to_owned())
+            .await
+            .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
+        if current_unit != verified.unit_path {
+            return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
+        }
+        let service = ServiceProxy::builder(&self.connection)
+            .path(verified.unit_path.clone())
+            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
+            // The second ControlGroup read must reach systemd, not a proxy cache.
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
+        let path = service
+            .control_group()
+            .await
+            .map_err(SystemdTransientUnitTransportError::CgroupReadback)?;
+        let reverse = manager
+            .get_unit_by_control_group(path.clone())
+            .await
+            .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
+        if reverse != verified.unit_path {
+            return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
+        }
+        let bound = BoundAttemptCgroup::open(
+            root,
+            verified.unit_name.clone(),
+            verified.unit_path.clone(),
+            path.clone(),
+        )?;
+        let reread = service
+            .control_group()
+            .await
+            .map_err(SystemdTransientUnitTransportError::CgroupReadback)?;
+        if reread != path {
+            return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
+        }
+        let reverse_again = manager
+            .get_unit_by_control_group(reread)
+            .await
+            .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
+        if reverse_again != verified.unit_path {
+            return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
+        }
+        let current_unit_again = manager
+            .get_unit(verified.unit_name.as_str().to_owned())
+            .await
+            .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
+        if current_unit_again != verified.unit_path {
+            return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
+        }
+        Ok(bound)
     }
 
     async fn start_with_prepared(
@@ -749,4 +852,5 @@ fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'s
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

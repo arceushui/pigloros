@@ -3,14 +3,22 @@
 //! This library does not implement the provider daemon or grant admission.
 //! The existing signed admission boundary must supply the selected SCS1 digest
 //! and architecture before these requested-state components are used.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 mod hardening;
+mod kernel_cgroup;
 mod system_bus;
 mod transient_unit;
+
+#[derive(Debug)]
+struct CgroupRoot(std::fs::File);
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
+};
+pub use kernel_cgroup::{
+    AttemptCgroupEmptyBasis, AttemptCgroupEmptyObservation, AttemptCgroupError, BoundAttemptCgroup,
 };
 pub use system_bus::{
     SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
