@@ -1773,6 +1773,31 @@ mod tests {
     }
 
     #[test]
+    fn verified_admission_accepts_each_declared_fidelity() {
+        let plugin_id = PluginId::new();
+        let closure = closure_for(plugin_id, WorkloadProfileV1::Interactive);
+        let owner = FixturePlugin {
+            id: plugin_id,
+            name: "fixture",
+            events: vec![
+                Kind::new("a.authoritative"),
+                Kind::new("b.derived"),
+                Kind::new("c.ephemeral"),
+            ],
+        }
+        .installed_owner_token();
+        let admission = OutputAdmissionV1::try_new_verified(plugin_id, "1.0.0", closure, owner)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        admission
+            .validate_batch(&[
+                draft("a.authoritative", b"a"),
+                draft("b.derived", b"b"),
+                draft("c.ephemeral", b"c"),
+            ])
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+    }
+
+    #[test]
     fn rejects_missing_declarations_and_identity_mismatches() {
         let plugin_id = PluginId::new();
         let budget = budget(plugin_id, 16, 2, 32, 100, [10, 10, 10]);
