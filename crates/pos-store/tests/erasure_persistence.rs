@@ -92,6 +92,7 @@ const fn transition() -> ErasureStateTransitionV1 {
 struct Host<S> {
     store: Rc<RefCell<S>>,
     targets: Vec<ErasureRequiredTargetV1>,
+    topology_override: Option<(ErasureReferenceV1, ErasureReferenceV1)>,
     verify_exact_retry: bool,
     fail_read_object: bool,
     manifest_sequence: Option<Rc<RefCell<VecDeque<pos_core::StoredErasureManifestV1>>>>,
@@ -330,12 +331,23 @@ impl<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1> ErasureCoo
         let request_topology = request_heads
             .iter()
             .map(|(request, manifest)| {
-                let bindings = topology
-                    .first()
-                    .copied()
-                    .map(|timeline| vec![(timeline, reference(9))])
-                    .unwrap_or_default();
-                let unaffected = topology.iter().copied().skip(1).collect();
+                let excludes_parent = self
+                    .topology_override
+                    .is_some_and(|(excluded_request, _)| excluded_request == *request);
+                let bindings = if excludes_parent {
+                    Vec::new()
+                } else {
+                    topology
+                        .first()
+                        .copied()
+                        .map(|timeline| vec![(timeline, reference(9))])
+                        .unwrap_or_default()
+                };
+                let unaffected = if excludes_parent {
+                    topology.clone()
+                } else {
+                    topology.iter().copied().skip(1).collect()
+                };
                 (
                     *request,
                     ErasureVerifiedTopologyObservationV1::new(*manifest, bindings, unaffected),
@@ -400,9 +412,13 @@ impl<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1> ErasureCoo
             policy: reference(6),
             trust: reference(8),
         })?;
+        let scope_members = self
+            .topology_override
+            .filter(|(overridden_request, _)| *overridden_request == request)
+            .map_or_else(|| vec![reference(9)], |(_, member)| vec![member]);
         let scope = ErasureScopeCommitmentInputV1 {
             request,
-            scope_members: vec![reference(9)],
+            scope_members,
             target_closure: target_closure_digest(&targets),
             lineage_rule: Some(reference(100)),
         };
@@ -503,6 +519,7 @@ fn complete_with_retry_validation<
         Host {
             store: Rc::clone(&shared),
             targets: vec![target],
+            topology_override: None,
             verify_exact_retry,
             fail_read_object: false,
             manifest_sequence: None,
@@ -617,6 +634,7 @@ fn assert_raw_backend<S: ErasurePersistencePortV1 + ErasureInventoryPersistenceP
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -638,6 +656,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePo
         Host {
             store: Rc::clone(&shared),
             targets: Vec::new(),
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -648,6 +667,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePo
         Host {
             store: shared,
             targets: Vec::new(),
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -739,6 +759,7 @@ where
         Host {
             store: Rc::clone(&shared),
             targets: vec![required_target],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -807,6 +828,7 @@ where
         Host {
             store: Rc::clone(&shared),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -888,6 +910,7 @@ where
         Host {
             store: Rc::clone(&shared),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -1092,10 +1115,23 @@ fn frozen_coordinator<S>(
 where
     S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
+    frozen_coordinator_with_topology_override(store, request, required_target, None)
+}
+
+fn frozen_coordinator_with_topology_override<S>(
+    store: Rc<RefCell<S>>,
+    request: &ErasureRequestV1,
+    required_target: ErasureRequiredTargetV1,
+    topology_override: Option<(ErasureReferenceV1, ErasureReferenceV1)>,
+) -> Result<ErasureCoordinatorStateMachineV1<Host<S>>, ErasureErrorV1>
+where
+    S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
         Host {
             store,
             targets: vec![required_target],
+            topology_override,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -1106,6 +1142,77 @@ where
     coordinator.authorize(request.reference(), reference(31))?;
     coordinator.freeze_inventory(request.reference(), &transition())?;
     Ok(coordinator)
+}
+
+fn assert_fork_scope_collision_with_unaffected_request_is_rejected<S>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    let _gate = bind_test_gate(&mut store)?;
+    let parent = store.create_timeline("fork-collision-parent")?.id();
+    store.append(
+        parent,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.collision.parent"),
+            pos_core::CanonicalBytes::from_vec(vec![1]),
+        )],
+    )?;
+    let shared = Rc::new(RefCell::new(store));
+    let affected_request = request()?;
+    let unaffected_request = overlapping_request()?;
+    let required_target = target();
+    let child_scope = reference(113);
+
+    let _affected = frozen_coordinator(Rc::clone(&shared), &affected_request, required_target)?;
+    let _unaffected = frozen_coordinator_with_topology_override(
+        Rc::clone(&shared),
+        &unaffected_request,
+        required_target,
+        Some((unaffected_request.reference(), child_scope)),
+    )?;
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![required_target],
+            topology_override: Some((unaffected_request.reference(), child_scope)),
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(114),
+        expected_inventory_generation: inventory.generation(),
+        child_scope,
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("colliding-unaffected-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::from_u64(1))),
+        },
+    };
+    let admission = prepare_overlap_admission(
+        &mut coordinator,
+        affected_request.reference(),
+        reference(115),
+        required_target,
+        child_scope,
+        &input,
+    )?;
+
+    assert_eq!(
+        inventory.prepare_fork_batch(input, vec![admission]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
 }
 
 fn overlapping_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
@@ -1512,6 +1619,12 @@ fn memory_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn memory_rejects_child_scope_already_in_an_unaffected_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_scope_collision_with_unaffected_request_is_rejected(MemoryStore::new())
+}
+
+#[test]
 fn memory_fork_admission_commits_every_overlapping_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_overlapping_fork_batch(MemoryStore::new())
@@ -1578,6 +1691,7 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
         Host {
             store: Rc::clone(&shared),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: true,
             manifest_sequence: None,
@@ -1596,6 +1710,7 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -1639,6 +1754,7 @@ fn memory_recovery_error_bound_rejects_without_partial_writes(
         Host {
             store: Rc::clone(&shared),
             targets: Vec::new(),
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: Some(Rc::new(RefCell::new(VecDeque::from(manifests)))),
@@ -1679,6 +1795,7 @@ fn retained_recovery_failure<S: ErasurePersistencePortV1 + ErasureInventoryPersi
         Host {
             store: Rc::clone(&shared),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: true,
             manifest_sequence: None,
@@ -1693,6 +1810,7 @@ fn retained_recovery_failure<S: ErasurePersistencePortV1 + ErasureInventoryPersi
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -1809,6 +1927,13 @@ fn sqlite_fork_exact_retry_survives_a_later_scope_manifest(
 #[test]
 fn sqlite_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error::Error>> {
     assert_duplicate_fork_scope_is_rejected(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rejects_child_scope_already_in_an_unaffected_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_scope_collision_with_unaffected_request_is_rejected(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
@@ -3706,6 +3831,7 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
         Host {
             store: Rc::new(RefCell::new(reopened)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -3750,6 +3876,7 @@ fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -3768,6 +3895,7 @@ fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -3814,6 +3942,7 @@ fn assert_sqlite_recovery_error_retention_failure(
         Host {
             store: Rc::new(RefCell::new(store)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: true,
             manifest_sequence: None,
@@ -3896,6 +4025,7 @@ fn sqlite_recovery_error_trigger_rollbacks_leave_no_partial_rows(
             Host {
                 store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
                 targets: vec![target()],
+                topology_override: None,
                 verify_exact_retry: false,
                 fail_read_object: true,
                 manifest_sequence: None,
@@ -3988,6 +4118,7 @@ fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dy
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -4030,6 +4161,7 @@ fn sqlite_recovery_rejects_a_missing_durable_attempt_effect(
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -4072,6 +4204,7 @@ fn sqlite_recovery_rejects_a_corrupted_durable_attempt_effect(
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
