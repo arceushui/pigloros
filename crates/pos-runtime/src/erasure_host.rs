@@ -2972,6 +2972,7 @@ mod tests {
                         ErasureProtectedOperationV1::Snapshot,
                         requested_use.range(),
                         requested_use.consumer_ids().to_vec(),
+                        Vec::new(),
                     ));
                     Ok(crate::world_replay::test_verified_world_replay(
                         closure,
@@ -3001,6 +3002,7 @@ mod tests {
             ErasureProtectedOperationV1::Read,
             pos_core::store::SeqRange::all(),
             vec!["count".to_owned()],
+            Vec::new(),
         ))
     }
 
@@ -3094,6 +3096,7 @@ mod tests {
             ErasureProtectedOperationV1::Read,
             pos_core::store::SeqRange::all(),
             vec!["count".to_owned()],
+            Vec::new(),
         ));
         assert_eq!(
             reads.admit_world_replay(&closure, &wrong_timeline_use),
@@ -3104,6 +3107,7 @@ mod tests {
             ErasureProtectedOperationV1::Read,
             pos_core::store::SeqRange::all(),
             vec!["unknown".to_owned()],
+            Vec::new(),
         ));
         assert_eq!(
             reads.admit_world_replay(&closure, &unknown_consumer_use),

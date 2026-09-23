@@ -123,6 +123,7 @@ fn comparison_use(
             .into_iter()
             .map(str::to_owned)
             .collect(),
+        Vec::new(),
     )
     .map_err(|_| CoreError::ArtifactUnavailable)
 }

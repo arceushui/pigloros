@@ -185,6 +185,7 @@ fn snapshot_use(
             .into_iter()
             .map(str::to_owned)
             .collect(),
+        Vec::new(),
     )
 }
 
