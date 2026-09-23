@@ -70,31 +70,32 @@ fn replay_range(
         Vec::new(),
     )
     .map_err(|_| CoreError::ArtifactUnavailable)?;
-    let mut outcome = Err(CoreError::ArtifactUnavailable);
-    let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = registry.try_with_state_transaction(|candidate| {
-            crate::require_world_replay(sender, closure, &requested_use).and_then(|read_bounds| {
-                crate::read_complete_world_replay(sender, timeline, range, read_bounds).and_then(
-                    |events| {
-                        candidate.fold_events(&events);
-                        crate::require_world_replay(sender, closure, &requested_use).and_then(
-                            |final_bounds| {
-                                if final_bounds == read_bounds {
-                                    Ok(events)
-                                } else {
-                                    Err(CoreError::ArtifactUnavailable)
-                                }
-                            },
-                        )
-                    },
-                )
-            })
-        });
-    };
-    sender
-        .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
-        .map_err(crate::host_error_to_core)
-        .and(outcome)
+    registry.try_with_state_transaction(|candidate| {
+        let mut outcome = Err(CoreError::ArtifactUnavailable);
+        let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
+            outcome = crate::require_world_replay(sender, closure, &requested_use).and_then(
+                |read_bounds| {
+                    crate::read_complete_world_replay(sender, timeline, range, read_bounds)
+                        .and_then(|events| {
+                            candidate.fold_events(&events);
+                            crate::require_world_replay(sender, closure, &requested_use).and_then(
+                                |final_bounds| {
+                                    if final_bounds == read_bounds {
+                                        Ok(events)
+                                    } else {
+                                        Err(CoreError::ArtifactUnavailable)
+                                    }
+                                },
+                            )
+                        })
+                },
+            );
+        };
+        sender
+            .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
+            .map_err(crate::host_error_to_core)
+            .and(outcome)
+    })
 }
 
 #[cfg(test)]
@@ -155,7 +156,7 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
@@ -681,6 +682,43 @@ mod tests {
     }
 
     #[test]
+    fn public_replay_rolls_back_when_the_post_effect_fence_fails() {
+        let poison_target = Arc::new(Mutex::new(None::<Arc<ErasureContainmentGateV1>>));
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(PoisonGateOnSecondVerification {
+                calls: AtomicUsize::new(0),
+                gate: Arc::clone(&poison_target),
+            }));
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("post-fence-replay").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        *poison_target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+
+        assert!(matches!(
+            super::replay(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(registry.state_for_reducer("count", &entity), None);
+    }
+
+    #[test]
     fn public_replay_rejects_empty_consumer_selection() {
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
@@ -805,7 +843,39 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct PoisonGateOnSecondVerification {
+        calls: AtomicUsize,
+        gate: Arc<Mutex<Option<Arc<ErasureContainmentGateV1>>>>,
+    }
+
     struct OneEventWorldReplayVerifier;
+
+    impl pos_runtime::WorldReplayVerifierV1 for PoisonGateOnSecondVerification {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                if let Some(gate) = self
+                    .gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    gate.poison();
+                }
+            }
+            Ok(pos_runtime::world_replay::test_verified_world_replay(
+                closure,
+                requested_use,
+                inventory_generation,
+                pos_core::ErasureReplayClaimV1::Exact,
+            ))
+        }
+    }
 
     impl pos_runtime::WorldReplayVerifierV1 for OneEventWorldReplayVerifier {
         fn verify(

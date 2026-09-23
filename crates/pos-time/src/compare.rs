@@ -53,55 +53,56 @@ pub fn compare(
             comparison_use(b, fork_seq, registry_b).map(|requested_b| [requested_a, requested_b])
         })?;
     let requested_uses = [&requested_a, &requested_b];
-    let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
-    let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
-    let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-            comparison_outcome = registry_a.try_with_state_transaction(|candidate_a| {
-                registry_b.try_with_state_transaction(|candidate_b| {
-                    require_comparison_artifacts(sender, closures, requested_uses).and_then(
-                        |read_bounds| {
-                            compare_with_sender(
-                                sender,
-                                a,
-                                b,
-                                fork_seq,
-                                candidate_a,
-                                candidate_b,
-                                read_bounds,
-                            )
-                            .and_then(|diff| {
-                                require_comparison_artifacts(sender, closures, requested_uses)
-                                    .and_then(|final_bounds| {
-                                        if final_bounds == read_bounds {
-                                            Ok(diff)
-                                        } else {
-                                            Err(CoreError::ArtifactUnavailable)
-                                        }
-                                    })
-                            })
-                        },
+    registry_a.try_with_state_transaction(|candidate_a| {
+        registry_b.try_with_state_transaction(|candidate_b| {
+            let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
+            let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
+            let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
+                let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
+                    comparison_outcome =
+                        require_comparison_artifacts(sender, closures, requested_uses).and_then(
+                            |read_bounds| {
+                                compare_with_sender(
+                                    sender,
+                                    a,
+                                    b,
+                                    fork_seq,
+                                    candidate_a,
+                                    candidate_b,
+                                    read_bounds,
+                                )
+                                .and_then(|diff| {
+                                    require_comparison_artifacts(sender, closures, requested_uses)
+                                        .and_then(|final_bounds| {
+                                            if final_bounds == read_bounds {
+                                                Ok(diff)
+                                            } else {
+                                                Err(CoreError::ArtifactUnavailable)
+                                            }
+                                        })
+                                })
+                            },
+                        );
+                };
+                second_timeline_fence_result = sender
+                    .with_protected_effect_fence(
+                        b,
+                        ErasureProtectedOperationV1::Export,
+                        &mut second_timeline_effect,
                     )
-                })
-            });
-        };
-        second_timeline_fence_result = sender
-            .with_protected_effect_fence(
-                b,
-                ErasureProtectedOperationV1::Export,
-                &mut second_timeline_effect,
-            )
-            .map_err(crate::host_error_to_core);
-    };
-    sender
-        .with_protected_effect_fence(
-            a,
-            ErasureProtectedOperationV1::Export,
-            &mut first_timeline_effect,
-        )
-        .map_err(crate::host_error_to_core)
-        .and(second_timeline_fence_result)
-        .and(comparison_outcome)
+                    .map_err(crate::host_error_to_core);
+            };
+            sender
+                .with_protected_effect_fence(
+                    a,
+                    ErasureProtectedOperationV1::Export,
+                    &mut first_timeline_effect,
+                )
+                .map_err(crate::host_error_to_core)
+                .and(second_timeline_fence_result)
+                .and(comparison_outcome)
+        })
+    })
 }
 
 fn require_comparison_artifacts(
