@@ -495,7 +495,6 @@ impl MemoryStore {
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
         self.erasure_topology_store_binding = None;
-        self.erasure_topology_requires_permit = false;
         self
     }
 

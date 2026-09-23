@@ -5450,7 +5450,8 @@ mod erasure_gate_coverage {
     #[test]
     fn with_erasure_gate_binds_the_shared_gate() {
         let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
-        let registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let registry_gate = Arc::clone(&gate);
+        let registry = PluginRegistry::new().with_erasure_gate(registry_gate);
         assert!(registry.clone_erasure_gate().is_some());
     }
 
