@@ -8945,7 +8945,7 @@ mod coverage_paths {
             reference(93),
             ErasureLifecycleV1::AccessFrozen,
         )?;
-        let affected_scope = affected
+        let affected_scope_commitment = affected
             .scope()
             .map(ErasureScopeCommitmentV1::reference)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
@@ -8977,7 +8977,7 @@ mod coverage_paths {
                     affected.clone(),
                     ErasureVerifiedTopologyProofV1::from_verified_recovery(
                         affected.manifest_digest(),
-                        vec![(parent, affected_scope)],
+                        vec![(parent, reference(93))],
                         Vec::new(),
                     ),
                 ),
@@ -9007,7 +9007,7 @@ mod coverage_paths {
         };
         let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
             request: affected.request().reference(),
-            scope_commitment: affected_scope,
+            scope_commitment: affected_scope_commitment,
             fork: child_scope,
             lineage_rule: reference(28),
             predecessor_extension: None,
@@ -9569,13 +9569,10 @@ mod coverage_paths {
         Ok(())
     }
 
-    fn assert_recovery_proof_rejects_oversized_effect(
+    fn assert_fork_admission_rejects_oversized_effect(
         input: &ErasureForkAdmissionInputV1,
         extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        let Some((parent, _)) = input.child.fork_point else {
-            return Err(ErasureErrorV1::PolicyConflict);
-        };
         let command = ErasureDestructionCommandV1 {
             obligation: reference(198),
             category: ErasureInventoryCategoryV1::Artifact,
@@ -9604,11 +9601,10 @@ mod coverage_paths {
             Vec::new(),
             oversized_effect,
         );
-        let admission = PreparedErasureForkAdmissionV1::new(input.clone(), *extension, mutation)?;
-        let successor =
-            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
-        let batch = PreparedErasureForkBatchV1::new(input.clone(), vec![admission], successor)?;
-        assert_eq!(batch.recovery_proof(), Err(ErasureErrorV1::ScopeInvalid));
+        assert_eq!(
+            PreparedErasureForkAdmissionV1::new(input.clone(), *extension, mutation),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
         Ok(())
     }
 
@@ -9703,7 +9699,7 @@ mod coverage_paths {
         assert_recovery_mutation_rejects_malformed_fields(mutation);
         assert_recovery_objects_and_indexes_reject_malformed_fields(mutation)?;
         assert_recovery_proof_rejects_oversized_admissions(&proof)?;
-        assert_recovery_proof_rejects_oversized_effect(&input, &extension)?;
+        assert_fork_admission_rejects_oversized_effect(&input, &extension)?;
         Ok(())
     }
 
