@@ -7065,12 +7065,6 @@ mod tests {
             inventory.clone().prepare_fork_batch(live, Vec::new()),
             Err(ErasureErrorV1::PolicyConflict)
         );
-        let mut stale = input.clone();
-        stale.expected_inventory_generation = ErasureReferenceV1::from_digest([8; 32]);
-        assert_eq!(
-            inventory.clone().prepare_fork_batch(stale, Vec::new()),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
         let mut existing = input.clone();
         existing.child.id = parent;
         assert_eq!(

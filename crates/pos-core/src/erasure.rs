@@ -8253,15 +8253,18 @@ mod coverage_paths {
     #[test]
     fn fork_batch_rejects_a_stale_predecessor_generation() -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
-        let current =
+        let unrelated = TimelineId::new();
+        let predecessor =
             ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
-        let stale =
-            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 3)?
-                .generation();
-        assert_ne!(current.generation(), stale);
+        let current = ErasureVerifiedInventoryV1::from_verified_recovery(
+            Vec::new(),
+            vec![parent, unrelated],
+            4,
+        )?;
+        assert_ne!(predecessor.generation(), current.generation());
         let input = ErasureForkAdmissionInputV1 {
             operation: reference(67),
-            expected_inventory_generation: stale,
+            expected_inventory_generation: predecessor.generation(),
             child_scope: reference(68),
             child: crate::TimelineMeta {
                 id: TimelineId::new(),
