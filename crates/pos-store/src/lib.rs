@@ -22,9 +22,8 @@
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
 //! | Verified identity | [`export_timeline_own`] | [`import_timeline_with_verified_signatures`] |
 //!
-//! Signatures cover the owner/role/epoch domain and **payload bytes only** (not
-//! event metadata). See
-//! [`import_timeline_with_verified_signatures`].
+//! Verified import delegates complete Timeline Event signature checks to the
+//! trusted host verifier. See [`import_timeline_with_verified_signatures`].
 //!
 //! # Backend features
 //!
@@ -575,30 +574,39 @@ where
         })?)
     };
     for event in &export.events {
-        if event.signature.is_none() {
-            return Err(CoreError::SignatureVerificationFailed);
-        }
-        let Some(identity) = event.signature_identity else {
-            return Err(CoreError::SignatureVerificationFailed);
-        };
-        if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning || identity.epoch == 0 {
-            return Err(CoreError::SignatureVerificationFailed);
-        }
-        let Some(public_key) = anchors.get(&identity) else {
-            return Err(CoreError::SignatureVerificationFailed);
-        };
-        let Some(record) = registry
-            .as_ref()
-            .and_then(|value| value.key_record(identity))
-        else {
-            return Err(CoreError::SignatureVerificationFailed);
-        };
-        if record.public_verification_key != Some(*public_key) {
-            return Err(CoreError::SignatureVerificationFailed);
-        }
-        verify_event(event, public_key)?;
+        verify_import_event(event, &anchors, registry.as_ref(), &mut verify_event)?;
     }
     import_timeline_with_id(store, export)
+}
+
+fn verify_import_event<F>(
+    event: &pos_core::Event,
+    anchors: &std::collections::BTreeMap<pos_core::KeyIdentityV1, pos_core::PublicKey>,
+    registry: Option<&pos_core::KeyRegistryStateV1>,
+    verify_event: &mut F,
+) -> Result<(), CoreError>
+where
+    F: FnMut(&pos_core::Event, &pos_core::PublicKey) -> Result<(), CoreError>,
+{
+    if event.signature.is_none() {
+        return Err(CoreError::SignatureVerificationFailed);
+    }
+    let Some(identity) = event.signature_identity else {
+        return Err(CoreError::SignatureVerificationFailed);
+    };
+    if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning || identity.epoch == 0 {
+        return Err(CoreError::SignatureVerificationFailed);
+    }
+    let Some(public_key) = anchors.get(&identity) else {
+        return Err(CoreError::SignatureVerificationFailed);
+    };
+    let Some(record) = registry.and_then(|value| value.key_record(identity)) else {
+        return Err(CoreError::SignatureVerificationFailed);
+    };
+    if record.public_verification_key != Some(*public_key) {
+        return Err(CoreError::SignatureVerificationFailed);
+    }
+    verify_event(event, public_key)
 }
 
 #[cfg(test)]

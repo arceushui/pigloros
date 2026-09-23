@@ -228,12 +228,17 @@ fn parse_public_key_hex(value: &str) -> Result<pos_core::PublicKey, CliError> {
         .as_slice()
         .try_into()
         .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
-    if crate::hex_encode(&array) != value {
+    require_canonical_public_key_hex(value, &array)?;
+    Ok(pos_core::PublicKey::from_bytes(array))
+}
+
+fn require_canonical_public_key_hex(value: &str, bytes: &[u8; 32]) -> Result<(), CliError> {
+    if crate::hex_encode(bytes) != value {
         return Err(CliError::BadKey(
             "--pubkey hex must use canonical lowercase encoding".to_owned(),
         ));
     }
-    Ok(pos_core::PublicKey::from_bytes(array))
+    Ok(())
 }
 
 fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
@@ -342,15 +347,20 @@ fn parse_supplied_public_keys(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    require_distinct_anchor_identities(&anchors)?;
+    Ok(Some(anchors))
+}
+
+fn require_distinct_anchor_identities(anchors: &[TrustedPublicKey]) -> Result<(), CliError> {
     let mut seen = std::collections::BTreeSet::new();
-    for anchor in &anchors {
+    for anchor in anchors {
         if !seen.insert(anchor.identity) {
             return Err(CliError::BadKey(
                 "--pubkey contains a duplicate owner/role/epoch identity".to_owned(),
             ));
         }
     }
-    Ok(Some(anchors))
+    Ok(())
 }
 
 fn verify_store_event(
