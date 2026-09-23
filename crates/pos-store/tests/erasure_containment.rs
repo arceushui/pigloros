@@ -177,11 +177,18 @@ fn assert_gate_removal_cannot_rebind<S: RemoveGate>(
     mut store: S,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let timeline = store.create_timeline("bound-then-removed")?;
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
     let mut removed = store.without_erasure_gate();
     let replacement =
         removed.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     assert!(replacement.is_err());
+    assert_eq!(
+        removed
+            .create_timeline("unpermitted-after-gate-removal")
+            .err()
+            .map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
     assert_eq!(
         removed
             .append(timeline.id(), &[draft()])
