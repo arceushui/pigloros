@@ -62,9 +62,7 @@ impl Source {
 /// # Errors
 /// Returns [`CliError::BadKey`] on read or hex-decode failure.
 fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> {
-    let encoded = zeroize::Zeroizing::new(
-        std::fs::read(path).map_err(|error| CliError::BadKey(error.to_string()))?,
-    );
+    let encoded = read_signing_key_bytes(path)?;
     let text = std::str::from_utf8(&encoded)
         .map_err(|error| CliError::BadKey(error.to_string()))?
         .trim();
@@ -76,6 +74,12 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
             .map_err(|_| CliError::BadKey("expected 32 bytes".to_owned()))?,
     );
     Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
+}
+
+fn read_signing_key_bytes(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, CliError> {
+    std::fs::read(path)
+        .map(zeroize::Zeroizing::new)
+        .map_err(|error| CliError::BadKey(error.to_string()))
 }
 
 fn register_initial_key(
@@ -270,8 +274,7 @@ fn find_ledger_timeline(store: &dyn pos_core::store::EventStore) -> Result<Timel
 /// Returns [`CliError`] on any failure. Used by `src/main.rs`.
 pub fn run(args: &[String]) -> Result<(), CliError> {
     match args.get(1).map(String::as_str) {
-        Some("keygen") => cmd_keygen(&args[2..]),
-        Some("destroy-key") => cmd_destroy_key(&args[2..]),
+        Some(command @ ("keygen" | "destroy-key")) => run_key_command(command, &args[2..]),
         Some("predict") => cmd_predict(&args[2..]),
         Some("resolve") => cmd_resolve(&args[2..]),
         Some("export") => cmd_export(&args[2..]),
@@ -298,6 +301,14 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             output_stderr!("  verify --source toml:DIR|store:DB [--pubkey BASE64URL-OWNER/ROLE-CODE/EPOCH=HEX,... (required trust anchor for store:)] [--manifest FILE]");
             Ok(())
         }
+    }
+}
+
+fn run_key_command(command: &str, args: &[String]) -> Result<(), CliError> {
+    if command == "keygen" {
+        cmd_keygen(args)
+    } else {
+        cmd_destroy_key(args)
     }
 }
 
