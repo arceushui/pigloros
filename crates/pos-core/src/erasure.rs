@@ -6989,7 +6989,11 @@ fn recovery_object_value(object: &ErasureForkRecoveryObjectV1) -> Value {
 
 fn recovery_index_value(index: &ErasureIndexInsertV1) -> Value {
     let (kind, ordinal, reference) = recovery_index_parts(*index);
-    Value::Array(vec![uint(kind), uint(ordinal), digest(reference)])
+    Value::Array(vec![
+        uint(u64::from(kind)),
+        uint(ordinal),
+        digest(reference),
+    ])
 }
 
 impl PreparedErasureCasV1 {
