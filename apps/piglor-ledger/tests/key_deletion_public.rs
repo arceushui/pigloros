@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use piglor_ledger::{open_store, run, Source};
@@ -52,6 +53,116 @@ fn authorized_store(database: &Path) -> Result<SqliteStore, Box<dyn std::error::
         ErasureContainmentGateV1::new_test_open(),
     ))?;
     Ok(store)
+}
+
+fn deletion_request(seed: &[u8; 32]) -> KeyDestructionRequestV1 {
+    KeyDestructionRequestV1::new(
+        KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1),
+        pos_crypto::key_roles::key_material_digest(seed),
+        Hash::from_bytes([7; 32]),
+    )
+}
+
+fn owned_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+#[test]
+fn deletion_rejects_unsafe_paths_and_file_shapes() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let request = deletion_request(&[9; 32]);
+    let key = directory.path().join("secret.key");
+
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(Path::new("/"), request).is_err());
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(directory.path(), request).is_err());
+
+    let missing_parent = directory.path().join("missing").join("secret.key");
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&missing_parent, request).is_err());
+
+    let link = directory.path().join("link.key");
+    std::os::unix::fs::symlink(&key, &link)?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&link, request).is_err());
+    std::fs::remove_file(&link)?;
+
+    owned_file(&key, b"00")?;
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644))?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::hard_link(&key, &link)?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    std::fs::remove_file(&link)?;
+
+    std::fs::write(&key, vec![b'0'; 129])?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    std::fs::write(&key, [0xff; 2])?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    std::fs::write(&key, b"not-hex")?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    std::fs::write(&key, b"00")?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    std::fs::write(&key, "08".repeat(32))?;
+    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
+    assert!(key.exists());
+
+    std::fs::write(&key, "09".repeat(32))?;
+    assert_eq!(
+        piglor_ledger::key_output::delete_owned_secret_key(&key, request)?,
+        pos_core::deletion_receipt(&request)
+    );
+    assert!(!key.exists());
+    Ok(())
+}
+
+#[test]
+fn destroy_key_rejects_invalid_flags_and_unknown_registry() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    let valid = destroy_args(&database, &key);
+    for flag in ["--source", "--key", "--epoch", "--authorization-digest"] {
+        let position = valid
+            .iter()
+            .position(|argument| argument == flag)
+            .ok_or("flag missing")?;
+        let mut args = valid.clone();
+        args.drain(position..=position + 1);
+        assert!(run(&args).is_err(), "{flag}");
+    }
+    for (flag, value) in [
+        ("--source", "toml:unused"),
+        ("--source", "invalid"),
+        ("--epoch", "invalid"),
+        ("--authorization-digest", "not-hex"),
+        ("--authorization-digest", "00"),
+    ] {
+        let mut args = valid.clone();
+        let position = args
+            .iter()
+            .position(|argument| argument == flag)
+            .ok_or("flag missing")?;
+        args[position + 1] = value.to_owned();
+        assert!(run(&args).is_err(), "{flag}={value}");
+    }
+    assert!(run(&valid).is_err());
+    make_key(&key)?;
+    drop(open_store(&Source::Store(database.clone()), Some(&key))?);
+    let mut unknown_epoch = valid;
+    let position = unknown_epoch
+        .iter()
+        .position(|argument| argument == "--epoch")
+        .ok_or("epoch flag missing")?;
+    unknown_epoch[position + 1] = "2".to_owned();
+    assert!(run(&unknown_epoch).is_err());
+    Ok(())
 }
 
 #[test]
