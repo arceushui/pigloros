@@ -239,7 +239,7 @@ fn parse_public_key_hex(value: &str) -> Result<pos_core::PublicKey, CliError> {
 fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
     let invalid =
         || CliError::BadKey("--pubkey owner must be canonical base64url_nopad".to_owned());
-    if value.is_empty() || value.len() > 171 || value.len() % 4 == 1 {
+    if value.is_empty() || value.len() > 172 || value.len() % 4 == 1 {
         return Err(invalid());
     }
     let mut bytes = Vec::with_capacity(value.len() * 3 / 4);
@@ -276,7 +276,7 @@ fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
             }
         }
     }
-    if remainder != 0 || bytes.is_empty() || bytes.len() > 128 {
+    if remainder != 0 {
         return Err(invalid());
     }
     let owner = String::from_utf8(bytes).map_err(|_| invalid())?;
@@ -456,11 +456,19 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let key = "aa".repeat(32);
         let valid = format!("bGVkZ2VyLW93bmVy/2/1={key}");
+        let all_valid = format!("{valid},8J-YgA/2/1={key},4L-_/2/1={key}");
         let anchors =
-            parse_supplied_public_keys(Some(&valid))?.ok_or("parsed anchor set missing")?;
-        assert_eq!(anchors.len(), 1);
+            parse_supplied_public_keys(Some(&all_valid))?.ok_or("parsed anchor set missing")?;
+        assert_eq!(anchors.len(), 3);
         assert_eq!(anchors[0].identity.owner_id.as_str(), "ledger-owner");
+        assert_eq!(anchors[1].identity.owner_id.as_str(), "😀");
+        assert_eq!(anchors[2].identity.owner_id.as_str(), "࿿");
         for invalid in [
+            format!("/2/1={key}"),
+            format!("{}/2/1={key}", "A".repeat(173)),
+            format!("{}/2/1={key}", "A".repeat(172)),
+            format!("AAAAA/2/1={key}"),
+            format!("_w/2/1={key}"),
             format!("ledger-owner/2/1={key}"),
             format!("bGVkZ2VyLW93bmVy=/2/1={key}"),
             format!("YR/2/1={key}"),
