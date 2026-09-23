@@ -87,7 +87,7 @@ impl CgroupRoot {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(root: File) -> Self {
+    pub(crate) const fn for_test(root: File) -> Self {
         Self(root)
     }
 }

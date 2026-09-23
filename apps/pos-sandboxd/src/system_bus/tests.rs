@@ -423,14 +423,15 @@ impl RecordingService {
     fn control_group(&self) -> fdo::Result<String> {
         let reads = self.control_group_reads.fetch_add(1, Ordering::SeqCst);
         match self.control_group_behavior {
-            ControlGroupBehavior::Stable => Ok(self.control_group.clone()),
             ControlGroupBehavior::Reject => Err(fdo::Error::Failed(
                 "test ControlGroup read failure".to_owned(),
             )),
             ControlGroupBehavior::ChangeOnSecondRead if reads > 0 => {
                 Ok("/system.slice/substituted.service".to_owned())
             }
-            ControlGroupBehavior::ChangeOnSecondRead => Ok(self.control_group.clone()),
+            ControlGroupBehavior::Stable | ControlGroupBehavior::ChangeOnSecondRead => {
+                Ok(self.control_group.clone())
+            }
         }
     }
 
@@ -1187,8 +1188,9 @@ async fn cgroup_binding_rejects_invalid_and_missing_kernel_paths() -> Result<(),
             .ok_or("invalid or missing cgroup was accepted")?;
         assert!(matches!(
             error,
-            SystemdTransientUnitTransportError::CgroupKernel(AttemptCgroupError::InvalidPath)
-                | SystemdTransientUnitTransportError::CgroupKernel(AttemptCgroupError::PathOpen(_))
+            SystemdTransientUnitTransportError::CgroupKernel(
+                AttemptCgroupError::InvalidPath | AttemptCgroupError::PathOpen(_)
+            )
         ));
     }
     Ok(())
@@ -1210,12 +1212,9 @@ async fn started_cgroup_transport(
     fs::create_dir_all(&directory)?;
     fs::write(directory.join("cgroup.events"), b"populated 0\nfrozen 0\n")?;
     let (transport, server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
-    let verified = transport
-        .start(
-            TransientServiceUnitName::from_attempt_id([0x10; 16])?,
-            request(LaunchMode::AirGapped)?,
-        )
-        .await?;
+    let unit_name = TransientServiceUnitName::from_attempt_id([0x10; 16])?;
+    let launch_request = request(LaunchMode::AirGapped)?;
+    let verified = transport.start(unit_name, launch_request).await?;
     Ok((transport, server, verified, temporary))
 }
 
