@@ -4,9 +4,9 @@ use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use zvariant::{Fd, OwnedFd};
 
 use crate::{
-    SystemCallFilter, SystemdHardeningProperty, SystemdHardeningReadbackValue,
-    SystemdHardeningValue, SystemdOperatingLimitProperty, SystemdTransientUnitPropertyAccess,
-    SystemdTransientUnitPropertyKind, TransientUnitHardening,
+    SystemCallFilter, SystemdDynamicPropertyKind, SystemdHardeningProperty,
+    SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdOperatingLimitProperty,
+    SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind, TransientUnitHardening,
 };
 
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
@@ -181,6 +181,24 @@ impl TransientUnitLaunchInputs {
     }
 }
 
+/// An exact D-Bus numeric requested-state value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemdTransientUnitNumericValue {
+    /// One exact ELM1-derived D-Bus `t` service limit.
+    OperatingLimit(u64),
+    /// A D-Bus `u` descriptor-store limit.
+    FileDescriptorStoreMax(u32),
+}
+
+impl SystemdTransientUnitNumericValue {
+    const fn dbus_signature(self) -> &'static str {
+        match self {
+            Self::OperatingLimit(_) => "t",
+            Self::FileDescriptorStoreMax(_) => "u",
+        }
+    }
+}
+
 /// One D-Bus requested-state value in the closed transient-unit bundle.
 #[derive(Debug)]
 pub enum SystemdTransientUnitValue {
@@ -194,10 +212,8 @@ pub enum SystemdTransientUnitValue {
     SystemCallFilter((bool, Vec<String>)),
     /// A D-Bus `(bas)` address-family value.
     RestrictAddressFamilies((bool, Vec<String>)),
-    /// One exact ELM1-derived D-Bus `t` service limit.
-    OperatingLimit(u64),
-    /// A D-Bus `u` descriptor-store limit.
-    FileDescriptorStoreMax(u32),
+    /// A D-Bus `t` or `u` numeric property with its exact semantic type.
+    Numeric(SystemdTransientUnitNumericValue),
     /// A D-Bus `a(hs)` descriptor array: Unix FD before descriptor name.
     ExtraFileDescriptors(Vec<(OwnedFd, String)>),
 }
@@ -212,8 +228,7 @@ impl SystemdTransientUnitValue {
             Self::RestrictAddressFamilies(value) => {
                 Ok(Self::RestrictAddressFamilies(value.clone()))
             }
-            Self::OperatingLimit(value) => Ok(Self::OperatingLimit(*value)),
-            Self::FileDescriptorStoreMax(value) => Ok(Self::FileDescriptorStoreMax(*value)),
+            Self::Numeric(value) => Ok(Self::Numeric(*value)),
             Self::ExtraFileDescriptors(value) => value
                 .iter()
                 .map(|(descriptor, name)| {
@@ -259,8 +274,7 @@ impl SystemdTransientUnitProperty {
             SystemdTransientUnitValue::BindReadOnlyPaths(_) => "a(ssbt)",
             SystemdTransientUnitValue::SystemCallFilter(_)
             | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
-            SystemdTransientUnitValue::OperatingLimit(_) => "t",
-            SystemdTransientUnitValue::FileDescriptorStoreMax(_) => "u",
+            SystemdTransientUnitValue::Numeric(value) => value.dbus_signature(),
             SystemdTransientUnitValue::ExtraFileDescriptors(_) => "a(hs)",
         }
     }
@@ -273,7 +287,9 @@ impl SystemdTransientUnitProperty {
         observed.name == self.name()
             && match (&self.value, &observed.value) {
                 (
-                    SystemdTransientUnitValue::FileDescriptorStoreMax(expected),
+                    SystemdTransientUnitValue::Numeric(
+                        SystemdTransientUnitNumericValue::FileDescriptorStoreMax(expected),
+                    ),
                     SystemdTransientUnitReadbackValue::U32(actual),
                 ) => expected == actual,
                 (
@@ -297,7 +313,9 @@ impl SystemdTransientUnitProperty {
                     SystemdTransientUnitReadbackValue::BoolStringArray(actual),
                 ) => expected == actual,
                 (
-                    SystemdTransientUnitValue::OperatingLimit(expected),
+                    SystemdTransientUnitValue::Numeric(
+                        SystemdTransientUnitNumericValue::OperatingLimit(expected),
+                    ),
                     SystemdTransientUnitReadbackValue::U64(actual),
                 ) => expected == actual,
                 (
@@ -497,11 +515,15 @@ impl TransientUnitRequest {
             ));
             if *property == SystemdHardeningProperty::TypeExec {
                 properties.push(SystemdTransientUnitProperty::new(
-                    SystemdTransientUnitPropertyKind::RootDirectory,
+                    SystemdTransientUnitPropertyKind::Dynamic(
+                        SystemdDynamicPropertyKind::RootDirectory,
+                    ),
                     SystemdTransientUnitValue::RootDirectory(root_directory.as_str().to_owned()),
                 ));
                 properties.push(SystemdTransientUnitProperty::new(
-                    SystemdTransientUnitPropertyKind::BindReadOnlyPaths,
+                    SystemdTransientUnitPropertyKind::Dynamic(
+                        SystemdDynamicPropertyKind::BindReadOnlyPaths,
+                    ),
                     SystemdTransientUnitValue::BindReadOnlyPaths(vec![(
                         launcher_source.as_str().to_owned(),
                         LAUNCHER_DESTINATION.to_owned(),
@@ -512,29 +534,43 @@ impl TransientUnitRequest {
             }
             if *property == SystemdHardeningProperty::SystemCallArchitectures {
                 properties.push(SystemdTransientUnitProperty::new(
-                    SystemdTransientUnitPropertyKind::SystemCallFilter,
+                    SystemdTransientUnitPropertyKind::Dynamic(
+                        SystemdDynamicPropertyKind::SystemCallFilter,
+                    ),
                     SystemdTransientUnitValue::SystemCallFilter(
                         system_call_filter.requested_property(),
                     ),
                 ));
                 properties.push(SystemdTransientUnitProperty::new(
-                    SystemdTransientUnitPropertyKind::RestrictAddressFamilies,
+                    SystemdTransientUnitPropertyKind::Dynamic(
+                        SystemdDynamicPropertyKind::RestrictAddressFamilies,
+                    ),
                     SystemdTransientUnitValue::RestrictAddressFamilies(address_families.clone()),
                 ));
             }
         }
         properties.extend(SystemdOperatingLimitProperty::ALL.map(|limit| {
             SystemdTransientUnitProperty::new(
-                SystemdTransientUnitPropertyKind::OperatingLimit(limit),
-                SystemdTransientUnitValue::OperatingLimit(service_limits.value(limit)),
+                SystemdTransientUnitPropertyKind::Dynamic(
+                    SystemdDynamicPropertyKind::OperatingLimit(limit),
+                ),
+                SystemdTransientUnitValue::Numeric(
+                    SystemdTransientUnitNumericValue::OperatingLimit(service_limits.value(limit)),
+                ),
             )
         }));
         properties.push(SystemdTransientUnitProperty::new(
-            SystemdTransientUnitPropertyKind::FileDescriptorStoreMax,
-            SystemdTransientUnitValue::FileDescriptorStoreMax(0),
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::FileDescriptorStoreMax,
+            ),
+            SystemdTransientUnitValue::Numeric(
+                SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
+            ),
         ));
         properties.push(SystemdTransientUnitProperty::new(
-            SystemdTransientUnitPropertyKind::ExtraFileDescriptors,
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::ExtraFileDescriptors,
+            ),
             SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
         ));
         Self {
@@ -604,7 +640,9 @@ mod tests {
     #[test]
     fn property_clone_propagates_value_failure() {
         let result = SystemdTransientUnitProperty::from_cloned_value(
-            SystemdTransientUnitPropertyKind::FileDescriptorStoreMax,
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::FileDescriptorStoreMax,
+            ),
             Err(zvariant::Error::IncorrectType),
         );
         assert!(matches!(result, Err(zvariant::Error::IncorrectType)));

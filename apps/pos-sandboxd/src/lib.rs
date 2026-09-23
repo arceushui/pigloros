@@ -29,8 +29,8 @@ pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,
     SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
     SystemdTransientUnitProperty, SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue,
-    SystemdTransientUnitValue, TransientUnitLaunchInputs, TransientUnitRequest,
-    TransientUnitRequestError,
+    SystemdTransientUnitNumericValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
+    TransientUnitRequest, TransientUnitRequestError,
 };
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
@@ -84,6 +84,12 @@ impl SystemdOperatingLimitProperty {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SystemdTransientUnitPropertyKind {
     Hardening(SystemdHardeningProperty),
+    Dynamic(SystemdDynamicPropertyKind),
+}
+
+/// Per-attempt property identity, distinct from fixed hardening.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemdDynamicPropertyKind {
     RootDirectory,
     BindReadOnlyPaths,
     SystemCallFilter,
@@ -97,6 +103,14 @@ impl SystemdTransientUnitPropertyKind {
     const fn name(self) -> &'static str {
         match self {
             Self::Hardening(property) => property.name(),
+            Self::Dynamic(property) => property.name(),
+        }
+    }
+}
+
+impl SystemdDynamicPropertyKind {
+    const fn name(self) -> &'static str {
+        match self {
             Self::RootDirectory => "RootDirectory",
             Self::BindReadOnlyPaths => "BindReadOnlyPaths",
             Self::SystemCallFilter => "SystemCallFilter",

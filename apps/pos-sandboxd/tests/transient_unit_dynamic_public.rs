@@ -5,8 +5,9 @@ use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit
 use pos_sandboxd::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter, SystemdManagerReadback,
     SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
-    SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
-    TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
+    SystemdTransientUnitNumericValue, SystemdTransientUnitReadback,
+    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
+    TransientUnitRequest, TransientUnitRequestError,
 };
 use zvariant::{serialized::Context, to_bytes, OwnedFd, Type, LE};
 
@@ -133,7 +134,9 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
     match properties[40].value() {
-        SystemdTransientUnitValue::FileDescriptorStoreMax(value) => {
+        SystemdTransientUnitValue::Numeric(
+            SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value),
+        ) => {
             let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
             let (decoded, consumed): (u32, usize) = encoded.deserialize()?;
             assert_eq!(decoded, *value);
@@ -173,7 +176,9 @@ fn elm1_service_limit_values_have_exact_dbus_encoding() -> Result<(), Box<dyn Er
             .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
     {
         match property.value() {
-            SystemdTransientUnitValue::OperatingLimit(value) => {
+            SystemdTransientUnitValue::Numeric(
+                SystemdTransientUnitNumericValue::OperatingLimit(value),
+            ) => {
                 let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
                 let (decoded, consumed): (u64, usize) = encoded.deserialize()?;
                 assert_eq!(decoded, expected);
@@ -564,7 +569,9 @@ fn exact_readback(
                 SystemdTransientUnitValue::RestrictAddressFamilies(value) => {
                     SystemdTransientUnitReadbackValue::BoolStringArray(value.clone())
                 }
-                SystemdTransientUnitValue::OperatingLimit(value) => {
+                SystemdTransientUnitValue::Numeric(
+                    SystemdTransientUnitNumericValue::OperatingLimit(value),
+                ) => {
                     SystemdTransientUnitReadbackValue::U64(*value)
                 }
                 SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
@@ -572,7 +579,9 @@ fn exact_readback(
                         value.iter().map(|(_, name)| name.clone()).collect(),
                     )
                 }
-                SystemdTransientUnitValue::FileDescriptorStoreMax(value) => {
+                SystemdTransientUnitValue::Numeric(
+                    SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value),
+                ) => {
                     SystemdTransientUnitReadbackValue::U32(*value)
                 }
             };

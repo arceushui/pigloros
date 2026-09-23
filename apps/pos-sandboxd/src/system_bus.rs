@@ -7,7 +7,7 @@ use zbus::{proxy::CacheProperties, zvariant::OwnedObjectPath, Connection};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
-use crate::SystemdOperatingLimitProperty;
+use crate::{SystemdDynamicPropertyKind, SystemdOperatingLimitProperty};
 use crate::{
     AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
     SystemdHardeningReadbackValue, SystemdHardeningValue, SystemdManagerReadback,
@@ -677,32 +677,43 @@ async fn read_property(
         SystemdTransientUnitPropertyKind::Hardening(property) => read_hardening(service, property)
             .await
             .map(SystemdTransientUnitReadbackValue::Static),
-        SystemdTransientUnitPropertyKind::RootDirectory => service
+        SystemdTransientUnitPropertyKind::Dynamic(property) => {
+            read_dynamic_property(service, property).await
+        }
+    }
+}
+
+async fn read_dynamic_property(
+    service: &ServiceProxy<'_>,
+    kind: SystemdDynamicPropertyKind,
+) -> Result<SystemdTransientUnitReadbackValue, zbus::Error> {
+    match kind {
+        SystemdDynamicPropertyKind::RootDirectory => service
             .root_directory()
             .await
             .map(SystemdTransientUnitReadbackValue::String),
-        SystemdTransientUnitPropertyKind::BindReadOnlyPaths => service
+        SystemdDynamicPropertyKind::BindReadOnlyPaths => service
             .bind_read_only_paths()
             .await
             .map(SystemdTransientUnitReadbackValue::BindReadOnlyPaths),
-        SystemdTransientUnitPropertyKind::SystemCallFilter => service
+        SystemdDynamicPropertyKind::SystemCallFilter => service
             .system_call_filter()
             .await
             .map(SystemdTransientUnitReadbackValue::BoolStringArray),
-        SystemdTransientUnitPropertyKind::RestrictAddressFamilies => service
+        SystemdDynamicPropertyKind::RestrictAddressFamilies => service
             .restrict_address_families()
             .await
             .map(SystemdTransientUnitReadbackValue::BoolStringArray),
-        SystemdTransientUnitPropertyKind::OperatingLimit(property) => {
+        SystemdDynamicPropertyKind::OperatingLimit(property) => {
             read_operating_limit(service, property)
                 .await
                 .map(SystemdTransientUnitReadbackValue::U64)
         }
-        SystemdTransientUnitPropertyKind::FileDescriptorStoreMax => service
+        SystemdDynamicPropertyKind::FileDescriptorStoreMax => service
             .file_descriptor_store_max()
             .await
             .map(SystemdTransientUnitReadbackValue::U32),
-        SystemdTransientUnitPropertyKind::ExtraFileDescriptors => service
+        SystemdDynamicPropertyKind::ExtraFileDescriptors => service
             .extra_file_descriptor_names()
             .await
             .map(SystemdTransientUnitReadbackValue::StringArray),
@@ -861,8 +872,14 @@ impl SystemdTransientUnitValue {
             Self::SystemCallFilter(value) | Self::RestrictAddressFamilies(value) => {
                 Value::from(value)
             }
-            Self::OperatingLimit(value) => Value::from(value),
-            Self::FileDescriptorStoreMax(value) => Value::from(value),
+            Self::Numeric(value) => match value {
+                crate::SystemdTransientUnitNumericValue::OperatingLimit(value) => {
+                    Value::from(value)
+                }
+                crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value) => {
+                    Value::from(value)
+                }
+            },
             Self::ExtraFileDescriptors(value) => extra_file_descriptors_value(value),
         }
     }

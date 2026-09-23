@@ -1588,7 +1588,9 @@ fn descriptor() -> Result<OwnedFd, std::io::Error> {
 }
 
 fn value() -> SystemdTransientUnitValue {
-    SystemdTransientUnitValue::FileDescriptorStoreMax(1)
+    SystemdTransientUnitValue::Numeric(
+        crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(1),
+    )
 }
 
 #[test]
