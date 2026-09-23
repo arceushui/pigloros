@@ -5041,10 +5041,15 @@ impl ErasureVerifiedInventoryV1 {
                         .any(|(request, _)| *request == admission.mutation.request())
                     || self.members.iter().any(|(state, _)| {
                         state.request().reference() == admission.mutation.request()
-                            && state
+                            && (state.scope().is_some_and(|scope| {
+                                // A Fork scope cannot reuse a base member identity;
+                                // retries must distinguish the original extension
+                                // from direct membership in that immutable scope.
+                                scope.scope_members().contains(&input.child_scope)
+                            }) || state
                                 .scope_extensions()
                                 .iter()
-                                .any(|extension| extension.fork() == input.child_scope)
+                                .any(|extension| extension.fork() == input.child_scope))
                     })
             })
         {

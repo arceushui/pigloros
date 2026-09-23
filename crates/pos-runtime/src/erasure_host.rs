@@ -4202,7 +4202,6 @@ mod tests {
     #[derive(Default)]
     struct RejectedCoordinatorAuthorityV1 {
         unaffected: std::sync::Mutex<Vec<TimelineId>>,
-        candidate_metadata: std::sync::Mutex<Vec<TimelineMeta>>,
         candidate_missing: std::sync::atomic::AtomicBool,
     }
 
@@ -4256,10 +4255,6 @@ mod tests {
             manifest_digest: ErasureReferenceV1,
             candidate: &TimelineMeta,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-            self.candidate_metadata
-                .lock()
-                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
-                .push(candidate.clone());
             if self
                 .candidate_missing
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -4879,66 +4874,6 @@ mod tests {
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::ProvenanceMissing)
-        );
-    }
-
-    #[test]
-    fn hosted_coordinator_port_includes_a_verified_candidate_in_the_observation() {
-        let authority = RejectedCoordinatorAuthorityV1::default();
-        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
-        let candidate = TimelineMeta::forked_from(
-            TimelineId::new(),
-            Seq::from_u64(7),
-            "verified-fork-candidate",
-        );
-        let candidate_id = candidate.id;
-        let port = HostedCoordinatorPortV1::new(&mut store, &authority)
-            .with_topology_candidate(&candidate);
-        let observation = port
-            .complete_erasure_inventory_observation(4)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(
-            observation,
-            ErasureInventoryObservationV1::new(
-                vec![(reference(34), reference(35))],
-                vec![candidate_id],
-                vec![(
-                    reference(34),
-                    ErasureVerifiedTopologyObservationV1::new(
-                        reference(35),
-                        Vec::new(),
-                        vec![candidate_id],
-                    ),
-                )],
-            )
-        );
-        assert_eq!(
-            *authority
-                .candidate_metadata
-                .lock()
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
-            vec![candidate]
-        );
-    }
-
-    #[test]
-    fn hosted_coordinator_port_inserts_a_candidate_into_existing_topology() {
-        let authority = RejectedCoordinatorAuthorityV1::default();
-        let mut store = MemoryStore::new().without_erasure_gate();
-        let existing = store
-            .create_timeline("existing-topology")
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let candidate = TimelineMeta::root("candidate-root");
-        let mut expected = vec![existing.id(), candidate.id];
-        expected.sort_unstable();
-        let port = HostedCoordinatorPortV1::new(&mut store, &authority)
-            .with_topology_candidate(&candidate);
-        let observation = port
-            .complete_erasure_inventory_observation(4)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(
-            observation,
-            ErasureInventoryObservationV1::new(Vec::new(), expected, Vec::new())
         );
     }
 

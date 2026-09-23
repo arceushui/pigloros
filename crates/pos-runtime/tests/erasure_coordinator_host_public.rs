@@ -121,6 +121,7 @@ fn coordinator_composition_rejects_zero_identity_at_every_public_entry() {
 struct TestAuthority {
     timelines: Mutex<Vec<(TimelineId, ErasureReferenceV1)>>,
     unaffected_timelines: Mutex<Vec<TimelineId>>,
+    candidate_metadata: Mutex<Vec<TimelineMeta>>,
     frozen: AtomicBool,
     deny_authentication: AtomicBool,
     deny_topology: AtomicBool,
@@ -144,6 +145,7 @@ impl Default for TestAuthority {
         Self {
             timelines: Mutex::new(Vec::new()),
             unaffected_timelines: Mutex::new(Vec::new()),
+            candidate_metadata: Mutex::new(Vec::new()),
             frozen: AtomicBool::new(false),
             deny_authentication: AtomicBool::new(false),
             deny_topology: AtomicBool::new(false),
@@ -296,6 +298,10 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
         manifest_digest: ErasureReferenceV1,
         candidate: &TimelineMeta,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
+        self.candidate_metadata
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .push(candidate.clone());
         self.topology(request, manifest_digest, Some(candidate.id))
             .map(Some)
     }
@@ -892,6 +898,14 @@ fn assert_active_unaffected_topology_parity(
             .map(|timeline| timeline.id()),
         Some(child.id())
     );
+    let candidates = test_stage(
+        "read topology candidates passed to authority",
+        authority
+            .candidate_metadata
+            .lock()
+            .map(|candidates| candidates.clone()),
+    )?;
+    assert_eq!(candidates, vec![root.meta.clone(), child.meta.clone()]);
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
 }

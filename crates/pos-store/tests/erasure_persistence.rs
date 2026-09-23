@@ -928,6 +928,38 @@ where
         inventory.prepare_fork_batch(input, vec![admission]),
         Err(ErasureErrorV1::PolicyConflict)
     );
+
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let base_member_child_scope = reference(9);
+    let base_member_input = ErasureForkAdmissionInputV1 {
+        operation: reference(111),
+        expected_inventory_generation: inventory.generation(),
+        child_scope: base_member_child_scope,
+        child: TimelineMeta {
+            id: TimelineId::new(),
+            mode: TimelineMode::Historical,
+            name: Some("base-member-scope-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::ZERO)),
+        },
+    };
+    let base_member_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: previous_extension.scope_commitment(),
+        fork: base_member_child_scope,
+        lineage_rule: previous_extension.lineage_rule(),
+        predecessor_extension: Some(previous_extension.reference()),
+        admission_provenance: reference(112),
+    })?;
+    let base_member_admission = coordinator.prepare_fork_admission(
+        request,
+        base_member_extension,
+        base_member_input.clone(),
+    )?;
+    assert_eq!(
+        inventory.prepare_fork_batch(base_member_input, vec![base_member_admission]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     assert_eq!(shared.borrow().scope_index_count(request)?, 1);
     assert_eq!(
         shared
