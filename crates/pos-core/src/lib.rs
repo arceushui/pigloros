@@ -39,6 +39,7 @@ pub mod state;
 pub mod store;
 pub mod timeline;
 pub mod world_artifact;
+pub mod world_closure_binding;
 pub mod world_consumer_set;
 pub mod world_transform;
 
@@ -46,6 +47,10 @@ pub use world_artifact::{
     WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
     WorldArtifactLeafInputV1, WorldArtifactLeafV1, MAX_WORLD_ARTIFACT_CHILDREN_V1,
     MAX_WORLD_ARTIFACT_KEYS_V1, MAX_WORLD_ARTIFACT_LEAF_BYTES_V1,
+};
+pub use world_closure_binding::{
+    WorldClosureBindingErrorV1, WorldClosureBindingInputV1, WorldClosureBindingV1,
+    WorldClosureCutCoordinateV1, WorldClosureReadLimitsV1, MAX_WORLD_CLOSURE_BINDING_BYTES_V1,
 };
 
 // Re-export commonly used types at the crate root.
