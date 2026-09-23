@@ -1185,6 +1185,28 @@ impl WorldDriver {
         Ok(())
     }
 
+    fn decode_configured_action(
+        &self,
+        payload: &CanonicalBytes,
+    ) -> Result<(WorldActionV1, (f32, f32)), RuntimeError> {
+        WorldActionV1::decode_with_params(payload)
+            .map_err(|error| RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                reason: error.to_string(),
+            })
+            .and_then(|(action, velocity)| {
+                if action.catalogue_version == self.config.actuator_catalogue_version {
+                    Ok((action, velocity))
+                } else {
+                    Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: "action catalogue version differs from pinned world configuration"
+                            .to_owned(),
+                    })
+                }
+            })
+    }
+
     fn config_draft(&mut self) -> Result<Option<pos_core::event::EventDraft>, RuntimeError> {
         if self.config_emitted {
             return Ok(None);
@@ -1211,20 +1233,7 @@ impl WorldDriver {
             {
                 continue;
             }
-            let (action, velocity) =
-                WorldActionV1::decode_with_params(&event.payload).map_err(|error| {
-                    RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                        reason: error.to_string(),
-                    }
-                })?;
-            if action.catalogue_version != self.config.actuator_catalogue_version {
-                return Err(RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                    reason: "action catalogue version differs from pinned world configuration"
-                        .to_owned(),
-                });
-            }
+            let (action, velocity) = self.decode_configured_action(&event.payload)?;
             if !Self::apply_action_to_entities(&mut self.entities, &action, velocity) {
                 return Err(RuntimeError::InvalidPayload {
                     event_type: EVENT_TYPE_ACTION_V1.to_owned(),
@@ -1369,20 +1378,7 @@ impl Driver for WorldDriver {
                 continue;
             };
             if event_type == EVENT_TYPE_ACTION_V1 {
-                let (action, velocity) =
-                    WorldActionV1::decode_with_params(payload).map_err(|error| {
-                        RuntimeError::InvalidPayload {
-                            event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                            reason: error.to_string(),
-                        }
-                    })?;
-                if action.catalogue_version != self.config.actuator_catalogue_version {
-                    return Err(RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                        reason: "action catalogue version differs from pinned world configuration"
-                            .to_owned(),
-                    });
-                }
+                let (action, velocity) = self.decode_configured_action(payload)?;
                 if !Self::apply_action_to_entities(&mut restored.entities, &action, velocity) {
                     return Err(RuntimeError::InvalidPayload {
                         event_type: EVENT_TYPE_ACTION_V1.to_owned(),
