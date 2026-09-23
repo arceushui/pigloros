@@ -108,6 +108,7 @@ struct ManagerBehavior {
     subscription: SubscriptionBehavior,
     reject: bool,
     unit_lookup: UnitLookupBehavior,
+    unit_lookups: Arc<AtomicUsize>,
     cgroup_lookup: CgroupLookupBehavior,
     cgroup_lookups: Arc<Mutex<Vec<String>>>,
     result: String,
@@ -130,6 +131,7 @@ enum UnitLookupBehavior {
     #[default]
     Resolve,
     Reject,
+    RejectAfterFirst,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -138,6 +140,8 @@ enum CgroupLookupBehavior {
     Resolve,
     Reject,
     Substitute,
+    RejectOnSecond,
+    SubstituteOnSecond,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -153,6 +157,7 @@ impl Default for ManagerBehavior {
             subscription: SubscriptionBehavior::default(),
             reject: false,
             unit_lookup: UnitLookupBehavior::default(),
+            unit_lookups: Arc::new(AtomicUsize::new(0)),
             cgroup_lookup: CgroupLookupBehavior::default(),
             cgroup_lookups: Arc::new(Mutex::new(Vec::new())),
             result: "done".to_owned(),
@@ -339,7 +344,13 @@ impl RecordingManager {
     #[zbus(name = "GetUnit")]
     fn get_unit(&self, name: String) -> fdo::Result<OwnedObjectPath> {
         let _ = (&self.observed, name);
-        if matches!(self.behavior.unit_lookup, UnitLookupBehavior::Reject) {
+        let lookup_index = self.behavior.unit_lookups.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.behavior.unit_lookup, UnitLookupBehavior::Reject)
+            || (matches!(
+                self.behavior.unit_lookup,
+                UnitLookupBehavior::RejectAfterFirst
+            ) && lookup_index > 0)
+        {
             return Err(fdo::Error::Failed("test lookup rejection".to_owned()));
         }
         OwnedObjectPath::try_from(UNIT_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
@@ -347,19 +358,36 @@ impl RecordingManager {
 
     #[zbus(name = "GetUnitByControlGroup")]
     fn get_unit_by_control_group(&self, path: String) -> fdo::Result<OwnedObjectPath> {
-        self.behavior
-            .cgroup_lookups
-            .lock()
-            .map_err(|error| fdo::Error::Failed(error.to_string()))?
-            .push(path);
-        let unit = match self.behavior.cgroup_lookup {
-            CgroupLookupBehavior::Resolve => UNIT_PATH,
-            CgroupLookupBehavior::Reject => {
-                return Err(fdo::Error::Failed(
-                    "test cgroup lookup rejection".to_owned(),
-                ));
-            }
-            CgroupLookupBehavior::Substitute => UNRELATED_UNIT_PATH,
+        let lookup_number = {
+            let mut lookups = self
+                .behavior
+                .cgroup_lookups
+                .lock()
+                .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+            lookups.push(path);
+            lookups.len()
+        };
+        if matches!(self.behavior.cgroup_lookup, CgroupLookupBehavior::Reject)
+            || (matches!(
+                self.behavior.cgroup_lookup,
+                CgroupLookupBehavior::RejectOnSecond
+            ) && lookup_number > 1)
+        {
+            return Err(fdo::Error::Failed(
+                "test cgroup lookup rejection".to_owned(),
+            ));
+        }
+        let unit = if matches!(
+            self.behavior.cgroup_lookup,
+            CgroupLookupBehavior::Substitute
+        ) || (matches!(
+            self.behavior.cgroup_lookup,
+            CgroupLookupBehavior::SubstituteOnSecond
+        ) && lookup_number > 1)
+        {
+            UNRELATED_UNIT_PATH
+        } else {
+            UNIT_PATH
         };
         OwnedObjectPath::try_from(unit).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
@@ -390,6 +418,7 @@ enum ControlGroupBehavior {
     #[default]
     Stable,
     Reject,
+    RejectAfter(Arc<AtomicUsize>),
     ChangeAfter(Arc<AtomicUsize>),
 }
 
@@ -426,6 +455,15 @@ impl RecordingService {
             ControlGroupBehavior::Reject => Err(fdo::Error::Failed(
                 "test ControlGroup read failure".to_owned(),
             )),
+            ControlGroupBehavior::RejectAfter(threshold) => {
+                if reads >= threshold.load(Ordering::SeqCst) {
+                    Err(fdo::Error::Failed(
+                        "test ControlGroup read failure".to_owned(),
+                    ))
+                } else {
+                    Ok(self.control_group.clone())
+                }
+            }
             ControlGroupBehavior::ChangeAfter(threshold) => {
                 let path = if reads >= threshold.load(Ordering::SeqCst) {
                     "/system.slice/substituted.service"
@@ -1096,6 +1134,47 @@ async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<
 }
 
 #[tokio::test]
+async fn fixed_mount_binding_rejects_absent_attempt_cgroup() -> Result<(), Box<dyn Error>> {
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server, verified, _temporary) =
+        started_cgroup_transport(ManagerBehavior::default(), service).await?;
+    let error = transport
+        .bind_cgroup(&verified)
+        .await
+        .err()
+        .ok_or("absent attempt cgroup was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::CgroupKernel(AttemptCgroupError::PathOpen(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cgroup_binding_rejects_lost_unit_lookup() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        unit_lookup: UnitLookupBehavior::RejectAfterFirst,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server, verified, temporary) =
+        started_cgroup_transport(behavior, service).await?;
+    let error = transport
+        .bind_cgroup_with_root(
+            &verified,
+            CgroupRoot::for_test(File::open(temporary.path())?),
+        )
+        .await
+        .err()
+        .ok_or("lost unit lookup was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::UnitLookup(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn cgroup_binding_rejects_unit_substitution_before_property_read(
 ) -> Result<(), Box<dyn Error>> {
     let service = RecordingService::exact(expected_system_call_filter()?);
@@ -1126,6 +1205,8 @@ async fn cgroup_binding_rejects_reverse_lookup_failure_and_substitution(
     for cgroup_lookup in [
         CgroupLookupBehavior::Reject,
         CgroupLookupBehavior::Substitute,
+        CgroupLookupBehavior::RejectOnSecond,
+        CgroupLookupBehavior::SubstituteOnSecond,
     ] {
         let behavior = ManagerBehavior {
             cgroup_lookup,
@@ -1189,6 +1270,28 @@ async fn cgroup_binding_rejects_service_read_failure_and_change() -> Result<(), 
     assert!(matches!(
         error,
         SystemdTransientUnitTransportError::CgroupUnitMismatch
+    ));
+    assert_eq!(reads.load(Ordering::SeqCst), reads_before_binding + 2);
+
+    let threshold = Arc::new(AtomicUsize::new(usize::MAX));
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    let reads = Arc::clone(&service.control_group_reads);
+    service.control_group_behavior = ControlGroupBehavior::RejectAfter(Arc::clone(&threshold));
+    let (transport, _server, verified, temporary) =
+        started_cgroup_transport(ManagerBehavior::default(), service).await?;
+    let reads_before_binding = reads.load(Ordering::SeqCst);
+    threshold.store(reads_before_binding + 1, Ordering::SeqCst);
+    let error = transport
+        .bind_cgroup_with_root(
+            &verified,
+            CgroupRoot::for_test(File::open(temporary.path())?),
+        )
+        .await
+        .err()
+        .ok_or("second ControlGroup read failure was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::CgroupReadback(_)
     ));
     assert_eq!(reads.load(Ordering::SeqCst), reads_before_binding + 2);
     Ok(())

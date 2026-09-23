@@ -836,4 +836,5 @@ fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'s
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
