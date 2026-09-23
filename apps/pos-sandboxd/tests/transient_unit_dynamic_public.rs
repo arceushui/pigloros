@@ -132,9 +132,10 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("SystemCallFilter must have a (bas) value".into()),
     }
-    for (property, expected) in properties[33..40]
-        .iter()
-        .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
+    for (property, expected) in
+        properties[33..40]
+            .iter()
+            .zip([134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096])
     {
         match property.value() {
             SystemdTransientUnitValue::OperatingLimit(value) => {
@@ -504,7 +505,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         descriptor()?,
     );
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
-    Ok(TransientUnitRequest::compile(inputs, filter, limits))
+    Ok(TransientUnitRequest::compile(inputs, filter, &limits))
 }
 
 fn complete_effective_limits() -> Vec<SandboxLimit> {

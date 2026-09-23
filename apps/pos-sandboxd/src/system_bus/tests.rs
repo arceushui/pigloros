@@ -1562,7 +1562,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         descriptor()?,
     );
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
-    Ok(TransientUnitRequest::compile(inputs, filter, limits))
+    Ok(TransientUnitRequest::compile(inputs, filter, &limits))
 }
 
 fn complete_effective_limits() -> Vec<SandboxLimit> {

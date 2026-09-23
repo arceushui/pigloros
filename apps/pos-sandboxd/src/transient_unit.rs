@@ -17,7 +17,7 @@ const ELM1_LIMIT_COUNT: usize = 17;
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SystemdOperatingLimitProperty {
+pub(super) enum SystemdOperatingLimitProperty {
     MemoryMax,
     MemorySwapMax,
     TasksMax,
@@ -28,7 +28,7 @@ pub(crate) enum SystemdOperatingLimitProperty {
 }
 
 impl SystemdOperatingLimitProperty {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 7] = [
         Self::MemoryMax,
         Self::MemorySwapMax,
         Self::TasksMax,
@@ -38,7 +38,7 @@ impl SystemdOperatingLimitProperty {
         Self::LimitFsize,
     ];
 
-    pub(crate) const fn name(self) -> &'static str {
+    pub(super) const fn name(self) -> &'static str {
         match self {
             Self::MemoryMax => "MemoryMax",
             Self::MemorySwapMax => "MemorySwapMax",
@@ -109,7 +109,9 @@ impl SystemdServiceLimits {
         let mut requested = [0; 7];
         for (id, limit) in limits.iter().take(requested.len()).enumerate() {
             if limit.value == u64::MAX || ([0, 2, 3, 4].contains(&id) && limit.value == 0) {
-                return Err(SystemdServiceLimitsError::UnenforceableLimit(limit.limit_id));
+                return Err(SystemdServiceLimitsError::UnenforceableLimit(
+                    limit.limit_id,
+                ));
             }
             requested[id] = limit.value;
         }
@@ -469,7 +471,7 @@ impl TransientUnitRequest {
     pub fn compile(
         inputs: TransientUnitLaunchInputs,
         system_call_filter: SystemCallFilter,
-        service_limits: SystemdServiceLimits,
+        service_limits: &SystemdServiceLimits,
     ) -> Self {
         let TransientUnitLaunchInputs {
             root_directory,
