@@ -1,5 +1,5 @@
 //! CLI parsing, source translation, and subcommand dispatch for
-//! `piglor-ledger keygen|predict|resolve|export|build|verify`
+//! `piglor-ledger keygen|destroy-key|predict|resolve|export|build|verify`
 //! (ADR-017 Decision 4).
 //!
 //! All dispatch is testable through [`run`] using `&[String]` args — the
@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use pos_core::{
-    ids::TimelineId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    ids::TimelineId, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
 };
 use pos_crypto::chain::Blake3Hasher;
 use pos_crypto::{
@@ -61,11 +62,19 @@ impl Source {
 /// # Errors
 /// Returns [`CliError::BadKey`] on read or hex-decode failure.
 fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> {
-    let text = std::fs::read_to_string(path).map_err(|e| CliError::BadKey(e.to_string()))?;
-    let text = text.trim();
-    let bytes = hex_decode(text).map_err(|e| CliError::BadKey(format!("hex decode: {e}")))?;
-    let arr = <[u8; 32]>::try_from(bytes.as_slice())
-        .map_err(|_| CliError::BadKey("expected 32 bytes".to_owned()))?;
+    let encoded = zeroize::Zeroizing::new(
+        std::fs::read(path).map_err(|error| CliError::BadKey(error.to_string()))?,
+    );
+    let text = std::str::from_utf8(&encoded)
+        .map_err(|error| CliError::BadKey(error.to_string()))?
+        .trim();
+    let bytes = zeroize::Zeroizing::new(
+        hex_decode(text).map_err(|error| CliError::BadKey(format!("hex decode: {error}")))?,
+    );
+    let arr = zeroize::Zeroizing::new(
+        <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| CliError::BadKey("expected 32 bytes".to_owned()))?,
+    );
     Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
 }
 
@@ -120,16 +129,46 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
             let key_path = key.ok_or_else(|| {
                 CliError::BadSource("store: source requires --key <path>".to_owned())
             })?;
-            let signing_key = load_signing_key(key_path)?;
             let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
                 crate::HostedLedgerStore::open(StoreConfig::Sqlite {
                     path: db.to_string_lossy().into_owned(),
                 })
                 .map_err(|error| CliError::BadSource(error.to_string()))?,
             );
-            let persisted_registry = event_store
+            let mut persisted_registry = event_store
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
+            if let Some(registry) = &persisted_registry {
+                if registry
+                    .active_key(&ledger_owner_id(), KeyRoleV1::TimelineIntegritySigning)
+                    .is_none()
+                {
+                    let pending: Vec<_> = registry
+                        .pending_destruction_requests()
+                        .filter(|request| {
+                            request.identity.owner_id == ledger_owner_id()
+                                && request.identity.role == KeyRoleV1::TimelineIntegritySigning
+                        })
+                        .collect();
+                    if pending.len() > 1 {
+                        return Err(CliError::BadSource(
+                            "multiple pending ledger keys require explicit recovery".to_owned(),
+                        ));
+                    }
+                    if let Some(request) = pending.first().copied() {
+                        crate::key_output::destroy_owned_secret_key(
+                            event_store.as_mut(),
+                            key_path,
+                            request,
+                        )
+                        .map_err(|error| CliError::BadSource(error.to_string()))?;
+                        persisted_registry = event_store
+                            .load_key_registry()
+                            .map_err(|error| CliError::BadSource(error.to_string()))?;
+                    }
+                }
+            }
+            let signing_key = load_signing_key(key_path)?;
             let (registry_state, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
             let timeline_id = event_store
@@ -232,6 +271,7 @@ fn find_ledger_timeline(store: &dyn pos_core::store::EventStore) -> Result<Timel
 pub fn run(args: &[String]) -> Result<(), CliError> {
     match args.get(1).map(String::as_str) {
         Some("keygen") => cmd_keygen(&args[2..]),
+        Some("destroy-key") => cmd_destroy_key(&args[2..]),
         Some("predict") => cmd_predict(&args[2..]),
         Some("resolve") => cmd_resolve(&args[2..]),
         Some("export") => cmd_export(&args[2..]),
@@ -242,9 +282,14 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         _ => {
-            output_stderr!("Usage: piglor-ledger <keygen|predict|resolve|export|build|verify>");
+            output_stderr!(
+                "Usage: piglor-ledger <keygen|destroy-key|predict|resolve|export|build|verify>"
+            );
             output_stderr!(
                 "  keygen --out <path>  (Unix only; path must be private and git-ignored)"
+            );
+            output_stderr!(
+                "  destroy-key --source store:DB --key PATH --epoch N --authorization-digest HEX"
             );
             output_stderr!("  predict --source toml:DIR|store:DB [--key <path>] --title T --statement S --predicted-outcome O --confidence 0..1 --made-at TS --resolve-by DATE --osf URL [--scenario NAME]");
             output_stderr!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
@@ -279,7 +324,8 @@ fn require<'a>(args: &'a [String], name: &str) -> Result<&'a str, CliError> {
 fn cmd_keygen(args: &[String]) -> Result<(), CliError> {
     require(args, "--out").map(PathBuf::from).and_then(|out| {
         let (sk, vk) = generate_keypair();
-        crate::key_output::write_new_secret_key(&out, hex_encode(&sk.to_bytes()).as_bytes()).map(
+        let encoded = zeroize::Zeroizing::new(hex_encode(sk.as_bytes()));
+        crate::key_output::write_new_secret_key(&out, encoded.as_bytes()).map(
             |()| {
                 output_stdout!(
                     "wrote secret key to {} (public key: {})",
@@ -295,6 +341,50 @@ fn cmd_keygen(args: &[String]) -> Result<(), CliError> {
             },
         )
     })
+}
+
+fn cmd_destroy_key(args: &[String]) -> Result<(), CliError> {
+    let Source::Store(db) = Source::parse(require(args, "--source")?)? else {
+        return Err(CliError::BadSource(
+            "destroy-key requires a store: source".to_owned(),
+        ));
+    };
+    let key_path = PathBuf::from(require(args, "--key")?);
+    let epoch = require(args, "--epoch")?
+        .parse::<u64>()
+        .map_err(|error| CliError::BadSource(format!("invalid key epoch: {error}")))?;
+    let authorization = hex_decode(require(args, "--authorization-digest")?)
+        .map_err(|error| CliError::BadSource(format!("invalid authorization digest: {error}")))?;
+    let authorization = <[u8; 32]>::try_from(authorization.as_slice())
+        .map_err(|_| CliError::BadSource("authorization digest must be 32 bytes".to_owned()))?;
+    let identity = KeyIdentityV1::from_parts(
+        ledger_owner_id(),
+        KeyRoleV1::TimelineIntegritySigning,
+        epoch,
+    );
+    let mut store = crate::HostedLedgerStore::open(StoreConfig::Sqlite {
+        path: db.to_string_lossy().into_owned(),
+    })
+    .map_err(|error| CliError::BadSource(error.to_string()))?;
+    let registry = store
+        .load_key_registry()
+        .map_err(|error| CliError::BadSource(error.to_string()))?
+        .ok_or_else(|| CliError::BadSource("durable key registry is unavailable".to_owned()))?;
+    let material_digest = registry
+        .key_record(identity)
+        .and_then(|record| record.private_material_digest)
+        .or_else(|| {
+            registry
+                .tombstone(identity)
+                .map(|tombstone| tombstone.destroyed_material_digest)
+        })
+        .ok_or_else(|| CliError::BadSource("ledger key identity is unavailable".to_owned()))?;
+    let request =
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes(authorization));
+    crate::key_output::destroy_owned_secret_key(&mut store, &key_path, request)
+        .map_err(|error| CliError::BadSource(error.to_string()))?;
+    output_stdout!("destroyed ledger signing key {}", identity.epoch);
+    Ok(())
 }
 
 fn cmd_predict(args: &[String]) -> Result<(), CliError> {
