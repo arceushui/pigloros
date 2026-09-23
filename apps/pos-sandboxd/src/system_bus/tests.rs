@@ -267,7 +267,10 @@ impl RecordingManager {
             });
         let job = OwnedObjectPath::try_from(STOP_JOB_PATH)
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
-        if matches!(self.behavior.start_job_signal, StartJobSignalBehavior::Canceled) {
+        if matches!(
+            self.behavior.start_job_signal,
+            StartJobSignalBehavior::Canceled
+        ) {
             Self::job_removed(
                 &emitter,
                 381,
