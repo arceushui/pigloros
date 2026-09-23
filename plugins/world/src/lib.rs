@@ -2,11 +2,10 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-world` — spatial + embodiment plugin (rapier-free stub for Wave 5).
+//! `pos-plugin-world` — spatial + embodiment plugin with a swappable backend.
 //!
 //! Owns versioned World action, observation and configuration Events and entity kind `"world-body"`.
-//! For Wave 5 we build the interface and a simple 2D position model (no rapier dependency —
-//! rapier is deferred to Wave 6 when we need 3D physics).
+//! The built-in backend integrates a 3D pose without a Rapier dependency.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use num_traits::ToPrimitive;
@@ -711,8 +710,8 @@ pub trait WorldBackend: Send + Sync {
     /// Human-readable name for this backend.
     fn name(&self) -> &'static str;
 
-    /// Simulate one step and return observations for all bodies.
-    fn step(&self, bodies: &[Body]) -> Vec<WorldObservation>;
+    /// Simulate one pinned-duration step and return body observations.
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation>;
 }
 
 /// A body in the world.
@@ -721,16 +720,22 @@ pub struct Body {
     pub entity_id: EntityId,
     pub x: f64,
     pub y: f64,
+    pub z: f64,
     pub vx: f64,
     pub vy: f64,
+    pub vz: f64,
 }
 
-/// An observation of a body's position.
+/// An observation of a body's position and linear velocity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldObservation {
     pub entity_id: EntityId,
     pub x: f64,
     pub y: f64,
+    pub z: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub vz: f64,
 }
 
 /// A world body represented by a core-owned named ENU coordinate.
@@ -800,7 +805,7 @@ impl WorldCoordinateObservation {
 // Built-in backend: SimpleKinematicBackend
 // ---------------------------------------------------------------------------
 
-/// Simple Euler integration: x += vx, y += vy per step (no physics).
+/// Simple Euler integration of three-dimensional velocity over the pinned step.
 #[derive(Default)]
 pub struct SimpleKinematicBackend;
 
@@ -842,13 +847,18 @@ impl WorldBackend for SimpleKinematicBackend {
         "simple-kinematic"
     }
 
-    fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        let seconds = f64::from(timestep_micros) / 1_000_000.0;
         bodies
             .iter()
             .map(|body| WorldObservation {
                 entity_id: body.entity_id,
-                x: body.x + body.vx,
-                y: body.y + body.vy,
+                x: body.x + body.vx * seconds,
+                y: body.y + body.vy * seconds,
+                z: body.z + body.vz * seconds,
+                vx: body.vx,
+                vy: body.vy,
+                vz: body.vz,
             })
             .collect()
     }
@@ -1085,17 +1095,17 @@ impl WorldDriver {
         else {
             return false;
         };
-        let Some((vx, vy)) = decode_velocity_params(&action.params_cbor) else {
+        let Some((vx, vz)) = decode_velocity_params(&action.params_cbor) else {
             return false;
         };
         match action.action_kind {
             ActionKindV1::Impulse => {
                 body.vx += f64::from(vx);
-                body.vy += f64::from(vy);
+                body.vz += f64::from(vz);
             }
             ActionKindV1::TargetVelocity => {
                 body.vx = f64::from(vx);
-                body.vy = f64::from(vy);
+                body.vz = f64::from(vz);
             }
         }
         true
@@ -1198,14 +1208,17 @@ impl WorldDriver {
                         Self::checked_f32(observation.y, "y")?,
                         self.config.sensor_min_resolution_mm,
                     ),
-                    pos_z: 0.0,
+                    pos_z: Self::quantize_sensor(
+                        Self::checked_f32(observation.z, "z")?,
+                        self.config.sensor_min_resolution_mm,
+                    ),
                     orient_w: 1.0,
                     orient_x: 0.0,
                     orient_y: 0.0,
                     orient_z: 0.0,
-                    vel_lin_x: 0.0,
-                    vel_lin_y: 0.0,
-                    vel_lin_z: 0.0,
+                    vel_lin_x: Self::checked_f32(observation.vx, "vx")?,
+                    vel_lin_y: Self::checked_f32(observation.vy, "vy")?,
+                    vel_lin_z: Self::checked_f32(observation.vz, "vz")?,
                     vel_ang_x: 0.0,
                     vel_ang_y: 0.0,
                     vel_ang_z: 0.0,
@@ -1334,6 +1347,10 @@ impl Driver for WorldDriver {
                 {
                     body.x = f64::from(observation.pos_x);
                     body.y = f64::from(observation.pos_y);
+                    body.z = f64::from(observation.pos_z);
+                    body.vx = f64::from(observation.vel_lin_x);
+                    body.vy = f64::from(observation.vel_lin_y);
+                    body.vz = f64::from(observation.vel_lin_z);
                 }
                 restored.tick = restored.tick.max(observation.tick.saturating_add(1));
                 restored.step_index = restored
@@ -1393,7 +1410,9 @@ impl Driver for WorldDriver {
         }
         self.apply_observed_actions(observations.events())?;
 
-        let step_obs = self.backend.step(&self.entities);
+        let step_obs = self
+            .backend
+            .step(&self.entities, self.config.timestep_micros);
         for obs in &step_obs {
             if let Some(body) = self
                 .entities
@@ -1402,6 +1421,10 @@ impl Driver for WorldDriver {
             {
                 body.x = obs.x;
                 body.y = obs.y;
+                body.z = obs.z;
+                body.vx = obs.vx;
+                body.vy = obs.vy;
+                body.vz = obs.vz;
             }
         }
 
@@ -1616,7 +1639,7 @@ mod tests {
 
     fn sample_config() -> WorldConfigV1 {
         WorldConfigV1 {
-            timestep_micros: 16_667,
+            timestep_micros: 1_000_000,
             coord_convention: 0,
             gravity_x: 0.0,
             gravity_y: -9.81,
@@ -1651,13 +1674,17 @@ mod tests {
             "non-finite-test-backend"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
                     x: f64::NAN,
                     y: body.y,
+                    z: body.z,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
                 })
                 .collect()
         }
@@ -1670,13 +1697,17 @@ mod tests {
             "y-non-finite-test-backend"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
                     x: body.x,
                     y: f64::NAN,
+                    z: body.z,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
                 })
                 .collect()
         }
@@ -1689,13 +1720,17 @@ mod tests {
             "out-of-range-test-backend"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
                     x: f64::MAX,
                     y: body.y,
+                    z: body.z,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
                 })
                 .collect()
         }
@@ -1725,8 +1760,10 @@ mod tests {
                 entity_id: entity,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(NonFiniteBackend),
             sample_config(),
@@ -1747,8 +1784,10 @@ mod tests {
                 entity_id: entity,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(YNonFiniteBackend),
             sample_config(),
@@ -1769,8 +1808,10 @@ mod tests {
                 entity_id: entity,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(OutOfRangeBackend),
             sample_config(),
@@ -2601,8 +2642,10 @@ mod tests {
                             entity_id: body,
                             x: 0.0,
                             y: 0.0,
+                            z: 0.0,
                             vx: 0.0,
                             vy: 0.0,
+                            vz: 0.0,
                         }],
                         Box::new(SimpleKinematicBackend::new()),
                         sample_config(),
@@ -2767,8 +2810,10 @@ mod tests {
                         entity_id: body,
                         x: 0.0,
                         y: 0.0,
+                        z: 0.0,
                         vx: 0.0,
                         vy: 0.0,
+                        vz: 0.0,
                     }],
                     Box::new(SimpleKinematicBackend::new()),
                     sample_config(),
@@ -2950,11 +2995,13 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 2.0,
+            vz: 0.0,
         }];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].entity_id, entity);
         assert!((observations[0].x - 1.0).abs() < f64::EPSILON);
@@ -2972,19 +3019,23 @@ mod tests {
                 entity_id: entity1,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 1.0,
                 vy: 0.0,
+                vz: 0.0,
             },
             Body {
                 entity_id: entity2,
                 x: 10.0,
                 y: 10.0,
+                z: 0.0,
                 vx: -1.0,
                 vy: -1.0,
+                vz: 0.0,
             },
         ];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 2);
         assert!((observations[0].x - 1.0).abs() < f64::EPSILON);
         assert!((observations[0].y - 0.0).abs() < f64::EPSILON);
@@ -3085,8 +3136,10 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3115,8 +3168,10 @@ mod tests {
             entity_id: entity,
             x: 5.0,
             y: 10.0,
+            z: 0.0,
             vx: 2.0,
             vy: 3.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3143,8 +3198,10 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3166,11 +3223,15 @@ mod tests {
             "unknown-entity"
         }
 
-        fn step(&self, _bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, _bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             vec![WorldObservation {
                 entity_id: EntityId::new(),
                 x: 9.0,
                 y: 9.0,
+                z: 9.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
             }]
         }
     }
@@ -3185,19 +3246,27 @@ mod tests {
             "mixed-entity"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             let mut out: Vec<WorldObservation> = bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
                     x: body.x + body.vx,
                     y: body.y + body.vy,
+                    z: body.z + body.vz,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
                 })
                 .collect();
             out.push(WorldObservation {
                 entity_id: self.extra,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
             });
             out
         }
@@ -3213,8 +3282,10 @@ mod tests {
             entity_id: known,
             x: 1.0,
             y: 2.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let mut driver =
             WorldDriver::new(vec![body], Box::new(UnknownEntityBackend), sample_config());
@@ -3238,8 +3309,10 @@ mod tests {
             entity_id: known,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 2.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3371,22 +3444,28 @@ mod tests {
             entity_id: entity,
             x: 1.0,
             y: 2.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let b2 = Body {
             entity_id: entity,
             x: 1.0,
             y: 2.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let b3 = Body {
             entity_id: entity,
             x: 3.0,
             y: 4.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         assert_eq!(b1, b2);
         assert_ne!(b1, b3);
@@ -3400,16 +3479,28 @@ mod tests {
             entity_id: entity,
             x: 1.0,
             y: 2.0,
+            z: 3.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
         };
         let o2 = WorldObservation {
             entity_id: entity,
             x: 1.0,
             y: 2.0,
+            z: 3.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
         };
         let o3 = WorldObservation {
             entity_id: entity,
             x: 3.0,
             y: 4.0,
+            z: 5.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
         };
         assert_eq!(o1, o2);
         assert_ne!(o1, o3);
@@ -3441,11 +3532,13 @@ mod tests {
             entity_id: entity,
             x: 5.0,
             y: 7.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         }];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 1);
         assert!((observations[0].x - 5.0).abs() < f64::EPSILON);
         assert!((observations[0].y - 7.0).abs() < f64::EPSILON);
@@ -3460,11 +3553,13 @@ mod tests {
             entity_id: entity,
             x: 10.0,
             y: 10.0,
+            z: 0.0,
             vx: -2.0,
             vy: -3.0,
+            vz: 0.0,
         }];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 1);
         assert!((observations[0].x - 8.0).abs() < f64::EPSILON);
         assert!((observations[0].y - 7.0).abs() < f64::EPSILON);
@@ -3480,8 +3575,10 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3508,8 +3605,10 @@ mod tests {
                 entity_id: entity,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 1.5,
                 vy: -0.5,
+                vz: 0.0,
             };
 
             // With resolution_mm=100 (0.1m), both 1.5 and -0.5 are exact multiples.
@@ -3561,8 +3660,10 @@ mod tests {
                 entity_id: entity,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 1.0,
                 vy: 0.0,
+                vz: 0.0,
             };
             let mut driver = WorldDriver::new(
                 vec![body],
@@ -3634,8 +3735,10 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3643,7 +3746,7 @@ mod tests {
             sample_config(),
         );
 
-        // Impulse (+0.5, +2.0): resulting vx=1.5, vy=2.0 → backend step: x=1.5, y=2.0.
+        // Impulse changes X/Z velocity; vertical Y remains unchanged.
         let action = WorldActionV1 {
             actor_entity_id: EntityId::new(),
             body_entity_id: entity,
@@ -3666,9 +3769,13 @@ mod tests {
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
-        // 100 mm quantization; 1.5 m and 2.0 m are exact multiples of 0.1 m.
+        // Position floor does not apply to velocity.
         assert!((obs.pos_x - 1.5_f32).abs() < 0.15);
-        assert!((obs.pos_y - 2.0_f32).abs() < 0.15);
+        assert!((obs.pos_z - 2.0_f32).abs() < 0.15);
+        assert_eq!(obs.pos_y, 0.0);
+        assert_eq!(obs.vel_lin_x, 1.5);
+        assert_eq!(obs.vel_lin_y, 0.0);
+        assert_eq!(obs.vel_lin_z, 2.0);
 
         // The host supplies the complete committed prefix on every Tick. The
         // same impulse must not be applied a second time when that prefix is
@@ -3684,7 +3791,8 @@ mod tests {
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         assert!((obs.pos_x - 3.0_f32).abs() < 0.15);
-        assert!((obs.pos_y - 4.0_f32).abs() < 0.15);
+        assert!((obs.pos_z - 4.0_f32).abs() < 0.15);
+        assert_eq!(obs.pos_y, 0.0);
     }
 
     #[test]
@@ -3698,8 +3806,10 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 10.0,
             vy: 10.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3707,7 +3817,7 @@ mod tests {
             sample_config(),
         );
 
-        // TargetVelocity (2.0, 0.5) → backend step: x=2.0, y=0.5.
+        // TargetVelocity overrides horizontal X/Z while retaining vertical Y.
         let action = WorldActionV1 {
             actor_entity_id: EntityId::new(),
             body_entity_id: entity,
@@ -3728,7 +3838,55 @@ mod tests {
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         assert!((obs.pos_x - 2.0_f32).abs() < 0.15);
-        assert!((obs.pos_y - 0.5_f32).abs() < 0.15);
+        assert!((obs.pos_z - 0.5_f32).abs() < 0.15);
+        assert!((obs.pos_y - 10.0_f32).abs() < 0.15);
+        assert_eq!(obs.vel_lin_x, 2.0);
+        assert_eq!(obs.vel_lin_y, 10.0);
+        assert_eq!(obs.vel_lin_z, 0.5);
+    }
+
+    #[test]
+    fn horizontal_actuators_use_pinned_timestep_without_velocity_quantization() {
+        let body_id = EntityId::new();
+        let mut config = sample_config();
+        config.timestep_micros = 250_000;
+        let mut driver = WorldDriver::new(
+            vec![Body {
+                entity_id: body_id,
+                x: 0.0,
+                y: 3.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 1.0,
+                vz: 0.0,
+            }],
+            Box::new(SimpleKinematicBackend::new()),
+            config,
+        );
+        let action = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: body_id,
+            action_kind: ActionKindV1::TargetVelocity,
+            params_cbor: encode_actuator_pair_v1(0.0625, -0.125).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let output = driver
+            .step(
+                TimelineId::new(),
+                ObservationView::from_events(&[make_action_event_from(body_id, &action)]),
+            )
+            .test_ok();
+        let body = &driver.entities[0];
+        assert_eq!(body.x, 0.015625);
+        assert_eq!(body.y, 3.25);
+        assert_eq!(body.z, -0.03125);
+        assert_eq!(body.vy, 1.0);
+        let observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+        assert_eq!(observation.vel_lin_x, 0.0625);
+        assert_eq!(observation.vel_lin_y, 1.0);
+        assert_eq!(observation.vel_lin_z, -0.125);
     }
 
     #[test]
@@ -3742,8 +3900,10 @@ mod tests {
                 entity_id: entity,
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(SimpleKinematicBackend::new()),
             sample_config(),
@@ -3783,8 +3943,10 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3830,8 +3992,10 @@ mod tests {
             entity_id: entity,
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],

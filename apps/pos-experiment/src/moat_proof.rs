@@ -527,13 +527,15 @@ fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityI
         vec![Body {
             entity_id: body,
             x: input.initial_position[0],
-            y: input.initial_position[1],
+            y: 0.0,
+            z: input.initial_position[1],
             vx: input.initial_velocity[0],
-            vy: input.initial_velocity[1],
+            vy: 0.0,
+            vz: input.initial_velocity[1],
         }],
         Box::new(SimpleKinematicBackend::new()),
         WorldConfigV1 {
-            timestep_micros: 16_667,
+            timestep_micros: 1_000_000,
             coord_convention: COORD_CONVENTION_RIGHT_HANDED_Y_UP,
             gravity_x: 0.0,
             gravity_y: 0.0,
