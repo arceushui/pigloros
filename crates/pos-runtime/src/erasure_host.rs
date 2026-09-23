@@ -3488,6 +3488,7 @@ mod tests {
         NonemptyInventory,
         MisreportInitialExactRetry,
         MisreportExactRetry,
+        MisreportStaleRecoveryGeneration,
         ForkCommit,
         Recovery,
         EventStore,
@@ -3505,6 +3506,7 @@ mod tests {
         resolve_control: Arc<ResolveStateControlV1>,
         timeline_created_hook: Option<TimelineCreatedHookV1>,
         inventory_snapshot_calls: usize,
+        fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
 
     #[derive(Clone, Copy)]
@@ -4006,6 +4008,9 @@ mod tests {
         ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
             if self.fault == FaultModeV1::Recovery {
                 Err(ErasureErrorV1::ProvenanceMissing)
+            } else if self.fault == FaultModeV1::MisreportStaleRecoveryGeneration {
+                // Test the host guard against a port that misreports a stale result.
+                Ok(self.fork_recovery_override.clone())
             } else {
                 self.inner
                     .recover_fork_admission(operation, successor_inventory)
@@ -5514,6 +5519,7 @@ mod tests {
                 resolve_control: Arc::clone(&resolve_control),
                 timeline_created_hook: None,
                 inventory_snapshot_calls: 0,
+                fork_recovery_override: None,
             },
             resolve_control,
         )
@@ -7187,56 +7193,6 @@ mod tests {
     }
 
     #[test]
-    fn identified_fork_recovery_reports_stale_successor_generation() {
-        let parent = TimelineId::new();
-        let operation = reference(60);
-        let batch = empty_fork_batch(parent, TimelineId::new(), operation)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let recovered = batch
-            .recovery_result()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_ne!(
-            recovered.expected_inventory_generation(),
-            recovered.successor_generation()
-        );
-        let current_inventory = verified_empty_inventory(
-            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), vec![parent], 4)
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let authority = UnusedCoordinatorAuthorityV1 {
-            resolved_child_scope: Some(recovered.child_scope()),
-        };
-        let input = IdentifiedForkTransitionInput {
-            operation,
-            parent,
-            child: recovered.child(),
-            current_generation: recovered.expected_inventory_generation(),
-            current_inventory: &current_inventory,
-            authority: &authority,
-            coordinator: reference(65),
-            recovered: Some(recovered.clone()),
-        };
-        let mut transition_failure = None;
-
-        assert_eq!(
-            ErasureExecutionHostV1::recover_identified_fork(
-                &input,
-                &recovered,
-                &mut transition_failure,
-            ),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-        assert_eq!(
-            transition_failure,
-            Some(TransitionFailureV1::Host(
-                ErasureHostErrorV1::StaleGeneration
-            ))
-        );
-    }
-
-    #[test]
     fn identified_fork_recovery_preserves_the_host_when_extension_resolution_fails() {
         let (mut host, authority, parent) = active_identified_fork_host(FaultModeV1::Passthrough)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -7886,6 +7842,46 @@ mod tests {
                 .map(|timeline| timeline.id()),
             Ok(child)
         );
+    }
+
+    #[test]
+    fn identified_fork_rejects_stale_recovery_generation_from_adapter() {
+        let operation = reference(120);
+        let (mut store, _) =
+            fault_store_with_control(FaultModeV1::MisreportStaleRecoveryGeneration);
+        let parent = store
+            .inner
+            .create_timeline("stale-recovery-parent")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let batch = empty_fork_batch(parent.id(), TimelineId::new(), operation)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let recovered = batch
+            .recovery_result()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_ne!(
+            recovered.successor_generation(),
+            recovered.expected_inventory_generation()
+        );
+        store.fork_recovery_override = Some(recovered);
+
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1 {
+            resolved_child_scope: Some(operation),
+        }));
+        host.coordinator = Some(reference(121));
+
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline_identified(
+                    operation,
+                    parent.id(),
+                    Seq::ZERO,
+                    "recovered-name-is-ignored",
+                )),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]
