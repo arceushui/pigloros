@@ -469,6 +469,13 @@ impl SystemdTransientUnitTransport {
         if reverse_again != verified.unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
+        let current_unit_again = manager
+            .get_unit(verified.unit_name.as_str().to_owned())
+            .await
+            .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
+        if current_unit_again != verified.unit_path {
+            return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
+        }
         Ok(bound)
     }
 

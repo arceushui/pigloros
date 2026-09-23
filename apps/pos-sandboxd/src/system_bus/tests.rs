@@ -132,6 +132,8 @@ enum UnitLookupBehavior {
     Resolve,
     Reject,
     RejectAfterFirst,
+    RejectAfterSecond,
+    SubstituteAfterSecond,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -350,10 +352,23 @@ impl RecordingManager {
                 self.behavior.unit_lookup,
                 UnitLookupBehavior::RejectAfterFirst
             ) && lookup_index > 0)
+            || (matches!(
+                self.behavior.unit_lookup,
+                UnitLookupBehavior::RejectAfterSecond
+            ) && lookup_index > 1)
         {
             return Err(fdo::Error::Failed("test lookup rejection".to_owned()));
         }
-        OwnedObjectPath::try_from(UNIT_PATH).map_err(|error| fdo::Error::Failed(error.to_string()))
+        let unit = if matches!(
+            self.behavior.unit_lookup,
+            UnitLookupBehavior::SubstituteAfterSecond
+        ) && lookup_index > 1
+        {
+            UNRELATED_UNIT_PATH
+        } else {
+            UNIT_PATH
+        };
+        OwnedObjectPath::try_from(unit).map_err(|error| fdo::Error::Failed(error.to_string()))
     }
 
     #[zbus(name = "GetUnitByControlGroup")]
@@ -1188,6 +1203,38 @@ async fn cgroup_binding_rejects_lost_unit_lookup() -> Result<(), Box<dyn Error>>
         error,
         SystemdTransientUnitTransportError::UnitLookup(_)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cgroup_binding_rechecks_unit_name_after_open() -> Result<(), Box<dyn Error>> {
+    for unit_lookup in [
+        UnitLookupBehavior::RejectAfterSecond,
+        UnitLookupBehavior::SubstituteAfterSecond,
+    ] {
+        let behavior = ManagerBehavior {
+            unit_lookup,
+            ..ManagerBehavior::default()
+        };
+        let lookups = Arc::clone(&behavior.unit_lookups);
+        let service = RecordingService::exact(expected_system_call_filter()?);
+        let (transport, _server, verified, temporary) =
+            started_cgroup_transport(behavior, service).await?;
+        let error = transport
+            .bind_cgroup_with_root(
+                &verified,
+                CgroupRoot::for_test(File::open(temporary.path())?),
+            )
+            .await
+            .err()
+            .ok_or("changed unit identity was accepted")?;
+        assert!(matches!(
+            error,
+            SystemdTransientUnitTransportError::UnitLookup(_)
+                | SystemdTransientUnitTransportError::CgroupUnitMismatch
+        ));
+        assert_eq!(lookups.load(Ordering::SeqCst), 3);
+    }
     Ok(())
 }
 
