@@ -5982,7 +5982,7 @@ where
             .unwrap_or(u64::MAX)
             .to_be_bytes(),
     );
-    for index in &evidence.index_inserts {
+    for index in evidence.index_inserts {
         let (kind, ordinal, reference) = match *index {
             ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (0, ordinal, reference),
             ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (1, ordinal, reference),
