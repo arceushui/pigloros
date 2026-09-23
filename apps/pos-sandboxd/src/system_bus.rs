@@ -416,7 +416,8 @@ async fn stop_job_with_completions(
     let completions =
         completions.map_err(SystemdTransientUnitTransportError::JobSignalSubscribe)?;
     let mut completions = completions.map(|completion| decode_job_completion(completion.args()));
-    stop_job_with_stream(proxy, &mut completions, unit_name).await
+    let result = stop_job_with_stream(proxy, &mut completions, unit_name).await;
+    result
 }
 
 async fn stop_job_with_stream<S>(
