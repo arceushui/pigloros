@@ -3390,29 +3390,25 @@ struct ErasureErrorDispositionV1 {
 }
 
 const fn erasure_error_disposition(error: ErasureErrorV1) -> ErasureErrorDispositionV1 {
+    let host_error = erasure_error_host_error(error);
+    ErasureErrorDispositionV1 {
+        host_error,
+        preserves_ready_host: !matches!(host_error, ErasureHostErrorV1::AdapterFailure),
+    }
+}
+
+const fn erasure_error_host_error(error: ErasureErrorV1) -> ErasureHostErrorV1 {
     match error {
-        ErasureErrorV1::StaleGeneration => ErasureErrorDispositionV1 {
-            host_error: ErasureHostErrorV1::StaleGeneration,
-            preserves_ready_host: true,
-        },
-        ErasureErrorV1::Unauthorized => ErasureErrorDispositionV1 {
-            host_error: ErasureHostErrorV1::AuthorizationDenied,
-            preserves_ready_host: true,
-        },
+        ErasureErrorV1::StaleGeneration => ErasureHostErrorV1::StaleGeneration,
+        ErasureErrorV1::Unauthorized => ErasureHostErrorV1::AuthorizationDenied,
         ErasureErrorV1::ScopeInvalid | ErasureErrorV1::PolicyConflict => {
-            ErasureErrorDispositionV1 {
-                host_error: ErasureHostErrorV1::Conflict,
-                preserves_ready_host: true,
-            }
+            ErasureHostErrorV1::Conflict
         }
         ErasureErrorV1::InvalidEncoding
         | ErasureErrorV1::UnsupportedVersion
         | ErasureErrorV1::AccessFreezeFailed
         | ErasureErrorV1::TrustSnapshotInvalid
-        | ErasureErrorV1::ProvenanceMissing => ErasureErrorDispositionV1 {
-            host_error: ErasureHostErrorV1::RecoveryUnavailable,
-            preserves_ready_host: true,
-        },
+        | ErasureErrorV1::ProvenanceMissing => ErasureHostErrorV1::RecoveryUnavailable,
         ErasureErrorV1::KeyRegistryUnavailable
         | ErasureErrorV1::KeyDestructionFailed
         | ErasureErrorV1::ArtifactDeletionFailed
@@ -3420,10 +3416,7 @@ const fn erasure_error_disposition(error: ErasureErrorV1) -> ErasureErrorDisposi
         | ErasureErrorV1::ReplicaNegativeAcknowledgement
         | ErasureErrorV1::BackupInventoryIncomplete
         | ErasureErrorV1::BackupDeletionPending
-        | ErasureErrorV1::ReceiptCommitFailed => ErasureErrorDispositionV1 {
-            host_error: ErasureHostErrorV1::AdapterFailure,
-            preserves_ready_host: false,
-        },
+        | ErasureErrorV1::ReceiptCommitFailed => ErasureHostErrorV1::AdapterFailure,
     }
 }
 

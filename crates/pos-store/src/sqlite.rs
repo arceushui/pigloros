@@ -5786,14 +5786,11 @@ fn sqlite_timeline_exact_metadata(
     Ok(Some((actual_meta, stored_head, stored_chain_head)))
 }
 
-fn sqlite_fork_admission_is_exact(
+fn sqlite_fork_admission_recovery_is_exact(
     conn: &Connection,
-    hasher: &dyn Hasher,
     admission: &PreparedErasureForkBatchV1,
-    chain_head: Hash,
     receipt: &SqliteForkAdmissionReceiptV1,
 ) -> Result<bool, ErasureErrorV1> {
-    let child = admission.child();
     let Ok(recovered) = receipt.recover(admission.operation()) else {
         return Ok(false);
     };
@@ -5810,6 +5807,20 @@ fn sqlite_fork_admission_is_exact(
         return Ok(false);
     }
     if sqlite_recovery_proof_is_exact(conn, &stored_proof).is_err() {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn sqlite_fork_admission_is_exact(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    admission: &PreparedErasureForkBatchV1,
+    chain_head: Hash,
+    receipt: &SqliteForkAdmissionReceiptV1,
+) -> Result<bool, ErasureErrorV1> {
+    let child = admission.child();
+    if !sqlite_fork_admission_recovery_is_exact(conn, admission, receipt)? {
         return Ok(false);
     }
     if !sqlite_timeline_is_exact(conn, hasher, child, chain_head)? {

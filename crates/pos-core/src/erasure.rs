@@ -227,42 +227,44 @@ impl ErasureRecoveryLimitsV1 {
 }
 
 /// Closed, payload-safe failures exposed by erasure lifecycle and persistence ports.
+///
+/// The explicit discriminants are the stable V1 error codes; do not reassign them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureErrorV1 {
     /// Malformed CBOR or closed enum value.
-    InvalidEncoding,
+    InvalidEncoding = 0,
     /// Unsupported wire version.
-    UnsupportedVersion,
+    UnsupportedVersion = 1,
     /// Requester is not authorized.
-    Unauthorized,
+    Unauthorized = 2,
     /// Scope, selector, or owner evidence is invalid.
-    ScopeInvalid,
+    ScopeInvalid = 3,
     /// Lifecycle or policy evidence conflicts.
-    PolicyConflict,
+    PolicyConflict = 4,
     /// The verified inventory or durable predecessor generation is stale.
-    StaleGeneration,
+    StaleGeneration = 16,
     /// Access could not be frozen.
-    AccessFreezeFailed,
+    AccessFreezeFailed = 5,
     /// Key registry is unavailable.
-    KeyRegistryUnavailable,
+    KeyRegistryUnavailable = 6,
     /// Eligible key destruction failed.
-    KeyDestructionFailed,
+    KeyDestructionFailed = 7,
     /// Eligible artifact deletion or redaction failed.
-    ArtifactDeletionFailed,
+    ArtifactDeletionFailed = 8,
     /// Replica acknowledgement timed out.
-    ReplicaTimeout,
+    ReplicaTimeout = 9,
     /// Replica negatively acknowledged.
-    ReplicaNegativeAcknowledgement,
+    ReplicaNegativeAcknowledgement = 10,
     /// Backup inventory proof is incomplete.
-    BackupInventoryIncomplete,
+    BackupInventoryIncomplete = 11,
     /// Backup deletion remains pending.
-    BackupDeletionPending,
+    BackupDeletionPending = 12,
     /// Receipt commit failed.
-    ReceiptCommitFailed,
+    ReceiptCommitFailed = 13,
     /// Trust snapshot is invalid.
-    TrustSnapshotInvalid,
+    TrustSnapshotInvalid = 14,
     /// Provenance is missing or invalid.
-    ProvenanceMissing,
+    ProvenanceMissing = 15,
 }
 
 /// A protected host operation whose effect must serialize with `AccessFrozen`.
@@ -1186,29 +1188,32 @@ impl ErasureGate for ErasureContainmentGateV1 {
 fn containment_recovery_failure<T>(_error: T) -> ErasureContainmentErrorV1 {
     ErasureContainmentErrorV1::RecoveryUnavailable
 }
+
+const ERASURE_ERROR_V1_BY_CODE: [ErasureErrorV1; 17] = [
+    ErasureErrorV1::InvalidEncoding,
+    ErasureErrorV1::UnsupportedVersion,
+    ErasureErrorV1::Unauthorized,
+    ErasureErrorV1::ScopeInvalid,
+    ErasureErrorV1::PolicyConflict,
+    ErasureErrorV1::AccessFreezeFailed,
+    ErasureErrorV1::KeyRegistryUnavailable,
+    ErasureErrorV1::KeyDestructionFailed,
+    ErasureErrorV1::ArtifactDeletionFailed,
+    ErasureErrorV1::ReplicaTimeout,
+    ErasureErrorV1::ReplicaNegativeAcknowledgement,
+    ErasureErrorV1::BackupInventoryIncomplete,
+    ErasureErrorV1::BackupDeletionPending,
+    ErasureErrorV1::ReceiptCommitFailed,
+    ErasureErrorV1::TrustSnapshotInvalid,
+    ErasureErrorV1::ProvenanceMissing,
+    ErasureErrorV1::StaleGeneration,
+];
+
 impl ErasureErrorV1 {
     /// Return the stable V1 error code.
     #[must_use]
     pub const fn code(self) -> u64 {
-        match self {
-            Self::InvalidEncoding => 0,
-            Self::UnsupportedVersion => 1,
-            Self::Unauthorized => 2,
-            Self::ScopeInvalid => 3,
-            Self::PolicyConflict => 4,
-            Self::AccessFreezeFailed => 5,
-            Self::KeyRegistryUnavailable => 6,
-            Self::KeyDestructionFailed => 7,
-            Self::ArtifactDeletionFailed => 8,
-            Self::ReplicaTimeout => 9,
-            Self::ReplicaNegativeAcknowledgement => 10,
-            Self::BackupInventoryIncomplete => 11,
-            Self::BackupDeletionPending => 12,
-            Self::ReceiptCommitFailed => 13,
-            Self::TrustSnapshotInvalid => 14,
-            Self::ProvenanceMissing => 15,
-            Self::StaleGeneration => 16,
-        }
+        self as u64
     }
 
     /// Decode one stable V1 error code.
@@ -1217,25 +1222,12 @@ impl ErasureErrorV1 {
     ///
     /// Returns [`Self::InvalidEncoding`] for an unknown code.
     pub const fn from_code(code: u64) -> Result<Self, Self> {
-        match code {
-            0 => Ok(Self::InvalidEncoding),
-            1 => Ok(Self::UnsupportedVersion),
-            2 => Ok(Self::Unauthorized),
-            3 => Ok(Self::ScopeInvalid),
-            4 => Ok(Self::PolicyConflict),
-            5 => Ok(Self::AccessFreezeFailed),
-            6 => Ok(Self::KeyRegistryUnavailable),
-            7 => Ok(Self::KeyDestructionFailed),
-            8 => Ok(Self::ArtifactDeletionFailed),
-            9 => Ok(Self::ReplicaTimeout),
-            10 => Ok(Self::ReplicaNegativeAcknowledgement),
-            11 => Ok(Self::BackupInventoryIncomplete),
-            12 => Ok(Self::BackupDeletionPending),
-            13 => Ok(Self::ReceiptCommitFailed),
-            14 => Ok(Self::TrustSnapshotInvalid),
-            15 => Ok(Self::ProvenanceMissing),
-            16 => Ok(Self::StaleGeneration),
-            _ => Err(Self::InvalidEncoding),
+        if code < ERASURE_ERROR_V1_BY_CODE.len() as u64 {
+            // Below 17, the low byte is the complete, lossless table index.
+            let index = code.to_le_bytes()[0] as usize;
+            Ok(ERASURE_ERROR_V1_BY_CODE[index])
+        } else {
+            Err(Self::InvalidEncoding)
         }
     }
 }
