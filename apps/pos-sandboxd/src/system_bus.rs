@@ -15,7 +15,9 @@ use crate::{
     TransientUnitRequest, TransientUnitRequestError,
 };
 
-const JOB_MODE: &str = "fail";
+const START_JOB_MODE: &str = "fail";
+// A stop must displace a conflicting queued start job for the same attempt unit.
+const STOP_JOB_MODE: &str = "replace";
 const KILL_WHOM: &str = "all";
 const SIGKILL: i32 = 9;
 const UNIT_PREFIX: &str = "pigloros-attempt-";
@@ -344,6 +346,9 @@ impl SystemdTransientUnitTransport {
 
     /// Submit and await the exact stop job for one deterministic attempt unit.
     ///
+    /// A queued start job may be replaced; its cancellation cannot satisfy
+    /// the returned stop-job path.
+    ///
     /// The caller must bound the wait and later prove unit/cgroup absence. A
     /// completed stop job is not a terminal attempt-cleanup proof.
     ///
@@ -430,7 +435,7 @@ where
 {
     let name = unit_name.as_str().to_owned();
     let job = proxy
-        .stop_unit(name.clone(), JOB_MODE.to_owned())
+        .stop_unit(name.clone(), STOP_JOB_MODE.to_owned())
         .await
         .map_err(SystemdTransientUnitTransportError::StopCall)?;
     await_job_completion(completions, job.as_str(), name).await?;
@@ -488,7 +493,7 @@ async fn submit_with_completions(
     let job_path = match proxy
         .start_transient_unit(
             submitted_name.clone(),
-            JOB_MODE.to_owned(),
+            START_JOB_MODE.to_owned(),
             properties,
             Vec::new(),
         )
