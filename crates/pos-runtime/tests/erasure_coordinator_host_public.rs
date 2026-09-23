@@ -2123,7 +2123,7 @@ fn authentication_denial_preserves_a_recovered_host() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+fn assert_exact_durable_fork_retry_preserves_current_inventory(
     config: StoreConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
@@ -2143,7 +2143,7 @@ fn assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_i
             commands.create_timeline("stale-fork-parent"),
         )?;
         let operation = reference(43);
-        test_stage(
+        let committed_child = test_stage(
             "commit durable fork",
             commands.fork_timeline_identified(
                 operation,
@@ -2156,15 +2156,16 @@ fn assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_i
             "advance inventory generation",
             commands.create_timeline("stale-fork-intervening"),
         )?;
-        assert!(matches!(
+        let retried_child = test_stage(
+            "retry durable fork after unrelated topology change",
             commands.fork_timeline_identified(
                 operation,
                 parent.id(),
                 pos_core::Seq::ZERO,
                 "stale-fork-child",
             ),
-            Err(ErasureHostErrorV1::StaleGeneration)
-        ));
+        )?;
+        assert_eq!(retried_child.id(), committed_child.id());
     }
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     let mut reads = test_stage("open stale-fork reader", host.read_sender())?;
@@ -2174,17 +2175,13 @@ fn assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_i
 }
 
 #[test]
-fn stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+fn exact_durable_fork_retry_preserves_current_inventory(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
-        StoreConfig::Memory,
-    )
+    assert_exact_durable_fork_retry_preserves_current_inventory(StoreConfig::Memory)
 }
 
 #[test]
-fn sqlite_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
+fn sqlite_exact_durable_fork_retry_preserves_current_inventory(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_stale_durable_fork_retry_preserves_the_host_without_republishing_old_inventory(
-        StoreConfig::SqliteInMemory,
-    )
+    assert_exact_durable_fork_retry_preserves_current_inventory(StoreConfig::SqliteInMemory)
 }
