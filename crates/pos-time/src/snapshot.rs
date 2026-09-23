@@ -60,8 +60,8 @@ fn run_snapshot_fence(
     };
     sender
         .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut effect)
-        .map_err(crate::host_error_to_core)?;
-    outcome
+        .map_err(crate::host_error_to_core)
+        .and_then(|()| outcome)
 }
 
 fn snapshot_effect_with_rechecks(
@@ -152,8 +152,8 @@ fn run_verification_fence(
             &mut effect,
         )
         .map_err(crate::host_error_to_core)
-        .map_err(SnapshotError::from)?;
-    outcome
+        .map_err(SnapshotError::from)
+        .and_then(|()| outcome)
 }
 
 fn verify_snapshot_effect_with_rechecks(

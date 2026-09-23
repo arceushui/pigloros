@@ -93,8 +93,8 @@ fn replay_range(
     };
     sender
         .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
-        .map_err(crate::host_error_to_core)?;
-    outcome
+        .map_err(crate::host_error_to_core)
+        .and_then(|()| outcome)
 }
 
 #[cfg(test)]
