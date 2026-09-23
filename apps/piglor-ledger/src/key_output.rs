@@ -262,8 +262,8 @@ fn injected_fault_result(path: &Path, stage: FaultStage) -> std::io::Result<()> 
 fn swap_deletion_target_for_test(path: &Path) {
     if injected_fault::take(path, FaultStage::DeleteSwapBeforeInspect) {
         let replacement = path.with_extension("replacement");
-        std::fs::write(&replacement, b"replacement").expect("write replacement key fixture");
-        std::fs::rename(replacement, path).expect("swap key fixture");
+        assert!(std::fs::write(&replacement, b"replacement").is_ok());
+        assert!(std::fs::rename(replacement, path).is_ok());
     }
 }
 
