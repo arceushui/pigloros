@@ -1,8 +1,8 @@
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, State, TimelineId,
+    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureGate, ErasureKeyRoleV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, State, TimelineId,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_state::ProjectionRegistry;
@@ -56,7 +56,7 @@ fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
     .test_ok()
 }
 
-fn registry(gate: &Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistry {
+fn registry(gate: &Arc<dyn ErasureGate>) -> ProjectionRegistry {
     let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
     registry.register("noop", Box::new(NoopReducer));
     registry

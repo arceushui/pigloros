@@ -5,7 +5,7 @@
 /// publication authority through this wrapper.
 struct HostedExperimentStore {
     host: Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: Arc<pos_core::ErasureContainmentGateV1>,
+    gate: Arc<dyn pos_core::ErasureGate>,
 }
 
 impl HostedExperimentStore {
@@ -32,7 +32,7 @@ impl HostedExperimentStore {
         })
     }
 
-    fn containment_gate(&self) -> Arc<pos_core::ErasureContainmentGateV1> {
+    fn containment_gate(&self) -> Arc<dyn pos_core::ErasureGate> {
         Arc::clone(&self.gate)
     }
 
@@ -54,6 +54,7 @@ impl EventStore for HostedExperimentStore {
         &mut self,
         gate: Arc<pos_core::ErasureContainmentGateV1>,
     ) -> Result<(), CoreError> {
+        let gate: Arc<dyn pos_core::ErasureGate> = gate;
         if Arc::ptr_eq(&self.gate, &gate) {
             Ok(())
         } else {

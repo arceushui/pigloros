@@ -811,8 +811,17 @@ fn collect_fork_retry_scope_requirements(
     parent: TimelineId,
     child: TimelineId,
 ) -> Result<Vec<ErasureForkRetryScopeRequirementV1>, ErasureErrorV1> {
+    collect_fork_retry_scope_requirements_for_scope(inventory, parent, child, reference(35))
+}
+
+fn collect_fork_retry_scope_requirements_for_scope(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+    child_scope: ErasureReferenceV1,
+) -> Result<Vec<ErasureForkRetryScopeRequirementV1>, ErasureErrorV1> {
     inventory
-        .fork_retry_scope_requirements(parent, child)?
+        .fork_retry_scope_requirements(parent, child, child_scope)?
         .collect()
 }
 
