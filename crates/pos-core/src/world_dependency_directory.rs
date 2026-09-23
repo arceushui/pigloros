@@ -542,21 +542,22 @@ impl Reader<'_> {
     }
 
     fn head(&mut self, expected_major: u8) -> Result<u64, WorldDependencyDirectoryErrorV1> {
-        self.take(1).and_then(|bytes| {
-            let initial = bytes[0];
-            if initial >> 5 != expected_major {
-                return Err(WorldDependencyDirectoryErrorV1::InvalidEncoding);
-            }
-            match initial & 31 {
-                value @ 0..=23 => Ok(u64::from(value)),
-                argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
-                    bytes
-                        .iter()
-                        .fold(0, |value, byte| (value << 8) | u64::from(*byte))
-                }),
-                _ => Err(WorldDependencyDirectoryErrorV1::InvalidEncoding),
-            }
-        })
+        let initial = match self.take(1) {
+            Ok(bytes) => bytes[0],
+            Err(error) => return Err(error),
+        };
+        if initial >> 5 != expected_major {
+            return Err(WorldDependencyDirectoryErrorV1::InvalidEncoding);
+        }
+        match initial & 31 {
+            value @ 0..=23 => Ok(u64::from(value)),
+            argument @ 24..=27 => self.take(1usize << (argument - 24)).map(|bytes| {
+                bytes
+                    .iter()
+                    .fold(0, |value, byte| (value << 8) | u64::from(*byte))
+            }),
+            _ => Err(WorldDependencyDirectoryErrorV1::InvalidEncoding),
+        }
     }
 
     fn code(&mut self) -> Result<u8, WorldDependencyDirectoryErrorV1> {
