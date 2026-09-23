@@ -28,6 +28,7 @@ const X86_64: &[u8] = include_bytes!(
 );
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const JOB_PATH: &str = "/org/freedesktop/systemd1/job/381";
+const STOP_JOB_PATH: &str = "/org/freedesktop/systemd1/job/382";
 const UNRELATED_JOB_PATH: &str = "/org/freedesktop/systemd1/job/999";
 const UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/pigloros_2dattempt_2dtest_2eservice";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
@@ -80,6 +81,12 @@ struct ObservedStart {
     auxiliary_count: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ObservedControl {
+    Stop { name: String, mode: String },
+    Kill { name: String, whom: String, signal: i32 },
+}
+
 struct RecordingManager {
     observed: Arc<Mutex<Option<ObservedStart>>>,
     subscribed: Arc<AtomicBool>,
@@ -95,6 +102,8 @@ struct ManagerBehavior {
     emit_unrelated: bool,
     completion_unit: Option<String>,
     emit_completion: bool,
+    control_calls: Arc<Mutex<Vec<ObservedControl>>>,
+    kill_reject: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -121,6 +130,8 @@ impl Default for ManagerBehavior {
             emit_unrelated: false,
             completion_unit: None,
             emit_completion: true,
+            control_calls: Arc::new(Mutex::new(Vec::new())),
+            kill_reject: false,
         }
     }
 }
@@ -215,6 +226,73 @@ impl RecordingManager {
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
         }
         Ok(job_path)
+    }
+
+    #[zbus(name = "StopUnit")]
+    async fn stop_unit(
+        &self,
+        name: String,
+        mode: String,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> fdo::Result<OwnedObjectPath> {
+        if !self.subscribed.load(Ordering::SeqCst) {
+            return Err(fdo::Error::Failed(
+                "StopUnit arrived before Subscribe".to_owned(),
+            ));
+        }
+        if self.behavior.reject {
+            return Err(fdo::Error::AccessDenied("test stop rejection".to_owned()));
+        }
+        self.behavior
+            .control_calls
+            .lock()
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?
+            .push(ObservedControl::Stop {
+                name: name.clone(),
+                mode,
+            });
+        let job = OwnedObjectPath::try_from(STOP_JOB_PATH)
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        if self.behavior.emit_unrelated {
+            Self::job_removed(
+                &emitter,
+                999,
+                OwnedObjectPath::try_from(UNRELATED_JOB_PATH)
+                    .map_err(|error| fdo::Error::Failed(error.to_string()))?,
+                name.clone(),
+                "done".to_owned(),
+            )
+            .await
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        }
+        if self.behavior.emit_completion {
+            Self::job_removed(
+                &emitter,
+                382,
+                job.clone(),
+                self.behavior
+                    .completion_unit
+                    .clone()
+                    .unwrap_or(name),
+                self.behavior.result.clone(),
+            )
+            .await
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        }
+        Ok(job)
+    }
+
+    #[zbus(name = "KillUnit")]
+    fn kill_unit(&self, name: String, whom: String, signal: i32) -> fdo::Result<()> {
+        if self.behavior.kill_reject {
+            return Err(fdo::Error::AccessDenied("test kill rejection".to_owned()));
+        }
+        self.behavior
+            .control_calls
+            .lock()
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?
+            .push(ObservedControl::Kill { name, whom, signal });
+        Ok(())
     }
 
     #[zbus(name = "GetUnit")]
@@ -755,6 +833,128 @@ async fn manager_only_property_read_failure_is_classified() -> Result<(), Box<dy
     Ok(())
 }
 
+#[tokio::test]
+async fn stop_job_observes_immediate_exact_completion() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        emit_unrelated: true,
+        ..ManagerBehavior::default()
+    };
+    let calls = Arc::clone(&behavior.control_calls);
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x08; 16])?;
+    let completed = transport.stop_job(name.clone()).await?;
+    assert_eq!(completed.unit_name(), &name);
+    assert_eq!(completed.job_path(), STOP_JOB_PATH);
+    assert_eq!(
+        calls.lock().map_err(|error| error.to_string())?.as_slice(),
+        &[ObservedControl::Stop {
+            name: name.as_str().to_owned(),
+            mode: JOB_MODE.to_owned(),
+        }]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn stop_job_rejects_every_non_done_result() -> Result<(), Box<dyn Error>> {
+    let cases = [
+        ("canceled", SystemdJobFailure::Canceled),
+        ("timeout", SystemdJobFailure::Timeout),
+        ("failed", SystemdJobFailure::Failed),
+        ("dependency", SystemdJobFailure::Dependency),
+        ("skipped", SystemdJobFailure::Skipped),
+        (
+            "future-result",
+            SystemdJobFailure::Unknown("future-result".to_owned()),
+        ),
+    ];
+    for (result, expected) in cases {
+        let behavior = ManagerBehavior {
+            result: result.to_owned(),
+            ..ManagerBehavior::default()
+        };
+        let service = RecordingService::exact(expected_system_call_filter()?);
+        let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+        let error = transport
+            .stop_job(TransientServiceUnitName::from_attempt_id([0x09; 16])?)
+            .await
+            .err()
+            .ok_or("non-done stop result was accepted")?;
+        let SystemdTransientUnitTransportError::JobFailed(actual) = error else {
+            return Err("stop result had the wrong error class".into());
+        };
+        assert_eq!(actual, expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn stop_job_rejects_unit_substitution_and_manager_failure() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior {
+        completion_unit: Some("substituted.service".to_owned()),
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x0a; 16])?;
+    let error = transport
+        .stop_job(name.clone())
+        .await
+        .err()
+        .ok_or("substituted stop unit was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::JobIdentityMismatch { .. }
+    ));
+
+    let behavior = ManagerBehavior {
+        reject: true,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let error = transport
+        .stop_job(name)
+        .await
+        .err()
+        .ok_or("rejected StopUnit call was accepted")?;
+    assert!(matches!(error, SystemdTransientUnitTransportError::StopCall(_)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>> {
+    let behavior = ManagerBehavior::default();
+    let calls = Arc::clone(&behavior.control_calls);
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x0b; 16])?;
+    transport.force_kill(name.clone()).await?;
+    assert_eq!(
+        calls.lock().map_err(|error| error.to_string())?.as_slice(),
+        &[ObservedControl::Kill {
+            name: name.as_str().to_owned(),
+            whom: KILL_WHOM.to_owned(),
+            signal: SIGKILL,
+        }]
+    );
+
+    let behavior = ManagerBehavior {
+        kill_reject: true,
+        ..ManagerBehavior::default()
+    };
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let error = transport
+        .force_kill(name)
+        .await
+        .err()
+        .ok_or("rejected KillUnit call was accepted")?;
+    assert!(matches!(error, SystemdTransientUnitTransportError::KillCall(_)));
+    Ok(())
+}
+
 async fn transport(
     observed: Arc<Mutex<Option<ObservedStart>>>,
     behavior: ManagerBehavior,
@@ -949,11 +1149,25 @@ async fn signal_subscription_and_stream_failures_are_classified() -> Result<(), 
         Err(SystemdTransientUnitTransportError::JobSignalSubscribe(_))
     ));
 
+    let stop_subscription_error = stop_job_with_completions(
+        &proxy,
+        Err(zbus::Error::Failure(
+            "test stop signal subscription failure".to_owned(),
+        )),
+        TransientServiceUnitName("pigloros-attempt-test.service".to_owned()),
+    )
+    .await;
+    assert!(matches!(
+        stop_subscription_error,
+        Err(SystemdTransientUnitTransportError::JobSignalSubscribe(_))
+    ));
+
     let job = SystemdStartJob(OwnedObjectPath::try_from(JOB_PATH)?);
     let mut ended = futures_util::stream::empty::<
         Result<SystemdJobCompletion, SystemdTransientUnitTransportError>,
     >();
-    let ended_error = await_job_completion(&mut ended, &job, "ended.service".to_owned()).await;
+    let ended_error =
+        await_job_completion(&mut ended, job.as_str(), "ended.service".to_owned()).await;
     assert!(matches!(
         ended_error,
         Err(SystemdTransientUnitTransportError::JobSignalEnded)
@@ -964,12 +1178,29 @@ async fn signal_subscription_and_stream_failures_are_classified() -> Result<(), 
     ));
     let mut malformed = futures_util::stream::once(std::future::ready(Err(signal_error)));
     let malformed_error =
-        await_job_completion(&mut malformed, &job, "malformed.service".to_owned()).await;
+        await_job_completion(&mut malformed, job.as_str(), "malformed.service".to_owned()).await;
     assert!(matches!(
         malformed_error,
         Err(SystemdTransientUnitTransportError::JobSignal(_))
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn stop_and_kill_proxy_failures_are_classified() {
+    let stop = stop_job_with_proxy(
+        Err(zbus::Error::Failure("test stop proxy failure".to_owned())),
+        TransientServiceUnitName("pigloros-attempt-test.service".to_owned()),
+    )
+    .await;
+    assert!(matches!(stop, Err(SystemdTransientUnitTransportError::Proxy(_))));
+
+    let kill = force_kill_with_proxy(
+        Err(zbus::Error::Failure("test kill proxy failure".to_owned())),
+        TransientServiceUnitName("pigloros-attempt-test.service".to_owned()),
+    )
+    .await;
+    assert!(matches!(kill, Err(SystemdTransientUnitTransportError::Proxy(_))));
 }
 
 #[test]
