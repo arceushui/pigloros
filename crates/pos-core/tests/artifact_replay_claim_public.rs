@@ -64,7 +64,7 @@ fn destroyed_registry(role: KeyRoleV1) -> (KeyIdentityV1, Hash, KeyRegistryState
     (identity, digest, registry)
 }
 
-fn signing_artifact(class: ErasureArtifactClassV1) -> ArtifactClaimInputV1 {
+const fn signing_artifact(class: ErasureArtifactClassV1) -> ArtifactClaimInputV1 {
     ArtifactClaimInputV1 {
         registration: RegisteredArtifactV1::new(
             class,
