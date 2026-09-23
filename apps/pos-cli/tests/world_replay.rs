@@ -24,7 +24,7 @@ fn timeline_replay_fails_closed_without_native_verifier() -> Result<(), Box<dyn 
 {
     assert_world_operation_unavailable(
         &["timeline", "replay", "unused", "unused"],
-        "Error: World Replay is unavailable until an installed native closure verifier is configured\n",
+        "Error: World Replay is unavailable until the native recording, retrieval, clock, disposition, and closure verifier owners are installed\n",
     )
 }
 
@@ -33,7 +33,7 @@ fn timeline_snapshot_fails_closed_without_native_verifier() -> Result<(), Box<dy
 {
     assert_world_operation_unavailable(
         &["timeline", "snapshot", "unused", "unused"],
-        "Error: World Snapshot is unavailable until an installed native closure verifier is configured\n",
+        "Error: World Snapshot is unavailable until the native recording, retrieval, clock, disposition, and closure verifier owners are installed\n",
     )
 }
 
@@ -44,6 +44,6 @@ fn timeline_compare_fails_closed_without_native_verifier() -> Result<(), Box<dyn
         &[
             "timeline", "compare", "unused", "unused", "unused", "unused",
         ],
-        "Error: World comparison is unavailable until an installed native closure verifier is configured\n",
+        "Error: Fork Compare is unavailable until the native recording, retrieval, clock, disposition, and closure verifier owners are installed\n",
     )
 }

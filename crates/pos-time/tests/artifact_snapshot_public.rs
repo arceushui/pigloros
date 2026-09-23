@@ -76,6 +76,18 @@ fn snapshot_verification_requires_installed_world_verifier() {
 }
 
 #[test]
+fn snapshot_error_preserves_artifact_unavailability_as_a_typed_error() {
+    assert!(matches!(
+        pos_time::SnapshotError::from(pos_core::CoreError::ArtifactUnavailable),
+        pos_time::SnapshotError::ArtifactUnavailable
+    ));
+    assert!(matches!(
+        pos_time::SnapshotError::from(pos_core::CoreError::Storage("probe".to_owned())),
+        pos_time::SnapshotError::Store(pos_core::CoreError::Storage(_))
+    ));
+}
+
+#[test]
 fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
     let mut host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Memory,
