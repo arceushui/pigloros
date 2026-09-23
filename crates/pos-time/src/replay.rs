@@ -668,10 +668,11 @@ mod tests {
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
 
-        assert!(matches!(
-            super::replay(&mut reads, timeline, &mut registry, &closure),
-            Err(CoreError::ArtifactUnavailable)
-        ));
+        let replay_result = super::replay(&mut reads, timeline, &mut registry, &closure);
+        assert!(
+            matches!(&replay_result, Err(CoreError::ArtifactUnavailable)),
+            "expected an over-bound Replay to fail closed, got {replay_result:?}"
+        );
         assert_eq!(registry.state_for_reducer("count", &entity), None);
     }
 
