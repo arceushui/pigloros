@@ -62,6 +62,16 @@ impl HostedCliStore {
     fn containment_gate(&self) -> std::sync::Arc<pos_core::ErasureContainmentGateV1> {
         self.gate.clone()
     }
+
+    fn committed_key_destruction_facts(
+        &self,
+    ) -> Result<Vec<pos_core::KeyTombstoneV1>, pos_core::CoreError> {
+        self.with_host(|host| host.key_registry()).map(|registry| {
+            registry.map_or_else(Vec::new, |registry| {
+                registry.committed_destruction_facts().collect()
+            })
+        })
+    }
 }
 
 impl pos_core::store::EventStore for HostedCliStore {
@@ -223,6 +233,39 @@ mod hosted_cli_store_tests {
         );
         let child = store.fork(parent.id(), Seq::from_u64(1), "cli-child")?;
         assert_eq!(child.meta.fork_point, Some((parent.id(), Seq::from_u64(1))));
+        assert!(store.committed_key_destruction_facts()?.is_empty());
+        let identity = pos_core::KeyIdentityV1::new(
+            "cli-owner",
+            pos_core::KeyRoleV1::TimelineIntegritySigning,
+            1,
+        );
+        let material_digest = pos_core::Hash::from_bytes([3; 32]);
+        let mut keys = pos_core::KeyRegistryStateV1::new();
+        keys.register_key(pos_core::KeyRegistrationV1::new(
+            identity,
+            material_digest,
+            Some(pos_core::PublicKey::from_bytes([4; 32])),
+        ))?;
+        store.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.save_key_registry(parent.id(), &keys))
+        })?;
+        let request = pos_core::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            pos_core::Hash::from_bytes([5; 32]),
+        );
+        keys.begin_key_destruction(request)?;
+        store.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.save_key_registry(parent.id(), &keys))
+        })?;
+        keys.complete_key_destruction(request, pos_core::deletion_receipt(&request))?;
+        store.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.save_key_registry(parent.id(), &keys))
+        })?;
+        assert_eq!(store.committed_key_destruction_facts()?.len(), 1);
         Ok(())
     }
 
