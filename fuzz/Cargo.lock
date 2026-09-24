@@ -780,6 +780,7 @@ dependencies = [
  "pos-plugin-ledger",
  "pos-runtime",
  "pos-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",
