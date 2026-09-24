@@ -85,6 +85,15 @@ pub enum RuntimeError {
     #[error("driver '{name}' panicked while restoring; the runtime is faulted")]
     DriverRestorePanicked { name: String },
 
+    #[error("driver '{name}' panicked during Fork handoff; the runtime is faulted")]
+    DriverForkPanicked { name: String },
+
+    #[error("driver '{name}' panicked during Fork handoff and child rollback failed: {source}")]
+    DriverForkRollbackFailed {
+        name: String,
+        source: pos_core::CoreError,
+    },
+
     #[error(
         "driver '{driver}' exceeded its deterministic resource budget: requested={requested}, limit={limit}"
     )]

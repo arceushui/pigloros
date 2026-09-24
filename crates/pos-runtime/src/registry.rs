@@ -759,6 +759,7 @@ pub struct PluginRegistry {
     composition_mode: PluginExecutionModeV1,
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
+    restored_binding: Option<(TimelineId, Seq)>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
     erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host composition root.
@@ -1045,6 +1046,7 @@ impl PluginRegistry {
             composition_mode,
             resource_limit: None,
             poisoned_driver: None,
+            restored_binding: None,
             // Every live registry has a host-owned gate, even before the
             // caller binds a durable authority. This default fails closed for
             // protected drafts instead of exposing an unguarded public path.
@@ -1493,6 +1495,7 @@ impl PluginRegistry {
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
+        self.restored_binding = None;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
             self.collect_anchored_selection(selection)?;
@@ -1646,6 +1649,7 @@ impl PluginRegistry {
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
         }
+        self.restored_binding = None;
         let (invocation, driver_name, owned_event_types) = {
             let Some(entry) = self.plugins.get_mut(&plugin_id) else {
                 return Err(RuntimeError::NoDriver {
@@ -2000,7 +2004,7 @@ impl PluginRegistry {
     /// to the child returned by that same committed operation.
     ///
     /// # Errors
-    /// Returns a mode, pending-step, or store error without transferring state.
+    /// Returns a mode, recovered-prefix, pending-step, Driver, or store error.
     pub fn fork_restored_timeline(
         &mut self,
         store: &mut dyn pos_core::EventStore,
@@ -2010,13 +2014,31 @@ impl PluginRegistry {
     ) -> Result<Timeline, RuntimeError> {
         self.ensure_live_execution()?;
         self.ensure_no_pending_step()?;
+        if self.restored_binding != Some((parent, at_seq)) {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Fork point differs from the restored Timeline prefix",
+            });
+        }
         let child = store.fork(parent, at_seq, name)?;
         let handoff = CommittedForkHandoff::new(parent, child.id());
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
-                driver.commit_fork_timeline(&handoff);
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    driver.commit_fork_timeline(&handoff);
+                }))
+                .is_err()
+                {
+                    self.poisoned_driver = Some(name.clone());
+                    self.restored_binding = None;
+                    return match store.delete_timeline(child.id()) {
+                        Ok(()) => Err(RuntimeError::DriverForkPanicked { name }),
+                        Err(source) => Err(RuntimeError::DriverForkRollbackFailed { name, source }),
+                    };
+                }
             }
         }
+        self.restored_binding = None;
         Ok(child)
     }
 
@@ -2080,6 +2102,9 @@ impl PluginRegistry {
             }
             entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
         }
+        self.restored_binding = timeline_segments
+            .last()
+            .map(|segment| (segment.timeline_id(), segment.through()));
         Ok(())
     }
 
@@ -2321,6 +2346,7 @@ impl PluginRegistry {
                 registration,
             },
         );
+        self.restored_binding = None;
         Ok(())
     }
 
@@ -2354,6 +2380,7 @@ impl PluginRegistry {
 
     /// Register a driver directly (for tests and late-bound agent registration).
     pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
+        self.restored_binding = None;
         let name = driver.name().to_owned();
         self.plugins.insert(
             pos_core::ids::PluginId::new(),
@@ -2497,6 +2524,7 @@ impl PluginRegistry {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
+        self.restored_binding = None;
         let mut all_drafts = Vec::new();
         let mut due_driver_ids = HashSet::new();
         let mut seen_subscriptions = HashSet::new();
@@ -2654,6 +2682,7 @@ impl PluginRegistry {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
+        self.restored_binding = None;
         let mut all_drafts = Vec::new();
         let snapshot = self.snapshot_for_tick(timeline, Seq::ZERO, &OperationContext::Public)?;
         for entry in self.plugins.values_mut() {
@@ -2781,6 +2810,46 @@ mod tests {
                 )))
             });
         store
+    }
+
+    #[test]
+    fn panicking_fork_handoff_rolls_back_child_and_faults_registry() {
+        struct PanickingForkDriver;
+
+        impl Driver for PanickingForkDriver {
+            fn name(&self) -> &'static str {
+                "panicking-fork-driver"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+
+            fn commit_fork_timeline(&mut self, _: &CommittedForkHandoff) {
+                panic!("fork handoff fault");
+            }
+        }
+
+        let mut store = gated_store();
+        let parent = store.create_timeline("parent").test_ok();
+        let mut registry = gated_registry();
+        registry.register_driver(Box::new(PanickingForkDriver));
+        registry
+            .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+            .test_ok();
+        assert!(matches!(
+            registry.fork_restored_timeline(store.as_mut(), parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::DriverForkPanicked { .. })
+        ));
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
+        assert!(matches!(
+            registry.step_all(parent.id()),
+            Err(RuntimeError::DriverCommitPanicked { .. })
+        ));
     }
 
     trait TestValueExt<T> {

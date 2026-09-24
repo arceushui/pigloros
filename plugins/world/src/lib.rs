@@ -3840,8 +3840,27 @@ mod tests {
                 Seq::from_u64(2),
                 "wrong-parent"
             ),
-            Err(RuntimeError::Store(_))
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
         ));
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                parent.id(),
+                Seq::from_u64(1),
+                "earlier-cut"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                parent.id(),
+                Seq::from_u64(3),
+                "later-cut"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
         let unrelated = store.create_timeline("unrelated").test_ok();
         assert!(matches!(
             registry.step_all_anchored_with_events(unrelated.id(), Seq::from_u64(2), &events),
