@@ -323,17 +323,19 @@ mod tests {
             } else {
                 65_535
             };
-            Ok(pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
-                closure.digest(),
-                closure.timeline_id(),
-                closure.source_head(),
-                requested_use.clone(),
-                inventory_generation,
-                pos_core::ErasureReplayClaimV1::Exact,
-                EventReadBounds::new_with_total_bytes_and_elapsed(
-                    65_536, 128, 8, max_events, 67_108_864, 30_000_000,
+            Ok(
+                pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                    closure.digest(),
+                    closure.timeline_id(),
+                    closure.source_head(),
+                    requested_use.clone(),
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                    EventReadBounds::new_with_total_bytes_and_elapsed(
+                        65_536, 128, 8, max_events, 67_108_864, 30_000_000,
+                    ),
                 ),
-            ))
+            )
         }
     }
 
