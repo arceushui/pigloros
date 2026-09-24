@@ -46,7 +46,7 @@ impl MeasuredProcessImageV1 {
         }
         let mut hasher = blake3::Hasher::new();
         let mut read_count = 0_u64;
-        let mut chunk = [0_u8; 64 * 1024];
+        let mut chunk = [0_u8; 16 * 1024];
         loop {
             let len = image
                 .read(&mut chunk)

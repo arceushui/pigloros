@@ -3012,9 +3012,11 @@ mod run_coverage_entrypoints {
         test_ok(experiment.register(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(
-                world_driver(&topology.input, topology.body, topology.config_entity).test_ok(),
-            )),
+            Some(Box::new(test_ok(world_driver(
+                &topology.input,
+                topology.body,
+                topology.config_entity,
+            )))),
         ));
         assert!(register_plugins(&mut experiment, &topology).is_err());
 
