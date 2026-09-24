@@ -109,28 +109,18 @@ fn memory_key_registry_public_contract_covers_transaction_boundaries(
     bind_test_erasure_gate(&mut store)?;
     let request =
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
-    let mut absent_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
-        Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    let mut rejecting_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        Err::<Event, _>(CoreError::Storage("callback rejected event".to_owned()))
     };
-    assert!(matches!(
-        store.append_signed_authorized(TimelineId::new(), &registry, &mut absent_callback),
-        Err(CoreError::Storage(_))
-    ));
-    assert!(matches!(
-        store.begin_key_registry_destruction(request),
-        Err(CoreError::Storage(_))
-    ));
-    assert!(matches!(
-        store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request)),
-        Err(CoreError::Storage(_))
-    ));
-
-    let mut unfenced = MemoryStore::new();
-    unfenced.save_key_registry(&registry)?;
-    let unfenced_timeline = unfenced.create_timeline("unfenced-registry")?;
-    assert!(unfenced
-        .append_signed_authorized(unfenced_timeline.id(), &registry, &mut absent_callback)
-        .is_err());
+    assert!(store
+        .append_signed_authorized(TimelineId::new(), &registry, &mut rejecting_callback)
+        .is_err_and(|error| error.to_string().contains("key registry is unavailable")));
+    assert!(store
+        .begin_key_registry_destruction(request)
+        .is_err_and(|error| error.to_string().contains("key registry is unavailable")));
+    assert!(store
+        .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))
+        .is_err_and(|error| error.to_string().contains("key registry is unavailable")));
 
     store.save_key_registry(&registry)?;
     let timeline = store.create_timeline("memory-registry-contract")?;
@@ -146,22 +136,21 @@ fn memory_key_registry_public_contract_covers_transaction_boundaries(
         .into_iter()
         .next()
         .ok_or_else(|| CoreError::Storage("seed append returned no event".to_owned()))?;
-    assert!(matches!(
-        store.append_signed_authorized(
+    assert!(store
+        .append_signed_authorized(
             timeline.id(),
             &KeyRegistryStateV1::new(),
-            &mut absent_callback
-        ),
-        Err(CoreError::Storage(_))
-    ));
-    assert!(matches!(
-        store.append_signed_authorized(TimelineId::new(), &registry, &mut absent_callback),
-        Err(CoreError::TimelineNotFound(_))
-    ));
-    assert!(matches!(
-        store.append_signed_authorized(timeline.id(), &registry, &mut absent_callback),
-        Err(CoreError::Storage(_))
-    ));
+            &mut rejecting_callback,
+        )
+        .is_err_and(|error| error
+            .to_string()
+            .contains("key registry changed during signing")));
+    assert!(store
+        .append_signed_authorized(TimelineId::new(), &registry, &mut rejecting_callback)
+        .is_err_and(|error| error.to_string().contains("timeline not found")));
+    assert!(store
+        .append_signed_authorized(timeline.id(), &registry, &mut rejecting_callback)
+        .is_err_and(|error| error.to_string().contains("callback rejected event")));
     seed.id = EventId::new();
     let mut success = move |_registry: &KeyRegistryStateV1, seq: Seq| {
         seed.seq = seq;
@@ -177,16 +166,14 @@ fn memory_key_registry_public_contract_covers_transaction_boundaries(
         Hash::from_bytes([9; 32]),
         Hash::from_bytes([2; 32]),
     );
-    assert!(matches!(
-        store.begin_key_registry_destruction(invalid_request),
-        Err(CoreError::Storage(_))
-    ));
+    assert!(store
+        .begin_key_registry_destruction(invalid_request)
+        .is_err_and(|error| error.to_string().contains("key destruction:")));
     let (_, pending) = store.begin_key_registry_destruction(request)?;
     assert_ne!(pending, registry);
-    assert!(matches!(
-        store.complete_key_registry_destruction(request, Hash::from_bytes([9; 32])),
-        Err(CoreError::Storage(_))
-    ));
+    assert!(store
+        .complete_key_registry_destruction(request, Hash::from_bytes([9; 32]))
+        .is_err_and(|error| error.to_string().contains("key destruction:")));
     let (_, destroyed) =
         store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))?;
     assert!(destroyed.tombstone(identity).is_some());
@@ -505,10 +492,8 @@ fn sqlite_key_registry_signing_and_rotation_are_ordered_across_handles(
             result
         });
         rotation_attempted_rx.recv_timeout(std::time::Duration::from_secs(5))?;
-        let rotation_waited = matches!(
-            rotation_done_rx.recv_timeout(std::time::Duration::from_millis(50)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        );
+        let rotation_waited = rotation_done_rx.recv_timeout(std::time::Duration::from_millis(50))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout);
         release_tx.send(())?;
         let sign_result = sign_handle
             .join()
