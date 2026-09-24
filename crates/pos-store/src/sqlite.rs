@@ -3812,7 +3812,7 @@ impl EventStore for SqliteStore {
             Err(error) => return finish_immediate_transaction(&self.conn, Err(error)),
         };
         let mut signing_registry = persisted.clone();
-        match persisted.with_signing_authorization(
+        let authorization = persisted.with_signing_authorization(
             identity,
             material_digest,
             public_verification_key,
@@ -3833,7 +3833,8 @@ impl EventStore for SqliteStore {
                 })();
                 finish_immediate_transaction(&self.conn, signed)
             },
-        ) {
+        );
+        let committed = match authorization {
             Ok(committed) => committed,
             Err(error) => finish_immediate_transaction(
                 &self.conn,
@@ -3841,7 +3842,8 @@ impl EventStore for SqliteStore {
                     "Timeline signing authorization: {error}"
                 ))),
             ),
-        }
+        };
+        committed
     }
 
     fn begin_key_registry_destruction(
