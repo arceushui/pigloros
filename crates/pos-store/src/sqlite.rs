@@ -5110,7 +5110,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             return Err(ErasureErrorV1::StaleGeneration);
         }
         transaction.commit().map_err(map_erasure_receipt_failure)?;
-        self.erasure_inventory_data_version = Some(version_after);
+        self.erasure_inventory_data_version = version_after;
         Ok(snapshot)
     }
 }
