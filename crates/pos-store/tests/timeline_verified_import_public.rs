@@ -11,7 +11,7 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft,
     EventOriginV1, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryStateV1, KeyRoleV1, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1, Seq,
-    SeqRange, Timeline, TimelineEventEnvelopeV1, TimelineId,
+    SeqRange, Timeline, TimelineEventEnvelopeV1, TimelineEventVerificationV1, TimelineId,
 };
 use pos_crypto::{
     key_roles::{sign_timeline_event_for_registered_role, SigningKeyMaterial},
@@ -19,6 +19,7 @@ use pos_crypto::{
 };
 use pos_store::{
     export_timeline_own, import_timeline_verified_v1, memory::MemoryStore, sqlite::SqliteStore,
+    verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1,
 };
 
 const EXPORT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([201; 32]);
@@ -263,6 +264,54 @@ fn verify_round_trip(store: &mut dyn EventStore) -> Result<(), Box<dyn std::erro
         store.read(fixture.nested, SeqRange::all())?,
         fixture.source.read(fixture.nested, SeqRange::all())?
     );
+    for timeline in [fixture.root, fixture.child, fixture.nested] {
+        let events = store.read(timeline, SeqRange::all())?;
+        let head = store.logical_head(timeline)?;
+        let report = verify_signed_timeline_range_v1(
+            store,
+            timeline,
+            SeqRange::all(),
+            &events,
+            &fixture.anchors,
+            Some(head),
+        )?;
+        assert_eq!(
+            report.range_claim(),
+            TimelineSignedRangeClaimV1::CompleteThroughHead
+        );
+        assert_eq!(report.per_event().len(), events.len());
+        assert!(report
+            .per_event()
+            .iter()
+            .all(|result| *result == TimelineEventVerificationV1::Verified));
+    }
+    let bounded = SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(3));
+    let events = store.read(fixture.nested, bounded)?;
+    let head = store.logical_head(fixture.nested)?;
+    let complete = verify_signed_timeline_range_v1(
+        store,
+        fixture.nested,
+        bounded,
+        &events,
+        &fixture.anchors,
+        Some(head),
+    )?;
+    assert_eq!(
+        complete.range_claim(),
+        TimelineSignedRangeClaimV1::CompleteBounded
+    );
+    let no_head = verify_signed_timeline_range_v1(
+        store,
+        fixture.nested,
+        bounded,
+        &events,
+        &fixture.anchors,
+        None,
+    )?;
+    assert_eq!(
+        no_head.range_claim(),
+        TimelineSignedRangeClaimV1::ContiguousOnly
+    );
     Ok(())
 }
 
@@ -373,5 +422,112 @@ fn invalid_signature_origin_and_trust_reject_without_partial_import(
     )?;
     let wrong_anchor = [(fixture.anchors[0].0, fixture.anchors[1].1)];
     reject_export(&mut MemoryStore::new(), &fixture, original, &wrong_anchor)?;
+    Ok(())
+}
+
+#[test]
+fn signed_range_rejects_reordering_duplicates_gaps_and_untrusted_head(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let store = &fixture.source;
+    let range = SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(2));
+    let root = store.read(fixture.root, range)?;
+    let head = store.logical_head(fixture.root)?;
+    for supplied in [
+        vec![root[1].clone(), root[0].clone()],
+        vec![root[0].clone(), root[0].clone()],
+        vec![root[1].clone()],
+    ] {
+        let report = verify_signed_timeline_range_v1(
+            store,
+            fixture.root,
+            range,
+            &supplied,
+            &fixture.anchors,
+            Some(head),
+        )?;
+        assert_eq!(report.range_claim(), TimelineSignedRangeClaimV1::Rejected);
+        assert!(report
+            .per_event()
+            .iter()
+            .all(|result| *result == TimelineEventVerificationV1::Verified));
+    }
+    let report = verify_signed_timeline_range_v1(
+        store,
+        fixture.root,
+        range,
+        &root,
+        &fixture.anchors,
+        Some(Seq::from_u64(1)),
+    )?;
+    assert_eq!(report.range_claim(), TimelineSignedRangeClaimV1::Rejected);
+    assert!(report
+        .per_event()
+        .iter()
+        .all(|result| *result == TimelineEventVerificationV1::Verified));
+
+    let missing_anchor =
+        verify_signed_timeline_range_v1(store, fixture.root, range, &root, &[], Some(head))?;
+    assert_eq!(
+        missing_anchor.range_claim(),
+        TimelineSignedRangeClaimV1::Rejected
+    );
+    assert!(missing_anchor
+        .per_event()
+        .iter()
+        .all(|result| *result == TimelineEventVerificationV1::MissingRequiredContext));
+    let wrong_anchor = [(fixture.anchors[0].0, fixture.anchors[1].1)];
+    let invalid = verify_signed_timeline_range_v1(
+        store,
+        fixture.root,
+        range,
+        &root,
+        &wrong_anchor,
+        Some(head),
+    )?;
+    assert_eq!(invalid.range_claim(), TimelineSignedRangeClaimV1::Rejected);
+    assert!(invalid
+        .per_event()
+        .iter()
+        .all(|result| *result == TimelineEventVerificationV1::Invalid));
+    Ok(())
+}
+
+#[test]
+fn signed_range_rejects_valid_event_from_other_fork() -> Result<(), Box<dyn std::error::Error>> {
+    let (key, _) = generate_keypair();
+    let material = SigningKeyMaterial::new(key);
+    let identity = KeyIdentityV1::new("range-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        identity,
+        material.material_digest(),
+        Some(material.public_verification_key()),
+    ))?;
+    let mut store = MemoryStore::new();
+    gated(&mut store)?;
+    store.save_key_registry(&registry)?;
+    let root = store.create_timeline("range-root")?.id();
+    append_signed(&mut store, root, &registry, identity, &material, b"root")?;
+    let left = store.fork(root, Seq::from_u64(1), "left")?.id();
+    let right = store.fork(root, Seq::from_u64(1), "right")?.id();
+    append_signed(&mut store, left, &registry, identity, &material, b"left")?;
+    append_signed(&mut store, right, &registry, identity, &material, b"right")?;
+    let mut supplied = store.read(left, SeqRange::all())?;
+    let right_event = store.read(right, SeqRange::all())?.remove(1);
+    supplied[1] = right_event;
+    let report = verify_signed_timeline_range_v1(
+        &store,
+        left,
+        SeqRange::all(),
+        &supplied,
+        &[(identity, material.public_verification_key())],
+        Some(store.logical_head(left)?),
+    )?;
+    assert_eq!(report.range_claim(), TimelineSignedRangeClaimV1::Rejected);
+    assert!(report
+        .per_event()
+        .iter()
+        .all(|result| *result == TimelineEventVerificationV1::Verified));
     Ok(())
 }
