@@ -281,47 +281,22 @@ fn rotated_import_fixture() -> Result<RotatedImportFixture, Box<dyn std::error::
 }
 
 #[test]
-fn verified_import_resolves_each_rotated_identity_including_a_tombstone(
+fn import_anchor_resolution_covers_rotated_identity_and_tombstone(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, export, anchors) = rotated_import_fixture()?;
     let mut destination = MemoryStore::new();
     bind_test_erasure_gate(&mut destination)?;
     destination.save_key_registry(&registry)?;
-    let calls = Cell::new(0);
-    let imported = pos_store::import_timeline_with_verified_signatures(
-        &mut destination,
-        export,
-        &anchors,
-        |event, public_key| {
-            calls.set(calls.get() + 1);
-            let (expected_key, expected_signature) = match event.signature_identity {
-                Some(identity) if identity == anchors[0].0 => {
-                    (anchors[0].1, pos_core::Signature::from_bytes([51; 64]))
-                }
-                Some(identity) if identity == anchors[1].0 => {
-                    (anchors[1].1, pos_core::Signature::from_bytes([52; 64]))
-                }
-                _ => return Err(CoreError::SignatureVerificationFailed),
-            };
-            if *public_key != expected_key || event.signature != Some(expected_signature) {
-                return Err(CoreError::SignatureVerificationFailed);
-            }
-            Ok(())
-        },
-    )?;
-    assert_eq!(calls.get(), 2);
-    assert_eq!(
-        destination
-            .read(imported.id(), pos_core::SeqRange::all())?
-            .len(),
-        2
-    );
+    let public_keys =
+        pos_store::resolve_timeline_import_public_keys_v1(&destination, &export, &anchors)?;
+    assert_eq!(public_keys, vec![anchors[0].1, anchors[1].1]);
+    assert!(destination.list_timelines()?.is_empty());
     assert!(registry.tombstone(anchors[0].0).is_some());
     Ok(())
 }
 
 #[test]
-fn verified_import_rejects_missing_duplicate_and_mismatched_anchors_before_create(
+fn import_anchor_resolution_rejects_missing_duplicate_and_mismatched_anchors(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, export, anchors) = rotated_import_fixture()?;
     let wrong_owner = KeyIdentityV1::new("other-owner", KeyRoleV1::TimelineIntegritySigning, 1);
@@ -335,11 +310,10 @@ fn verified_import_rejects_missing_duplicate_and_mismatched_anchors_before_creat
         let mut destination = MemoryStore::new();
         bind_test_erasure_gate(&mut destination)?;
         destination.save_key_registry(&registry)?;
-        assert!(pos_store::import_timeline_with_verified_signatures(
-            &mut destination,
-            export.clone(),
+        assert!(pos_store::resolve_timeline_import_public_keys_v1(
+            &destination,
+            &export,
             &trust_set,
-            |_, _| Ok(()),
         )
         .is_err_and(|error| error.to_string() == "signature verification failed"));
         assert!(destination.list_timelines()?.is_empty());
@@ -348,11 +322,10 @@ fn verified_import_rejects_missing_duplicate_and_mismatched_anchors_before_creat
     let mut missing_registration = MemoryStore::new();
     bind_test_erasure_gate(&mut missing_registration)?;
     missing_registration.save_key_registry(&KeyRegistryStateV1::new())?;
-    assert!(pos_store::import_timeline_with_verified_signatures(
-        &mut missing_registration,
-        export,
+    assert!(pos_store::resolve_timeline_import_public_keys_v1(
+        &missing_registration,
+        &export,
         &anchors,
-        |_, _| Ok(()),
     )
     .is_err_and(|error| error.to_string() == "signature verification failed"));
     assert!(missing_registration.list_timelines()?.is_empty());

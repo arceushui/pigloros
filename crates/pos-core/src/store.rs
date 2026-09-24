@@ -6,7 +6,7 @@
 //! |--------|--------|--------|-------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] | Remints timeline/event ids; converts to drafts (signatures dropped) |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] | Parent first, then child; forks need `parent_fork_hash` |
-//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must carry a signature verified against its exact owner/role/epoch trust anchor |
+//! | Verified identity | [`export_timeline_own`] | Pending `TimelineEventEnvelopeV1` verifier (#202) | Resolve exact owner/role/epoch trust anchors before normative envelope verification |
 //!
 //! Prefer [`export_timeline_own`] (alias: [`export_timeline_cow`]) for copy-on-write sync.
 //! [`export_timeline_raw`] is the same function kept for existing call sites.
@@ -1061,8 +1061,9 @@ pub fn export_timeline_raw(
 /// clear signatures and signature identities (`EventDraft` has neither field).
 ///
 /// For identity-preserving `CoW` sync, use [`export_timeline_own`] +
-/// [`import_timeline_with_id`] instead. For crypto-checked identity import, see
-/// `pos_store::import_timeline_with_verified_signatures`.
+/// [`import_timeline_with_id`] instead. Crypto-checked identity import remains
+/// unavailable until the normative `TimelineEventEnvelopeV1` verifier is added
+/// under #202.
 ///
 /// # Errors
 /// Returns a [`CoreError::Storage`] error if the timeline already exists or on I/O failure.

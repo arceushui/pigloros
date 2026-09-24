@@ -20,10 +20,11 @@
 //! |--------|--------|--------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
-//! | Verified identity | [`export_timeline_own`] | [`import_timeline_with_verified_signatures`] |
+//! | Verified identity | [`export_timeline_own`] | Pending `TimelineEventEnvelopeV1` verifier (#202) |
 //!
-//! Verified import delegates complete Timeline Event signature checks to the
-//! trusted host verifier. See [`import_timeline_with_verified_signatures`].
+//! [`resolve_timeline_import_public_keys_v1`] checks exact owner/role/epoch
+//! trust anchors without importing Events. Verified identity import remains
+//! unavailable until #202 adds the normative Timeline envelope verifier.
 //!
 //! # Backend features
 //!
@@ -530,33 +531,28 @@ pub fn open_store_with_hasher(
     }
 }
 
-/// Verify every signed Event against its exact trusted owner/role/epoch key,
-/// then import without changing Timeline or Event identity.
+/// Resolve each signed Event's exact trusted owner/role/epoch public key.
 ///
-/// `verify_event` is the trusted host's Timeline envelope verifier. It must
-/// verify the complete original Event context and signature using the supplied
-/// public key. This function resolves trust anchors and invokes that verifier;
-/// it does not implement cryptographic verification itself. A callback that
-/// returns success without checking `TimelineEventEnvelopeV1` voids the
-/// integrity claim. The generic payload-only role verifier is not valid here.
-/// Mixed owner and epoch histories are accepted when each Event has one exact
-/// anchor matching the destination registry, including retained public keys
-/// for destroyed identities. Duplicate or mismatched anchors fail closed.
-/// An empty Event list is allowed.
+/// The result has one public key per Event, in export order. Mixed owner and
+/// epoch histories are accepted when every Event has one exact anchor matching
+/// the destination registry, including retained public keys for destroyed
+/// identities. Duplicate or mismatched anchors fail closed. An empty Event
+/// list returns an empty result.
+///
+/// This checks identity and trust resolution only. It does not verify any
+/// signature or import any Event. A host must not treat the result as Timeline
+/// integrity evidence. Verified identity import remains unavailable until
+/// #202 adds the normative `TimelineEventEnvelopeV1` verifier; payload-only
+/// `verify_for_role` is not valid for Timeline Events.
 ///
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if any Event is unsigned,
-/// lacks an exact trust anchor, or fails the supplied verifier; also returns
-/// errors from [`import_timeline_with_id`].
-pub fn import_timeline_with_verified_signatures<F>(
-    store: &mut dyn EventStore,
-    export: TimelineExport,
+/// lacks an exact trust anchor, or has a mismatched retained registry key.
+pub fn resolve_timeline_import_public_keys_v1(
+    store: &dyn EventStore,
+    export: &TimelineExport,
     trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
-    mut verify_event: F,
-) -> Result<pos_core::Timeline, CoreError>
-where
-    F: FnMut(&pos_core::Event, &pos_core::PublicKey) -> Result<(), CoreError>,
-{
+) -> Result<Vec<pos_core::PublicKey>, CoreError> {
     let mut anchors = std::collections::BTreeMap::new();
     for (identity, public_key) in trust_anchors {
         if identity.epoch == 0
@@ -567,11 +563,16 @@ where
             return Err(CoreError::SignatureVerificationFailed);
         }
     }
-    let registry = load_import_registry(store, &export)?;
+    let registry = load_import_registry(store, export)?;
+    let mut public_keys = Vec::with_capacity(export.events.len());
     for event in &export.events {
-        verify_import_event(event, &anchors, registry.as_ref(), &mut verify_event)?;
+        public_keys.push(resolve_import_event_key(
+            event,
+            &anchors,
+            registry.as_ref(),
+        )?);
     }
-    import_timeline_with_id(store, export)
+    Ok(public_keys)
 }
 
 fn load_import_registry(
@@ -585,21 +586,17 @@ fn load_import_registry(
         .load_key_registry()?
         .ok_or_else(|| {
             CoreError::Storage(
-                "verified Timeline import requires a persisted key registry".to_owned(),
+                "Timeline import trust resolution requires a persisted key registry".to_owned(),
             )
         })
         .map(Some)
 }
 
-fn verify_import_event<F>(
+fn resolve_import_event_key(
     event: &pos_core::Event,
     anchors: &std::collections::BTreeMap<pos_core::KeyIdentityV1, pos_core::PublicKey>,
     registry: Option<&pos_core::KeyRegistryStateV1>,
-    verify_event: &mut F,
-) -> Result<(), CoreError>
-where
-    F: FnMut(&pos_core::Event, &pos_core::PublicKey) -> Result<(), CoreError>,
-{
+) -> Result<pos_core::PublicKey, CoreError> {
     if event.signature.is_none() {
         return Err(CoreError::SignatureVerificationFailed);
     }
@@ -618,7 +615,27 @@ where
     if record.public_verification_key != Some(*public_key) {
         return Err(CoreError::SignatureVerificationFailed);
     }
-    verify_event(event, public_key)
+    Ok(*public_key)
+}
+
+// Exercise the resolver's dispatch against existing fixture signatures. This
+// helper is test-only: production verified import waits for #202's envelope
+// verifier and cannot be called through the public crate API.
+#[cfg(test)]
+fn fixture_import_with_resolved_keys<F>(
+    store: &mut dyn EventStore,
+    export: TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+    mut verify_event: F,
+) -> Result<pos_core::Timeline, CoreError>
+where
+    F: FnMut(&pos_core::Event, &pos_core::PublicKey) -> Result<(), CoreError>,
+{
+    let public_keys = resolve_timeline_import_public_keys_v1(store, &export, trust_anchors)?;
+    for (event, public_key) in export.events.iter().zip(&public_keys) {
+        verify_event(event, public_key)?;
+    }
+    import_timeline_with_id(store, export)
 }
 
 #[cfg(test)]
@@ -1294,7 +1311,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_with_verified_signatures_accepts_valid_and_rejects_bad() {
+    fn fixture_import_resolves_anchors_and_checks_role_message_signatures() {
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, SchemaVersion},
@@ -1356,7 +1373,7 @@ mod tests {
 
         let mut ok_store = open_fixture_store(StoreConfig::Memory);
         ok_store.save_key_registry(&registry).test_ok();
-        import_timeline_with_verified_signatures(
+        fixture_import_with_resolved_keys(
             ok_store.as_mut(),
             export.clone(),
             &fixture_anchors(pk),
@@ -1369,7 +1386,7 @@ mod tests {
         let reject_key = public_key_from_verifying_key(&reject_vk);
         let mut bad_store = open_fixture_store(StoreConfig::Memory);
         bad_store.save_key_registry(&registry).test_ok();
-        let err = import_timeline_with_verified_signatures(
+        let err = fixture_import_with_resolved_keys(
             bad_store.as_mut(),
             export,
             &fixture_anchors(reject_key),
@@ -1388,7 +1405,7 @@ mod tests {
         let anchors = fixture_anchors(*public_key);
 
         let mut missing_registry_store = open_fixture_store(StoreConfig::Memory);
-        let missing_registry = import_timeline_with_verified_signatures(
+        let missing_registry = fixture_import_with_resolved_keys(
             missing_registry_store.as_mut(),
             export.clone(),
             &anchors,
@@ -1404,7 +1421,7 @@ mod tests {
         let mut missing_identity_store = open_fixture_store(StoreConfig::Memory);
         missing_identity_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
+            fixture_import_with_resolved_keys(
                 missing_identity_store.as_mut(),
                 missing_identity,
                 &anchors,
@@ -1423,7 +1440,7 @@ mod tests {
         let mut wrong_role_store = open_fixture_store(StoreConfig::Memory);
         wrong_role_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
+            fixture_import_with_resolved_keys(
                 wrong_role_store.as_mut(),
                 wrong_role,
                 &anchors,
@@ -1444,7 +1461,7 @@ mod tests {
             .save_key_registry(registry)
             .test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
+            fixture_import_with_resolved_keys(
                 mismatched_identity_store.as_mut(),
                 mismatched_identity,
                 &anchors,
@@ -1464,7 +1481,7 @@ mod tests {
         let mut missing_record_store = open_fixture_store(StoreConfig::Memory);
         missing_record_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
+            fixture_import_with_resolved_keys(
                 missing_record_store.as_mut(),
                 missing_record,
                 &anchors,
@@ -1481,7 +1498,7 @@ mod tests {
             .save_key_registry(registry)
             .test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
+            fixture_import_with_resolved_keys(
                 invalid_signature_store.as_mut(),
                 invalid_signature,
                 &anchors,
@@ -1494,7 +1511,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_with_verified_signatures_rejects_invalid_public_key() {
+    fn fixture_anchor_resolution_rejects_invalid_public_key() {
         use pos_core::{
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
@@ -1510,7 +1527,7 @@ mod tests {
         let mut store = open_fixture_store(StoreConfig::Memory);
         let (_, verifying_key) = generate_keypair();
         let valid = public_key_from_verifying_key(&verifying_key);
-        import_timeline_with_verified_signatures(
+        fixture_import_with_resolved_keys(
             store.as_mut(),
             export.clone(),
             &fixture_anchors(valid),
@@ -1520,7 +1537,7 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[31] = 0xff;
         let bad = PublicKey::from_bytes(bytes);
-        let err = import_timeline_with_verified_signatures(
+        let err = fixture_import_with_resolved_keys(
             store.as_mut(),
             export,
             &fixture_anchors(bad),
@@ -1532,7 +1549,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_with_verified_signatures_rejects_unsigned_event() {
+    fn fixture_anchor_resolution_rejects_unsigned_event() {
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, SchemaVersion},
@@ -1568,7 +1585,7 @@ mod tests {
         store
             .save_key_registry(&KeyRegistryStateV1::new())
             .test_ok();
-        let err = import_timeline_with_verified_signatures(
+        let err = fixture_import_with_resolved_keys(
             store.as_mut(),
             export,
             &fixture_anchors(pk),
@@ -1870,7 +1887,7 @@ mod coverage_entrypoints {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verified_import_requires_a_registry_snapshot() {
+    fn import_anchor_resolution_requires_a_registry_snapshot() {
         let export = TimelineExport {
             timeline: pos_core::Timeline::new(pos_core::TimelineMeta::root("missing-registry")),
             events: vec![pos_core::Event {
@@ -1891,7 +1908,7 @@ mod coverage_entrypoints {
         };
         let mut missing_registry = ok(open_store(StoreConfig::Memory));
         assert!(matches!(
-            import_timeline_with_verified_signatures(
+            fixture_import_with_resolved_keys(
                 missing_registry.as_mut(),
                 export,
                 &[],
@@ -1903,7 +1920,7 @@ mod coverage_entrypoints {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verified_import_propagates_registry_load_failure() {
+    fn import_anchor_resolution_propagates_registry_load_failure() {
         let export = TimelineExport {
             timeline: pos_core::Timeline::new(pos_core::TimelineMeta::root("registry-load-error")),
             events: vec![pos_core::Event {
@@ -1924,7 +1941,7 @@ mod coverage_entrypoints {
         };
         let mut store = RegistryLoadErrorStore;
         assert!(matches!(
-            import_timeline_with_verified_signatures(&mut store, export, &[], |_, _| Ok(())),
+            fixture_import_with_resolved_keys(&mut store, export, &[], |_, _| Ok(())),
             Err(CoreError::Storage(message)) if message == "registry load failed"
         ));
     }
