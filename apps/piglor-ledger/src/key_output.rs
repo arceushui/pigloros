@@ -16,6 +16,25 @@ use std::path::Path;
 
 use crate::CliError;
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BoundFileIdentity {
+    device: [u8; 8],
+    inode: [u8; 8],
+}
+
+#[cfg(unix)]
+impl BoundFileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            device: metadata.dev().to_be_bytes(),
+            inode: metadata.ino().to_be_bytes(),
+        }
+    }
+}
+
 /// Persist the exact owner-managed key path before its registry identity is
 /// first registered. A stale binding after a failed registration is safe: it
 /// prevents a later registration from silently moving the owned artifact.
@@ -41,6 +60,7 @@ pub(crate) fn bind_owned_secret_key(
     if !metadata.is_file() {
         return Err(binding_error("owned key is not a regular file"));
     }
+    let file_identity = BoundFileIdentity::from_metadata(&metadata);
     let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(binding_error)?;
     connection
@@ -52,6 +72,8 @@ pub(crate) fn bind_owned_secret_key(
                epoch INTEGER NOT NULL,
                material_digest BLOB NOT NULL CHECK (length(material_digest) = 32),
                absolute_path BLOB NOT NULL,
+               file_device BLOB NOT NULL CHECK (length(file_device) = 8),
+               file_inode BLOB NOT NULL CHECK (length(file_inode) = 8),
                PRIMARY KEY (owner_id, role, epoch)
              );",
         )
@@ -60,18 +82,26 @@ pub(crate) fn bind_owned_secret_key(
     connection
         .execute(
             "INSERT OR IGNORE INTO ledger_owned_key_binding_v1
-             (owner_id, role, epoch, material_digest, absolute_path)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (owner_id, role, epoch, material_digest, absolute_path, file_device, file_inode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 identity.owner_id.as_str(),
                 identity.role.code(),
                 epoch,
                 material_digest.as_bytes().as_slice(),
-                absolute.as_os_str().as_encoded_bytes()
+                absolute.as_os_str().as_encoded_bytes(),
+                file_identity.device.as_slice(),
+                file_identity.inode.as_slice()
             ],
         )
         .map_err(binding_error)?;
-    verify_owned_secret_key_binding(&connection, &absolute, identity, material_digest)
+    let bound = verify_owned_secret_key_binding(&connection, &absolute, identity, material_digest)?;
+    if bound != file_identity {
+        return Err(binding_error(
+            "owned key file identity differs from durable binding",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -85,20 +115,21 @@ fn verify_owned_secret_key_binding(
     absolute: &Path,
     identity: pos_core::KeyIdentityV1,
     material_digest: pos_core::Hash,
-) -> Result<(), pos_core::CoreError> {
+) -> Result<BoundFileIdentity, pos_core::CoreError> {
     use rusqlite::{params, OptionalExtension};
 
     let epoch = i64::try_from(identity.epoch).map_err(binding_error)?;
-    let binding: Option<(Vec<u8>, Vec<u8>)> = connection
+    let binding: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = connection
         .query_row(
-            "SELECT material_digest, absolute_path FROM ledger_owned_key_binding_v1
+            "SELECT material_digest, absolute_path, file_device, file_inode
+             FROM ledger_owned_key_binding_v1
              WHERE owner_id = ?1 AND role = ?2 AND epoch = ?3",
             params![identity.owner_id.as_str(), identity.role.code(), epoch],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(binding_error)?;
-    let Some((bound_digest, bound_path)) = binding else {
+    let Some((bound_digest, bound_path, device, inode)) = binding else {
         return Err(binding_error("no durable owner-managed key path is bound"));
     };
     if bound_digest.as_slice() != material_digest.as_bytes()
@@ -108,7 +139,14 @@ fn verify_owned_secret_key_binding(
             "key path or material differs from durable owner binding",
         ));
     }
-    Ok(())
+    Ok(BoundFileIdentity {
+        device: device
+            .try_into()
+            .map_err(|_| binding_error("invalid bound device"))?,
+        inode: inode
+            .try_into()
+            .map_err(|_| binding_error("invalid bound inode"))?,
+    })
 }
 
 #[cfg(unix)]
@@ -116,7 +154,7 @@ fn require_owned_secret_key_binding(
     database: &Path,
     path: &Path,
     request: pos_core::KeyDestructionRequestV1,
-) -> Result<(), pos_core::CoreError> {
+) -> Result<BoundFileIdentity, pos_core::CoreError> {
     use rusqlite::{Connection, OpenFlags};
 
     let absolute = absolute_output(path).map_err(binding_error)?;
@@ -172,6 +210,15 @@ pub fn delete_owned_secret_key(
     path: &Path,
     request: pos_core::KeyDestructionRequestV1,
 ) -> Result<pos_core::Hash, pos_core::CoreError> {
+    delete_owned_secret_key_with_identity(path, request, None)
+}
+
+#[cfg(unix)]
+fn delete_owned_secret_key_with_identity(
+    path: &Path,
+    request: pos_core::KeyDestructionRequestV1,
+    expected_file: Option<BoundFileIdentity>,
+) -> Result<pos_core::Hash, pos_core::CoreError> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
@@ -206,6 +253,12 @@ pub fn delete_owned_secret_key(
     let metadata = deletion_fault!(&absolute, FaultStage::DeleteMetadata)
         .and_then(|()| file.metadata())
         .map_err(|error| storage_error(&error))?;
+    if expected_file.is_some_and(|expected| expected != BoundFileIdentity::from_metadata(&metadata))
+    {
+        return Err(pos_core::CoreError::Storage(
+            "owned signing-key file identity differs from durable binding".to_owned(),
+        ));
+    }
     if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
         return Err(pos_core::CoreError::Storage(
             "owned signing-key file is not a private single-link regular file".to_owned(),
@@ -295,10 +348,13 @@ pub fn destroy_owned_secret_key<S: pos_core::EventStore + ?Sized>(
     pos_core::CoreError,
 > {
     #[cfg(unix)]
-    require_owned_secret_key_binding(database, path, request)?;
+    let bound_file = require_owned_secret_key_binding(database, path, request)?;
     #[cfg(not(unix))]
     let _ = database;
     store.begin_key_registry_destruction(request)?;
+    #[cfg(unix)]
+    let receipt = delete_owned_secret_key_with_identity(path, request, Some(bound_file))?;
+    #[cfg(not(unix))]
     let receipt = delete_owned_secret_key(path, request)?;
     store.complete_key_registry_destruction(request, receipt)
 }
@@ -715,8 +771,8 @@ mod binding_tests {
     use std::path::Path;
 
     use super::{
-        bind_owned_secret_key, clear_faults, install_faults, require_owned_secret_key_binding,
-        FaultStage,
+        bind_owned_secret_key, clear_faults, delete_owned_secret_key_with_identity, install_faults,
+        require_owned_secret_key_binding, FaultStage,
     };
     use pos_core::{Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRoleV1};
 
@@ -724,7 +780,7 @@ mod binding_tests {
         KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, epoch)
     }
 
-    fn digest() -> Hash {
+    const fn digest() -> Hash {
         Hash::from_bytes([9; 32])
     }
 
@@ -785,6 +841,17 @@ mod binding_tests {
         bind_owned_secret_key(&database, &key, identity(1), digest())?;
         require_owned_secret_key_binding(&database, &key, request(1, digest()))?;
 
+        let bound = require_owned_secret_key_binding(&database, &key, request(1, digest()))?;
+        let moved = directory.path().join("moved.key");
+        std::fs::rename(&key, &moved)?;
+        std::fs::write(&key, b"owned")?;
+        assert!(
+            delete_owned_secret_key_with_identity(&key, request(1, digest()), Some(bound)).is_err()
+        );
+        assert!(bind_owned_secret_key(&database, &key, identity(1), digest()).is_err());
+        assert!(moved.exists());
+        assert!(key.exists());
+
         assert!(require_owned_secret_key_binding(
             &database,
             &key,
@@ -820,9 +887,26 @@ mod binding_tests {
              DROP TABLE ledger_owned_key_binding_v1;
              CREATE TABLE ledger_owned_key_binding_v1 (
                  owner_id TEXT, role INTEGER, epoch INTEGER,
-                 material_digest INTEGER, absolute_path BLOB
+                 material_digest INTEGER, absolute_path BLOB,
+                 file_device BLOB, file_inode BLOB
              );
-             INSERT INTO ledger_owned_key_binding_v1 VALUES ('piglor-ledger', 2, 1, 9, X'01');",
+             INSERT INTO ledger_owned_key_binding_v1
+             VALUES ('piglor-ledger', 2, 1, 9, X'01', X'01', X'0000000000000000');",
+        )?;
+        assert!(require_owned_secret_key_binding(&database, &key, request(1, digest())).is_err());
+        let expected_digest = digest();
+        connection.execute(
+            "UPDATE ledger_owned_key_binding_v1
+             SET material_digest = ?1, absolute_path = ?2",
+            rusqlite::params![
+                expected_digest.as_bytes().as_slice(),
+                key.as_os_str().as_encoded_bytes()
+            ],
+        )?;
+        assert!(require_owned_secret_key_binding(&database, &key, request(1, digest())).is_err());
+        connection.execute(
+            "UPDATE ledger_owned_key_binding_v1 SET file_device = X'0000000000000000', file_inode = X'01'",
+            [],
         )?;
         assert!(require_owned_secret_key_binding(&database, &key, request(1, digest())).is_err());
         connection.execute_batch("DROP TABLE ledger_owned_key_binding_v1")?;
