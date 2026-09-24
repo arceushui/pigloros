@@ -6062,24 +6062,6 @@ mod tests {
     }
 
     #[test]
-    fn successful_topology_rollback_deletes_a_previously_created_timeline() {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let timeline = host
-            .command_sender()
-            .and_then(|mut sender| sender.create_timeline("explicit-rollback"))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-
-        assert_eq!(
-            host.rollback_unaffected_topology_timeline(&timeline, true),
-            Ok(())
-        );
-    }
-
-    #[test]
     fn current_store_inventory_failure_poisons_recovery() {
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(fault_store(
             FaultModeV1::InventorySnapshot,

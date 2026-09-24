@@ -5960,7 +5960,7 @@ impl SqliteErasureIndex {
     }
 }
 
-fn sqlite_erasure_index_parts(
+const fn sqlite_erasure_index_parts(
     index: ErasureIndexInsertV1,
 ) -> (SqliteErasureIndex, u64, ErasureReferenceV1) {
     match index {
