@@ -1353,8 +1353,8 @@ impl PluginRegistry {
                 name: entry.name.clone(),
             });
         };
-        let complete_prefix_required = driver.requires_complete_event_prefix();
-        if complete_prefix_required {
+        let verified_prefix_required = driver.requires_verified_event_prefix();
+        if verified_prefix_required {
             let anchor = snapshot
                 .view_for(driver.subscriptions())
                 .anchor()
@@ -1380,8 +1380,8 @@ impl PluginRegistry {
             driver.event_subscriptions(),
             entry.event_cursor,
         );
-        let observations = if complete_prefix_required {
-            observations.with_complete_events(
+        let observations = if verified_prefix_required {
+            observations.with_verified_prefix_events(
                 visible_events
                     .iter()
                     .filter(|event| driver.event_subscriptions().contains(&event.event_type))

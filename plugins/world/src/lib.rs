@@ -940,7 +940,6 @@ impl SimpleKinematicBackend {
     /// component or translated coordinate is not finite.
     #[cfg(test)]
     fn step_coordinates(
-        &self,
         bodies: &[WorldCoordinateBody],
     ) -> Result<Vec<WorldCoordinateObservation>, WorldTransformError> {
         bodies
@@ -1767,7 +1766,7 @@ impl Driver for WorldDriver {
         matches!(&self.backend, WorldDriverBackend::Installed(_))
     }
 
-    fn requires_complete_event_prefix(&self) -> bool {
+    fn requires_verified_event_prefix(&self) -> bool {
         matches!(&self.backend, WorldDriverBackend::Installed(_))
     }
 
@@ -1877,11 +1876,9 @@ impl Driver for WorldDriver {
                     });
                 }
             }
-            let complete = match observations.complete_events() {
-                Some(events) => events,
-                None if anchor.observed_through().as_u64() == 0 => &[],
-                None => return Err(WorldInstallationErrorV1::RetainedConfigMissing.into()),
-            };
+            let complete = observations
+                .verified_prefix_events()
+                .ok_or(WorldInstallationErrorV1::RetainedConfigMissing)?;
             self.preflight_installed_step(complete)?;
             self.staged_step_timeline = Some(timeline);
         }
@@ -3718,20 +3715,11 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn installed_history(body_id: EntityId, timeline: TimelineId) -> Vec<Event> {
-        let mut driver = WorldDriver::new_live(
-            vec![installed_body(body_id)],
-            HostWorldProfileV1::standard(),
-        )
-        .test_ok();
-        let output = driver
-            .step(
-                timeline,
-                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::ZERO)),
-            )
+        let (mut registry, _) = installed_registry(body_id);
+        let drafts = registry
+            .step_all_anchored_with_events(timeline, Seq::ZERO, &[])
             .test_ok();
-        driver.commit_step();
-        output
-            .drafts
+        drafts
             .iter()
             .enumerate()
             .map(|(index, draft)| {
@@ -3746,7 +3734,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn installed_registry(body_id: EntityId) -> (PluginRegistry, Arc<AtomicUsize>) {
+    fn installed_counted_driver(body_id: EntityId) -> (WorldDriver, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut driver = WorldDriver::new_live(
             vec![installed_body(body_id)],
@@ -3756,6 +3744,12 @@ mod tests {
         if let WorldDriverBackend::Installed(installed) = &mut driver.backend {
             installed.test_backend = Some(Box::new(CountedInstalledBackend(Arc::clone(&calls))));
         }
+        (driver, calls)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_registry(body_id: EntityId) -> (PluginRegistry, Arc<AtomicUsize>) {
+        let (driver, calls) = installed_counted_driver(body_id);
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
@@ -3818,11 +3812,7 @@ mod tests {
         let body_id = EntityId::new();
         let timeline = TimelineId::new();
         let other_timeline = TimelineId::new();
-        let mut driver = WorldDriver::new_live(
-            vec![installed_body(body_id)],
-            HostWorldProfileV1::standard(),
-        )
-        .test_ok();
+        let (mut driver, direct_calls) = installed_counted_driver(body_id);
         assert!(matches!(
             driver.step(timeline, ObservationView::empty()),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
@@ -3843,6 +3833,16 @@ mod tests {
                 WorldInstallationErrorV1::RetainedConfigMissing
             ))
         ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::ZERO)),
+            ),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+        assert_eq!(direct_calls.load(Ordering::SeqCst), 0);
 
         let events = installed_history(body_id, timeline);
         let (mut registry, calls) = installed_registry(body_id);
@@ -3944,7 +3944,7 @@ mod tests {
             ),
             (
                 {
-                    let mut value = original.clone();
+                    let mut value = original;
                     value.gravity_x = -0.0;
                     value
                 },
@@ -4412,8 +4412,7 @@ mod tests {
         assert!((body.position().north_metres() - position.north_metres()).abs() < f64::EPSILON);
         assert!((body.position().up_metres() - position.up_metres()).abs() < f64::EPSILON);
 
-        let backend = SimpleKinematicBackend::new();
-        let observations = backend.step_coordinates(&[body]).test_ok();
+        let observations = SimpleKinematicBackend::step_coordinates(&[body]).test_ok();
 
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].entity_id(), body.entity_id());
@@ -4453,10 +4452,8 @@ mod tests {
             )
             .test_ok();
         let body = WorldCoordinateBody::new(EntityId::new(), position, f64::INFINITY, 0.0, 0.0);
-        let backend = SimpleKinematicBackend::new();
-
         assert!(matches!(
-            backend.step_coordinates(&[body]),
+            SimpleKinematicBackend::step_coordinates(&[body]),
             Err(WorldTransformError::NonFiniteCoordinate)
         ));
     }
