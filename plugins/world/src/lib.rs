@@ -2,19 +2,21 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-world` — spatial + embodiment plugin with a swappable backend.
+//! `pos-plugin-world` — spatial + embodiment plugin with an installed Live backend.
 //!
 //! Owns versioned World action, observation and configuration Events and entity kind `"world-body"`.
 //! The built-in backend integrates a 3D pose without a Rapier dependency.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use num_traits::ToPrimitive;
+#[cfg(test)]
+use pos_core::WorldTransformError;
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1, WorldTransformError,
+    ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1,
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_runtime::{
@@ -788,9 +790,10 @@ impl WorldConfigV1 {
 // World backend trait (physics seam)
 // ---------------------------------------------------------------------------
 
-/// A swappable physics backend; the built-in adapter uses simple kinematics.
-pub trait WorldBackend: Send + Sync {
+/// Internal physics step seam used by the built-in backend and test fixtures.
+trait WorldBackend: Send + Sync {
     /// Human-readable name for this backend.
+    #[cfg(test)]
     fn name(&self) -> &'static str;
 
     /// Simulate one pinned-duration step and return body observations.
@@ -918,11 +921,11 @@ impl WorldCoordinateObservation {
 
 /// Simple Euler integration of three-dimensional velocity over the pinned step.
 #[derive(Default)]
-pub struct SimpleKinematicBackend;
+struct SimpleKinematicBackend;
 
 impl SimpleKinematicBackend {
     #[must_use]
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self
     }
 
@@ -932,7 +935,8 @@ impl SimpleKinematicBackend {
     ///
     /// Returns [`WorldTransformError::NonFiniteCoordinate`] when a velocity
     /// component or translated coordinate is not finite.
-    pub fn step_coordinates(
+    #[cfg(test)]
+    fn step_coordinates(
         &self,
         bodies: &[WorldCoordinateBody],
     ) -> Result<Vec<WorldCoordinateObservation>, WorldTransformError> {
@@ -954,6 +958,7 @@ impl SimpleKinematicBackend {
 }
 
 impl WorldBackend for SimpleKinematicBackend {
+    #[cfg(test)]
     fn name(&self) -> &'static str {
         "simple-kinematic"
     }
@@ -1141,6 +1146,7 @@ pub struct WorldDriver {
     config_entity: EntityId,
     staged_step: Option<WorldDriverState>,
     staged_restore: Option<WorldDriverState>,
+    installed_prefix_verified: bool,
 }
 
 struct InstalledWorldBackendV1 {
@@ -1258,6 +1264,7 @@ impl WorldDriver {
             config_entity: EntityId::new(),
             staged_step: None,
             staged_restore: None,
+            installed_prefix_verified: false,
         }
     }
 
@@ -1292,9 +1299,11 @@ impl WorldDriver {
         &self,
         evidence: &DriverRecoveryEvidence,
     ) -> Result<(), RuntimeError> {
+        #[cfg(not(test))]
+        let WorldDriverBackend::Installed(installed) = &self.backend;
+        #[cfg(test)]
         let installed = match &self.backend {
             WorldDriverBackend::Installed(installed) => installed,
-            #[cfg(test)]
             WorldDriverBackend::Fixture(_) => return Ok(()),
         };
         let fresh = MeasuredProcessImageV1::capture()?;
@@ -1709,6 +1718,10 @@ impl Driver for WorldDriver {
         "world-driver"
     }
 
+    fn requires_snapshot_anchor(&self) -> bool {
+        matches!(&self.backend, WorldDriverBackend::Installed(_))
+    }
+
     fn event_subscriptions(&self) -> &[Kind] {
         static SUBSCRIPTIONS: std::sync::OnceLock<Vec<Kind>> = std::sync::OnceLock::new();
         SUBSCRIPTIONS.get_or_init(|| vec![Kind::new(EVENT_TYPE_ACTION_V1)])
@@ -1755,6 +1768,7 @@ impl Driver for WorldDriver {
     fn commit_restore_from_history(&mut self) {
         if let Some(restored) = self.staged_restore.take() {
             self.restore_state(restored);
+            self.installed_prefix_verified = true;
         }
     }
 
@@ -1763,7 +1777,11 @@ impl Driver for WorldDriver {
     }
 
     fn commit_step(&mut self) {
-        self.staged_step = None;
+        if self.staged_step.take().is_some()
+            && matches!(&self.backend, WorldDriverBackend::Installed(_))
+        {
+            self.installed_prefix_verified = true;
+        }
     }
 
     fn abort_step(&mut self) {
@@ -1774,9 +1792,25 @@ impl Driver for WorldDriver {
 
     fn step(
         &mut self,
-        _timeline: TimelineId,
+        timeline: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
+        if matches!(&self.backend, WorldDriverBackend::Installed(_)) {
+            let anchor = observations
+                .anchor()
+                .ok_or(RuntimeError::MissingSnapshotAnchor {
+                    driver: self.name().to_owned(),
+                })?;
+            if anchor.timeline_id() != timeline {
+                return Err(RuntimeError::SnapshotTimelineMismatch {
+                    expected: timeline,
+                    actual: anchor.timeline_id(),
+                });
+            }
+            if anchor.observed_through().as_u64() != 0 && !self.installed_prefix_verified {
+                return Err(WorldInstallationErrorV1::RetainedConfigMissing.into());
+            }
+        }
         self.staged_step = Some(self.state());
         let result = (|| {
             let mut drafts = Vec::new();
@@ -1947,7 +1981,7 @@ mod tests {
         ids::{EntityId, EventId},
         CoreError, ErasureContainmentGateV1,
     };
-    use pos_runtime::{PluginRegistry, TimelineHistorySegment};
+    use pos_runtime::{PluginRegistry, SnapshotAnchor, TimelineHistorySegment};
     use pos_store::{open_store as open_unbound_store, StoreConfig};
     #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3615,7 +3649,13 @@ mod tests {
             HostWorldProfileV1::standard(),
         )
         .test_ok();
-        let output = driver.step(timeline, ObservationView::empty()).test_ok();
+        let output = driver
+            .step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::ZERO)),
+            )
+            .test_ok();
+        driver.commit_step();
         output
             .drafts
             .iter()
@@ -3696,6 +3736,50 @@ mod tests {
             .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
             .test_ok();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_step_requires_anchor_and_verified_retained_prefix() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let other_timeline = TimelineId::new();
+        let mut driver = WorldDriver::new_live(
+            vec![installed_body(body_id)],
+            HostWorldProfileV1::standard(),
+        )
+        .test_ok();
+        assert!(matches!(
+            driver.step(timeline, ObservationView::empty()),
+            Err(RuntimeError::MissingSnapshotAnchor { .. })
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(other_timeline, Seq::ZERO)),
+            ),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::from_u64(1))),
+            ),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+
+        let events = installed_history(body_id, timeline);
+        let (mut registry, calls) = installed_registry(body_id);
+        let error = registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::WorldInstallation(WorldInstallationErrorV1::RetainedConfigMissing)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(target_os = "linux")]

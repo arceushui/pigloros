@@ -143,10 +143,10 @@ mod tests {
     };
     use pos_plugin_world::{
         encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldDriver,
-        WorldObservationV1, WorldReducer, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1,
-        EVENT_TYPE_OBSERVATION_V1,
+        WorldObservationV1, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
+        EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
     };
-    use pos_runtime::{Driver, ObservationView};
+    use pos_runtime::{PluginRegistry, TimelineHistorySegment};
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
@@ -314,7 +314,7 @@ mod tests {
         .test_ok();
         let mut bodies = [EntityId::new(), EntityId::new()];
         bodies.sort_unstable();
-        let mut driver = WorldDriver::new_live(
+        let driver = WorldDriver::new_live(
             vec![
                 Body {
                     entity_id: bodies[1],
@@ -349,6 +349,7 @@ mod tests {
             catalogue_version: 1,
             tick: 0,
         };
+        let gate = host.containment_gate();
         let (timeline, action, committed) = {
             let mut commands = host.command_sender().test_ok();
             let timeline = commands.create_timeline("world-live-replay").test_ok().id();
@@ -363,16 +364,26 @@ mod tests {
                 )
                 .test_ok()
                 .remove(0);
-            let output = driver
-                .step(
-                    timeline,
-                    ObservationView::from_events(std::slice::from_ref(&action)),
+            let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+            registry
+                .register(
+                    &WorldPlugin::new().with_bodies(bodies),
+                    Some(Box::new(WorldReducer)),
+                    Some(Box::new(driver)),
                 )
                 .test_ok();
-            let committed = commands.append(timeline, &output.drafts).test_ok();
+            registry
+                .restore_driver_state(
+                    &[TimelineHistorySegment::new(timeline, action.seq)],
+                    std::slice::from_ref(&action),
+                )
+                .test_ok();
+            let drafts = registry
+                .step_all_anchored_with_events(timeline, action.seq, std::slice::from_ref(&action))
+                .test_ok();
+            let committed = commands.append(timeline, &drafts).test_ok();
             (timeline, action, committed)
         };
-        drop(driver);
         (host, timeline, bodies, action, committed)
     }
 
