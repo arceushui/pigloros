@@ -79,6 +79,9 @@ struct Fixture {
     root: pos_core::TimelineId,
     child: pos_core::TimelineId,
     nested: pos_core::TimelineId,
+    initial_registry: KeyRegistryStateV1,
+    rotated_registry: KeyRegistryStateV1,
+    destruction_request: KeyDestructionRequestV1,
     registry: KeyRegistryStateV1,
     anchors: [(KeyIdentityV1, pos_core::PublicKey); 2],
 }
@@ -93,6 +96,7 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         first_material.material_digest(),
         Some(first_material.public_verification_key()),
     ))?;
+    let initial_registry = registry.clone();
     let mut source = MemoryStore::new();
     gated(&mut source)?;
     source.save_key_registry(&registry)?;
@@ -134,6 +138,7 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         second_material.material_digest(),
         Some(second_material.public_verification_key()),
     ))?;
+    let rotated_registry = registry.clone();
     source.save_key_registry(&registry)?;
     append_signed(
         &mut source,
@@ -158,6 +163,9 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         root,
         child,
         nested,
+        initial_registry,
+        rotated_registry,
+        destruction_request: request,
         registry,
         anchors: [
             (first, first_material.public_verification_key()),
@@ -166,10 +174,25 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
     })
 }
 
+fn seed_destination_registry(
+    store: &mut dyn EventStore,
+    fixture: &Fixture,
+) -> Result<(), CoreError> {
+    store.save_key_registry(&fixture.initial_registry)?;
+    store.save_key_registry(&fixture.rotated_registry)?;
+    store.begin_key_registry_destruction(fixture.destruction_request)?;
+    let (_, registry) = store.complete_key_registry_destruction(
+        fixture.destruction_request,
+        pos_core::deletion_receipt(&fixture.destruction_request),
+    )?;
+    assert_eq!(registry, fixture.registry);
+    Ok(())
+}
+
 fn verify_round_trip(store: &mut dyn EventStore) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture()?;
     gated(store)?;
-    store.save_key_registry(&fixture.registry)?;
+    seed_destination_registry(store, &fixture)?;
     let evaluation = export_evaluation()?;
     for timeline in [fixture.root, fixture.child, fixture.nested] {
         let export = export_timeline_own(&fixture.source, timeline, EXPORT_DIGEST, &evaluation)?;
@@ -201,7 +224,7 @@ fn reject_export(
     anchors: &[(KeyIdentityV1, pos_core::PublicKey)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     gated(store)?;
-    store.save_key_registry(&fixture.registry)?;
+    seed_destination_registry(store, fixture)?;
     assert!(import_timeline_verified_v1(store, export, anchors).is_err());
     assert!(store.get_timeline(fixture.root)?.is_none());
     assert!(store.list_timelines()?.is_empty());
