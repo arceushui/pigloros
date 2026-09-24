@@ -1,7 +1,7 @@
 //! Bounded, descriptor-bound operating-limit event observations.
 
 use std::collections::BTreeMap;
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 
@@ -175,7 +175,7 @@ impl AttemptLimitEventSnapshot {
         self.counters[counter.index()]
     }
 
-    /// Return the CLOCK_MONOTONIC capture time as seconds and nanoseconds.
+    /// Return the `CLOCK_MONOTONIC` capture time as seconds and nanoseconds.
     #[must_use]
     pub const fn observed_monotonic(&self) -> (i64, i64) {
         (self.monotonic_seconds, self.monotonic_nanoseconds)
@@ -207,9 +207,7 @@ impl AttemptLimitEventSnapshot {
             let index = counter.index();
             increases[index] = terminal.counters[index]
                 .checked_sub(self.counters[index])
-                .ok_or(AttemptCgroupError::LimitEventCounterDecreased {
-                    counter,
-                })?;
+                .ok_or(AttemptCgroupError::LimitEventCounterDecreased { counter })?;
         }
         Ok(AttemptLimitEventDelta {
             baseline: self,
@@ -258,22 +256,30 @@ impl BoundAttemptCgroup {
     /// Rejects identity replacement or any missing, unsafe, unreadable,
     /// oversized, malformed, or incomplete source.
     pub fn capture_limit_events(&self) -> Result<AttemptLimitEventSnapshot, AttemptCgroupError> {
-        self.verify_limit_event_identity()?;
+        self.capture_limit_events_with_verifier(Self::verify_limit_event_identity)
+    }
+
+    fn capture_limit_events_with_verifier(
+        &self,
+        mut verify: impl FnMut(&Self) -> Result<(), AttemptCgroupError>,
+    ) -> Result<AttemptLimitEventSnapshot, AttemptCgroupError> {
+        verify(self)?;
         let mut raw = std::array::from_fn(|_| Vec::new());
         let mut counters = [0; 6];
         for source in SOURCES {
             let bytes = self.read_limit_event_source(source)?;
             let parsed = parse_flat_counters(&bytes, source)?;
             for &counter in source.required_counters() {
-                counters[counter.index()] = parsed.get(counter.key()).copied().ok_or(
-                    AttemptCgroupError::MalformedLimitEvents {
+                let Some(&value) = parsed.get(counter.key()) else {
+                    return Err(AttemptCgroupError::MalformedLimitEvents {
                         property: source.file_name(),
-                    },
-                )?;
+                    });
+                };
+                counters[counter.index()] = value;
             }
             raw[source.index()] = bytes;
         }
-        self.verify_limit_event_identity()?;
+        verify(self)?;
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptLimitEventSnapshot {
             unit_name: self.unit_name.clone(),
@@ -289,10 +295,14 @@ impl BoundAttemptCgroup {
     }
 
     fn verify_limit_event_identity(&self) -> Result<(), AttemptCgroupError> {
-        let retained = self
-            .directory
-            .metadata()
-            .map_err(AttemptCgroupError::Metadata)?;
+        self.verify_limit_event_identity_with_metadata(File::metadata)
+    }
+
+    fn verify_limit_event_identity_with_metadata(
+        &self,
+        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+    ) -> Result<(), AttemptCgroupError> {
+        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
         if retained.dev() != self.device || retained.ino() != self.inode {
             return Err(AttemptCgroupError::PathReused);
         }
@@ -306,7 +316,7 @@ impl BoundAttemptCgroup {
         )
         .map(File::from)
         .map_err(AttemptCgroupError::PathOpen)?;
-        let metadata = current.metadata().map_err(AttemptCgroupError::Metadata)?;
+        let metadata = read_metadata(&current).map_err(AttemptCgroupError::Metadata)?;
         if metadata.dev() != self.device || metadata.ino() != self.inode {
             return Err(AttemptCgroupError::PathReused);
         }
@@ -386,9 +396,7 @@ mod tests {
             }
             AttemptLimitEventSource::MemorySwapEvents => b"max 5\nfail 0\n",
             AttemptLimitEventSource::PidsEventsLocal => b"max 5\n",
-            AttemptLimitEventSource::CpuStat => {
-                b"usage_usec 9\nnr_throttled 5\nthrottled_usec 5\n"
-            }
+            AttemptLimitEventSource::CpuStat => b"usage_usec 9\nnr_throttled 5\nthrottled_usec 5\n",
         }
     }
 
@@ -441,17 +449,11 @@ mod tests {
         let terminal = bound.capture_limit_events()?;
         assert!(baseline.observed_monotonic() <= terminal.observed_monotonic());
         let delta = baseline.delta_to(terminal)?;
-        assert_eq!(
-            delta.increase(AttemptLimitEventCounter::MemoryOomKill),
-            2
-        );
+        assert_eq!(delta.increase(AttemptLimitEventCounter::MemoryOomKill), 2);
         assert_eq!(delta.increase(AttemptLimitEventCounter::MemoryMax), 1);
         assert_eq!(delta.increase(AttemptLimitEventCounter::SwapMax), 3);
         assert_eq!(delta.increase(AttemptLimitEventCounter::PidsMax), 4);
-        assert_eq!(
-            delta.increase(AttemptLimitEventCounter::CpuNrThrottled),
-            5
-        );
+        assert_eq!(delta.increase(AttemptLimitEventCounter::CpuNrThrottled), 5);
         assert_eq!(
             delta.increase(AttemptLimitEventCounter::CpuThrottledUsec),
             7
@@ -469,7 +471,9 @@ mod tests {
             7
         );
         assert_eq!(
-            delta.terminal().raw(AttemptLimitEventSource::MemoryEventsLocal),
+            delta
+                .terminal()
+                .raw(AttemptLimitEventSource::MemoryEventsLocal),
             b"low 0\nmax 6\noom_kill 7\nfuture_counter 9\n"
         );
         Ok(())
@@ -498,10 +502,7 @@ mod tests {
         ] {
             assert_eq!(delta.increase(counter), 0);
         }
-        assert_eq!(
-            delta.increase(AttemptLimitEventCounter::CpuNrThrottled),
-            1
-        );
+        assert_eq!(delta.increase(AttemptLimitEventCounter::CpuNrThrottled), 1);
         assert_eq!(
             delta.increase(AttemptLimitEventCounter::CpuThrottledUsec),
             10
@@ -609,6 +610,58 @@ mod tests {
             bound.capture_limit_events(),
             Err(AttemptCgroupError::PathReused)
         ));
+        fs::remove_dir(&directory)?;
+        assert!(matches!(
+            bound.capture_limit_events(),
+            Err(AttemptCgroupError::PathOpen(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn identity_metadata_read_errors_fail_closed() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let (bound, _directory) = fixture(temporary.path())?;
+        assert!(matches!(
+            bound.verify_limit_event_identity_with_metadata(|_| Err(std::io::Error::other(
+                "retained metadata read failed"
+            ))),
+            Err(AttemptCgroupError::Metadata(_))
+        ));
+
+        let mut reads = 0;
+        assert!(matches!(
+            bound.verify_limit_event_identity_with_metadata(|file| {
+                reads += 1;
+                if reads == 2 {
+                    Err(std::io::Error::other("reopened metadata read failed"))
+                } else {
+                    file.metadata()
+                }
+            }),
+            Err(AttemptCgroupError::Metadata(_))
+        ));
+        assert_eq!(reads, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn identity_replacement_after_source_reads_rejects_capture() -> Result<(), Box<dyn Error>> {
+        let temporary = tempfile::tempdir()?;
+        let (bound, _directory) = fixture(temporary.path())?;
+        let mut checks = 0;
+        assert!(matches!(
+            bound.capture_limit_events_with_verifier(|cgroup| {
+                checks += 1;
+                if checks == 2 {
+                    Err(AttemptCgroupError::PathReused)
+                } else {
+                    cgroup.verify_limit_event_identity()
+                }
+            }),
+            Err(AttemptCgroupError::PathReused)
+        ));
+        assert_eq!(checks, 2);
         Ok(())
     }
 
