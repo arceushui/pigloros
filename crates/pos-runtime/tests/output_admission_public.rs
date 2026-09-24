@@ -4,7 +4,7 @@ use pos_core::{
 };
 use pos_runtime::{
     validate_output_policy_artifacts_v1, Driver, InstalledOutputPolicySourceV1, ObservationView,
-    OutputAdmissionErrorV1, PluginRegistry, RuntimeError, StepOutput,
+    OutputAdmissionErrorV1, PluginRegistry, RuntimeError, StepOutput, TickScheduler,
 };
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -439,6 +439,77 @@ impl Driver for RejectingDriver {
     fn name(&self) -> &'static str {
         "output-admission-rejecting-driver"
     }
+}
+
+struct CadencedFixtureDriver;
+
+impl Driver for CadencedFixtureDriver {
+    fn step(
+        &mut self,
+        _timeline: pos_core::TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![draft("plugin.output", b"accepted")]))
+    }
+
+    fn name(&self) -> &'static str {
+        "output-admission-cadenced-fixture-driver"
+    }
+
+    fn tick_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(100)
+    }
+}
+
+struct RejectOnceDriver {
+    reject_next: bool,
+}
+
+impl Driver for RejectOnceDriver {
+    fn step(
+        &mut self,
+        _timeline: pos_core::TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let event_type = if self.reject_next {
+            self.reject_next = false;
+            "plugin.undeclared"
+        } else {
+            "plugin.output"
+        };
+        Ok(StepOutput::new(vec![draft(event_type, b"accepted")]))
+    }
+
+    fn name(&self) -> &'static str {
+        "output-admission-reject-once-driver"
+    }
+}
+
+#[test]
+fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult {
+    let first = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let second = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_generated(&first, None, Some(Box::new(CadencedFixtureDriver)))?;
+    registry.register_generated(
+        &second,
+        None,
+        Some(Box::new(RejectOnceDriver { reject_next: true })),
+    )?;
+    let timeline = pos_core::TimelineId::new();
+    let mut scheduler = TickScheduler::new(registry);
+    assert!(matches!(
+        scheduler.tick(timeline, 0),
+        Err(RuntimeError::OutputAdmission(_))
+    ));
+    assert_eq!(scheduler.tick(timeline, 0)?.len(), 2);
+    Ok(())
 }
 
 #[test]

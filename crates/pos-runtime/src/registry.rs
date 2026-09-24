@@ -3398,26 +3398,43 @@ impl PluginRegistry {
             due_subscriptions.iter(),
         )?;
         let snapshot = self.snapshot_for_subscriptions(&due_subscriptions);
-        for (id, entry) in &mut self.plugins {
-            let Some(driver) = entry.driver.as_mut() else {
-                continue;
-            };
-            if due_driver_ids.remove(id) {
-                let observations = snapshot.view_for(driver.subscriptions());
-                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                validate_driver_output(entry, &output)?;
-                entry.last_tick = Some(now_ns);
-                all_drafts.extend(output.drafts);
+        let mut stepped_driver_ids = Vec::new();
+        let result = (|| {
+            for (id, entry) in &mut self.plugins {
+                let Some(driver) = entry.driver.as_mut() else {
+                    continue;
+                };
+                if due_driver_ids.remove(id) {
+                    stepped_driver_ids.push(*id);
+                    let observations = snapshot.view_for(driver.subscriptions());
+                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                    validate_driver_output(entry, &output)?;
+                    all_drafts.extend(output.drafts);
+                }
+            }
+            debug_assert!(due_driver_ids.is_empty());
+            self.validate_protected_drafts(
+                timeline,
+                &OperationContext::Public,
+                Seq::ZERO,
+                &all_drafts,
+            )?;
+            Ok(all_drafts)
+        })();
+        match result {
+            Ok(drafts) => {
+                for (id, entry) in &mut self.plugins {
+                    if stepped_driver_ids.contains(id) {
+                        entry.last_tick = Some(now_ns);
+                    }
+                }
+                Ok(drafts)
+            }
+            Err(error) => {
+                let _ = self.abort_drivers(&stepped_driver_ids);
+                Err(error)
             }
         }
-        debug_assert!(due_driver_ids.is_empty());
-        self.validate_protected_drafts(
-            timeline,
-            &OperationContext::Public,
-            Seq::ZERO,
-            &all_drafts,
-        )?;
-        Ok(all_drafts)
     }
 
     /// Step cadence-ready Drivers against one host-owned immutable-prefix

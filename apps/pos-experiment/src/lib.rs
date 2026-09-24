@@ -7479,8 +7479,10 @@ mod coverage_entrypoints {
         register_owned_schema_failure_driver(&mut session.registry);
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::Runtime(_))
+            Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(event_type)))
+                if event_type == "coverage.unknown"
         ));
+        assert!(matches!(session.step_tick(), Err(ExperimentError::SessionFaulted)));
     }
 
     #[test]
@@ -7489,13 +7491,17 @@ mod coverage_entrypoints {
         let timeline = ok(store.create_timeline("coverage-owned-schema-failure"));
         let mut registry = test_registry();
         register_owned_schema_failure_driver(&mut registry);
-        assert!(append_driver_drafts(
-            &mut store,
-            timeline.id(),
-            &mut registry,
-            pos_core::clock::Seq::ZERO,
-        )
-        .is_err());
+        assert!(matches!(
+            append_driver_drafts(
+                &mut store,
+                timeline.id(),
+                &mut registry,
+                pos_core::clock::Seq::ZERO,
+            ),
+            Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(event_type)))
+                if event_type == "coverage.unknown"
+        ));
+        assert_eq!(ok(store.logical_head(timeline.id())), Seq::ZERO);
     }
 
     #[test]

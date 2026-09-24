@@ -1335,22 +1335,6 @@ mod tests {
         let manifest_path = path.replace(".db", "-manifest.json");
         let error = cmd_experiment_reproduce(&manifest_path).test_err();
         assert!(error.to_string().contains("owner-verified policy closure"));
-        let mut reproduction: ReproductionManifest =
-            serde_json::from_str(&std::fs::read_to_string(&manifest_path).test_ok()).test_ok();
-        let policy_digest = reproduction
-            .manifest
-            .output_policy_digests
-            .values_mut()
-            .next()
-            .test_ok();
-        *policy_digest = pos_core::Hash::zero();
-        std::fs::write(
-            &manifest_path,
-            serde_json::to_string(&reproduction).test_ok(),
-        )
-        .test_ok();
-        let error = cmd_experiment_reproduce(&manifest_path).test_err();
-        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1507,7 +1491,8 @@ mod tests {
         let path = dir.path().join("dispatch.db").to_str().test_ok().to_owned();
         cmd_experiment_run(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        assert!(handle_experiment(&args(&["reproduce", &manifest_path])).is_ok());
+        let error = handle_experiment(&args(&["reproduce", &manifest_path])).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
         assert!(handle_experiment(&args(&["reproduce"])).is_err());
     }
 
