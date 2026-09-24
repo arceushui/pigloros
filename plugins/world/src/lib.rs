@@ -659,8 +659,7 @@ impl WorldObservationV1 {
             sensor_kind,
             sensor_value,
         };
-        observation.validate_shape()?;
-        Ok(observation)
+        observation.validate_shape().map(|()| observation)
     }
 }
 
@@ -2733,6 +2732,19 @@ mod tests {
             )),
             Err(WorldCodecError::WrongFieldType)
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_rejects_nonfinite_gravity_on_decode() {
+        let encoded = sample_config().encode().test_ok();
+        for gravity in [f64::NAN, f64::INFINITY, f64::MAX] {
+            let invalid = rewrite_array_field(&encoded, 4, ciborium::Value::Float(gravity));
+            assert!(matches!(
+                WorldConfigV1::decode(&invalid),
+                Err(WorldCodecError::NonFiniteFloat)
+            ));
+        }
     }
 
     #[test]

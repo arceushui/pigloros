@@ -71,6 +71,10 @@ impl StateRegistry {
         {
             return;
         }
+        self.apply_reducer_event(reducer, event);
+    }
+
+    fn apply_reducer_event(&mut self, reducer: &dyn Reducer, event: &Event) {
         if !reducer.accepts_event(event) {
             return;
         }
