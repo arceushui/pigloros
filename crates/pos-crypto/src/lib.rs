@@ -9,3 +9,4 @@ pub mod canonical;
 pub mod chain;
 pub mod key_roles;
 pub mod signing;
+pub mod timeline_erasure;
