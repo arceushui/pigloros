@@ -2176,6 +2176,11 @@ impl ErasureExecutionHostV1 {
         limits: ErasureRecoveryLimitsV1,
     ) -> bool {
         match transition_failure {
+            Some(TransitionFailureV1::Host(ErasureHostErrorV1::StaleGeneration))
+            | Some(TransitionFailureV1::ErasureBeforeCommit(ErasureErrorV1::StaleGeneration)) => {
+                self.install_inventory_from_coordinator_with_limits(limits)
+                    .is_ok()
+            }
             Some(TransitionFailureV1::Host(_)) => true,
             Some(TransitionFailureV1::ErasureBeforeCommit(error))
                 if is_non_poisoning_transition_error(error) =>
