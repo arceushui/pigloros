@@ -138,7 +138,11 @@ impl ManifestAdmissionCatalogV1 {
     /// # Errors
     /// Rejects malformed, noncanonical, oversized or duplicate inputs.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
-        preflight(bytes, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, RecordShape::Catalog)?;
+        preflight(
+            bytes,
+            MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1,
+            RecordShape::Catalog,
+        )?;
         let mut wire = WirePreflight::new(bytes);
         wire.array(5)?;
         check_magic(wire.fixed_bytes(4)?, b"MCA1")?;
@@ -261,7 +265,11 @@ impl ManifestSlotBindingV1 {
     /// # Errors
     /// Rejects malformed, noncanonical, oversized or duplicate inputs.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
-        preflight(bytes, MAX_MANIFEST_SLOT_BINDING_BYTES_V1, RecordShape::Binding)?;
+        preflight(
+            bytes,
+            MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+            RecordShape::Binding,
+        )?;
         let mut wire = WirePreflight::new(bytes);
         wire.array(5)?;
         check_magic(wire.fixed_bytes(4)?, b"MSB1")?;
