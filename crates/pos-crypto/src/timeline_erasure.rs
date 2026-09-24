@@ -1,4 +1,4 @@
-//! Erasure-aware Timeline verification and ADR-060 ReplayClaim reporting.
+//! Erasure-aware Timeline verification and ADR-060 `ReplayClaim` reporting.
 //!
 //! Artifact availability comes from the host-owned erasure record. This
 //! module retains no Event bytes and never treats a structural commitment as
@@ -22,6 +22,7 @@ use crate::{
 /// signed metadata field; the exact trust anchor is still supplied separately.
 /// An originally absent optional ID is authenticated null. Loss of an
 /// originally present ID requires a missing context state.
+#[derive(Clone, Copy)]
 pub struct TimelineEventErasureInputV1<'a> {
     pub event: Option<&'a Event>,
     pub registry: Option<&'a KeyRegistryStateV1>,
@@ -59,7 +60,7 @@ enum RetainedContext {
     Invalid,
 }
 
-fn artifact_bytes_available(input: ArtifactClaimInputV1) -> bool {
+const fn artifact_bytes_available(input: ArtifactClaimInputV1) -> bool {
     match input.state {
         ArtifactStateV1::Retained => true,
         ArtifactStateV1::TransitionApplied => matches!(
@@ -102,12 +103,12 @@ fn retained_context(
     RetainedContext::Present
 }
 
-/// Evaluate erasure without upgrading either cryptographic or ReplayClaim evidence.
+/// Evaluate erasure without upgrading either cryptographic or `ReplayClaim` evidence.
 ///
 /// If payload bytes are unavailable but signed context and exact trust remain,
-/// the cryptographic result is `MissingRequiredContext` and the ReplayClaim is
+/// the cryptographic result is `MissingRequiredContext` and the `ReplayClaim` is
 /// at most `StructuralOnly`. Loss of signed context, public key, or trust anchor
-/// caps the ReplayClaim at `UnverifiableArtifactsMissing`. A present invalid
+/// caps the `ReplayClaim` at `UnverifiableArtifactsMissing`. A present invalid
 /// signature remains `Invalid`; its artifact-level claim is reported separately.
 /// No field is retained solely for this report.
 ///
@@ -127,38 +128,39 @@ pub fn evaluate_timeline_event_erasure_v1(
     let evaluation = ReplayClaimEvaluatorV1::evaluate(input.enclosing_claim, &artifacts)?;
     let context_available = artifact_bytes_available(input.signed_context_artifact);
     let payload_available = artifact_bytes_available(input.payload_artifact);
-    let (verification, cap) = if let Some(event) = input.event.filter(|_| context_available) {
-        if payload_available {
-            let verification =
-                verify_committed_timeline_event_v1(event, input.registry, input.trust_anchor);
-            let cap = if verification == TimelineEventVerificationV1::MissingRequiredContext {
-                ErasureReplayClaimV1::UnverifiableArtifactsMissing
-            } else {
-                evaluation.replay_claim()
-            };
-            (verification, cap)
-        } else {
-            match retained_context(event, input.registry, input.trust_anchor) {
-                RetainedContext::Present => (
-                    TimelineEventVerificationV1::MissingRequiredContext,
-                    ErasureReplayClaimV1::StructuralOnly,
-                ),
-                RetainedContext::Missing => (
-                    TimelineEventVerificationV1::MissingRequiredContext,
-                    ErasureReplayClaimV1::UnverifiableArtifactsMissing,
-                ),
-                RetainedContext::Invalid => (
-                    TimelineEventVerificationV1::Invalid,
-                    ErasureReplayClaimV1::UnverifiableArtifactsMissing,
-                ),
-            }
-        }
-    } else {
+    let (verification, cap) = input.event.filter(|_| context_available).map_or(
         (
             TimelineEventVerificationV1::MissingRequiredContext,
             ErasureReplayClaimV1::UnverifiableArtifactsMissing,
-        )
-    };
+        ),
+        |event| {
+            if payload_available {
+                let verification =
+                    verify_committed_timeline_event_v1(event, input.registry, input.trust_anchor);
+                let cap = if verification == TimelineEventVerificationV1::MissingRequiredContext {
+                    ErasureReplayClaimV1::UnverifiableArtifactsMissing
+                } else {
+                    evaluation.replay_claim()
+                };
+                (verification, cap)
+            } else {
+                match retained_context(event, input.registry, input.trust_anchor) {
+                    RetainedContext::Present => (
+                        TimelineEventVerificationV1::MissingRequiredContext,
+                        ErasureReplayClaimV1::StructuralOnly,
+                    ),
+                    RetainedContext::Missing => (
+                        TimelineEventVerificationV1::MissingRequiredContext,
+                        ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+                    ),
+                    RetainedContext::Invalid => (
+                        TimelineEventVerificationV1::Invalid,
+                        ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+                    ),
+                }
+            }
+        },
+    );
     Ok(TimelineEventErasureReportV1 {
         verification,
         replay_claim: evaluation.replay_claim().weakened_to(cap),
