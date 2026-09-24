@@ -766,7 +766,7 @@ fn assert_frozen_fork_retries(
 
 fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
     let mut host = test_stage(
         "open coordinator host",
         open_with_authority(
@@ -2304,7 +2304,7 @@ fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
         (parent.id(), request_reference)
     };
 
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
     let mut current_host = test_stage(
         "open current SQLite host",
         open_with_authority(
@@ -2340,16 +2340,17 @@ fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
     }
 
     assert_eq!(stale_host.status(), ErasureHostStatusV1::Ready);
-    let mut reads = test_stage("open refreshed stale host reader", stale_host.read_sender())?;
-    assert_eq!(
-        reads.timeline(parent),
-        Err(ErasureHostErrorV1::AccessFrozen)
-    );
-    drop(reads);
+    {
+        let mut reads = test_stage("open refreshed stale host reader", stale_host.read_sender())?;
+        assert_eq!(
+            reads.timeline(parent),
+            Err(ErasureHostErrorV1::AccessFrozen)
+        );
+    }
     drop(current_host);
     drop(stale_host);
     for candidate in [
-        path.clone(),
+        path,
         std::path::PathBuf::from(format!("{path_text}-wal")),
         std::path::PathBuf::from(format!("{path_text}-shm")),
     ] {
