@@ -211,11 +211,23 @@ fn generic_timeline_clone_clears_source_signature_identity(
     Ok(())
 }
 
-type RotatedImportFixture = (
-    KeyRegistryStateV1,
-    pos_core::store::TimelineExport,
-    [(KeyIdentityV1, pos_core::PublicKey); 2],
-);
+struct RotatedImportFixture {
+    registry: KeyRegistryStateV1,
+    export: pos_core::store::TimelineExport,
+    first_identity: KeyIdentityV1,
+    first_key: pos_core::PublicKey,
+    second_identity: KeyIdentityV1,
+    second_key: pos_core::PublicKey,
+}
+
+impl RotatedImportFixture {
+    fn anchors(&self) -> [(KeyIdentityV1, pos_core::PublicKey); 2] {
+        [
+            (self.first_identity, self.first_key),
+            (self.second_identity, self.second_key),
+        ]
+    }
+}
 
 fn rotated_import_fixture() -> Result<RotatedImportFixture, Box<dyn std::error::Error>> {
     let (_, first_verifier) = pos_crypto::signing::generate_keypair();
@@ -269,50 +281,57 @@ fn rotated_import_fixture() -> Result<RotatedImportFixture, Box<dyn std::error::
     let timeline = source
         .get_timeline(timeline.id())?
         .ok_or_else(|| CoreError::Storage("source timeline missing".to_owned()))?;
-    Ok((
+    Ok(RotatedImportFixture {
         registry,
-        pos_core::store::TimelineExport {
+        export: pos_core::store::TimelineExport {
             timeline,
             events,
             parent_fork_hash: None,
         },
-        [(first, first_key), (second, second_key)],
-    ))
+        first_identity: first,
+        first_key,
+        second_identity: second,
+        second_key,
+    })
 }
 
 #[test]
 fn import_anchor_resolution_covers_rotated_identity_and_tombstone(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (registry, export, anchors) = rotated_import_fixture()?;
+    let fixture = rotated_import_fixture()?;
+    let anchors = fixture.anchors();
     let mut destination = MemoryStore::new();
     bind_test_erasure_gate(&mut destination)?;
-    destination.save_key_registry(&registry)?;
+    destination.save_key_registry(&fixture.registry)?;
     let public_keys =
-        pos_store::resolve_timeline_import_public_keys_v1(&destination, &export, &anchors)?;
-    assert_eq!(public_keys, vec![anchors[0].1, anchors[1].1]);
+        pos_store::resolve_timeline_import_public_keys_v1(&destination, &fixture.export, &anchors)?;
+    assert_eq!(public_keys, vec![fixture.first_key, fixture.second_key]);
     assert!(destination.list_timelines()?.is_empty());
-    assert!(registry.tombstone(anchors[0].0).is_some());
+    assert!(fixture.registry.tombstone(fixture.first_identity).is_some());
     Ok(())
 }
 
 #[test]
 fn import_anchor_resolution_rejects_missing_duplicate_and_mismatched_anchors(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (registry, export, anchors) = rotated_import_fixture()?;
+    let fixture = rotated_import_fixture()?;
+    let anchors = fixture.anchors();
+    let first_anchor = (fixture.first_identity, fixture.first_key);
+    let second_anchor = (fixture.second_identity, fixture.second_key);
     let wrong_owner = KeyIdentityV1::new("other-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let rejected = [
-        vec![anchors[1]],
-        vec![anchors[0], anchors[0], anchors[1]],
-        vec![(wrong_owner, anchors[0].1), anchors[1]],
-        vec![(anchors[0].0, anchors[1].1), anchors[1]],
+        vec![second_anchor],
+        vec![first_anchor, first_anchor, second_anchor],
+        vec![(wrong_owner, fixture.first_key), second_anchor],
+        vec![(fixture.first_identity, fixture.second_key), second_anchor],
     ];
     for trust_set in rejected {
         let mut destination = MemoryStore::new();
         bind_test_erasure_gate(&mut destination)?;
-        destination.save_key_registry(&registry)?;
+        destination.save_key_registry(&fixture.registry)?;
         assert!(pos_store::resolve_timeline_import_public_keys_v1(
             &destination,
-            &export,
+            &fixture.export,
             &trust_set,
         )
         .is_err_and(|error| error.to_string() == "signature verification failed"));
@@ -324,7 +343,7 @@ fn import_anchor_resolution_rejects_missing_duplicate_and_mismatched_anchors(
     missing_registration.save_key_registry(&KeyRegistryStateV1::new())?;
     assert!(pos_store::resolve_timeline_import_public_keys_v1(
         &missing_registration,
-        &export,
+        &fixture.export,
         &anchors,
     )
     .is_err_and(|error| error.to_string() == "signature verification failed"));
