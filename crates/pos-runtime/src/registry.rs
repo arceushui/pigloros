@@ -2830,7 +2830,7 @@ mod tests {
             }
 
             fn commit_fork_timeline(&mut self, _: &CommittedForkHandoff) {
-                panic!("fork handoff fault");
+                std::panic::resume_unwind(Box::new("fork handoff fault"));
             }
         }
 
