@@ -152,9 +152,11 @@ fn exercise_failed_signing(store: &mut dyn EventStore) -> Result<(), Box<dyn std
     assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
 
     let oversized = vec![7; pos_core::MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1 + 1];
+    let unexpected_calls = std::cell::Cell::new(0);
     let mut not_called =
         |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
-            panic!("signer ran before envelope validation");
+            unexpected_calls.set(unexpected_calls.get() + 1);
+            Err(CoreError::Storage("signer must not run".to_owned()))
         };
     assert!(store
         .append_timeline_signed_authorized(
@@ -191,6 +193,7 @@ fn exercise_failed_signing(store: &mut dyn EventStore) -> Result<(), Box<dyn std
         )
         .is_err());
     assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
+    assert_eq!(unexpected_calls.get(), 0);
     Ok(())
 }
 
@@ -286,46 +289,65 @@ fn sqlite_rotation_waits_until_signed_event_commit() -> Result<(), Box<dyn std::
     let timeline_id = timeline.id();
     let public_key = material.public_verification_key();
     let material_digest = material.material_digest();
-    let (signed, rotation_result, rotation_waited) = std::thread::scope(|scope| {
-        let signing = scope.spawn(move || {
-            let mut sign = |authorized: &mut KeyRegistryStateV1,
-                            envelope: &TimelineEventEnvelopeV1,
-                            payload: &CanonicalBytes| {
-                entered_tx.send(()).expect("signal signing callback");
-                release_rx.recv().expect("release signing callback");
-                sign_timeline_event_for_registered_role(authorized, &material, envelope, payload)
+    let (signed, rotation_result, rotation_waited) =
+        std::thread::scope(|scope| -> Result<_, CoreError> {
+            let signing = scope.spawn(move || {
+                let mut sign = |authorized: &mut KeyRegistryStateV1,
+                                envelope: &TimelineEventEnvelopeV1,
+                                payload: &CanonicalBytes| {
+                    entered_tx
+                        .send(())
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    release_rx
+                        .recv()
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    sign_timeline_event_for_registered_role(
+                        authorized, &material, envelope, payload,
+                    )
                     .map_err(|error| CoreError::Storage(error.to_string()))
-            };
-            signing_store.append_timeline_signed_authorized(
-                timeline_id,
-                &expected,
-                draft(b"before-rotation"),
-                identity,
-                material_digest,
-                public_key,
-                &mut sign,
-            )
-        });
-        entered_rx.recv().expect("signing callback entered");
-        let rotation = scope.spawn(move || {
-            attempt_tx.send(()).expect("signal rotation attempt");
-            let result = rotation_store.save_key_registry(&proposed);
-            rotation_done_tx
+                };
+                signing_store.append_timeline_signed_authorized(
+                    timeline_id,
+                    &expected,
+                    draft(b"before-rotation"),
+                    identity,
+                    material_digest,
+                    public_key,
+                    &mut sign,
+                )
+            });
+            entered_rx
+                .recv()
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let rotation = scope.spawn(move || {
+                attempt_tx
+                    .send(())
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                let result = rotation_store.save_key_registry(&proposed);
+                rotation_done_tx
+                    .send(())
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                result
+            });
+            let attempted = attempt_rx.recv().is_ok();
+            let rotation_waited = attempted
+                && rotation_done_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_err();
+            release_tx
                 .send(())
-                .expect("signal rotation completion");
-            result
-        });
-        attempt_rx.recv().expect("rotation attempted");
-        let rotation_waited = rotation_done_rx
-            .recv_timeout(std::time::Duration::from_millis(100))
-            .is_err();
-        release_tx.send(()).expect("release signer");
-        (
-            signing.join().expect("signing thread panicked"),
-            rotation.join().expect("rotation thread panicked"),
-            rotation_waited,
-        )
-    });
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let signed = signing
+                .join()
+                .map_err(|_| CoreError::Storage("signing thread panicked".to_owned()))?;
+            let rotation_result = rotation
+                .join()
+                .map_err(|_| CoreError::Storage("rotation thread panicked".to_owned()))?;
+            if !attempted {
+                return Err(CoreError::Storage("rotation never attempted".to_owned()));
+            }
+            Ok((signed, rotation_result, rotation_waited))
+        })?;
     let signed = signed?;
     rotation_result?;
     assert!(rotation_waited);
@@ -358,12 +380,14 @@ fn sqlite_destruction_winning_first_rejects_late_signing() -> Result<(), Box<dyn
     let (_, pending) =
         std::thread::spawn(move || destroyer.begin_key_registry_destruction(request))
             .join()
-            .expect("destruction thread panicked")?;
+            .map_err(|_| CoreError::Storage("destruction thread panicked".to_owned()))??;
     let mut signer = SqliteStore::open(path)?;
     signer.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let unexpected_calls = std::cell::Cell::new(0);
     let mut not_called =
         |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
-            panic!("signer ran after destruction began");
+            unexpected_calls.set(unexpected_calls.get() + 1);
+            Err(CoreError::Storage("signer must not run".to_owned()))
         };
     assert!(signer
         .append_timeline_signed_authorized(
@@ -377,5 +401,6 @@ fn sqlite_destruction_winning_first_rejects_late_signing() -> Result<(), Box<dyn
         )
         .is_err());
     assert!(signer.read_own(timeline.id(), SeqRange::all())?.is_empty());
+    assert_eq!(unexpected_calls.get(), 0);
     Ok(())
 }
