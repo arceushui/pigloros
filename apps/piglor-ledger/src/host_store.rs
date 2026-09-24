@@ -2,8 +2,8 @@ use super::HostedLedgerStore;
 use pos_core::{
     store::{EventReadBounds, EventStore, SeqRange},
     CoreError, ErasureHostErrorV1, Event, EventDraft, Hash, KeyDestructionBeginOutcomeV1,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, Seq, Timeline,
-    TimelineId,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, Seq,
+    Timeline, TimelineId,
 };
 
 impl HostedLedgerStore {
@@ -120,6 +120,33 @@ impl EventStore for HostedLedgerStore {
                 timeline,
                 expected_registry,
                 create_event,
+            )
+        })
+    }
+
+    fn append_timeline_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        identity: KeyIdentityV1,
+        material_digest: pos_core::Hash,
+        public_verification_key: pos_core::PublicKey,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &pos_core::CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        self.with_host(|host| {
+            host.command_sender()?.append_timeline_signed_authorized(
+                timeline,
+                expected_registry,
+                draft,
+                identity,
+                material_digest,
+                public_verification_key,
+                sign,
             )
         })
     }
