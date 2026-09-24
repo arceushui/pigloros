@@ -9,7 +9,7 @@ use std::{
 };
 
 use pos_conformance::SandboxSyscallSetV1;
-use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
+use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit};
 use zbus::{
     connection::{socket::channel::Channel, Builder},
     fdo,
@@ -21,7 +21,7 @@ use zbus::{
 use super::*;
 use crate::{
     ActivatedRootDirectory, AttemptCgroupEmptyBasis, LaunchMode, LauncherSource, SystemCallFilter,
-    TransientUnitLaunchInputs,
+    SystemdServiceLimits, TransientUnitLaunchInputs,
 };
 
 const X86_64: &[u8] = include_bytes!(
@@ -36,7 +36,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 35] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 42] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -70,6 +70,13 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 35] = [
     ("UMask", "u"),
     ("KillMode", "s"),
     ("SendSIGKILL", "b"),
+    ("MemoryMax", "t"),
+    ("MemorySwapMax", "t"),
+    ("TasksMax", "t"),
+    ("CPUQuotaPerSecUSec", "t"),
+    ("RuntimeMaxUSec", "t"),
+    ("LimitNOFILE", "t"),
+    ("LimitFSIZE", "t"),
     ("FileDescriptorStoreMax", "u"),
     ("ExtraFileDescriptors", "a(hs)"),
 ];
@@ -420,12 +427,14 @@ impl RecordingManager {
 struct RecordingService {
     system_call_filter: Vec<String>,
     root_directory: String,
+    service_limits: [u64; 7],
     property_reads: Arc<AtomicUsize>,
     control_group_reads: Arc<AtomicUsize>,
     control_group: String,
     control_group_behavior: ControlGroupBehavior,
     fail_root_directory: bool,
     fail_root_image_policy: bool,
+    fail_memory_max: bool,
 }
 
 #[derive(Clone, Default)]
@@ -442,12 +451,14 @@ impl RecordingService {
         Self {
             system_call_filter,
             root_directory: ROOT_DIRECTORY.to_owned(),
+            service_limits: [134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096],
             property_reads: Arc::new(AtomicUsize::new(0)),
             control_group_reads: Arc::new(AtomicUsize::new(0)),
             control_group: CONTROL_GROUP_PATH.to_owned(),
             control_group_behavior: ControlGroupBehavior::default(),
             fail_root_directory: false,
             fail_root_image_policy: false,
+            fail_memory_max: false,
         }
     }
 
@@ -667,6 +678,46 @@ impl RecordingService {
         self.fixed(true)
     }
 
+    #[zbus(property, name = "MemoryMax")]
+    fn memory_max(&self) -> fdo::Result<u64> {
+        self.record_read();
+        if self.fail_memory_max {
+            Err(fdo::Error::Failed("test limit readback failure".to_owned()))
+        } else {
+            Ok(self.service_limits[0])
+        }
+    }
+
+    #[zbus(property, name = "MemorySwapMax")]
+    fn memory_swap_max(&self) -> u64 {
+        self.fixed(self.service_limits[1])
+    }
+
+    #[zbus(property, name = "TasksMax")]
+    fn tasks_max(&self) -> u64 {
+        self.fixed(self.service_limits[2])
+    }
+
+    #[zbus(property, name = "CPUQuotaPerSecUSec")]
+    fn cpu_quota_per_sec_u_sec(&self) -> u64 {
+        self.fixed(self.service_limits[3])
+    }
+
+    #[zbus(property, name = "RuntimeMaxUSec")]
+    fn runtime_max_u_sec(&self) -> u64 {
+        self.fixed(self.service_limits[4])
+    }
+
+    #[zbus(property, name = "LimitNOFILE")]
+    fn limit_nofile(&self) -> u64 {
+        self.fixed(self.service_limits[5])
+    }
+
+    #[zbus(property, name = "LimitFSIZE")]
+    fn limit_fsize(&self) -> u64 {
+        self.fixed(self.service_limits[6])
+    }
+
     #[zbus(property, name = "FileDescriptorStoreMax")]
     fn file_descriptor_store_max(&self) -> u32 {
         self.fixed(0)
@@ -734,10 +785,10 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 35);
+    assert_eq!(verified.requested_readback().len(), 42);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
-        verified.requested_readback()[34].name(),
+        verified.requested_readback()[41].name(),
         "ExtraFileDescriptors"
     );
     assert_eq!(
@@ -949,6 +1000,56 @@ async fn typed_property_read_failure_is_classified() -> Result<(), Box<dyn Error
         return Err("failed property read had the wrong error class".into());
     };
     assert_eq!(property, "RootDirectory");
+    Ok(())
+}
+
+#[tokio::test]
+async fn substituted_typed_service_limit_fails_closed() -> Result<(), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    service.service_limits[2] = 17;
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x06; 16])?,
+            request(LaunchMode::AirGapped)?,
+        )
+        .await
+        .err()
+        .ok_or("substituted service limit was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::Readback(TransientUnitRequestError::ReadbackMismatch)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_service_limit_read_failure_is_classified() -> Result<(), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    service.fail_memory_max = true;
+    let (transport, _server) = transport(
+        Arc::new(Mutex::new(None)),
+        ManagerBehavior::default(),
+        service,
+    )
+    .await?;
+    let error = transport
+        .start(
+            TransientServiceUnitName::from_attempt_id([0x08; 16])?,
+            request(LaunchMode::AirGapped)?,
+        )
+        .await
+        .err()
+        .ok_or("failed service-limit property read was accepted")?;
+    let SystemdTransientUnitTransportError::PropertyReadback { property, .. } = error else {
+        return Err("failed service-limit read had the wrong error class".into());
+    };
+    assert_eq!(property, "MemoryMax");
     Ok(())
 }
 
@@ -1460,7 +1561,26 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         mode,
         descriptor()?,
     );
-    Ok(TransientUnitRequest::compile(inputs, filter))
+    let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
+    Ok(TransientUnitRequest::compile(inputs, filter, &limits))
+}
+
+fn complete_effective_limits() -> Vec<SandboxLimit> {
+    (0..=16)
+        .map(|limit_id| SandboxLimit {
+            limit_id,
+            value: match limit_id {
+                0 => 134_217_728,
+                1 => 0,
+                2 => 16,
+                3 => 500_000,
+                4 => 5_000,
+                5 => 64,
+                6 => 4_096,
+                _ => 1_000,
+            },
+        })
+        .collect()
 }
 
 fn descriptor() -> Result<OwnedFd, std::io::Error> {
@@ -1468,7 +1588,9 @@ fn descriptor() -> Result<OwnedFd, std::io::Error> {
 }
 
 fn value() -> SystemdTransientUnitValue {
-    SystemdTransientUnitValue::FileDescriptorStoreMax(1)
+    SystemdTransientUnitValue::Numeric(
+        crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(1),
+    )
 }
 
 #[test]
