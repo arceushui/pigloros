@@ -577,8 +577,8 @@ impl<'a> WirePreflight<'a> {
     }
 
     fn slice(&mut self, length: u64) -> Result<&'a [u8], ManifestOwnerLinkErrorV1> {
-        let length = usize::try_from(length)
-            .map_err(|_| ManifestOwnerLinkErrorV1::FieldOutOfBounds)?;
+        let length =
+            usize::try_from(length).map_err(|_| ManifestOwnerLinkErrorV1::FieldOutOfBounds)?;
         if length > self.bytes.len() - self.offset {
             return Err(ManifestOwnerLinkErrorV1::InvalidEncoding);
         }
