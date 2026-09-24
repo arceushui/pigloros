@@ -276,8 +276,8 @@ mod tests {
 
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
+        let closure = crate::test_support::closure_for_host(&host, timeline);
         let mut reads = host.read_sender().test_ok();
-        let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
         assert!(matches!(
             super::replay(&mut reads, timeline, &mut registry, &closure),
             Err(CoreError::ArtifactUnavailable)
