@@ -174,9 +174,6 @@ pub enum WorldReplayClosureErrorV1 {
     /// An optional view is not selected by the immutable WCS1 root set.
     #[error("World Replay closure contains an unselected optional view")]
     UnselectedOptionalView,
-    /// A WCS1-bound required leaf is not selected by a producer or consumer.
-    #[error("World Replay closure contains an unselected consumer artifact")]
-    UnselectedConsumerArtifact,
     /// The retention clock or artifact authority could not be read.
     #[error("World Replay artifact authority is unavailable")]
     AuthorityUnavailable,
@@ -673,33 +670,6 @@ fn validate_consumer_set_references(
             && !consumer_set.optional_view_roots().contains(&leaf.digest())
     }) {
         return Err(WorldReplayClosureErrorV1::UnselectedOptionalView);
-    }
-    // WCS1 selects these four required kinds by WAL1 address. Other required
-    // kinds need the native WDB1 directory; this flat record cannot infer
-    // their cardinality from kind alone.
-    if artifacts.iter().any(|leaf| {
-        let address = leaf.digest();
-        match leaf.as_input().kind {
-            WorldArtifactKindV1::OutputPolicy => !consumer_set
-                .producers()
-                .iter()
-                .any(|producer| producer.output_policy_hash() == address),
-            WorldArtifactKindV1::Schema => !consumer_set
-                .consumers()
-                .iter()
-                .any(|consumer| consumer.schema_hash() == address),
-            WorldArtifactKindV1::ReducerImplementation => !consumer_set
-                .consumers()
-                .iter()
-                .any(|consumer| consumer.reducer_hash() == address),
-            WorldArtifactKindV1::RuntimeIdentity => !consumer_set
-                .consumers()
-                .iter()
-                .any(|consumer| consumer.runtime_hash() == address),
-            _ => false,
-        }
-    }) {
-        return Err(WorldReplayClosureErrorV1::UnselectedConsumerArtifact);
     }
     Ok(())
 }
