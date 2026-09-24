@@ -377,7 +377,7 @@ fn public_wdb1_key_roundtrips_closure_and_rejects_next_kind() -> TestResult {
             child(closure, closure, 1, hash(51))?,
         ],
     })?;
-    let bytes = directory.encode().to_vec();
+    let bytes = directory.encode().as_slice().to_vec();
     assert_eq!(
         WorldDependencyBranchV1::decode(&CanonicalBytes::from_vec(bytes.clone()))?,
         directory
