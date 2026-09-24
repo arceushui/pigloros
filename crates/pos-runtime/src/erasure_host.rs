@@ -1772,12 +1772,13 @@ impl ErasureExecutionHostV1 {
         match publication {
             Ok((inventory, transition)) => {
                 let generation = inventory.generation();
+                let refreshed_request_count = inventory.request_count();
                 self.inventory = Some(Arc::new(inventory));
                 self.recovery_limits = limits;
                 self.state = HostStateV1::Ready {
                     generation,
                     maximum_requests,
-                    request_count,
+                    request_count: refreshed_request_count,
                 };
                 Ok((transition.timeline, generation))
             }
