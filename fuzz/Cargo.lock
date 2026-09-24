@@ -892,6 +892,7 @@ dependencies = [
 name = "pos-runtime"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "indexmap",
  "pos-core",
  "pos-state",
