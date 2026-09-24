@@ -1146,7 +1146,19 @@ pub struct WorldDriver {
 struct InstalledWorldBackendV1 {
     image: MeasuredProcessImageV1,
     sealed_config: CanonicalBytes,
-    backend: Box<dyn WorldBackend>,
+    backend: SimpleKinematicBackend,
+    #[cfg(test)]
+    test_backend: Option<Box<dyn WorldBackend>>,
+}
+
+impl InstalledWorldBackendV1 {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.test_backend {
+            return fixture.step(bodies, timestep_micros);
+        }
+        self.backend.step(bodies, timestep_micros)
+    }
 }
 
 enum WorldDriverBackend {
@@ -1158,7 +1170,7 @@ enum WorldDriverBackend {
 impl WorldDriverBackend {
     fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
         match self {
-            Self::Installed(installed) => installed.backend.step(bodies, timestep_micros),
+            Self::Installed(installed) => installed.step(bodies, timestep_micros),
             #[cfg(test)]
             Self::Fixture(backend) => backend.step(bodies, timestep_micros),
         }
@@ -1214,7 +1226,9 @@ impl WorldDriver {
             WorldDriverBackend::Installed(InstalledWorldBackendV1 {
                 image,
                 sealed_config,
-                backend: Box::new(SimpleKinematicBackend::new()),
+                backend: SimpleKinematicBackend::new(),
+                #[cfg(test)]
+                test_backend: None,
             }),
             config,
         ))
@@ -3626,7 +3640,7 @@ mod tests {
         )
         .test_ok();
         if let WorldDriverBackend::Installed(installed) = &mut driver.backend {
-            installed.backend = Box::new(CountedInstalledBackend(Arc::clone(&calls)));
+            installed.test_backend = Some(Box::new(CountedInstalledBackend(Arc::clone(&calls))));
         }
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
