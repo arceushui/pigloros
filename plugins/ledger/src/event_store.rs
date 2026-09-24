@@ -175,7 +175,7 @@ impl EventLedgerStore {
 
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn head_seq(&self) -> Result<Seq, LedgerError> {
+    fn head_seq(&self) -> Result<pos_core::Seq, LedgerError> {
         self.store
             .get_timeline(self.timeline_id)
             .ok()
