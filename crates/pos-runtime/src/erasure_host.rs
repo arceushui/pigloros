@@ -1541,14 +1541,6 @@ impl ErasureExecutionHostV1 {
         inventory: ErasureVerifiedInventoryV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
-        self.publish_inventory_with_limits_inner(inventory, limits)
-    }
-
-    fn publish_inventory_with_limits_inner(
-        &mut self,
-        inventory: ErasureVerifiedInventoryV1,
-        limits: ErasureRecoveryLimitsV1,
-    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
         let request_count = inventory.request_count();
         let retained_inventory = Arc::new(inventory);
         let publication = self
