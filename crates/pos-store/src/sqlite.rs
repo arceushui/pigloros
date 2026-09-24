@@ -605,7 +605,7 @@ impl SqliteStore {
     }
 
     fn append_one_in_transaction(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         hasher: &dyn Hasher,
         timeline: TimelineId,
         draft: EventDraft,
@@ -677,7 +677,7 @@ impl SqliteStore {
     }
 
     fn retained_event_matches_draft(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         event_id: &str,
         timeline: TimelineId,
         draft: &EventDraft,
@@ -3600,7 +3600,7 @@ impl SqliteStore {
     }
 
     fn timeline_owner_in_transaction(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         timeline: TimelineId,
     ) -> Result<Option<EntityId>, CoreError> {
         tx.query_row(
@@ -3615,7 +3615,7 @@ impl SqliteStore {
     }
 
     fn persist_timeline_owner(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         timeline: TimelineId,
         owner: EntityId,
     ) -> Result<(), CoreError> {
