@@ -235,3 +235,50 @@ fn sqlite_read_rejects_corrupt_persisted_origin() -> Result<(), Box<dyn std::err
     assert!(store.read(root, SeqRange::all()).is_err());
     Ok(())
 }
+
+#[test]
+fn sqlite_read_rejects_malformed_origin_column_types_and_values(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rusqlite::types::Value;
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("malformed-origin.sqlite");
+    let path = path.to_str().ok_or("temporary SQLite path is not UTF-8")?;
+    let mut setup = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut setup)?;
+    let timeline = setup.create_timeline("malformed-origin")?.id();
+    append(&mut setup, timeline, 1)?;
+    drop(setup);
+
+    for value in [
+        Value::Blob(vec![0xff]),
+        Value::Text("invalid-ulid".to_owned()),
+    ] {
+        let connection = rusqlite::Connection::open(path)?;
+        connection.execute(
+            "UPDATE events SET origin_timeline_id = ?1 WHERE timeline_id = ?2",
+            rusqlite::params![value, timeline.to_string()],
+        )?;
+        drop(connection);
+        let mut reader = SqliteStore::open(path)?;
+        bind_test_erasure_gate(&mut reader)?;
+        assert!(reader.read(timeline, SeqRange::all()).is_err());
+    }
+    for value in [
+        Value::Text("not-an-integer".to_owned()),
+        Value::Integer(-1),
+        Value::Integer(0),
+    ] {
+        let connection = rusqlite::Connection::open(path)?;
+        connection.pragma_update(None, "ignore_check_constraints", true)?;
+        connection.execute(
+            "UPDATE events SET origin_timeline_id = ?1, origin_logical_seq = ?2 WHERE timeline_id = ?3",
+            rusqlite::params![timeline.to_string(), value, timeline.to_string()],
+        )?;
+        drop(connection);
+        let mut reader = SqliteStore::open(path)?;
+        bind_test_erasure_gate(&mut reader)?;
+        assert!(reader.read(timeline, SeqRange::all()).is_err());
+    }
+    Ok(())
+}
