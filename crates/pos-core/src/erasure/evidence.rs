@@ -1334,15 +1334,6 @@ pub(super) fn references_value(references: &[ErasureReferenceV1]) -> Value {
 pub(super) fn timeline_id_value(timeline: TimelineId) -> Value {
     Value::Bytes(timeline.inner().to_bytes().to_vec())
 }
-pub(super) fn timeline_ids_value(timelines: &[TimelineId]) -> Value {
-    Value::Array(timelines.iter().copied().map(timeline_id_value).collect())
-}
-pub(super) fn bounded_timeline_ids_from_value(
-    value: &Value,
-    maximum: usize,
-) -> Result<Vec<TimelineId>, ErasureErrorV1> {
-    array(value, maximum).and_then(|values| values.iter().map(timeline_id_from_value).collect())
-}
 fn timeline_id_from_value(value: &Value) -> Result<TimelineId, ErasureErrorV1> {
     match value {
         Value::Bytes(bytes) => bytes
