@@ -2410,9 +2410,11 @@ mod tests {
                 binding.execution_profile_artifact(),
                 binding.retention_policy_artifact(),
             ),
-            Err(pos_runtime::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
-                kind: "implementation"
-            })
+            Err(
+                pos_runtime::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                    kind: "implementation"
+                }
+            )
         ));
     }
 
