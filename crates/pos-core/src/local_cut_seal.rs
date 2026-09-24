@@ -111,9 +111,7 @@ impl LocalCutManifestBindingRowV1 {
     }
 }
 
-fn validate_binding_rows(
-    rows: &[LocalCutManifestBindingRowV1],
-) -> Result<(), LocalCutSealErrorV2> {
+fn validate_binding_rows(rows: &[LocalCutManifestBindingRowV1]) -> Result<(), LocalCutSealErrorV2> {
     if rows.windows(2).any(|pair| {
         pair[0].timeline_id.inner().to_bytes() >= pair[1].timeline_id.inner().to_bytes()
     }) {

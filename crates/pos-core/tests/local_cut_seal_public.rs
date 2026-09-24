@@ -322,7 +322,7 @@ fn binding_rows(count: u128) -> Vec<LocalCutManifestBindingRowV1> {
 }
 
 #[test]
-fn kind14_page_and_branch_roundtrip_and_reject_wrong_code() -> TestResult {
+fn kind14_page_and_branch_roundtrip() -> TestResult {
     let page = LocalCutManifestBindingPageV1::new(hash(1), 0, vec![binding_row(1)])?;
     let page_bytes = page.to_canonical_cbor();
     assert_eq!(hex(&page_bytes)?, EXPECTED_LCP1_CBOR_HEX);
@@ -557,10 +557,8 @@ fn kind14_branch_decoder_rejects_truncation_and_mistyped_children() -> TestResul
     )?;
     let branch_bytes = branch.to_canonical_cbor();
     for length in 0..branch_bytes.len() {
-        let result = LocalCutManifestBindingBranchV1::from_canonical_cbor(
-            hash(1),
-            &branch_bytes[..length],
-        );
+        let result =
+            LocalCutManifestBindingBranchV1::from_canonical_cbor(hash(1), &branch_bytes[..length]);
         assert!(
             result.is_err(),
             "truncated LCT1 prefix {length} was accepted"
