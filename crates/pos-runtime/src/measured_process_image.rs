@@ -85,11 +85,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn process_image_digest_matches_independent_executable_read() {
-        let measured = MeasuredProcessImageV1::capture().expect("running executable measured");
-        let bytes = std::fs::read("/proc/self/exe").expect("running executable read");
+    fn process_image_digest_matches_independent_executable_read(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let measured = MeasuredProcessImageV1::capture()?;
+        let bytes = std::fs::read("/proc/self/exe")?;
         assert!(!bytes.is_empty());
         assert_eq!(measured.digest(), *blake3::hash(&bytes).as_bytes());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
