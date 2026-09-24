@@ -2784,7 +2784,7 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
         Capability, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentErrorV1,
-        Event, Plugin, Reducer, State,
+        Event, EventStore, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2812,28 +2812,28 @@ mod tests {
         store
     }
 
-    #[test]
-    fn panicking_fork_handoff_rolls_back_child_and_faults_registry() {
-        struct PanickingForkDriver;
+    struct PanickingForkDriver;
 
-        impl Driver for PanickingForkDriver {
-            fn name(&self) -> &'static str {
-                "panicking-fork-driver"
-            }
-
-            fn step(
-                &mut self,
-                _: TimelineId,
-                _: ObservationView<'_>,
-            ) -> Result<StepOutput, RuntimeError> {
-                Ok(StepOutput::empty())
-            }
-
-            fn commit_fork_timeline(&mut self, _: &CommittedForkHandoff) {
-                std::panic::resume_unwind(Box::new("fork handoff fault"));
-            }
+    impl Driver for PanickingForkDriver {
+        fn name(&self) -> &'static str {
+            "panicking-fork-driver"
         }
 
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn commit_fork_timeline(&mut self, _: &CommittedForkHandoff) {
+            std::panic::resume_unwind(Box::new("fork handoff fault"));
+        }
+    }
+
+    #[test]
+    fn panicking_fork_handoff_rolls_back_child_and_faults_registry() {
         let mut store = gated_store();
         let parent = store.create_timeline("parent").test_ok();
         let mut registry = gated_registry();
@@ -2850,6 +2850,93 @@ mod tests {
             registry.step_all(parent.id()),
             Err(RuntimeError::DriverCommitPanicked { .. })
         ));
+    }
+
+    #[test]
+    fn failed_fork_rollback_surfaces_the_store_error() {
+        struct FailedRollbackStore(Box<dyn pos_core::EventStore>);
+
+        impl pos_core::EventStore for FailedRollbackStore {
+            fn create_timeline(&mut self, name: &str) -> Result<pos_core::Timeline, CoreError> {
+                self.0.create_timeline(name)
+            }
+
+            fn append(
+                &mut self,
+                timeline: TimelineId,
+                drafts: &[EventDraft],
+            ) -> Result<Vec<Event>, CoreError> {
+                self.0.append(timeline, drafts)
+            }
+
+            fn read(
+                &self,
+                timeline: TimelineId,
+                range: pos_core::store::SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
+                self.0.read(timeline, range)
+            }
+
+            fn fork(
+                &mut self,
+                timeline: TimelineId,
+                at_seq: Seq,
+                name: &str,
+            ) -> Result<pos_core::Timeline, CoreError> {
+                self.0.fork(timeline, at_seq, name)
+            }
+
+            fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+                self.0.list_timelines()
+            }
+
+            fn get_timeline(
+                &self,
+                timeline: TimelineId,
+            ) -> Result<Option<pos_core::Timeline>, CoreError> {
+                self.0.get_timeline(timeline)
+            }
+        }
+
+        let mut store = FailedRollbackStore(gated_store());
+        let parent = store.create_timeline("parent").test_ok();
+        let mut registry = gated_registry();
+        registry.register_driver(Box::new(PanickingForkDriver));
+        registry
+            .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+            .test_ok();
+        assert!(matches!(
+            registry.fork_restored_timeline(&mut store, parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::DriverForkRollbackFailed { .. })
+        ));
+        assert_eq!(store.list_timelines().test_ok().len(), 2);
+    }
+
+    #[test]
+    fn restored_fork_rejects_replay_pending_steps_and_store_failure() {
+        let mut store = gated_store();
+        let parent = store.create_timeline("parent").test_ok();
+        let mut replay = PluginRegistry::new_replay();
+        assert!(matches!(
+            replay.fork_restored_timeline(store.as_mut(), parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::ModeMismatch { .. })
+        ));
+
+        let mut pending = gated_registry();
+        pending.step_all_anchored(parent.id(), Seq::ZERO).test_ok();
+        assert!(matches!(
+            pending.fork_restored_timeline(store.as_mut(), parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+        pending.abort_step();
+
+        let mut restored = gated_registry();
+        restored
+            .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+            .test_ok();
+        assert!(restored
+            .fork_restored_timeline(&mut AppendFailStore, parent.id(), Seq::ZERO, "child")
+            .is_err());
     }
 
     trait TestValueExt<T> {

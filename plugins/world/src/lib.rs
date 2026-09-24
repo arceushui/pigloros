@@ -3815,6 +3815,36 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn installed_preflight_rejects_absent_or_payloadless_retained_config() {
+        let body_id = EntityId::new();
+        let (mut driver, _) = installed_counted_driver(body_id);
+        assert!(driver.requires_snapshot_anchor());
+        assert!(driver.requires_verified_event_prefix());
+        assert!(!WorldDriver::default().requires_snapshot_anchor());
+        assert!(!WorldDriver::default().requires_verified_event_prefix());
+        assert!(matches!(
+            WorldDriver::scan_retained_config(
+                [(EVENT_TYPE_CONFIG_V1, None::<&CanonicalBytes>)].into_iter()
+            ),
+            Err(WorldInstallationErrorV1::RetainedConfigMalformed)
+        ));
+        assert!(matches!(
+            WorldDriver::scan_retained_config(
+                [(EVENT_TYPE_ACTION_V1, None::<&CanonicalBytes>)].into_iter()
+            ),
+            Ok(None)
+        ));
+        driver.config_emitted = true;
+        assert!(matches!(
+            driver.preflight_installed_step(&[]),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn installed_fork_handoff_requires_the_restored_parent() {
         let body_id = EntityId::new();
         let mut store = open_store(StoreConfig::Memory).test_ok();
