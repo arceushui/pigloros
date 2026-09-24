@@ -169,6 +169,7 @@ impl ErasureCoordinatorPortV1 for BenchmarkErasureHost {
         let scope = ErasureScopeCommitmentInputV1 {
             request,
             scope_members: vec![benchmark_reference(9, 0)],
+            scope_timeline_ids: Vec::new(),
             target_closure: target_closure_digest(&targets),
             lineage_rule: None,
         };

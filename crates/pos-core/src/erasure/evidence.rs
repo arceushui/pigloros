@@ -18,18 +18,18 @@ use super::{
     ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
     ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateV1, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+    ErasureScopeV1, ErasureStateV1, TimelineId, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
     ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
     ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_CAS_EFFECT_TAG_V1,
     ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
     ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
     ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
     ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
-    ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES,
-    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_TAG_V1,
-    ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1,
-    ERASURE_RECOVERY_ERROR_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERQ1, ERS1, VERSION,
+    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS,
+    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
+    ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1,
+    ERASURE_RECEIPT_TAG_V1, ERASURE_RECOVERY_ERROR_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -240,6 +240,7 @@ pub(super) fn scope_commitment_value(record: &ErasureScopeCommitmentV1) -> Value
         uint(VERSION),
         digest(record.input.request),
         references_value(&record.input.scope_members),
+        timeline_ids_value(&record.input.scope_timeline_ids),
         digest(record.input.target_closure),
         optional_digest(record.input.lineage_rule),
     ])
@@ -256,8 +257,12 @@ pub(super) fn scope_commitment_from_fields(
             ERASURE_MAX_SCOPE_EXTENSIONS,
             true,
         )?,
-        target_closure: bytes32(&fields[4])?,
-        lineage_rule: optional_bytes32(&fields[5])?,
+        scope_timeline_ids: bounded_timeline_ids_from_value(
+            &fields[4],
+            ERASURE_MAX_INVENTORY_TIMELINES,
+        )?,
+        target_closure: bytes32(&fields[5])?,
+        lineage_rule: optional_bytes32(&fields[6])?,
     })
 }
 
@@ -473,6 +478,7 @@ pub(super) fn scope_extension_value(record: &ErasureScopeExtensionV1) -> Value {
         digest(record.input.request),
         digest(record.input.scope_commitment),
         digest(record.input.fork),
+        timeline_id_value(record.input.child_timeline),
         digest(record.input.lineage_rule),
         optional_digest(record.input.predecessor_extension),
         digest(record.input.admission_provenance),
@@ -487,9 +493,10 @@ pub(super) fn scope_extension_from_fields(
         request: bytes32(&fields[2])?,
         scope_commitment: bytes32(&fields[3])?,
         fork: bytes32(&fields[4])?,
-        lineage_rule: bytes32(&fields[5])?,
-        predecessor_extension: optional_bytes32(&fields[6])?,
-        admission_provenance: bytes32(&fields[7])?,
+        child_timeline: timeline_id_from_value(&fields[5])?,
+        lineage_rule: bytes32(&fields[6])?,
+        predecessor_extension: optional_bytes32(&fields[7])?,
+        admission_provenance: bytes32(&fields[8])?,
     })
 }
 
@@ -1279,6 +1286,29 @@ pub(super) fn acknowledgements_are_closure_subset(
 }
 pub(super) fn references_value(references: &[ErasureReferenceV1]) -> Value {
     Value::Array(references.iter().copied().map(digest).collect())
+}
+pub(super) fn timeline_id_value(timeline: TimelineId) -> Value {
+    Value::Bytes(timeline.inner().to_bytes().to_vec())
+}
+pub(super) fn timeline_ids_value(timelines: &[TimelineId]) -> Value {
+    Value::Array(timelines.iter().copied().map(timeline_id_value).collect())
+}
+pub(super) fn bounded_timeline_ids_from_value(
+    value: &Value,
+    maximum: usize,
+) -> Result<Vec<TimelineId>, ErasureErrorV1> {
+    array(value, maximum).and_then(|values| values.iter().map(timeline_id_from_value).collect())
+}
+fn timeline_id_from_value(value: &Value) -> Result<TimelineId, ErasureErrorV1> {
+    match value {
+        Value::Bytes(bytes) => bytes
+            .as_slice()
+            .try_into()
+            .map(ulid::Ulid::from_bytes)
+            .map(TimelineId::from_ulid)
+            .map_err(|_| ErasureErrorV1::InvalidEncoding),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
 }
 pub(super) fn references_from_value(
     value: &Value,

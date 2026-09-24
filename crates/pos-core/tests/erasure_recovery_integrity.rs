@@ -300,6 +300,7 @@ fn scope(
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request,
         scope_members: vec![reference(7)],
+        scope_timeline_ids: Vec::new(),
         target_closure: target_closure_digest(targets),
         lineage_rule: Some(lineage_rule),
     })
@@ -314,6 +315,7 @@ fn extension(
         request,
         scope_commitment: scope.reference(),
         fork: reference(160),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule,
         predecessor_extension: None,
         admission_provenance: reference(161),
@@ -1356,7 +1358,7 @@ fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(),
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .digest();
     let parent = TimelineId::new();
-    let child = TimelineId::new();
+    let child = extension.child_timeline();
     let input = ErasureForkAdmissionInputV1 {
         operation: reference(180),
         expected_inventory_generation: reference(181),
@@ -1388,7 +1390,7 @@ fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(),
             ErasureForkAdmissionInputV1 {
                 operation: reference(183),
                 child: TimelineMeta {
-                    id: TimelineId::new(),
+                    id: child,
                     name: None,
                     owner: Some(EntityId::new()),
                     ..input.child.clone()
@@ -1423,7 +1425,7 @@ fn fork_input(extension: ErasureScopeExtensionV1) -> ErasureForkAdmissionInputV1
         expected_inventory_generation: reference(181),
         child_scope: extension.fork(),
         child: TimelineMeta {
-            id: TimelineId::new(),
+            id: extension.child_timeline(),
             mode: TimelineMode::Historical,
             name: Some("failure-child".to_owned()),
             owner: None,

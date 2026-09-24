@@ -1197,14 +1197,6 @@ impl Experiment {
         self.finish_start_with_bound_store(store, recovery_store_config)
     }
 
-    fn start_with_prebound_store_and_recipe(
-        self,
-        store: Box<dyn pos_core::store::EventStore>,
-        recovery_store_config: Option<StoreConfig>,
-    ) -> Result<ExperimentSession, ExperimentError> {
-        self.finish_start_with_bound_store(store, recovery_store_config)
-    }
-
     fn finish_start_with_bound_store(
         self,
         mut store: Box<dyn pos_core::store::EventStore>,
@@ -1244,7 +1236,7 @@ impl Experiment {
     ) -> Result<ExperimentSession, ExperimentError> {
         let gate = store.containment_gate();
         bind_registry_to_host_gate(&mut self.registry, gate.clone())?;
-        self.start_with_prebound_store_and_recipe(Box::new(store), recovery_store_config)
+        self.finish_start_with_bound_store(Box::new(store), recovery_store_config)
     }
 
     /// Resume an existing durable Timeline with a fresh Driver registry.

@@ -150,6 +150,8 @@ pub struct SqliteStore {
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
+    /// SQLite revision observed with the last complete host inventory.
+    erasure_inventory_data_version: i64,
     /// Host-managed topology may only change through verified transitions.
     erasure_topology_requires_permit: bool,
     /// Opaque host-issued identity for this adapter's topology transitions.
@@ -783,6 +785,8 @@ impl SqliteStore {
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
+        let erasure_inventory_data_version =
+            sqlite_data_version(&conn).map_err(|error| CoreError::Storage(error.to_string()))?;
         let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let erasure_gate_bound = false;
 
@@ -795,6 +799,7 @@ impl SqliteStore {
             // before the composition root supplies the host-owned gate.
             erasure_gate,
             erasure_gate_bound,
+            erasure_inventory_data_version,
             erasure_topology_requires_permit: false,
             erasure_topology_store_binding: None,
             authority_persistence_binding: None,
@@ -2373,14 +2378,16 @@ impl SqliteStore {
         let Some(gate) = self.erasure_gate.clone() else {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
+        self.validate_erasure_inventory_data_version()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
         let mut run = || {
             result = effect(self);
         };
-        gate.with_fence(timeline, operation, &mut run)
-            .map_err(pos_core::store::erasure_containment_error)?;
+        let fenced = gate.with_fence(timeline, operation, &mut run);
+        self.validate_erasure_inventory_data_version()?;
+        fenced.map_err(pos_core::store::erasure_containment_error)?;
         result
     }
 
@@ -2393,16 +2400,29 @@ impl SqliteStore {
         let Some(gate) = self.erasure_gate.clone() else {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
+        self.validate_erasure_inventory_data_version()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
         let mut run = || {
             result = effect(self);
         };
-        match gate.with_fence(timeline, operation, &mut run) {
+        let fenced = gate.with_fence(timeline, operation, &mut run);
+        self.validate_erasure_inventory_data_version()?;
+        match fenced {
             Ok(()) => result.map(Some),
             Err(pos_core::ErasureContainmentErrorV1::AccessFrozen) => Ok(None),
             Err(error) => Err(pos_core::store::erasure_containment_error(error)),
+        }
+    }
+
+    fn validate_erasure_inventory_data_version(&self) -> Result<(), CoreError> {
+        if !self.erasure_gate_bound {
+            return Ok(());
+        }
+        match sqlite_data_version(&self.conn) {
+            Ok(observed) if observed == self.erasure_inventory_data_version => Ok(()),
+            Ok(_) | Err(_) => Err(CoreError::ErasureContainmentUnavailable),
         }
     }
 
@@ -5077,14 +5097,26 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         &mut self,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+        let version_before =
+            sqlite_data_version(&self.conn).map_err(map_erasure_receipt_failure)?;
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(map_erasure_receipt_failure)?;
         let snapshot = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
+        let version_after =
+            sqlite_data_version(&transaction).map_err(map_erasure_receipt_failure)?;
+        if version_before != version_after {
+            return Err(ErasureErrorV1::StaleGeneration);
+        }
         transaction.commit().map_err(map_erasure_receipt_failure)?;
+        self.erasure_inventory_data_version = Some(version_after);
         Ok(snapshot)
     }
+}
+
+fn sqlite_data_version(connection: &Connection) -> rusqlite::Result<i64> {
+    connection.query_row("PRAGMA data_version", [], |row| row.get(0))
 }
 
 fn map_erasure_receipt_failure(_error: rusqlite::Error) -> ErasureErrorV1 {

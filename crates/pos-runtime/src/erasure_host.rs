@@ -1361,8 +1361,7 @@ impl ErasureExecutionHostV1 {
             .and_then(|inventory| self.verify_current_inventory(inventory, limits))
         {
             Ok(inventory) => inventory,
-            Err(error) => {
-                eprintln!("[DEBUG-139-refresh] verified inventory install: {error:?}");
+            Err(_) => {
                 self.poison();
                 return Err(ErasureHostErrorV1::RecoveryUnavailable);
             }
@@ -1398,13 +1397,9 @@ impl ErasureExecutionHostV1 {
         let inventory = {
             let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
             let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
-            match state_machine.verified_inventory_with_limits(limits) {
-                Ok(inventory) => inventory,
-                Err(error) => {
-                    eprintln!("[DEBUG-139-refresh] authority inventory query: {error:?}");
-                    return Err(map_erasure_error(error));
-                }
-            }
+            state_machine
+                .verified_inventory_with_limits(limits)
+                .map_err(map_erasure_error)?
         };
         let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         self.install_inventory_with_limits(&mut query, limits)
@@ -1564,7 +1559,6 @@ impl ErasureExecutionHostV1 {
         let generation = match publication {
             Ok(generation) => generation,
             Err(error) => {
-                eprintln!("[DEBUG-139-refresh] gate inventory publication: {error:?}");
                 self.poison();
                 return Err(error);
             }
@@ -4425,6 +4419,7 @@ mod tests {
             let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
                 request,
                 scope_members: vec![reference(9)],
+                scope_timeline_ids: Vec::new(),
                 target_closure: pos_core::erasure::target_closure_digest(&targets),
                 lineage_rule: Some(reference(100)),
             })?;
@@ -4472,6 +4467,7 @@ mod tests {
                     scope: ErasureScopeCommitmentInputV1 {
                         request,
                         scope_members: vec![reference(9)],
+                        scope_timeline_ids: Vec::new(),
                         target_closure: pos_core::erasure::target_closure_digest(&[target]),
                         lineage_rule: Some(reference(100)),
                     },
@@ -4638,6 +4634,7 @@ mod tests {
                 request: requirement.request(),
                 scope_commitment: requirement.scope_commitment(),
                 fork: input.child_scope,
+                child_timeline: input.child.id,
                 lineage_rule: requirement.lineage_rule(),
                 predecessor_extension: requirement.predecessor_extension(),
                 admission_provenance: reference(129),
@@ -5295,6 +5292,7 @@ mod tests {
             request,
             scope_commitment: ErasureReferenceV1::from_digest([75; 32]),
             fork: ErasureReferenceV1::from_digest([76; 32]),
+            child_timeline: pos_core::TimelineId::new(),
             lineage_rule: ErasureReferenceV1::from_digest([77; 32]),
             predecessor_extension: None,
             admission_provenance: ErasureReferenceV1::from_digest([78; 32]),
