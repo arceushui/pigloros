@@ -335,30 +335,26 @@ fn verified_import_rejects_missing_duplicate_and_mismatched_anchors_before_creat
         let mut destination = MemoryStore::new();
         bind_test_erasure_gate(&mut destination)?;
         destination.save_key_registry(&registry)?;
-        assert!(matches!(
-            pos_store::import_timeline_with_verified_signatures(
-                &mut destination,
-                export.clone(),
-                &trust_set,
-                |_, _| Ok(()),
-            ),
-            Err(CoreError::SignatureVerificationFailed)
-        ));
+        assert!(pos_store::import_timeline_with_verified_signatures(
+            &mut destination,
+            export.clone(),
+            &trust_set,
+            |_, _| Ok(()),
+        )
+        .is_err_and(|error| error.to_string() == "signature verification failed"));
         assert!(destination.list_timelines()?.is_empty());
     }
 
     let mut missing_registration = MemoryStore::new();
     bind_test_erasure_gate(&mut missing_registration)?;
     missing_registration.save_key_registry(&KeyRegistryStateV1::new())?;
-    assert!(matches!(
-        pos_store::import_timeline_with_verified_signatures(
-            &mut missing_registration,
-            export,
-            &anchors,
-            |_, _| Ok(()),
-        ),
-        Err(CoreError::SignatureVerificationFailed)
-    ));
+    assert!(pos_store::import_timeline_with_verified_signatures(
+        &mut missing_registration,
+        export,
+        &anchors,
+        |_, _| Ok(()),
+    )
+    .is_err_and(|error| error.to_string() == "signature verification failed"));
     assert!(missing_registration.list_timelines()?.is_empty());
     Ok(())
 }
