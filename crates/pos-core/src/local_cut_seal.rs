@@ -223,7 +223,7 @@ impl LocalCutManifestBindingPageV1 {
         if !(1..=MAX_PAGE_ROWS as u64).contains(&row_count) {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
-        let mut rows = Vec::with_capacity(row_count as usize);
+        let mut rows = Vec::new();
         for _ in 0..row_count {
             reader.array(5)?;
             let timeline_id = TimelineId::from_ulid(ulid::Ulid::from_bytes(reader.fixed_bytes()?));
@@ -278,15 +278,15 @@ impl LocalCutManifestBindingBranchV1 {
         if tree_scope == Hash::zero() {
             return Err(LocalCutSealErrorV2::ZeroContentAddress);
         }
-        if !(1..=2).contains(&height)
-            || children.is_empty()
-            || children.len() > MAX_BRANCH_CHILDREN
+        if !(1..=2).contains(&height) || children.is_empty() || children.len() > MAX_BRANCH_CHILDREN
         {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
         let mut next = first_ordinal;
         for child in &children {
-            if child.first_ordinal != next || child.row_count == 0 || child.node_hash == Hash::zero()
+            if child.first_ordinal != next
+                || child.row_count == 0
+                || child.node_hash == Hash::zero()
             {
                 return Err(LocalCutSealErrorV2::InvalidTableNode);
             }
@@ -375,15 +375,15 @@ impl LocalCutManifestBindingBranchV1 {
         if reader.uint()? != MANIFEST_BINDING_KIND || reader.hash()? != expected_scope {
             return Err(LocalCutSealErrorV2::InvalidTableNode);
         }
-        let height = u8::try_from(reader.uint()?)
-            .map_err(|_| LocalCutSealErrorV2::FieldOutOfBounds)?;
+        let height =
+            u8::try_from(reader.uint()?).map_err(|_| LocalCutSealErrorV2::FieldOutOfBounds)?;
         let first_ordinal = reader.uint()?;
         let row_count = reader.uint()?;
         let child_count = reader.array_len()?;
         if !(1..=MAX_BRANCH_CHILDREN as u64).contains(&child_count) {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
-        let mut children = Vec::with_capacity(child_count as usize);
+        let mut children = Vec::new();
         for _ in 0..child_count {
             reader.array(3)?;
             children.push(LocalCutBranchChildV1 {
@@ -448,11 +448,8 @@ impl LocalCutManifestBindingTableV1 {
         let mut level = Vec::new();
         for (index, chunk) in rows.chunks(MAX_PAGE_ROWS).enumerate() {
             let first_ordinal = (index * MAX_PAGE_ROWS) as u64;
-            let page = LocalCutManifestBindingPageV1::new(
-                tree_scope,
-                first_ordinal,
-                chunk.to_vec(),
-            )?;
+            let page =
+                LocalCutManifestBindingPageV1::new(tree_scope, first_ordinal, chunk.to_vec())?;
             level.push(LocalCutBranchChildV1 {
                 first_ordinal,
                 row_count: chunk.len() as u64,
@@ -479,12 +476,7 @@ impl LocalCutManifestBindingTableV1 {
             if parent_level.len() == 1 {
                 Some(parent_level[0].node_hash)
             } else {
-                let root = LocalCutManifestBindingBranchV1::new(
-                    tree_scope,
-                    2,
-                    0,
-                    parent_level,
-                )?;
+                let root = LocalCutManifestBindingBranchV1::new(tree_scope, 2, 0, parent_level)?;
                 let hash = root.digest();
                 records.push(root.to_canonical_cbor());
                 Some(hash)
@@ -527,7 +519,7 @@ impl LocalCutManifestBindingTableV1 {
             return Err(LocalCutSealErrorV2::TableMismatch);
         }
         let tree_scope = local_cut_tree_scope_v1(owner_id, cut_id);
-        let mut pages = Vec::with_capacity(page_count as usize);
+        let mut pages = Vec::new();
         let mut supplied = BTreeMap::new();
         for bytes in records {
             let digest = if bytes.starts_with(&[0x86, 0x44, b'L', b'C', b'P', b'1']) {
@@ -536,7 +528,8 @@ impl LocalCutManifestBindingTableV1 {
                 pages.push(page);
                 digest
             } else if bytes.starts_with(&[0x88, 0x44, b'L', b'C', b'T', b'1']) {
-                let branch = LocalCutManifestBindingBranchV1::from_canonical_cbor(tree_scope, bytes)?;
+                let branch =
+                    LocalCutManifestBindingBranchV1::from_canonical_cbor(tree_scope, bytes)?;
                 branch.digest()
             } else {
                 return Err(LocalCutSealErrorV2::InvalidEncoding);
@@ -549,7 +542,7 @@ impl LocalCutManifestBindingTableV1 {
             return Err(LocalCutSealErrorV2::TableMismatch);
         }
         pages.sort_unstable_by_key(LocalCutManifestBindingPageV1::first_ordinal);
-        let mut rows = Vec::with_capacity(row_count as usize);
+        let mut rows = Vec::new();
         for page in pages {
             if page.first_ordinal() != rows.len() as u64 {
                 return Err(LocalCutSealErrorV2::InvalidTableNode);
@@ -728,8 +721,8 @@ impl LocalCutSealV2 {
         let owner_id = reader.fixed_bytes()?;
         let cut_id = reader.uint()?;
         let tick = reader.uint()?;
-        let membership_epoch = u32::try_from(reader.uint()?)
-            .map_err(|_| LocalCutSealErrorV2::FieldOutOfBounds)?;
+        let membership_epoch =
+            u32::try_from(reader.uint()?).map_err(|_| LocalCutSealErrorV2::FieldOutOfBounds)?;
         let configuration_generation = reader.uint()?;
         let schedule_ns = reader.uint()?;
         let previous_visible_receipt_hash = reader.optional_hash()?;
@@ -799,17 +792,18 @@ fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 
 fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     if value < 24 {
-        out.push((major << 5) | value as u8);
+        // The low byte is exact here because the value is below 24.
+        out.push((major << 5) | value.to_be_bytes()[7]);
     } else if let Ok(value) = u8::try_from(value) {
-        out.extend_from_slice(&[(major << 5) | 24, value]);
+        out.extend_from_slice(&[(major << 5) | 0x18, value]);
     } else if let Ok(value) = u16::try_from(value) {
-        out.push((major << 5) | 25);
+        out.push((major << 5) | 0x19);
         out.extend_from_slice(&value.to_be_bytes());
     } else if let Ok(value) = u32::try_from(value) {
-        out.push((major << 5) | 26);
+        out.push((major << 5) | 0x1a);
         out.extend_from_slice(&value.to_be_bytes());
     } else {
-        out.push((major << 5) | 27);
+        out.push((major << 5) | 0x1b);
         out.extend_from_slice(&value.to_be_bytes());
     }
 }
