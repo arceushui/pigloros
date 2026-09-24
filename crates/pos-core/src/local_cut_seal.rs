@@ -717,13 +717,7 @@ impl LocalCutSealV2 {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
         let mut reader = Reader { bytes, offset: 0 };
-        reader.array(22)?;
-        if reader.fixed_bytes::<4>()? != *b"LCS2" {
-            return Err(LocalCutSealErrorV2::InvalidEncoding);
-        }
-        if reader.uint()? != 1 {
-            return Err(LocalCutSealErrorV2::UnsupportedVersion);
-        }
+        reader.lcs2_header()?;
         let owner_id = reader.fixed_bytes()?;
         let cut_id = reader.uint()?;
         let tick = reader.uint()?;
@@ -820,6 +814,17 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    fn lcs2_header(&mut self) -> Result<(), LocalCutSealErrorV2> {
+        self.array(22)?;
+        if self.fixed_bytes::<4>()? != *b"LCS2" {
+            return Err(LocalCutSealErrorV2::InvalidEncoding);
+        }
+        if self.uint()? != 1 {
+            return Err(LocalCutSealErrorV2::UnsupportedVersion);
+        }
+        Ok(())
+    }
+
     fn take(&mut self, length: usize) -> Result<&[u8], LocalCutSealErrorV2> {
         // Seal input is capped at 16 KiB, node input at 64 KiB, and each read
         // requests at most 32 bytes on supported targets.
