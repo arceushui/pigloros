@@ -4950,10 +4950,10 @@ mod receipt;
 pub use receipt::target_closure_digest;
 mod artifact;
 pub use artifact::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
-    ArtifactStateV1, ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1,
-    KeyDestructionArtifactEvidenceV1, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, SignatureEvidenceV1,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactRedactionStateV1, ArtifactStateV1, ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1,
+    RegisteredArtifactV1, ReplayArtifactAuthorizationV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1,
 };
 mod rejoin;
 use receipt::{

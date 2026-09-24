@@ -23,7 +23,7 @@ pub fn replay(
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
     artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    evaluation: &pos_core::ReplayArtifactAuthorizationV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
     replay_range(
         sender,
@@ -48,7 +48,7 @@ pub fn replay_at(
     at_seq: Seq,
     registry: &mut ProjectionRegistry,
     artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    evaluation: &pos_core::ReplayArtifactAuthorizationV1,
 ) -> Result<(), CoreError> {
     replay_range(
         sender,
@@ -67,7 +67,7 @@ fn replay_range(
     range: SeqRange,
     registry: &mut ProjectionRegistry,
     artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    evaluation: &pos_core::ReplayArtifactAuthorizationV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
@@ -155,8 +155,10 @@ mod tests {
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([43; 32]);
 
-    fn replay_evaluation(state: pos_core::ArtifactStateV1) -> pos_core::ReplayClaimEvaluationV1 {
-        pos_core::ReplayClaimEvaluatorV1::evaluate(
+    fn replay_evaluation(
+        state: pos_core::ArtifactStateV1,
+    ) -> pos_core::ReplayArtifactAuthorizationV1 {
+        pos_core::ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
             pos_core::ErasureReplayClaimV1::Exact,
             &[pos_core::ArtifactClaimInputV1 {
                 registration: pos_core::RegisteredArtifactV1::new(
@@ -171,6 +173,7 @@ mod tests {
                 current_claim: pos_core::ErasureReplayClaimV1::Exact,
                 state,
             }],
+            &[],
         )
         .test_ok()
     }
@@ -194,7 +197,7 @@ mod tests {
         timeline: TimelineId,
         registry: &mut ProjectionRegistry,
         artifact_digest: pos_core::ErasureReferenceV1,
-        evaluation: &pos_core::ReplayClaimEvaluationV1,
+        evaluation: &pos_core::ReplayArtifactAuthorizationV1,
     ) -> Result<Vec<Event>, CoreError> {
         evaluation
             .require_authoritative_use(

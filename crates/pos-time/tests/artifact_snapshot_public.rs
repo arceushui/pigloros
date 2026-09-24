@@ -1,9 +1,9 @@
 use pos_core::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, Event, Hash, KeyDestructionArtifactEvidenceV1, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Reducer, RegisteredArtifactV1,
-    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, SignatureEvidenceV1, State, TimelineId,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Reducer, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, State, TimelineId,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_state::ProjectionRegistry;
@@ -99,23 +99,23 @@ fn replay_rejects_a_required_key_destroyed_in_the_registry() {
             ErasureReferenceV1::from_digest([56; 32]),
             ArtifactOptionalityV1::Required,
             ArtifactTransitionRuleV1::PreserveExact,
-        ),
-        current_claim: ErasureReplayClaimV1::Exact,
-        state: ArtifactStateV1::Retained,
-    }
-    .with_destruction_evidence(
-        &key_registry,
-        KeyDestructionArtifactEvidenceV1 {
+        )
+        .with_key_dependency(ArtifactKeyDependencyV1 {
             identity,
             material_digest,
             private_material_required: true,
-            signature: SignatureEvidenceV1::NotRequired,
-            required_artifacts_present: true,
-        },
+        })
+        .test_ok(),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state: ArtifactStateV1::Retained,
+    };
+    let facts: Vec<_> = key_registry.committed_destruction_facts().collect();
+    let evaluation = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+        ErasureReplayClaimV1::Exact,
+        &[artifact],
+        &facts,
     )
     .test_ok();
-    let evaluation =
-        ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &[artifact]).test_ok();
     let mut reads = host.read_sender().test_ok();
     let mut projections = registry(&gate);
     assert!(matches!(
