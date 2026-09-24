@@ -16,6 +16,130 @@ use std::path::Path;
 
 use crate::CliError;
 
+/// Persist the exact owner-managed key path before its registry identity is
+/// first registered. A stale binding after a failed registration is safe: it
+/// prevents a later registration from silently moving the owned artifact.
+///
+/// # Errors
+/// Returns a closed storage error if the path is unsafe, the binding cannot be
+/// committed durably, or the identity is already bound to another path.
+#[cfg(unix)]
+pub(crate) fn bind_owned_secret_key(
+    database: &Path,
+    path: &Path,
+    identity: pos_core::KeyIdentityV1,
+    material_digest: pos_core::Hash,
+) -> Result<(), pos_core::CoreError> {
+    use rusqlite::{params, Connection, OpenFlags};
+
+    let absolute = absolute_output(path).map_err(binding_error)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| binding_error("key path has no parent"))?;
+    validate_ancestors(&absolute, parent).map_err(binding_error)?;
+    let metadata = std::fs::symlink_metadata(&absolute).map_err(binding_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(binding_error("owned key is not a regular file"));
+    }
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(binding_error)?;
+    connection
+        .execute_batch(
+            "PRAGMA synchronous=FULL;
+             CREATE TABLE IF NOT EXISTS ledger_owned_key_binding_v1 (
+               owner_id TEXT NOT NULL,
+               role INTEGER NOT NULL,
+               epoch INTEGER NOT NULL,
+               material_digest BLOB NOT NULL CHECK (length(material_digest) = 32),
+               absolute_path BLOB NOT NULL,
+               PRIMARY KEY (owner_id, role, epoch)
+             );",
+        )
+        .map_err(binding_error)?;
+    let epoch = i64::try_from(identity.epoch).map_err(binding_error)?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO ledger_owned_key_binding_v1
+             (owner_id, role, epoch, material_digest, absolute_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                identity.owner_id.as_str(),
+                identity.role.code(),
+                epoch,
+                material_digest.as_bytes().as_slice(),
+                absolute.as_os_str().as_encoded_bytes()
+            ],
+        )
+        .map_err(binding_error)?;
+    verify_owned_secret_key_binding(&connection, &absolute, identity, material_digest)
+}
+
+#[cfg(unix)]
+fn binding_error(error: impl std::fmt::Display) -> pos_core::CoreError {
+    pos_core::CoreError::Storage(format!("owned signing-key binding: {error}"))
+}
+
+#[cfg(unix)]
+fn verify_owned_secret_key_binding(
+    connection: &rusqlite::Connection,
+    absolute: &Path,
+    identity: pos_core::KeyIdentityV1,
+    material_digest: pos_core::Hash,
+) -> Result<(), pos_core::CoreError> {
+    use rusqlite::{params, OptionalExtension};
+
+    let epoch = i64::try_from(identity.epoch).map_err(binding_error)?;
+    let binding: Option<(Vec<u8>, Vec<u8>)> = connection
+        .query_row(
+            "SELECT material_digest, absolute_path FROM ledger_owned_key_binding_v1
+             WHERE owner_id = ?1 AND role = ?2 AND epoch = ?3",
+            params![identity.owner_id.as_str(), identity.role.code(), epoch],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(binding_error)?;
+    let Some((bound_digest, bound_path)) = binding else {
+        return Err(binding_error("no durable owner-managed key path is bound"));
+    };
+    if bound_digest.as_slice() != material_digest.as_bytes()
+        || bound_path.as_slice() != absolute.as_os_str().as_encoded_bytes()
+    {
+        return Err(binding_error(
+            "key path or material differs from durable owner binding",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn require_owned_secret_key_binding(
+    database: &Path,
+    path: &Path,
+    request: pos_core::KeyDestructionRequestV1,
+) -> Result<(), pos_core::CoreError> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let absolute = absolute_output(path).map_err(binding_error)?;
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(binding_error)?;
+    verify_owned_secret_key_binding(
+        &connection,
+        &absolute,
+        request.identity,
+        request.expected_material_digest,
+    )
+}
+
+#[cfg(not(unix))]
+pub(crate) fn bind_owned_secret_key(
+    _database: &Path,
+    _path: &Path,
+    _identity: pos_core::KeyIdentityV1,
+    _material_digest: pos_core::Hash,
+) -> Result<(), pos_core::CoreError> {
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 macro_rules! deletion_fault {
     ($path:expr_2021, $stage:expr_2021) => {
@@ -26,7 +150,7 @@ macro_rules! deletion_fault {
 #[cfg(all(not(test), unix))]
 macro_rules! deletion_fault {
     ($path:expr_2021, $stage:expr_2021) => {{
-        let _ = ($path, $stage);
+        let _ = $path;
         Ok::<(), std::io::Error>(())
     }};
 }
@@ -149,6 +273,8 @@ pub fn delete_owned_secret_key(
 
 /// Durably destroy an owned signing-key file and commit its tombstone.
 ///
+/// `database` contains the immutable owner-path binding recorded before key
+/// registration. A missing or mismatched binding cannot start destruction.
 /// Calling this again with the same request resumes a pending request after a
 /// crash or an uncertain directory sync.
 /// Returns the outcome and the committed registry state.
@@ -158,6 +284,7 @@ pub fn delete_owned_secret_key(
 /// leaves `DestructionPending` and cannot restore signing authorization.
 pub fn destroy_owned_secret_key<S: pos_core::EventStore + ?Sized>(
     store: &mut S,
+    database: &Path,
     path: &Path,
     request: pos_core::KeyDestructionRequestV1,
 ) -> Result<
@@ -167,6 +294,10 @@ pub fn destroy_owned_secret_key<S: pos_core::EventStore + ?Sized>(
     ),
     pos_core::CoreError,
 > {
+    #[cfg(unix)]
+    require_owned_secret_key_binding(database, path, request)?;
+    #[cfg(not(unix))]
+    let _ = database;
     store.begin_key_registry_destruction(request)?;
     let receipt = delete_owned_secret_key(path, request)?;
     store.complete_key_registry_destruction(request, receipt)
@@ -175,9 +306,9 @@ pub fn destroy_owned_secret_key<S: pos_core::EventStore + ?Sized>(
 #[cfg(unix)]
 const NO_OUTPUT: &str = "no output was created; retry is safe";
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FaultStage {
+pub(crate) enum FaultStage {
     DeleteOpenParent,
     DeleteOpenFile,
     DeleteAbsentDirectorySync,
@@ -282,7 +413,7 @@ macro_rules! fault {
 #[cfg(all(not(test), unix))]
 macro_rules! fault {
     ($path:expr_2021, $stage:expr_2021) => {{
-        let _ = ($path, $stage);
+        let _ = $path;
         Ok::<(), std::io::Error>(())
     }};
 }

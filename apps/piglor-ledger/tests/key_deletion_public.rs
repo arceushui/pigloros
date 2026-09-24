@@ -272,6 +272,60 @@ fn destroyed_secret_file_is_absent_after_reopen_and_retry() -> Result<(), Box<dy
 }
 
 #[test]
+fn destroy_key_rejects_unbound_absent_path_and_matching_copy(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    let absent = directory.path().join("absent.key");
+    let copy = directory.path().join("copy.key");
+    make_key(&key)?;
+    drop(open_store(&Source::Store(database.clone()), Some(&key))?);
+
+    assert!(run(&destroy_args(&database, &absent)).is_err());
+    owned_file(&copy, &std::fs::read(&key)?)?;
+    assert!(run(&destroy_args(&database, &copy)).is_err());
+
+    let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1);
+    let state = registry(&database)?;
+    assert!(state
+        .active_key(&identity.owner_id, identity.role)
+        .is_some());
+    assert!(state.tombstone(identity).is_none());
+    assert_eq!(state.pending_destruction_requests().count(), 0);
+    assert!(key.exists());
+    assert!(copy.exists());
+    run(&destroy_args(&database, &key))?;
+    assert!(!key.exists());
+    assert!(copy.exists());
+    Ok(())
+}
+
+#[test]
+fn destroy_key_requires_durable_owner_path_binding() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    make_key(&key)?;
+    drop(open_store(&Source::Store(database.clone()), Some(&key))?);
+
+    let connection = rusqlite::Connection::open(&database)?;
+    connection.execute_batch("DROP TABLE ledger_owned_key_binding_v1")?;
+    drop(connection);
+
+    assert!(run(&destroy_args(&database, &key)).is_err());
+    let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1);
+    let state = registry(&database)?;
+    assert!(state
+        .active_key(&identity.owner_id, identity.role)
+        .is_some());
+    assert_eq!(state.pending_destruction_requests().count(), 0);
+    assert!(state.tombstone(identity).is_none());
+    assert!(key.exists());
+    Ok(())
+}
+
+#[test]
 fn wrong_owned_file_leaves_pending_and_startup_recovers_with_the_correct_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::TempDir::new()?;
@@ -285,17 +339,28 @@ fn wrong_owned_file_leaves_pending_and_startup_recovers_with_the_correct_file(
     let mut store = authorized_store(&database)?;
     assert!(piglor_ledger::key_output::destroy_owned_secret_key(
         &mut store,
+        &database,
         &key,
         deletion_request(&[0; 32]),
     )
     .is_err());
     assert!(key.exists());
+    let state = store.load_key_registry()?.ok_or("key registry missing")?;
+    let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1);
+    let digest = state
+        .key_record(identity)
+        .and_then(|record| record.private_material_digest)
+        .ok_or("signing material digest missing")?;
+    store.begin_key_registry_destruction(KeyDestructionRequestV1::new(
+        identity,
+        digest,
+        Hash::from_bytes([7; 32]),
+    ))?;
     drop(store);
 
     assert!(run(&destroy_args(&database, &wrong)).is_err());
     assert!(key.exists());
     assert!(wrong.exists());
-    let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1);
     assert_eq!(
         registry(&database)?.pending_destruction_requests().count(),
         1
@@ -358,7 +423,7 @@ fn failed_tombstone_commit_keeps_pending_until_absent_file_is_recovered(
 
     connection.execute_batch("DROP TRIGGER reject_final_destruction")?;
     drop(connection);
-    piglor_ledger::key_output::destroy_owned_secret_key(&mut store, &key, request)?;
+    piglor_ledger::key_output::destroy_owned_secret_key(&mut store, &database, &key, request)?;
     drop(store);
     let state = registry(&database)?;
     assert!(state.tombstone(identity).is_some());

@@ -166,6 +166,7 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                     if let Some(request) = pending.first().copied() {
                         let (_, recovered_registry) = crate::key_output::destroy_owned_secret_key(
                             event_store.as_mut(),
+                            db,
                             key_path,
                             request,
                         )
@@ -177,6 +178,15 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
             let signing_key = load_signing_key(key_path)?;
             let (registry_state, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
+            if persisted_registry.is_none() {
+                crate::key_output::bind_owned_secret_key(
+                    db,
+                    key_path,
+                    identity,
+                    key_material_digest(signing_key.as_bytes()),
+                )
+                .map_err(|error| CliError::BadSource(error.to_string()))?;
+            }
             let timeline_id = event_store
                 .initialize_timeline_with_key_registry("ledger", &registry_state)
                 .map_err(|error| CliError::BadSource(error.to_string()))?
@@ -394,7 +404,7 @@ fn cmd_destroy_key(args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::BadSource("ledger key identity is unavailable".to_owned()))?;
     let request =
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes(authorization));
-    crate::key_output::destroy_owned_secret_key(&mut store, &key_path, request)
+    crate::key_output::destroy_owned_secret_key(&mut store, &db, &key_path, request)
         .map_err(|error| CliError::BadSource(error.to_string()))?;
     output_stdout!("destroyed ledger signing key {}", identity.epoch);
     Ok(())
