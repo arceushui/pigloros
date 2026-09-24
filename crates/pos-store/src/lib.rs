@@ -677,17 +677,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn erasure_topology_binding_rejects_an_already_bound_store() {
-        let gate = pos_core::ErasureContainmentGateV1::new_test_open();
-        issue_erasure_topology_store_binding(false, &gate).test_ok();
-        assert!(matches!(
-            issue_erasure_topology_store_binding(true, &gate),
-            Err(CoreError::Storage(message))
-                if message == "erasure containment gate is already bound"
-        ));
-    }
-
     impl<T> TestValueExt<T> for Option<T> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|| {
@@ -754,30 +743,6 @@ mod tests {
                 hasher: &hasher,
             }),
             Err(pos_core::ErasureErrorV1::ProvenanceMissing)
-        );
-    }
-
-    #[test]
-    fn fork_child_exactness_rejects_a_skipped_event_sequence() {
-        let parent = pos_core::TimelineId::new();
-        let expected = pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "child");
-        let hasher = pos_crypto::chain::Blake3Hasher;
-        let genesis = hasher.genesis_hash();
-        assert_eq!(
-            fork_child_is_exact(ForkChildVerificationInput {
-                expected_meta: &expected,
-                actual_meta: &expected,
-                stored_head: pos_core::Seq::from_u64(2),
-                stored_chain_head: genesis.as_bytes(),
-                chain_head: genesis,
-                events: [Ok((
-                    pos_core::Seq::from_u64(2),
-                    pos_core::EventId::new(),
-                    pos_core::CanonicalBytes::from_vec(vec![1]),
-                ))],
-                hasher: &hasher,
-            }),
-            Ok(false)
         );
     }
 

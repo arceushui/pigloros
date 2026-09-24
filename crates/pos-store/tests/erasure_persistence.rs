@@ -3014,6 +3014,60 @@ fn sqlite_fork_recovery_rejects_malformed_child_event_rows(
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_recovery_rejects_a_skipped_child_event_sequence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.child.sequence"),
+            pos_core::CanonicalBytes::from_vec(vec![1]),
+        )],
+    )?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE events SET seq=2 WHERE timeline_id=?1 AND seq=1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    assert_eq!(
+        connection.execute(
+            "UPDATE timelines SET head_seq=2 WHERE id=?1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+
+    assert_eq!(
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_retry_rejects_mistyped_child_fields() -> Result<(), Box<dyn std::error::Error>> {
     for assignment in [
         "name=X'00'",
