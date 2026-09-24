@@ -8,7 +8,7 @@ fn run_pos(args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
         .output()?)
 }
 
-fn assert_world_operation_unavailable(
+fn assert_timeline_operation_unavailable(
     args: &[&str],
     expected_error: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -20,30 +20,33 @@ fn assert_world_operation_unavailable(
 }
 
 #[test]
-fn timeline_replay_fails_closed_without_native_verifier() -> Result<(), Box<dyn std::error::Error>>
+fn timeline_replay_fails_closed_without_owner_verified_path()
+    -> Result<(), Box<dyn std::error::Error>>
 {
-    assert_world_operation_unavailable(
+    assert_timeline_operation_unavailable(
         &["timeline", "replay", "unused", "unused"],
-        "Error: World Replay is unavailable until the native recording, retrieval, clock, disposition, and closure verifier owners are installed\n",
+        "Error: timeline replay is unavailable: the CLI has no owner-verified evidence path for this operation\n",
     )
 }
 
 #[test]
-fn timeline_snapshot_fails_closed_without_native_verifier() -> Result<(), Box<dyn std::error::Error>>
+fn timeline_snapshot_fails_closed_without_owner_verified_path()
+    -> Result<(), Box<dyn std::error::Error>>
 {
-    assert_world_operation_unavailable(
+    assert_timeline_operation_unavailable(
         &["timeline", "snapshot", "unused", "unused"],
-        "Error: World Snapshot is unavailable until the native recording, retrieval, clock, disposition, and closure verifier owners are installed\n",
+        "Error: timeline snapshot is unavailable: the CLI has no owner-verified evidence path for this operation\n",
     )
 }
 
 #[test]
-fn timeline_compare_fails_closed_without_native_verifier() -> Result<(), Box<dyn std::error::Error>>
+fn timeline_compare_fails_closed_without_owner_verified_path()
+    -> Result<(), Box<dyn std::error::Error>>
 {
-    assert_world_operation_unavailable(
+    assert_timeline_operation_unavailable(
         &[
             "timeline", "compare", "unused", "unused", "unused", "unused",
         ],
-        "Error: Fork Compare is unavailable until the native recording, retrieval, clock, disposition, and closure verifier owners are installed\n",
+        "Error: timeline compare is unavailable: the CLI has no owner-verified evidence path for this operation\n",
     )
 }
