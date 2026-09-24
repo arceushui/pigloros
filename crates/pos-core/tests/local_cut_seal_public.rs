@@ -1,3 +1,4 @@
+use ciborium::value::Value;
 use pos_core::{
     local_cut_tree_scope_v1, Hash, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,
     LocalCutManifestBindingPageV1, LocalCutManifestBindingRowV1,
@@ -95,11 +96,25 @@ fn lcs2_known_digest_and_preferred_roundtrip() -> TestResult {
 #[test]
 fn lcs2_rejects_unpreferred_and_wrong_wire_shapes() -> TestResult {
     let canonical = LocalCutSealV2::new(sample_input()?)?.to_canonical_cbor();
-    let mut old_magic = canonical.clone();
+    // This is an actual 21-field LCS1 shape: the 22nd kind-14 reference is
+    // absent, and the array header and magic both carry the old format.
+    let mut old_magic = canonical[..canonical.len() - 36].to_vec();
+    old_magic[0] = 0x95;
     old_magic[5] = b'1';
+    assert_eq!(old_magic.len(), 368);
+    let Value::Array(old_fields) = ciborium::from_reader(old_magic.as_slice())? else {
+        return Err("old LCS1 fixture is not a CBOR array".into());
+    };
+    assert_eq!(old_fields.len(), 21);
     assert_eq!(
         LocalCutSealV2::from_canonical_cbor(&old_magic),
         Err(LocalCutSealErrorV2::InvalidEncoding)
+    );
+    let mut unsupported_version = canonical.clone();
+    unsupported_version[6] = 2;
+    assert_eq!(
+        LocalCutSealV2::from_canonical_cbor(&unsupported_version),
+        Err(LocalCutSealErrorV2::UnsupportedVersion)
     );
     let mut wrong_count = canonical.clone();
     wrong_count[0] = 0x95;
@@ -260,6 +275,12 @@ fn kind14_page_and_branch_roundtrip_and_reject_wrong_code() -> TestResult {
         LocalCutManifestBindingPageV1::from_canonical_cbor(hash(1), &nonpreferred),
         Err(LocalCutSealErrorV2::NonCanonical)
     );
+    let mut unsupported_page_version = page.to_canonical_cbor();
+    unsupported_page_version[6] = 2;
+    assert_eq!(
+        LocalCutManifestBindingPageV1::from_canonical_cbor(hash(1), &unsupported_page_version),
+        Err(LocalCutSealErrorV2::UnsupportedVersion)
+    );
     let mut wrong_branch_kind = branch_bytes;
     wrong_branch_kind[7] = 13;
     assert_eq!(
@@ -303,6 +324,84 @@ fn kind14_page_and_branch_roundtrip_and_reject_wrong_code() -> TestResult {
             }],
         ),
         Err(LocalCutSealErrorV2::InvalidTableNode)
+    );
+    Ok(())
+}
+
+#[test]
+fn kind14_nodes_enforce_finite_public_shape_bounds() -> TestResult {
+    let row = binding_row(1);
+    assert_eq!(
+        LocalCutManifestBindingPageV1::new(Hash::zero(), 0, vec![row]),
+        Err(LocalCutSealErrorV2::ZeroContentAddress)
+    );
+    assert_eq!(
+        LocalCutManifestBindingPageV1::new(hash(1), 0, Vec::new()),
+        Err(LocalCutSealErrorV2::FieldOutOfBounds)
+    );
+    assert_eq!(
+        LocalCutManifestBindingPageV1::new(hash(1), 0, binding_rows(65)),
+        Err(LocalCutSealErrorV2::FieldOutOfBounds)
+    );
+    assert_eq!(
+        LocalCutManifestBindingPageV1::new(hash(1), u64::MAX, vec![row]),
+        Err(LocalCutSealErrorV2::FieldOutOfBounds)
+    );
+    let child = LocalCutBranchChildV1 {
+        first_ordinal: 0,
+        row_count: 1,
+        node_hash: hash(7),
+    };
+    assert_eq!(
+        LocalCutManifestBindingBranchV1::new(Hash::zero(), 1, 0, vec![child]),
+        Err(LocalCutSealErrorV2::ZeroContentAddress)
+    );
+    for height in [0, 3] {
+        assert_eq!(
+            LocalCutManifestBindingBranchV1::new(hash(1), height, 0, vec![child]),
+            Err(LocalCutSealErrorV2::FieldOutOfBounds)
+        );
+    }
+    assert_eq!(
+        LocalCutManifestBindingBranchV1::new(hash(1), 1, 0, Vec::new()),
+        Err(LocalCutSealErrorV2::FieldOutOfBounds)
+    );
+    assert_eq!(
+        LocalCutManifestBindingBranchV1::new(hash(1), 1, 0, vec![child; 241]),
+        Err(LocalCutSealErrorV2::FieldOutOfBounds)
+    );
+    assert_eq!(
+        LocalCutManifestBindingBranchV1::new(
+            hash(1),
+            1,
+            0,
+            vec![LocalCutBranchChildV1 {
+                row_count: 0,
+                ..child
+            }],
+        ),
+        Err(LocalCutSealErrorV2::InvalidTableNode)
+    );
+    assert_eq!(
+        LocalCutManifestBindingBranchV1::new(
+            hash(1),
+            1,
+            0,
+            vec![LocalCutBranchChildV1 {
+                node_hash: Hash::zero(),
+                ..child
+            }],
+        ),
+        Err(LocalCutSealErrorV2::InvalidTableNode)
+    );
+    let oversized = vec![0; 65_537];
+    assert_eq!(
+        LocalCutManifestBindingPageV1::from_canonical_cbor(hash(1), &oversized),
+        Err(LocalCutSealErrorV2::FieldOutOfBounds)
+    );
+    assert_eq!(
+        LocalCutManifestBindingBranchV1::from_canonical_cbor(hash(1), &oversized),
+        Err(LocalCutSealErrorV2::FieldOutOfBounds)
     );
     Ok(())
 }
@@ -414,6 +513,17 @@ fn kind14_table_rejects_duplicate_missing_extra_and_misaddressed_nodes() -> Test
     missing.pop();
     assert_eq!(
         LocalCutManifestBindingTableV1::from_records(owner_id, 1, table.table_ref(), &missing),
+        Err(LocalCutSealErrorV2::TableMismatch)
+    );
+    let mut duplicate_node = table.records().to_vec();
+    duplicate_node[1] = duplicate_node[0].clone();
+    assert_eq!(
+        LocalCutManifestBindingTableV1::from_records(
+            owner_id,
+            1,
+            table.table_ref(),
+            &duplicate_node
+        ),
         Err(LocalCutSealErrorV2::TableMismatch)
     );
     let mut extra = table.records().to_vec();
