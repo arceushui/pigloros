@@ -69,9 +69,7 @@ fn finalize_committed_origins(
     events: &mut [Event],
 ) -> Result<(), CoreError> {
     for event in events {
-        let logical_seq = inherited_prefix
-            .checked_add(event.seq.as_u64())
-            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
+        let logical_seq = checked_logical_head(inherited_prefix, event.seq.as_u64())?;
         let expected = pos_core::EventOriginV1 {
             origin_timeline_id: timeline,
             origin_logical_seq: pos_core::Seq::from_u64(logical_seq),

@@ -642,13 +642,14 @@ impl MemoryStore {
         hasher: &dyn Hasher,
     ) -> Result<Event, CoreError> {
         let seq = state.timeline.head.next();
-        let origin_logical_seq = state
-            .timeline
-            .meta
-            .fork_point
-            .map_or(0, |(_, fork)| fork.as_u64())
-            .checked_add(seq.as_u64())
-            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
+        let origin_logical_seq = crate::checked_logical_head(
+            state
+                .timeline
+                .meta
+                .fork_point
+                .map_or(0, |(_, fork)| fork.as_u64()),
+            seq.as_u64(),
+        )?;
         let event_id = EventId::new();
         let id_bytes = event_id.to_string();
         let payload_hash = hasher.hash_payload(&draft.payload);
@@ -2332,10 +2333,8 @@ impl GeographicAdmissionStore for MemoryStore {
         let mut staged_state = existing_state.clone();
         let event_id = EventId::new();
         let event_seq = staged_state.timeline.head.next();
-        let origin_logical_seq = self
-            .logical_prefix(timeline)?
-            .checked_add(event_seq.as_u64())
-            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
+        let origin_logical_seq =
+            crate::checked_logical_head(self.logical_prefix(timeline)?, event_seq.as_u64())?;
         let snapshot_id = AdmissionSnapshotId::new();
         let snapshot =
             AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);

@@ -581,18 +581,8 @@ impl SqliteStore {
             Err(_) => return Err(CoreError::Serialization("bad hash length".to_owned())),
         };
         let seq = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)).next();
-        let inherited_prefix = fork_seq
-            .map(|value| {
-                u64::try_from(value)
-                    .map_err(|_| CoreError::Storage("invalid Fork prefix sequence".to_owned()))
-            })
-            .transpose()?
-            .unwrap_or(0);
-        let origin_logical_seq = inherited_prefix
-            .checked_add(seq.as_u64())
-            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
-        let origin_sql_seq = i64::try_from(origin_logical_seq)
-            .map_err(|_| CoreError::Storage("origin sequence exceeds SQLite range".to_owned()))?;
+        let inherited_prefix = sqlite_fork_prefix(fork_seq)?;
+        let (origin_logical_seq, origin_sql_seq) = sqlite_origin_seq(inherited_prefix, seq)?;
         let event_id = EventId::new();
         let event_id_text = event_id.to_string();
         let payload_hash = hasher.hash_payload(&draft.payload);
@@ -1493,13 +1483,7 @@ impl SqliteStore {
                 |row| row.get(0),
             )
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let inherited_prefix = fork_seq
-            .map(|value| {
-                u64::try_from(value)
-                    .map_err(|_| CoreError::Storage("invalid Fork prefix sequence".to_owned()))
-            })
-            .transpose()?
-            .unwrap_or(0);
+        let inherited_prefix = sqlite_fork_prefix(fork_seq)?;
         let sql_limit = limit.map_or(i64::MAX, |value| i64::try_from(value).unwrap_or(i64::MAX));
         let prepared = conn.prepare(SQL);
         let mut stmt = prepared.map_err(|error| CoreError::Storage(error.to_string()))?;
@@ -2722,18 +2706,8 @@ impl SqliteStore {
             .try_into()
             .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
         let seq = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)).next();
-        let inherited_prefix = fork_seq
-            .map(|value| {
-                u64::try_from(value)
-                    .map_err(|_| CoreError::Storage("invalid Fork prefix sequence".to_owned()))
-            })
-            .transpose()?
-            .unwrap_or(0);
-        let origin_logical_seq = inherited_prefix
-            .checked_add(seq.as_u64())
-            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
-        let origin_sql_seq = i64::try_from(origin_logical_seq)
-            .map_err(|_| CoreError::Storage("origin sequence exceeds SQLite range".to_owned()))?;
+        let inherited_prefix = sqlite_fork_prefix(fork_seq)?;
+        let (origin_logical_seq, origin_sql_seq) = sqlite_origin_seq(inherited_prefix, seq)?;
         let payload_hash = hasher.hash_payload(&payload);
         let event_id_text = event_id.to_string();
         let next_chain_head = hasher.hash_event(
@@ -4507,16 +4481,7 @@ impl EventStore for SqliteStore {
                             let arr: [u8; 32] = bytes.try_into().map_err(|_| {
                                 CoreError::Serialization("bad hash length".to_owned())
                             })?;
-                            let inherited_prefix = fork_seq
-                                .map(|value| {
-                                    u64::try_from(value).map_err(|_| {
-                                        CoreError::Storage(
-                                            "invalid Fork prefix sequence".to_owned(),
-                                        )
-                                    })
-                                })
-                                .transpose()?
-                                .unwrap_or(0);
+                            let inherited_prefix = sqlite_fork_prefix(fork_seq)?;
                             (
                                 Seq::from_u64(u64::try_from(n).unwrap_or(0)),
                                 pos_core::Hash::from_bytes(arr),
@@ -6031,6 +5996,20 @@ fn seq_as_i64(seq: Seq) -> i64 {
     i64::try_from(seq.as_u64()).unwrap_or(i64::MAX)
 }
 
+fn sqlite_fork_prefix(fork_seq: Option<i64>) -> Result<u64, CoreError> {
+    fork_seq.map_or(Ok(0), |value| {
+        u64::try_from(value)
+            .map_err(|_| CoreError::Storage("invalid Fork prefix sequence".to_owned()))
+    })
+}
+
+fn sqlite_origin_seq(inherited_prefix: u64, local_seq: Seq) -> Result<(u64, i64), CoreError> {
+    let logical_seq = crate::checked_logical_head(inherited_prefix, local_seq.as_u64())?;
+    let sql_seq = i64::try_from(logical_seq)
+        .map_err(|_| CoreError::Storage("origin sequence exceeds SQLite range".to_owned()))?;
+    Ok((logical_seq, sql_seq))
+}
+
 /// Persist a `u64` micros value as `SQLite` INTEGER (saturates at [`i64::MAX`]).
 fn u64_as_i64(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
@@ -6185,6 +6164,17 @@ mod tests {
         CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };
+
+    #[test]
+    fn sqlite_origin_conversion_covers_boundaries() -> Result<(), CoreError> {
+        assert_eq!(sqlite_fork_prefix(None)?, 0);
+        assert_eq!(sqlite_fork_prefix(Some(2))?, 2);
+        assert!(sqlite_fork_prefix(Some(-1)).is_err());
+        assert_eq!(sqlite_origin_seq(2, Seq::from_u64(3))?, (5, 5));
+        assert!(sqlite_origin_seq(i64::MAX.unsigned_abs(), Seq::from_u64(1)).is_err());
+        assert!(sqlite_origin_seq(u64::MAX, Seq::from_u64(1)).is_err());
+        Ok(())
+    }
 
     fn authorized_export_timeline(
         store: &dyn EventStore,

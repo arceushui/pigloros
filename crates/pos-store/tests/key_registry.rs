@@ -723,11 +723,13 @@ fn sqlite_key_registry_all_mutating_boundaries_reject_read_only_transactions(
 }
 
 #[test]
-fn sqlite_read_only_open_rejects_missing_signature_identity_columns(
+fn sqlite_read_only_open_rejects_missing_signature_or_origin_columns(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for schema in [
         "CREATE TABLE events (id INTEGER PRIMARY KEY);",
         "CREATE TABLE events (id INTEGER PRIMARY KEY, signature_role INTEGER);",
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, signature_owner_id TEXT, signature_role INTEGER, signature_epoch INTEGER);",
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, signature_owner_id TEXT, signature_role INTEGER, signature_epoch INTEGER, origin_timeline_id TEXT);",
     ] {
         let database = tempfile::NamedTempFile::new()?;
         let path = database
