@@ -24,6 +24,14 @@ struct BoundFileIdentity {
 }
 
 #[cfg(unix)]
+struct StoredOwnedKeyBinding {
+    material_digest: Vec<u8>,
+    absolute_path: Vec<u8>,
+    device: Vec<u8>,
+    inode: Vec<u8>,
+}
+
+#[cfg(unix)]
 impl BoundFileIdentity {
     fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
@@ -119,31 +127,40 @@ fn verify_owned_secret_key_binding(
     use rusqlite::{params, OptionalExtension};
 
     let epoch = i64::try_from(identity.epoch).map_err(binding_error)?;
-    let binding: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = connection
+    let binding = connection
         .query_row(
             "SELECT material_digest, absolute_path, file_device, file_inode
              FROM ledger_owned_key_binding_v1
              WHERE owner_id = ?1 AND role = ?2 AND epoch = ?3",
             params![identity.owner_id.as_str(), identity.role.code(), epoch],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok(StoredOwnedKeyBinding {
+                    material_digest: row.get(0)?,
+                    absolute_path: row.get(1)?,
+                    device: row.get(2)?,
+                    inode: row.get(3)?,
+                })
+            },
         )
         .optional()
         .map_err(binding_error)?;
-    let Some((bound_digest, bound_path, device, inode)) = binding else {
+    let Some(binding) = binding else {
         return Err(binding_error("no durable owner-managed key path is bound"));
     };
-    if bound_digest.as_slice() != material_digest.as_bytes()
-        || bound_path.as_slice() != absolute.as_os_str().as_encoded_bytes()
+    if binding.material_digest.as_slice() != material_digest.as_bytes()
+        || binding.absolute_path.as_slice() != absolute.as_os_str().as_encoded_bytes()
     {
         return Err(binding_error(
             "key path or material differs from durable owner binding",
         ));
     }
     Ok(BoundFileIdentity {
-        device: device
+        device: binding
+            .device
             .try_into()
             .map_err(|_| binding_error("invalid bound device"))?,
-        inode: inode
+        inode: binding
+            .inode
             .try_into()
             .map_err(|_| binding_error("invalid bound inode"))?,
     })
@@ -205,8 +222,8 @@ macro_rules! deletion_fault {
 /// # Errors
 /// Returns a closed storage error when the path is unsafe, the file does not
 /// match the pending material, or durable deletion cannot be confirmed.
-#[cfg(unix)]
-pub fn delete_owned_secret_key(
+#[cfg(all(test, unix))]
+fn delete_owned_secret_key(
     path: &Path,
     request: pos_core::KeyDestructionRequestV1,
 ) -> Result<pos_core::Hash, pos_core::CoreError> {
@@ -315,7 +332,7 @@ fn delete_owned_secret_key_with_identity(
 /// # Errors
 /// Always returns an unsupported storage error.
 #[cfg(not(unix))]
-pub fn delete_owned_secret_key(
+fn delete_owned_secret_key(
     _path: &Path,
     _request: pos_core::KeyDestructionRequestV1,
 ) -> Result<pos_core::Hash, pos_core::CoreError> {
@@ -700,7 +717,7 @@ fn unsafe_key(path: &Path, reason: String, cleanup: impl Into<String>) -> CliErr
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod deletion_tests {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::Path;
 
     use super::{clear_faults, delete_owned_secret_key, install_faults, FaultStage};
@@ -721,6 +738,61 @@ mod deletion_tests {
             .mode(0o600)
             .open(path)?;
         file.write_all(crate::hex_encode(&[9; 32]).as_bytes())?;
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_rejects_unsafe_paths_and_file_shapes() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let request = request();
+        let key = directory.path().join("secret.key");
+
+        assert!(delete_owned_secret_key(Path::new("/"), request).is_err());
+        assert!(delete_owned_secret_key(directory.path(), request).is_err());
+
+        let missing_parent = directory.path().join("missing").join("secret.key");
+        assert!(delete_owned_secret_key(&missing_parent, request).is_err());
+
+        let ancestor = directory.path().join("ancestor");
+        std::os::unix::fs::symlink(directory.path(), &ancestor)?;
+        assert!(delete_owned_secret_key(&ancestor.join("secret.key"), request).is_err());
+        std::fs::remove_file(&ancestor)?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777))?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+
+        let link = directory.path().join("link.key");
+        std::os::unix::fs::symlink(&key, &link)?;
+        assert!(delete_owned_secret_key(&link, request).is_err());
+        std::fs::remove_file(&link)?;
+
+        write_owned_key(&key)?;
+        std::fs::write(&key, b"00")?;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644))?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::hard_link(&key, &link)?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        std::fs::remove_file(&link)?;
+
+        std::fs::write(&key, vec![b'0'; 129])?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        std::fs::write(&key, [0xff; 2])?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        std::fs::write(&key, b"not-hex")?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        std::fs::write(&key, b"00")?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        std::fs::write(&key, "08".repeat(32))?;
+        assert!(delete_owned_secret_key(&key, request).is_err());
+        assert!(key.exists());
+
+        std::fs::write(&key, "09".repeat(32))?;
+        assert_eq!(
+            delete_owned_secret_key(&key, request)?,
+            pos_core::deletion_receipt(&request)
+        );
+        assert!(!key.exists());
         Ok(())
     }
 
