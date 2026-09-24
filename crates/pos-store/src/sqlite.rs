@@ -1476,6 +1476,16 @@ impl SqliteStore {
         started: Option<Instant>,
         max_elapsed_micros: u64,
     ) -> Result<Vec<Event>, CoreError> {
+        const SQL: &str = "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+                                causation_id, correlation_id, schema_version, payload_hash, signature,
+                                signature_owner_id, signature_role, signature_epoch,
+                                origin_timeline_id, origin_logical_seq
+                         FROM events
+                         WHERE timeline_id = ?1
+                           AND seq >= ?2
+                           AND (?3 IS NULL OR seq <= ?3)
+                         ORDER BY seq ASC
+                         LIMIT ?4";
         let fork_seq: Option<i64> = conn
             .query_row(
                 "SELECT fork_seq FROM timelines WHERE id = ?1",
@@ -1490,16 +1500,6 @@ impl SqliteStore {
             })
             .transpose()?
             .unwrap_or(0);
-        const SQL: &str = "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                                causation_id, correlation_id, schema_version, payload_hash, signature,
-                                signature_owner_id, signature_role, signature_epoch,
-                                origin_timeline_id, origin_logical_seq
-                         FROM events
-                         WHERE timeline_id = ?1
-                           AND seq >= ?2
-                           AND (?3 IS NULL OR seq <= ?3)
-                         ORDER BY seq ASC
-                         LIMIT ?4";
         let sql_limit = limit.map_or(i64::MAX, |value| i64::try_from(value).unwrap_or(i64::MAX));
         let prepared = conn.prepare(SQL);
         let mut stmt = prepared.map_err(|error| CoreError::Storage(error.to_string()))?;
