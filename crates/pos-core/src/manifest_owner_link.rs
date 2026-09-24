@@ -3,9 +3,7 @@
 //! A matching digest or decoded receipt cannot establish that an actual owner
 //! admitted, retained, or selected these bytes for a committed `WorldCut`.
 
-use std::{collections::HashSet, io::Cursor};
-
-use ciborium::value::Value;
+use std::collections::HashSet;
 
 use crate::{Hash, PluginId};
 
@@ -140,33 +138,30 @@ impl ManifestAdmissionCatalogV1 {
     /// # Errors
     /// Rejects malformed, noncanonical, oversized or duplicate inputs.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
-        let [magic, version, owner, generation, rows] =
-            decode_array::<5>(bytes, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1)?;
-        check_magic(magic, *b"MCA1")?;
-        check_version(&version)?;
-        let rows = take_array(rows)?;
-        if rows.len() > MAX_MANIFEST_OWNER_PLUGINS_V1 {
-            return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
-        }
-        let rows = rows
-            .into_iter()
-            .map(|row| {
-                let [slot, id, name, version, implementation, eop1, closure] =
-                    take_array_exact::<7>(row)?;
+        preflight(bytes, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, RecordShape::Catalog)?;
+        let mut wire = WirePreflight::new(bytes);
+        wire.array(5)?;
+        check_magic(wire.fixed_bytes(4)?, b"MCA1")?;
+        check_version(wire.head(0)?)?;
+        let owner_id = wire.bytes()?;
+        let configuration_generation = wire.head(0)?;
+        let rows = (0..wire.row_count()?)
+            .map(|_| {
+                wire.array(7)?;
                 Ok(ManifestAdmissionCatalogRowV1 {
-                    stable_slot: take_text(slot)?,
-                    plugin_id: take_plugin_id(id)?,
-                    plugin_name: take_text(name)?,
-                    plugin_version: take_text(version)?,
-                    implementation_hash: take_hash(implementation)?,
-                    eop1_native_digest: take_hash(eop1)?,
-                    closure_hash: take_hash(closure)?,
+                    stable_slot: wire.text(64)?.to_owned(),
+                    plugin_id: PluginId::from_ulid(ulid::Ulid::from_bytes(wire.bytes()?)),
+                    plugin_name: wire.text(128)?.to_owned(),
+                    plugin_version: wire.text(64)?.to_owned(),
+                    implementation_hash: Hash::from_bytes(wire.bytes()?),
+                    eop1_native_digest: Hash::from_bytes(wire.bytes()?),
+                    closure_hash: Hash::from_bytes(wire.bytes()?),
                 })
             })
             .collect::<Result<Vec<_>, ManifestOwnerLinkErrorV1>>()?;
         let record = Self::new(ManifestAdmissionCatalogInputV1 {
-            owner_id: take_bytes(owner)?,
-            configuration_generation: take_uint(&generation)?,
+            owner_id,
+            configuration_generation,
             rows,
         })?;
         check_canonical(bytes, &record.to_canonical_cbor())?;
@@ -266,29 +261,27 @@ impl ManifestSlotBindingV1 {
     /// # Errors
     /// Rejects malformed, noncanonical, oversized or duplicate inputs.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
-        let [magic, version, scope, wcs1, rows] =
-            decode_array::<5>(bytes, MAX_MANIFEST_SLOT_BINDING_BYTES_V1)?;
-        check_magic(magic, *b"MSB1")?;
-        check_version(&version)?;
-        let rows = take_array(rows)?;
-        if rows.len() > MAX_MANIFEST_OWNER_PLUGINS_V1 {
-            return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
-        }
-        let rows = rows
-            .into_iter()
-            .map(|row| {
-                let [slot, id, eop1, closure] = take_array_exact::<4>(row)?;
+        preflight(bytes, MAX_MANIFEST_SLOT_BINDING_BYTES_V1, RecordShape::Binding)?;
+        let mut wire = WirePreflight::new(bytes);
+        wire.array(5)?;
+        check_magic(wire.fixed_bytes(4)?, b"MSB1")?;
+        check_version(wire.head(0)?)?;
+        let scope = Hash::from_bytes(wire.bytes()?);
+        let wcs1_hash = Hash::from_bytes(wire.bytes()?);
+        let rows = (0..wire.row_count()?)
+            .map(|_| {
+                wire.array(4)?;
                 Ok(ManifestSlotBindingRowV1 {
-                    stable_slot: take_text(slot)?,
-                    plugin_id: take_plugin_id(id)?,
-                    eop1_wal1_hash: take_hash(eop1)?,
-                    closure_hash: take_hash(closure)?,
+                    stable_slot: wire.text(64)?.to_owned(),
+                    plugin_id: PluginId::from_ulid(ulid::Ulid::from_bytes(wire.bytes()?)),
+                    eop1_wal1_hash: Hash::from_bytes(wire.bytes()?),
+                    closure_hash: Hash::from_bytes(wire.bytes()?),
                 })
             })
             .collect::<Result<Vec<_>, ManifestOwnerLinkErrorV1>>()?;
         let record = Self::new(ManifestSlotBindingInputV1 {
-            scope: take_hash(scope)?,
-            wcs1_hash: take_hash(wcs1)?,
+            scope,
+            wcs1_hash,
             rows,
         })?;
         check_canonical(bytes, &record.to_canonical_cbor())?;
@@ -404,22 +397,27 @@ impl ManifestSlotAdmissionReceiptV1 {
     /// # Errors
     /// Rejects malformed, noncanonical, oversized or impossible nullable inputs.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
-        let [magic, version, owner, generation, scope, wcs1, mca1, operation, previous_lcq1, inventory, msb1, key_evidence, signature] =
-            decode_array::<13>(bytes, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1)?;
-        check_magic(magic, *b"MSR1")?;
-        check_version(&version)?;
+        preflight(
+            bytes,
+            MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1,
+            RecordShape::Receipt,
+        )?;
+        let mut wire = WirePreflight::new(bytes);
+        wire.array(13)?;
+        check_magic(wire.fixed_bytes(4)?, b"MSR1")?;
+        check_version(wire.head(0)?)?;
         let record = Self::new(ManifestSlotAdmissionReceiptInputV1 {
-            owner_id: take_bytes(owner)?,
-            configuration_generation: take_uint(&generation)?,
-            scope: take_hash(scope)?,
-            wcs1_hash: take_hash(wcs1)?,
-            mca1_hash: take_hash(mca1)?,
-            admission_operation_id: take_hash(operation)?,
-            previous_visible_lcq1_hash: take_optional_hash(previous_lcq1)?,
-            expected_inventory_generation: take_optional_hash(inventory)?,
-            msb1_hash: take_hash(msb1)?,
-            coordinator_key_evidence_hash: take_hash(key_evidence)?,
-            signature: take_bytes(signature)?,
+            owner_id: wire.bytes()?,
+            configuration_generation: wire.head(0)?,
+            scope: Hash::from_bytes(wire.bytes()?),
+            wcs1_hash: Hash::from_bytes(wire.bytes()?),
+            mca1_hash: Hash::from_bytes(wire.bytes()?),
+            admission_operation_id: Hash::from_bytes(wire.bytes()?),
+            previous_visible_lcq1_hash: wire.optional_hash()?,
+            expected_inventory_generation: wire.optional_hash()?,
+            msb1_hash: Hash::from_bytes(wire.bytes()?),
+            coordinator_key_evidence_hash: Hash::from_bytes(wire.bytes()?),
+            signature: wire.bytes()?,
         })?;
         check_canonical(bytes, &record.to_canonical_cbor())?;
         Ok(record)
@@ -479,85 +477,192 @@ fn encode_optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
     }
 }
 
-fn decode_array<const N: usize>(
+#[derive(Clone, Copy)]
+enum RecordShape {
+    Catalog,
+    Binding,
+    Receipt,
+}
+
+// Inspect the entire closed wire shape without heap allocation before the
+// decoders construct owned strings or row vectors. The canonical-byte
+// comparison after decoding still rejects non-preferred integer encodings.
+struct WirePreflight<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> WirePreflight<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn byte(&mut self) -> Result<u8, ManifestOwnerLinkErrorV1> {
+        let byte = self
+            .bytes
+            .get(self.offset)
+            .copied()
+            .ok_or(ManifestOwnerLinkErrorV1::InvalidEncoding)?;
+        self.offset += 1;
+        Ok(byte)
+    }
+
+    fn head(&mut self, major: u8) -> Result<u64, ManifestOwnerLinkErrorV1> {
+        let first = self.byte()?;
+        if first >> 5 != major {
+            return Err(ManifestOwnerLinkErrorV1::InvalidEncoding);
+        }
+        let additional = first & 0x1f;
+        if additional < 24 {
+            return Ok(u64::from(additional));
+        }
+        let width = match additional {
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return Err(ManifestOwnerLinkErrorV1::InvalidEncoding),
+        };
+        let mut value = 0_u64;
+        for _ in 0..width {
+            value = (value << 8) | u64::from(self.byte()?);
+        }
+        Ok(value)
+    }
+
+    fn array(&mut self, expected: u64) -> Result<(), ManifestOwnerLinkErrorV1> {
+        if self.head(4)? == expected {
+            Ok(())
+        } else {
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        }
+    }
+
+    fn row_count(&mut self) -> Result<u64, ManifestOwnerLinkErrorV1> {
+        let count = self.head(4)?;
+        if count > MAX_MANIFEST_OWNER_PLUGINS_V1 as u64 {
+            Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+        } else {
+            Ok(count)
+        }
+    }
+
+    fn slice(&mut self, length: u64) -> Result<&'a [u8], ManifestOwnerLinkErrorV1> {
+        if length > (self.bytes.len() - self.offset) as u64 {
+            return Err(ManifestOwnerLinkErrorV1::InvalidEncoding);
+        }
+        let start = self.offset;
+        self.offset += length as usize;
+        Ok(&self.bytes[start..self.offset])
+    }
+
+    fn fixed_bytes(&mut self, expected: u64) -> Result<&'a [u8], ManifestOwnerLinkErrorV1> {
+        let length = self.head(2)?;
+        if length != expected {
+            return Err(ManifestOwnerLinkErrorV1::InvalidEncoding);
+        }
+        self.slice(length)
+    }
+
+    fn bytes<const N: usize>(&mut self) -> Result<[u8; N], ManifestOwnerLinkErrorV1> {
+        let mut bytes = [0; N];
+        bytes.copy_from_slice(self.fixed_bytes(N as u64)?);
+        Ok(bytes)
+    }
+
+    fn text(&mut self, maximum: u64) -> Result<&'a str, ManifestOwnerLinkErrorV1> {
+        let length = self.head(3)?;
+        if length == 0 || length > maximum {
+            return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
+        }
+        std::str::from_utf8(self.slice(length)?)
+            .map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)
+    }
+
+    fn optional_hash(&mut self) -> Result<Option<Hash>, ManifestOwnerLinkErrorV1> {
+        if self.bytes.get(self.offset) == Some(&0xf6) {
+            self.offset += 1;
+            Ok(None)
+        } else {
+            self.bytes().map(Hash::from_bytes).map(Some)
+        }
+    }
+
+    fn record(&mut self, shape: RecordShape) -> Result<(), ManifestOwnerLinkErrorV1> {
+        self.array(match shape {
+            RecordShape::Receipt => 13,
+            RecordShape::Catalog | RecordShape::Binding => 5,
+        })?;
+        self.fixed_bytes(4)?;
+        self.head(0)?;
+        match shape {
+            RecordShape::Catalog => {
+                self.fixed_bytes(32)?;
+                self.head(0)?;
+                for _ in 0..self.row_count()? {
+                    self.array(7)?;
+                    self.text(64)?;
+                    self.fixed_bytes(16)?;
+                    self.text(128)?;
+                    self.text(64)?;
+                    for _ in 0..3 {
+                        self.fixed_bytes(32)?;
+                    }
+                }
+            }
+            RecordShape::Binding => {
+                self.fixed_bytes(32)?;
+                self.fixed_bytes(32)?;
+                for _ in 0..self.row_count()? {
+                    self.array(4)?;
+                    self.text(64)?;
+                    self.fixed_bytes(16)?;
+                    self.fixed_bytes(32)?;
+                    self.fixed_bytes(32)?;
+                }
+            }
+            RecordShape::Receipt => {
+                self.fixed_bytes(32)?;
+                self.head(0)?;
+                for _ in 0..4 {
+                    self.fixed_bytes(32)?;
+                }
+                self.optional_hash()?;
+                self.optional_hash()?;
+                self.fixed_bytes(32)?;
+                self.fixed_bytes(32)?;
+                self.fixed_bytes(64)?;
+            }
+        }
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        }
+    }
+}
+
+fn preflight(
     bytes: &[u8],
     maximum: usize,
-) -> Result<[Value; N], ManifestOwnerLinkErrorV1> {
+    shape: RecordShape,
+) -> Result<(), ManifestOwnerLinkErrorV1> {
     if bytes.len() > maximum {
         return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
     }
-    let mut cursor = Cursor::new(bytes);
-    let value: Value = ciborium::from_reader(&mut cursor)
-        .map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)?;
-    if cursor.position() != bytes.len() as u64 {
-        return Err(ManifestOwnerLinkErrorV1::InvalidEncoding);
-    }
-    take_array_exact(value)
+    WirePreflight::new(bytes).record(shape)
 }
 
-fn take_array_exact<const N: usize>(value: Value) -> Result<[Value; N], ManifestOwnerLinkErrorV1> {
-    take_array(value)?
-        .try_into()
-        .map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)
-}
-
-fn take_array(value: Value) -> Result<Vec<Value>, ManifestOwnerLinkErrorV1> {
-    match value {
-        Value::Array(values) => Ok(values),
-        _ => Err(ManifestOwnerLinkErrorV1::InvalidEncoding),
-    }
-}
-
-fn take_bytes<const N: usize>(value: Value) -> Result<[u8; N], ManifestOwnerLinkErrorV1> {
-    match value {
-        Value::Bytes(bytes) => bytes
-            .try_into()
-            .map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding),
-        _ => Err(ManifestOwnerLinkErrorV1::InvalidEncoding),
-    }
-}
-
-fn take_text(value: Value) -> Result<String, ManifestOwnerLinkErrorV1> {
-    match value {
-        Value::Text(text) => Ok(text),
-        _ => Err(ManifestOwnerLinkErrorV1::InvalidEncoding),
-    }
-}
-
-fn take_uint(value: &Value) -> Result<u64, ManifestOwnerLinkErrorV1> {
-    match value {
-        Value::Integer(value) => {
-            u64::try_from(*value).map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)
-        }
-        _ => Err(ManifestOwnerLinkErrorV1::InvalidEncoding),
-    }
-}
-
-fn take_hash(value: Value) -> Result<Hash, ManifestOwnerLinkErrorV1> {
-    take_bytes(value).map(Hash::from_bytes)
-}
-
-fn take_optional_hash(value: Value) -> Result<Option<Hash>, ManifestOwnerLinkErrorV1> {
-    match value {
-        Value::Null => Ok(None),
-        value => take_hash(value).map(Some),
-    }
-}
-
-fn take_plugin_id(value: Value) -> Result<PluginId, ManifestOwnerLinkErrorV1> {
-    take_bytes(value).map(|bytes| PluginId::from_ulid(ulid::Ulid::from_bytes(bytes)))
-}
-
-fn check_magic(value: Value, expected: [u8; 4]) -> Result<(), ManifestOwnerLinkErrorV1> {
-    if take_bytes::<4>(value)? == expected {
+fn check_magic(value: &[u8], expected: &[u8; 4]) -> Result<(), ManifestOwnerLinkErrorV1> {
+    if value == expected {
         Ok(())
     } else {
         Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
     }
 }
 
-fn check_version(value: &Value) -> Result<(), ManifestOwnerLinkErrorV1> {
-    if take_uint(value)? == 1 {
+const fn check_version(value: u64) -> Result<(), ManifestOwnerLinkErrorV1> {
+    if value == 1 {
         Ok(())
     } else {
         Err(ManifestOwnerLinkErrorV1::UnsupportedVersion)

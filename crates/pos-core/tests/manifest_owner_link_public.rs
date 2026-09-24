@@ -525,6 +525,41 @@ fn malformed_nonpreferred_trailing_and_oversized_wire_rejects() -> TestResult {
 }
 
 #[test]
+fn catalog_preflights_lengths_counts_and_utf8_before_decoding() -> TestResult {
+    let bytes = ManifestAdmissionCatalogV1::new(catalog_input())?.to_canonical_cbor();
+    assert_eq!(&bytes[42..46], &[0x82, 0x87, 0x65, b'f']);
+
+    for malformed in [&[][..], &[0x98][..], &[0x9f][..], &bytes[..10]] {
+        assert_eq!(
+            ManifestAdmissionCatalogV1::from_canonical_cbor(malformed),
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        );
+    }
+
+    let mut excessive_rows = bytes.clone();
+    excessive_rows.splice(42..43, [0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&excessive_rows),
+        Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+    );
+
+    let mut excessive_text = bytes.clone();
+    excessive_text.splice(44..45, [0x78, 0xff]);
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&excessive_text),
+        Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+    );
+
+    let mut invalid_utf8 = bytes;
+    invalid_utf8[45] = 0xff;
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&invalid_utf8),
+        Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
 fn wrong_catalog_cbor_shapes_and_field_widths_reject() -> TestResult {
     assert_eq!(
         ManifestAdmissionCatalogV1::from_canonical_cbor(&encoded(&Value::Map(Vec::new()))?),
@@ -834,7 +869,7 @@ fn receipt_decode_rejects_every_untrusted_field_and_nonpreferred_width() -> Test
 
 #[test]
 fn large_generation_widths_roundtrip_canonically() -> TestResult {
-    for generation in [65_536, u64::MAX] {
+    for generation in [256, 65_536, u64::MAX] {
         let mut catalog = catalog_input();
         catalog.configuration_generation = generation;
         let catalog = ManifestAdmissionCatalogV1::new(catalog)?;
