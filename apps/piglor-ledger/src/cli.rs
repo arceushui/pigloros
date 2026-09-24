@@ -178,8 +178,7 @@ fn bad_source(error: impl std::fmt::Display) -> CliError {
 }
 
 fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStore>, CliError> {
-    let key_path =
-        key.ok_or_else(|| CliError::BadSource("store: source requires --key <path>".to_owned()))?;
+    let key_path = key.ok_or_else(|| bad_source("store: source requires --key <path>"))?;
     let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
         crate::HostedLedgerStore::open(StoreConfig::Sqlite {
             path: db.to_string_lossy().into_owned(),
