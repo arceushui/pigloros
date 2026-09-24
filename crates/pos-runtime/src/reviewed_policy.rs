@@ -25,6 +25,15 @@ pub const MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1: usize = 1_048_576;
 pub const MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1: usize =
     MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1;
 
+/// Host role for one exact installed Plugin instance.
+///
+/// A Plugin name is not an identity: distinct PluginIds may share it in one
+/// admitted composition. The role therefore includes the registered ID.
+#[must_use]
+pub fn installed_plugin_role_v1<P: Plugin + ?Sized>(plugin: &P) -> String {
+    format!("{}:{}", plugin.name(), plugin.id())
+}
+
 /// Closed errors for host-owned reviewed policy artifacts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ReviewedPolicyArtifactErrorV1 {

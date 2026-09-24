@@ -60,7 +60,7 @@ pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
-    implementation_artifact_hash_v1, reviewed_retention_policy_bytes_v1,
+    implementation_artifact_hash_v1, installed_plugin_role_v1, reviewed_retention_policy_bytes_v1,
     reviewed_retention_policy_hash_v1, ReviewedPolicyArtifactErrorV1,
     MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1, MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1,
     MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1,

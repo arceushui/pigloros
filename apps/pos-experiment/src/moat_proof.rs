@@ -80,6 +80,22 @@ fn reviewed_output_binding<P: Plugin + ?Sized>(
     .map_err(Into::into)
 }
 
+fn reviewed_output_registration<P: Plugin + ?Sized>(
+    plugin: &P,
+    binding: &pos_runtime::OutputPolicyBindingV1,
+) -> Result<pos_runtime::PluginRegistrationV1, RuntimeError> {
+    pos_runtime::PluginPinV1::try_new(
+        pos_runtime::DomainImplementationKindV1::Plugin,
+        pos_runtime::PluginIsolationV1::OperatorTrustedNative,
+        binding.policy().digest(),
+        vec![pos_runtime::installed_plugin_role_v1(plugin)],
+    )
+    .map(|pin| {
+        pos_runtime::PluginRegistrationV1::new(pin, pos_runtime::PluginAvailabilityV1::Available)
+    })
+    .map_err(Into::into)
+}
+
 fn world_output_binding(
     plugin: &WorldPlugin,
     input: &MoatProofInputV1,
@@ -540,51 +556,92 @@ impl ProofTopology {
     }
 }
 
-fn register_plugins_for_profile(
-    experiment: &mut Experiment,
+fn installed_world_registration(
     topology: &ProofTopology,
     profile_id: &str,
-) -> Result<(), RuntimeError> {
+) -> Result<(pos_runtime::OutputPolicyBindingV1, pos_runtime::PluginRegistrationV1), RuntimeError> {
     result_pipeline! {
         world_output_binding(
             &topology.world_plugin,
             &topology.input,
             topology.body,
             profile_id,
-        ) => |world_closure|;
+        ) => |binding|;
+        binding.with_installed_driver(world_driver(
+            &topology.input,
+            topology.body,
+            topology.config_entity,
+        )).map_err(Into::into) => |binding|;
+        binding.with_installed_action_approver(
+            topology.world_plugin.clone(),
+            [Kind::new(EVENT_TYPE_ACTION_V1)],
+        ).map_err(Into::into) => |binding|;
+        reviewed_output_registration(&topology.world_plugin, &binding) => |registration|;
+        Ok((binding, registration))
+    }
+}
+
+fn installed_agent_registration(
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<(pos_runtime::OutputPolicyBindingV1, pos_runtime::PluginRegistrationV1), RuntimeError> {
+    result_pipeline! {
         proof_agent_output_binding(
             &topology.agent_plugin,
             topology.input.agent_response_threshold,
             profile_id,
-        ) => |agent_closure|;
-        proof_society_output_binding(&topology.society_plugin, profile_id)
-            => |society_closure|;
-        experiment.register_with_verified_output_policy_and_approver(
+        ) => |binding|;
+        binding.with_installed_driver(ProofAgentDriver::new(
+            topology.agent,
+            topology.input.agent_response_threshold,
+        )).map_err(Into::into) => |binding|;
+        reviewed_output_registration(&topology.agent_plugin, &binding) => |registration|;
+        Ok((binding, registration))
+    }
+}
+
+fn installed_society_registration(
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<(pos_runtime::OutputPolicyBindingV1, pos_runtime::PluginRegistrationV1), RuntimeError> {
+    result_pipeline! {
+        proof_society_output_binding(&topology.society_plugin, profile_id) => |binding|;
+        binding.with_installed_driver(ProofSocietyDriver::new(topology.society))
+            .map_err(Into::into) => |binding|;
+        reviewed_output_registration(&topology.society_plugin, &binding) => |registration|;
+        Ok((binding, registration))
+    }
+}
+
+fn register_plugins_for_profile(
+    experiment: &mut Experiment,
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<(), RuntimeError> {
+    result_pipeline! {
+        installed_world_registration(topology, profile_id)
+            => |(world_closure, world_registration)|;
+        installed_agent_registration(topology, profile_id)
+            => |(agent_closure, agent_registration)|;
+        installed_society_registration(topology, profile_id)
+            => |(society_closure, society_registration)|;
+        experiment.register_installed_output(
             &topology.world_plugin,
             world_closure,
+            world_registration,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
-                &topology.input,
-                topology.body,
-                topology.config_entity,
-            ))),
-            Some(Box::new(topology.world_plugin.clone())),
-            [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        experiment.register_with_verified_output_policy(
+        experiment.register_installed_output(
             &topology.agent_plugin,
             agent_closure,
+            agent_registration,
             Some(Box::new(ProofAgentReducer)),
-            Some(Box::new(ProofAgentDriver::new(
-                topology.agent,
-                topology.input.agent_response_threshold,
-            ))),
         ) => |()|;
-        experiment.register_with_verified_output_policy(
+        experiment.register_installed_output(
             &topology.society_plugin,
             society_closure,
+            society_registration,
             Some(Box::new(SocietyReducer)),
-            Some(Box::new(ProofSocietyDriver::new(topology.society))),
         )
     }
 }
@@ -604,45 +661,29 @@ fn build_registry_for_profile(
     result_pipeline! {
         let mut registry =
             pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-        world_output_binding(
-            &topology.world_plugin,
-            &topology.input,
-            topology.body,
-            profile_id,
-        ) => |world_closure|;
-        proof_agent_output_binding(
-            &topology.agent_plugin,
-            topology.input.agent_response_threshold,
-            profile_id,
-        ) => |agent_closure|;
-        proof_society_output_binding(&topology.society_plugin, profile_id)
-            => |society_closure|;
-        registry.register_with_verified_output_policy_and_approver(
+        installed_world_registration(topology, profile_id)
+            => |(world_closure, world_registration)|;
+        installed_agent_registration(topology, profile_id)
+            => |(agent_closure, agent_registration)|;
+        installed_society_registration(topology, profile_id)
+            => |(society_closure, society_registration)|;
+        registry.register_installed_output(
             &topology.world_plugin,
             world_closure,
+            world_registration,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
-                &topology.input,
-                topology.body,
-                topology.config_entity,
-            ))),
-            Some(Box::new(topology.world_plugin.clone())),
-            [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        registry.register_with_verified_output_policy(
+        registry.register_installed_output(
             &topology.agent_plugin,
             agent_closure,
+            agent_registration,
             Some(Box::new(ProofAgentReducer)),
-            Some(Box::new(ProofAgentDriver::new(
-                topology.agent,
-                topology.input.agent_response_threshold,
-            ))),
         ) => |()|;
-        registry.register_with_verified_output_policy(
+        registry.register_installed_output(
             &topology.society_plugin,
             society_closure,
+            society_registration,
             Some(Box::new(SocietyReducer)),
-            Some(Box::new(ProofSocietyDriver::new(topology.society))),
         ) => |()|;
         Ok(registry)
     }
@@ -1690,22 +1731,30 @@ fn failure_probe(
             profile_id,
             &failure_details,
         ).map_err(MoatProofError::from) => |failure_closure|;
-        experiment.register_with_verified_output_policy(
+        sibling_closure.with_installed_driver(SiblingProbeDriver {
+            steps: Arc::clone(&sibling_steps),
+        }).map_err(|error| MoatProofError::from(RuntimeError::from(error)))
+            => |sibling_closure|;
+        failure_closure.with_installed_driver(FailureProbeDriver {
+            class,
+            resource_limit,
+        }).map_err(|error| MoatProofError::from(RuntimeError::from(error)))
+            => |failure_closure|;
+        reviewed_output_registration(&sibling_plugin, &sibling_closure)
+            .map_err(MoatProofError::from) => |sibling_registration|;
+        reviewed_output_registration(&plugin, &failure_closure)
+            .map_err(MoatProofError::from) => |failure_registration|;
+        experiment.register_installed_output(
             &sibling_plugin,
             sibling_closure,
+            sibling_registration,
             None,
-            Some(Box::new(SiblingProbeDriver {
-                steps: Arc::clone(&sibling_steps),
-            })),
         ).map_err(MoatProofError::from) => |()|;
-        experiment.register_with_verified_output_policy(
+        experiment.register_installed_output(
             &plugin,
             failure_closure,
+            failure_registration,
             None,
-            Some(Box::new(FailureProbeDriver {
-                class,
-                resource_limit,
-            })),
         ).map_err(MoatProofError::from) => |()|;
         experiment.start().map_err(MoatProofError::from) => |mut session|;
         session.source_events_with_control().map_err(MoatProofError::from) => |before|;
