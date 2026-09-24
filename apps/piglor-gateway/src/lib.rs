@@ -426,7 +426,7 @@ mod coverage_tests {
             DomainImplementationKindV1::Plugin,
             PluginIsolationV1::OperatorTrustedNative,
             digest,
-            vec![role.clone()],
+            vec![role],
         )
         .test_ok();
         registry
@@ -446,6 +446,40 @@ mod coverage_tests {
             digest
         );
         assert_eq!(registry.output_policy_digests().next().test_ok().1, digest);
+    }
+
+    #[test]
+    fn installed_gateway_rejects_duplicate_registered_role() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        let role = pos_runtime::installed_plugin_role_v1(&plugin);
+        let binding = installed_gateway_binding(&plugin);
+        let pin = PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![role.clone()],
+        )
+        .test_ok();
+        let registration = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        registry
+            .register_installed_output(&plugin, binding, registration.clone(), None)
+            .test_ok();
+        let duplicate = registry.register_installed_output(
+            &plugin,
+            installed_gateway_binding(&plugin),
+            registration,
+            None,
+        );
+        assert!(matches!(
+            duplicate,
+            Err(RuntimeError::Composition(
+                PluginCompositionErrorV1::DuplicateRole { role: duplicate_role }
+            )) if duplicate_role == role
+        ));
+        assert_eq!(registry.len(), 1);
     }
 
     #[test]

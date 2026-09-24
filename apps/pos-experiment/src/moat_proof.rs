@@ -2389,6 +2389,34 @@ mod tests {
     }
 
     #[test]
+    fn experiment_binding_retains_delegated_society_source() {
+        let plugin = ProofSocietyPlugin::new();
+        let binding = proof_society_output_binding(&plugin, "deterministic-local-v1").test_ok();
+        assert!(binding
+            .implementation_artifact()
+            .ends_with(include_bytes!("../../../plugins/society/src/lib.rs")));
+        assert_eq!(
+            binding.policy().fields().implementation_hash,
+            pos_runtime::implementation_artifact_hash_v1(binding.implementation_artifact()),
+        );
+        let mut changed_society_source = binding.implementation_artifact().to_vec();
+        *changed_society_source.last_mut().test_ok() ^= 1;
+        assert!(matches!(
+            pos_runtime::validate_output_policy_artifacts_v1(
+                &binding.policy().to_canonical_cbor(),
+                &binding.budget().to_canonical_cbor(),
+                &changed_society_source,
+                binding.configuration_artifact(),
+                binding.execution_profile_artifact(),
+                binding.retention_policy_artifact(),
+            ),
+            Err(pos_runtime::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                kind: "implementation"
+            })
+        ));
+    }
+
+    #[test]
     fn world_output_binding_reports_invalid_configuration_encoding() {
         let plugin = WorldPlugin::new();
         let mut config = world_config(&input());
