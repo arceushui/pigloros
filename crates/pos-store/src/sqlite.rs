@@ -7062,6 +7062,128 @@ mod tests {
     }
 
     #[test]
+    fn host_transition_timeline_creation_rejects_missing_corrupt_and_duplicate_rows() {
+        let mut missing_parent = new_store();
+        let missing_parent_meta = TimelineMeta::forked_from(
+            TimelineId::new(),
+            Seq::ZERO,
+            "missing-host-transition-parent",
+        );
+        assert!(missing_parent
+            .create_timeline_with_meta_for_host_transition_unchecked(&missing_parent_meta)
+            .is_err());
+
+        let mut corrupt_parent = new_store();
+        let parent = corrupt_parent
+            .create_timeline("corrupt-host-transition-parent")
+            .test_ok();
+        let event = corrupt_parent
+            .append(parent.id(), &[make_draft(EntityId::new(), b"parent-event")])
+            .test_ok()
+            .remove(0);
+        corrupt_parent
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .test_ok();
+        corrupt_parent
+            .conn
+            .execute(
+                "UPDATE events SET wall_time=-1 WHERE event_id=?1",
+                params![event.id.to_string()],
+            )
+            .test_ok();
+        let corrupt_child = TimelineMeta::forked_from(
+            parent.id(),
+            Seq::from_u64(1),
+            "corrupt-host-transition-child",
+        );
+        assert!(corrupt_parent
+            .create_timeline_with_meta_for_host_transition_unchecked(&corrupt_child)
+            .is_err());
+
+        let mut duplicate = new_store();
+        let existing = duplicate
+            .create_timeline("duplicate-host-transition-row")
+            .test_ok();
+        let mut duplicate_meta = TimelineMeta::root("duplicate-host-transition-name");
+        duplicate_meta.id = existing.id();
+        assert!(duplicate
+            .create_timeline_with_meta_for_host_transition_unchecked(&duplicate_meta)
+            .is_err());
+
+        let mut denied_begin = new_store();
+        denied_begin
+            .conn
+            .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Begin
+                    }
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert!(matches!(
+            denied_begin.create_timeline_with_meta_for_host_transition_unchecked(
+                &TimelineMeta::root("denied-host-transition-begin"),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        denied_begin
+            .conn
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )
+            .test_ok();
+    }
+
+    #[test]
+    fn direct_ledger_initialization_requires_host_transition_authority() {
+        let mut store = SqliteStore::open_in_memory().test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))
+            .test_ok();
+
+        assert!(matches!(
+            store.initialize_timeline_with_key_registry(
+                "direct-ledger-initialization",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+    }
+
+    #[test]
+    fn host_transition_ledger_initialization_closes_begin_failure() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing SQLite test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+            let result = store.initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                permit,
+                &TimelineMeta::root("host-ledger-begin-failure"),
+                &KeyRegistryStateV1::new(),
+            );
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+            assert!(matches!(result, Err(CoreError::Storage(_))));
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+    }
+
+    #[test]
     fn host_transition_meta_creation_reports_an_uncertain_commit() {
         let mut store = new_store();
         let gate =
@@ -14000,6 +14122,374 @@ mod tests {
             ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+    }
+
+    #[test]
+    fn sqlite_recovery_proof_checks_objects_states_all_indexes_and_subject() {
+        use ciborium::value::Value;
+
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let digest = |reference: ErasureReferenceV1| Value::Bytes(reference.digest().to_vec());
+        let extension = reference(50);
+        let request = reference(51);
+        let state_reference = reference(52);
+        let manifest = reference(53);
+        let effect_subject = reference(54);
+        let object_bytes = b"extension";
+        let state_bytes = b"state";
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: effect_subject,
+        };
+        let effect_bytes = effect.to_canonical_cbor().test_ok();
+        let index_references = [reference(55), reference(56), reference(57)];
+        let mutation = Value::Array(vec![
+            digest(reference(58)),
+            digest(reference(59)),
+            digest(reference(60)),
+            digest(extension),
+            digest(request),
+            Value::Null,
+            digest(manifest),
+            digest(reference(61)),
+            Value::Array(vec![Value::Array(vec![
+                digest(extension),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(object_bytes)),
+            ])]),
+            Value::Array(vec![Value::Array(vec![
+                digest(state_reference),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(state_bytes)),
+            ])]),
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Integer(0.into()),
+                    Value::Integer(0.into()),
+                    digest(index_references[0]),
+                ]),
+                Value::Array(vec![
+                    Value::Integer(1.into()),
+                    Value::Integer(1.into()),
+                    digest(index_references[1]),
+                ]),
+                Value::Array(vec![
+                    Value::Integer(2.into()),
+                    Value::Integer(2.into()),
+                    digest(index_references[2]),
+                ]),
+            ]),
+            digest(effect.identity()),
+            digest(ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)),
+            digest(effect_subject),
+            digest(reference(62)),
+        ]);
+        let proof_value = Value::Array(vec![
+            Value::Text(ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+            Value::Integer(1.into()),
+            digest(reference(58)),
+            digest(reference(62)),
+            digest(reference(59)),
+            digest(reference(60)),
+            digest(reference(63)),
+            Value::Array(vec![mutation]),
+        ]);
+        let mut proof_bytes = Vec::new();
+        ciborium::into_writer(&proof_value, &mut proof_bytes).test_ok();
+        let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes).test_ok();
+        let proof_mutation = proof.admissions().first().test_ok();
+
+        let store = new_store();
+        insert_sqlite_exact(&store.conn, extension, object_bytes).test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_states(state_digest,request_digest,state_cbor)
+                 VALUES(?1,?2,?3)",
+                params![
+                    state_reference.digest().as_slice(),
+                    request.digest().as_slice(),
+                    state_bytes,
+                ],
+            )
+            .test_ok();
+        for (index, (ordinal, reference)) in [
+            (0, index_references[0]),
+            (1, index_references[1]),
+            (2, index_references[2]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let index = match index {
+                0 => ErasureIndexInsertV1::AttemptPage { ordinal, reference },
+                1 => ErasureIndexInsertV1::ScopeNode { ordinal, reference },
+                _ => ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
+            };
+            insert_sqlite_index(&store.conn, request, index).test_ok();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
+                 VALUES(?1,?2,?3,?4)",
+                params![
+                    manifest.digest().as_slice(),
+                    effect.identity().digest().as_slice(),
+                    effect_subject.digest().as_slice(),
+                    effect_bytes.as_slice(),
+                ],
+            )
+            .test_ok();
+
+        sqlite_recovery_proof_mutation_is_exact(&store.conn, proof_mutation).test_ok();
+        sqlite_recovery_proof_indexes_are_exact(&store.conn, proof_mutation).test_ok();
+        sqlite_recovery_proof_subject_is_exact(&store.conn, proof_mutation).test_ok();
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_fork_recovery_proofs(operation_digest,proof_digest,proof_cbor)
+                 VALUES(?1,?2,?3)",
+                params![
+                    reference(58).digest().as_slice(),
+                    proof.content_digest().test_ok().digest().as_slice(),
+                    proof_bytes.as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_fork_recovery_proof(&store.conn, reference(58)).test_ok(),
+            proof
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=?1
+                 WHERE operation_digest=?2",
+                params![
+                    reference(64).digest().as_slice(),
+                    reference(58).digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_fork_recovery_proof(&store.conn, reference(58)),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+                params![reference(58).digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_fork_recovery_proof(&store.conn, reference(58)),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut missing_extension = proof_value.clone();
+        let Value::Array(fields) = &mut missing_extension else {
+            std::panic::resume_unwind(Box::new("recovery proof root is not an array"));
+        };
+        let Value::Array(admissions) = &mut fields[7] else {
+            std::panic::resume_unwind(Box::new("recovery proof admissions are not an array"));
+        };
+        let Value::Array(mutation_fields) = &mut admissions[0] else {
+            std::panic::resume_unwind(Box::new("recovery mutation is not an array"));
+        };
+        mutation_fields[8] = Value::Array(Vec::new());
+        let mut missing_extension_bytes = Vec::new();
+        ciborium::into_writer(&missing_extension, &mut missing_extension_bytes).test_ok();
+        let missing_extension_proof =
+            ErasureForkRecoveryProofV1::from_canonical_cbor(&missing_extension_bytes).test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_objects_are_exact(
+                &store.conn,
+                missing_extension_proof.admissions().first().test_ok(),
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET manifest_digest=?1 WHERE subject_digest=?2",
+                params![
+                    reference(64).digest().as_slice(),
+                    effect_subject.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_subject_is_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET manifest_digest=?1 WHERE subject_digest=?2",
+                params![
+                    manifest.digest().as_slice(),
+                    effect_subject.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_evidence SET object_cbor=X'00' WHERE reference_digest=?1",
+                params![extension.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_objects_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_states SET request_digest=?1 WHERE state_digest=?2",
+                params![
+                    reference(64).digest().as_slice(),
+                    state_reference.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_states_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_states SET request_digest=?1,state_cbor=X'00'
+                 WHERE state_digest=?2",
+                params![
+                    request.digest().as_slice(),
+                    state_reference.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_states_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_attempt_pages SET reference_digest=?1
+                 WHERE request_digest=?2 AND ordinal=0",
+                params![
+                    reference(64).digest().as_slice(),
+                    request.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_indexes_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET effect_cbor=X'FF' WHERE manifest_digest=?1",
+                params![manifest.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_effect_is_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn sqlite_fork_recovery_rejects_orphaned_proof_and_missing_proof_table() {
+        let operation = ErasureReferenceV1::from_digest([65; 32]);
+
+        let mut orphaned = new_store();
+        let snapshot = orphaned.complete_erasure_inventory_snapshot(4).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(4).test_ok();
+        orphaned
+            .conn
+            .execute(
+                "INSERT INTO erasure_fork_recovery_proofs(operation_digest,proof_digest,proof_cbor)
+                 VALUES(?1,?2,?3)",
+                params![
+                    operation.digest().as_slice(),
+                    [66_u8; 32].as_slice(),
+                    b"orphaned-proof",
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recover_fork_admission(
+                &orphaned.conn,
+                orphaned.hasher.as_ref(),
+                operation,
+                &inventory,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut missing_table = new_store();
+        let snapshot = missing_table
+            .complete_erasure_inventory_snapshot(4)
+            .test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(4).test_ok();
+        missing_table
+            .conn
+            .execute_batch("DROP TABLE erasure_fork_recovery_proofs")
+            .test_ok();
+        assert_eq!(
+            sqlite_recover_fork_admission(
+                &missing_table.conn,
+                missing_table.hasher.as_ref(),
+                operation,
+                &inventory,
+            ),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+    }
+
+    #[test]
+    fn sqlite_event_decoder_rejects_unsupported_schema_and_negative_wall_time() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("event-decoder-corruption").test_ok();
+        let event = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"event")])
+            .test_ok()
+            .remove(0);
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET schema_version=2 WHERE event_id=?1",
+                params![event.id.to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET schema_version=1,wall_time=-1 WHERE event_id=?1",
+                params![event.id.to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
     }
 
     #[test]

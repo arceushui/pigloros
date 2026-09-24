@@ -7844,6 +7844,19 @@ mod coverage_entrypoints {
 
     #[test]
     fn host_gate_binding_and_startup_errors_are_closed() {
+        let mut store = pos_store::memory::MemoryStore::new();
+        let mut registry = PluginRegistry::new();
+        assert!(matches!(
+            start_backtest_train(
+                &mut store,
+                &mut registry,
+                None,
+                None,
+                "missing-runtime-gate"
+            ),
+            Err(pos_core::CoreError::ErasureContainmentUnavailable)
+        ));
+
         let unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
         assert!(matches!(
             unbound_store.get_timeline(TimelineId::new()),

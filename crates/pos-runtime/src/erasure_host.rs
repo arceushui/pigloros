@@ -3456,6 +3456,8 @@ mod tests {
         MisreportInitialExactRetry,
         MisreportExactRetry,
         MisreportStaleRecoveryGeneration,
+        StaleRecovery,
+        ForkRecoveryOverride,
         ForkCommit,
         Recovery,
         EventStore,
@@ -3929,8 +3931,12 @@ mod tests {
         ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
             if self.fault == FaultModeV1::Recovery {
                 Err(ErasureErrorV1::ProvenanceMissing)
+            } else if self.fault == FaultModeV1::StaleRecovery {
+                Err(ErasureErrorV1::StaleGeneration)
             } else if self.fault == FaultModeV1::MisreportStaleRecoveryGeneration {
                 // Test the host guard against a port that misreports a stale result.
+                Ok(self.fork_recovery_override.clone())
+            } else if self.fault == FaultModeV1::ForkRecoveryOverride {
                 Ok(self.fork_recovery_override.clone())
             } else {
                 self.inner
@@ -4874,6 +4880,49 @@ mod tests {
         assert_eq!(
             port.complete_erasure_inventory_observation(4),
             Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn hosted_coordinator_port_adds_a_new_candidate_to_active_topology() {
+        let authority = ActiveTopologyAuthorityV1::default();
+        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
+        let candidate = TimelineMeta::root("candidate-topology");
+        let observation = HostedCoordinatorPortV1::new(&mut store, &authority)
+            .with_topology_candidate(&candidate)
+            .complete_erasure_inventory_observation(4);
+
+        assert!(observation.is_ok());
+        assert_eq!(
+            authority
+                .candidate_metadata
+                .lock()
+                .unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("candidate lock poisoned: {error}")))
+                })
+                .as_slice(),
+            std::slice::from_ref(&candidate)
+        );
+    }
+
+    #[test]
+    fn active_candidate_inventory_requires_both_recovery_credentials() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let candidate = TimelineMeta::root("candidate-without-authority");
+        let limits = ErasureRecoveryLimitsV1::compiled_maximum();
+
+        assert_eq!(
+            host.verify_unaffected_topology_candidate(1, limits, &candidate),
+            Err(ErasureErrorV1::Unauthorized)
+        );
+        host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
+        assert_eq!(
+            host.verify_unaffected_topology_candidate(1, limits, &candidate),
+            Err(ErasureErrorV1::Unauthorized)
         );
     }
 
@@ -5996,6 +6045,46 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         assert_eq!(publication_failure.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
+    fn unaffected_fork_publication_failure_rolls_back_the_created_child() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let parent = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("publication-rollback-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.fail_inventory_publication = true;
+
+        assert_eq!(
+            host.command_sender().and_then(|mut sender| {
+                sender.fork_timeline(parent.id(), Seq::ZERO, "publication-rollback-child")
+            }),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
+    fn successful_topology_rollback_deletes_a_previously_created_timeline() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timeline = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("explicit-rollback"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+
+        assert_eq!(
+            host.rollback_unaffected_topology_timeline(&timeline, true),
+            Ok(())
+        );
     }
 
     #[test]
@@ -7732,6 +7821,87 @@ mod tests {
                     Seq::ZERO,
                     "recovered-name-is-ignored",
                 )),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn identified_fork_maps_a_stale_recovery_error_from_the_adapter() {
+        let operation = reference(122);
+        let (mut store, _) = fault_store_with_control(FaultModeV1::StaleRecovery);
+        let parent = store
+            .inner
+            .create_timeline("stale-recovery-error-parent")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1 {
+            resolved_child_scope: Some(operation),
+        }));
+        host.coordinator = Some(reference(123));
+
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline_identified(
+                    operation,
+                    parent.id(),
+                    Seq::ZERO,
+                    "recovered-name-is-ignored",
+                )),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn identified_fork_rejects_a_recovered_child_with_a_different_owner() {
+        let operation = reference(124);
+        let (mut store, _) = fault_store_with_control(FaultModeV1::ForkRecoveryOverride);
+        let parent_owner = EntityId::new();
+        let parent = store
+            .inner
+            .create_timeline_with_meta(TimelineMeta::root_owned(
+                "owner-mismatch-parent",
+                parent_owner,
+            ))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let batch = empty_fork_batch(parent.id(), TimelineId::new(), operation)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        store.fork_recovery_override = Some(
+            batch
+                .recovery_result()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+        );
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.authority = Some(Arc::new(UnusedCoordinatorAuthorityV1 {
+            resolved_child_scope: Some(operation),
+        }));
+        host.coordinator = Some(reference(125));
+
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.fork_timeline_identified(
+                    operation,
+                    parent.id(),
+                    Seq::ZERO,
+                    "recovered-name-is-ignored",
+                )),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn recovery_sender_maps_a_stale_adapter_result_without_poisoning() {
+        let (store, _) = fault_store_with_control(FaultModeV1::StaleRecovery);
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+
+        assert_eq!(
+            host.command_sender()
+                .and_then(|mut sender| sender.recover_fork_admission(reference(126))),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);

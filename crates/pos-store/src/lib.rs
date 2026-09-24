@@ -758,6 +758,30 @@ mod tests {
     }
 
     #[test]
+    fn fork_child_exactness_rejects_a_skipped_event_sequence() {
+        let parent = pos_core::TimelineId::new();
+        let expected = pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "child");
+        let hasher = pos_crypto::chain::Blake3Hasher;
+        let genesis = hasher.genesis_hash();
+        assert_eq!(
+            fork_child_is_exact(ForkChildVerificationInput {
+                expected_meta: &expected,
+                actual_meta: &expected,
+                stored_head: pos_core::Seq::from_u64(2),
+                stored_chain_head: genesis.as_bytes(),
+                chain_head: genesis,
+                events: [Ok((
+                    pos_core::Seq::from_u64(2),
+                    pos_core::EventId::new(),
+                    pos_core::CanonicalBytes::from_vec(vec![1]),
+                ))],
+                hasher: &hasher,
+            }),
+            Ok(false)
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_draft_guards_cover_revocation_and_owner_failures() {
         let timeline = pos_core::TimelineId::new();
