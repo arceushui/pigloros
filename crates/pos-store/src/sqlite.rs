@@ -2224,28 +2224,29 @@ impl SqliteStore {
         draft: &EventDraft,
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
-        let logical_prefix = self.logical_prefix(timeline)?;
-        self.get_head_seq(timeline)
-            .map(Seq::as_u64)
-            .and_then(|head_seq| {
-                let tx = self
-                    .conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(Self::into_storage_error)?;
-                let existing = tx.query_row(
-                    "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
-                    params![identity.dedup_key.as_bytes().as_slice()],
-                    |row| {
-                        row.get::<_, String>(0).and_then(|event_id| {
-                            row.get::<_, i64>(1).map(|expires| (event_id, expires))
-                        })
-                    },
-                );
-                match existing {
-                    Ok((event_id, expires_at))
-                        if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
-                    {
-                        return Self::retained_event_matches_draft(&tx, &event_id, timeline, draft)
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                (|| {
+                    let logical_prefix = self.logical_prefix(timeline)?;
+                    let head_seq = self.get_head_seq(timeline)?.as_u64();
+                    let existing = self.conn.query_row(
+                        "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
+                        params![identity.dedup_key.as_bytes().as_slice()],
+                        |row| {
+                            row.get::<_, String>(0).and_then(|event_id| {
+                                row.get::<_, i64>(1).map(|expires| (event_id, expires))
+                            })
+                        },
+                    );
+                    let expired_identity = match existing {
+                        Ok((event_id, expires_at))
+                            if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
+                        {
+                            return Self::retained_event_matches_draft(
+                                &self.conn, &event_id, timeline, draft,
+                            )
                             .and_then(|matches| {
                                 if matches {
                                     parse_event_id(&event_id).map(|id| {
@@ -2255,28 +2256,30 @@ impl SqliteStore {
                                     Ok(Some(AppendOrDuplicateOutcome::Conflict))
                                 }
                             });
+                        }
+                        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+                        Err(error) => return Err(CoreError::Storage(error.to_string())),
+                        Ok(_) => true,
+                    };
+                    if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
+                        return Ok(None);
                     }
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                    Err(error) => return Err(CoreError::Storage(error.to_string())),
-                    Ok(_) => {
-                        tx.execute(
-                            "DELETE FROM append_identities WHERE dedup_key = ?1",
-                            params![identity.dedup_key.as_bytes().as_slice()],
-                        )
-                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    if expired_identity {
+                        self.conn
+                            .execute(
+                                "DELETE FROM append_identities WHERE dedup_key = ?1",
+                                params![identity.dedup_key.as_bytes().as_slice()],
+                            )
+                            .map_err(|error| CoreError::Storage(error.to_string()))?;
                     }
-                }
-                if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
-                    return Ok(None);
-                }
-                let expires_at = checked_append_identity_expires_at(admitted_at)?;
-                let event = Self::append_one_in_transaction(
-                    &tx,
-                    self.hasher.as_ref(),
-                    timeline,
-                    draft.clone(),
-                )?;
-                tx.execute(
+                    let expires_at = checked_append_identity_expires_at(admitted_at)?;
+                    let event = Self::append_one_in_transaction(
+                        &self.conn,
+                        self.hasher.as_ref(),
+                        timeline,
+                        draft.clone(),
+                    )?;
+                    self.conn.execute(
                     "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
              VALUES (?1, ?2, ?3, ?4)",
                     params![
@@ -2287,11 +2290,11 @@ impl SqliteStore {
                     ],
                 )
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
-                tx.commit()
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
-                Self::logical_event(logical_prefix, event)
-                    .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
-            })
+                    Self::logical_event(logical_prefix, event)
+                        .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+                })()
+            });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 }
 
@@ -2482,22 +2485,25 @@ impl SqliteStore {
         if drafts.is_empty() {
             return Ok(Vec::new());
         }
-        let logical_prefix = self.logical_prefix(timeline)?;
-        let mut committed = Vec::with_capacity(drafts.len());
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        for draft in drafts {
-            committed.push(Self::append_one_in_transaction(
-                &tx,
-                self.hasher.as_ref(),
-                timeline,
-                draft.clone(),
-            )?);
-        }
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                let logical_prefix = self.logical_prefix(timeline)?;
+                drafts
+                    .iter()
+                    .map(|draft| {
+                        Self::append_one_in_transaction(
+                            &self.conn,
+                            self.hasher.as_ref(),
+                            timeline,
+                            draft.clone(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|committed| (logical_prefix, committed))
+            });
+        let (logical_prefix, committed) = finish_immediate_scope(&self.conn, scope, result)?;
         committed
             .into_iter()
             .map(|event| Self::logical_event(logical_prefix, event))
@@ -2526,58 +2532,51 @@ impl SqliteStore {
                 ));
             }
         }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&tx, timeline)?;
-        let logical_prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
-        let owner = if gateway_consent {
-            Some(crate::ensure_gateway_consent_drafts(
-                drafts,
-                timeline,
-                Self::timeline_owner_in_transaction(&tx, timeline)?,
-                logical_prefix.saturating_add(owned_head).saturating_add(1),
-            )?)
-        } else {
-            None
-        };
-        let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
-        let next_head = owned_head.saturating_add(batch_len);
-        if next_head > max_owned_events {
-            return Ok(None);
-        }
-        let mut committed = Vec::with_capacity(drafts.len());
-        for draft in drafts {
-            committed.push(Self::append_one_in_transaction(
-                &tx,
-                self.hasher.as_ref(),
-                timeline,
-                draft.clone(),
-            )?);
-        }
-        if let Some(scope) = cleanup_scope {
-            tx.execute(
-                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
-                params![scope.as_bytes().as_slice()],
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        }
-        let owner_result = owner.map_or_else(
-            || Ok(()),
-            |owner| {
-                Self::timeline_owner_in_transaction(&tx, timeline).and_then(|current| {
-                    current.map_or_else(
-                        || Self::persist_timeline_owner(&tx, timeline, owner),
-                        |_| Ok(()),
-                    )
-                })
-            },
-        );
-        owner_result
-            .and_then(|()| tx.commit().map_err(Self::into_storage_error))
-            .map(|()| {
-                Some(
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self.validate_erasure_inventory_data_version().and_then(|()| {
+            (|| {
+                let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&self.conn, timeline)?;
+                let logical_prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
+                let owner = if gateway_consent {
+                    Some(crate::ensure_gateway_consent_drafts(
+                        drafts,
+                        timeline,
+                        Self::timeline_owner_in_transaction(&self.conn, timeline)?,
+                        logical_prefix.saturating_add(owned_head).saturating_add(1),
+                    )?)
+                } else {
+                    None
+                };
+                let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
+                let next_head = owned_head.saturating_add(batch_len);
+                if next_head > max_owned_events {
+                    return Ok(None);
+                }
+                let committed = drafts
+                    .iter()
+                    .map(|draft| {
+                        Self::append_one_in_transaction(
+                            &self.conn,
+                            self.hasher.as_ref(),
+                            timeline,
+                            draft.clone(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(cleanup_scope) = cleanup_scope {
+                    self.conn
+                        .execute(
+                            "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                            params![cleanup_scope.as_bytes().as_slice()],
+                        )
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                }
+                if let Some(owner) = owner {
+                    if Self::timeline_owner_in_transaction(&self.conn, timeline)?.is_none() {
+                        Self::persist_timeline_owner(&self.conn, timeline, owner)?;
+                    }
+                }
+                Ok(Some(
                     committed
                         .into_iter()
                         .map(|mut event| {
@@ -2585,8 +2584,10 @@ impl SqliteStore {
                             event
                         })
                         .collect(),
-                )
-            })
+                ))
+            })()
+        });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
@@ -3703,48 +3704,48 @@ impl SqliteStore {
         at_seq: Seq,
         name: &str,
     ) -> Result<Timeline, CoreError> {
-        let head = self.logical_head_unchecked(parent)?;
-        if at_seq > head {
-            return Err(CoreError::ForkBeyondHead {
-                fork_seq: at_seq.as_u64(),
-                head: head.as_u64(),
-            });
-        }
-
-        let fork_hash = Self::compute_chain_hash_at_unchecked_on(
-            &self.conn,
-            self.hasher.as_ref(),
-            parent,
-            at_seq,
-        )?;
-        let meta = self.timeline_owner(parent)?.map_or_else(
-            || TimelineMeta::forked_from(parent, at_seq, name),
-            |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
-        );
-        let child = Timeline::new(meta);
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        tx.execute(
-            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-            params![
-                child.id().to_string(),
-                child.meta.name.as_deref(),
-                mode_str(child.mode()),
-                parent.to_string(),
-                i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
-                fork_hash.as_bytes().as_slice(),
-            ],
-        )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        if let Some(owner) = child.meta.owner {
-            Self::persist_timeline_owner(&tx, child.id(), owner)?;
-        }
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(child)
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self.validate_erasure_inventory_data_version().and_then(|()| {
+            (|| {
+                let head = self.logical_head_unchecked(parent)?;
+                if at_seq > head {
+                    return Err(CoreError::ForkBeyondHead {
+                        fork_seq: at_seq.as_u64(),
+                        head: head.as_u64(),
+                    });
+                }
+                let fork_hash = Self::compute_chain_hash_at_unchecked_on(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    parent,
+                    at_seq,
+                )?;
+                let meta = self.timeline_owner(parent)?.map_or_else(
+                    || TimelineMeta::forked_from(parent, at_seq, name),
+                    |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+                );
+                let child = Timeline::new(meta);
+                self.conn
+                    .execute(
+                        "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                        params![
+                            child.id().to_string(),
+                            child.meta.name.as_deref(),
+                            mode_str(child.mode()),
+                            parent.to_string(),
+                            i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
+                            fork_hash.as_bytes().as_slice(),
+                        ],
+                    )
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                if let Some(owner) = child.meta.owner {
+                    Self::persist_timeline_owner(&self.conn, child.id(), owner)?;
+                }
+                Ok(child)
+            })()
+        });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn insert_timeline_with_meta_on(
@@ -3782,39 +3783,17 @@ impl SqliteStore {
         &mut self,
         meta: &TimelineMeta,
     ) -> Result<Timeline, CoreError> {
-        if self.conn.is_autocommit() {
-            let gate_bound = self.erasure_gate_bound;
-            let expected_version = self.erasure_inventory_data_version;
-            let hasher = Arc::clone(&self.hasher);
-            let transaction = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            Self::validate_erasure_inventory_data_version_on(
-                &transaction,
-                gate_bound,
-                expected_version,
-            )?;
-            let timeline = Self::create_timeline_with_meta_in_transaction(
-                &transaction,
-                hasher.as_ref(),
-                meta,
-            )?;
-            transaction.commit().map_err(|error| {
-                CoreError::StorageOutcomeUnknown(format!(
-                    "transaction commit outcome uncertain: {error}"
-                ))
-            })?;
-            return Ok(timeline);
-        }
-        self.validate_erasure_inventory_data_version()
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
             .and_then(|()| {
                 Self::create_timeline_with_meta_in_transaction(
                     &self.conn,
                     self.hasher.as_ref(),
                     meta,
                 )
-            })
+            });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn create_timeline_with_meta_in_transaction(
@@ -4067,13 +4046,11 @@ impl EventStore for SqliteStore {
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
         let result = self
             .validate_erasure_inventory_data_version()
             .and_then(|()| self.save_key_registry_in_transaction(registry));
-        finish_immediate_transaction(&self.conn, result)
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn initialize_timeline_with_key_registry(
@@ -4081,12 +4058,10 @@ impl EventStore for SqliteStore {
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
         let result =
             self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
-        finish_immediate_transaction(&self.conn, result).map(|(timeline, _)| timeline)
+        finish_immediate_scope(&self.conn, scope, result).map(|(timeline, _)| timeline)
     }
 
     fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
@@ -4096,9 +4071,7 @@ impl EventStore for SqliteStore {
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<(Timeline, bool), CoreError> {
         self.ensure_host_transition_permit(permit)?;
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
         let result = self
             .validate_erasure_inventory_data_version()
             .and_then(|()| {
@@ -4108,7 +4081,7 @@ impl EventStore for SqliteStore {
                     true,
                 )
             });
-        finish_immediate_transaction(&self.conn, result)
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn append_signed_authorized(
@@ -4117,9 +4090,7 @@ impl EventStore for SqliteStore {
         expected_registry: &KeyRegistryStateV1,
         create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
     ) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
         let result = self
             .validate_erasure_inventory_data_version()
             .and_then(|()| {
@@ -4139,16 +4110,14 @@ impl EventStore for SqliteStore {
                     self.append_committed(timeline, &[event])
                 })()
             });
-        finish_immediate_transaction(&self.conn, result)
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn begin_key_registry_destruction(
         &mut self,
         request: KeyDestructionRequestV1,
     ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
         let version_check = self.validate_erasure_inventory_data_version();
         #[cfg(test)]
         if version_check.is_ok() {
@@ -4169,7 +4138,7 @@ impl EventStore for SqliteStore {
                 Ok((outcome, registry))
             })()
         });
-        finish_immediate_transaction(&self.conn, result)
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn complete_key_registry_destruction(
@@ -4177,9 +4146,7 @@ impl EventStore for SqliteStore {
         request: KeyDestructionRequestV1,
         deletion_receipt: Hash,
     ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
         let result = self
             .validate_erasure_inventory_data_version()
             .and_then(|()| {
@@ -4196,7 +4163,7 @@ impl EventStore for SqliteStore {
                     Ok((outcome, registry))
                 })()
             });
-        finish_immediate_transaction(&self.conn, result)
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn append_bounded(
@@ -5168,6 +5135,47 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         transaction.commit().map_err(map_erasure_receipt_failure)?;
         self.erasure_inventory_data_version = version_after;
         Ok(snapshot)
+    }
+
+    fn begin_protected_effect_interval(&mut self) -> Result<bool, ErasureErrorV1> {
+        if !self.conn.is_autocommit() {
+            return Ok(false);
+        }
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let observed = match sqlite_data_version(&self.conn) {
+            Ok(version) => version,
+            Err(_) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(ErasureErrorV1::ReceiptCommitFailed);
+            }
+        };
+        if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
+            return match self.conn.execute_batch("ROLLBACK") {
+                Ok(()) => Err(ErasureErrorV1::StaleGeneration),
+                Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
+            };
+        }
+        Ok(true)
+    }
+
+    fn finish_protected_effect_interval(
+        &mut self,
+        owns_interval: bool,
+        commit_effect: bool,
+    ) -> Result<(), ErasureErrorV1> {
+        if !owns_interval {
+            return Ok(());
+        }
+        let statement = if commit_effect { "COMMIT" } else { "ROLLBACK" };
+        match self.conn.execute_batch(statement) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(ErasureErrorV1::ReceiptCommitFailed)
+            }
+        }
     }
 }
 
@@ -6443,6 +6451,58 @@ fn begin_immediate_sql() -> &'static str {
 #[cfg(not(test))]
 const fn begin_immediate_sql() -> &'static str {
     "BEGIN IMMEDIATE"
+}
+
+#[derive(Clone, Copy)]
+enum SqliteImmediateScopeV1 {
+    Transaction,
+    Savepoint,
+}
+
+fn begin_immediate_scope(connection: &Connection) -> Result<SqliteImmediateScopeV1, CoreError> {
+    if connection.is_autocommit() {
+        connection
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(SqliteImmediateScopeV1::Transaction)
+    } else {
+        connection
+            .execute_batch("SAVEPOINT pigloros_protected_effect")
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(SqliteImmediateScopeV1::Savepoint)
+    }
+}
+
+fn finish_immediate_scope<T>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_immediate_transaction(connection, result),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|error| {
+                    CoreError::StorageOutcomeUnknown(format!(
+                        "savepoint release outcome uncertain: {error}"
+                    ))
+                }),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(CoreError::StorageOutcomeUnknown(format!(
+                        "{error}; savepoint rollback failed: {rollback_error}"
+                    ))),
+                }
+            }
+        },
+    }
 }
 
 fn finish_immediate_transaction<T>(

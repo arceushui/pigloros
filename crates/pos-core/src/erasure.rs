@@ -4486,6 +4486,38 @@ pub trait ErasureInventoryPersistencePortV1 {
             Err(ErasureErrorV1::ScopeInvalid)
         }
     }
+
+    /// Begin an adapter-level exclusion interval for a protected host effect.
+    ///
+    /// Adapters sharing durable state across hosts should acquire the same
+    /// write boundary used by inventory-changing operations and reject a stale
+    /// inventory before the caller's effect runs. The returned flag is true
+    /// only when this call owns the interval; false means it joined an outer
+    /// protected effect interval or the adapter does not need one.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::StaleGeneration`] when the durable inventory
+    /// changed since this adapter installed its verified inventory, or a
+    /// persistence error when the exclusion interval cannot be established.
+    fn begin_protected_effect_interval(&mut self) -> Result<bool, ErasureErrorV1> {
+        Ok(false)
+    }
+
+    /// End an interval started by [`Self::begin_protected_effect_interval`].
+    ///
+    /// `commit_effect` is false when the local Tick Boundary rejected the
+    /// protected operation. Implementations must release or roll back only an
+    /// interval owned by the matching begin call.
+    ///
+    /// # Errors
+    /// Returns a persistence error when the interval cannot be closed safely.
+    fn finish_protected_effect_interval(
+        &mut self,
+        _owns_interval: bool,
+        _commit_effect: bool,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
 }
 
 /// Adapter capability for the single atomic `ERSE1` and child-Fork commit.

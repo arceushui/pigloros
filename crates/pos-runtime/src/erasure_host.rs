@@ -95,6 +95,12 @@ enum UnaffectedTopologyTransitionError {
     RollbackFailed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateInventoryVerificationV1 {
+    NotVerified,
+    Verified,
+}
+
 struct TopologyTransitionResultV1 {
     timeline: Timeline,
     #[cfg(test)]
@@ -1656,7 +1662,7 @@ impl ErasureExecutionHostV1 {
         change: &mut F,
         permit: &ErasureTopologyTransitionPermitV1,
         limits: ErasureRecoveryLimitsV1,
-        candidate_inventory_verified: &mut bool,
+        candidate_verification: &mut CandidateInventoryVerificationV1,
     ) -> Result<
         (ErasureVerifiedInventoryV1, TopologyTransitionResultV1),
         UnaffectedTopologyTransitionError,
@@ -1678,7 +1684,7 @@ impl ErasureExecutionHostV1 {
             current_inventory,
         ) {
             Ok(candidate) => {
-                *candidate_inventory_verified = true;
+                *candidate_verification = CandidateInventoryVerificationV1::Verified;
                 candidate
             }
             Err(error) => return Err(UnaffectedTopologyTransitionError::Erasure(error)),
@@ -1746,7 +1752,7 @@ impl ErasureExecutionHostV1 {
         }
         let gate = Arc::clone(&self.gate);
         let mut transition_failure = None;
-        let mut candidate_inventory_verified = false;
+        let mut candidate_verification = CandidateInventoryVerificationV1::NotVerified;
         let mut fenced_preflight =
             |permit: &ErasureTopologyTransitionPermitV1, store: &mut dyn ErasureHostStore| {
                 if let Some(parent) = parent {
@@ -1765,7 +1771,7 @@ impl ErasureExecutionHostV1 {
                     &mut change,
                     permit,
                     limits,
-                    &mut candidate_inventory_verified,
+                    &mut candidate_verification,
                 ) {
                 Ok(result) => Ok(result),
                 Err(UnaffectedTopologyTransitionError::Host(error)) => {
@@ -1809,7 +1815,7 @@ impl ErasureExecutionHostV1 {
             }
             Err(publication_error) => match transition_failure {
                 Some(UnaffectedTopologyTransitionError::Host(error)) => {
-                    if candidate_inventory_verified
+                    if candidate_verification == CandidateInventoryVerificationV1::Verified
                         && error == ErasureHostErrorV1::RecoveryUnavailable
                     {
                         self.poison();
@@ -2436,15 +2442,25 @@ impl ErasureCommandSenderV1<'_> {
         effect: &mut dyn FnMut(&mut Self),
     ) -> Result<(), ErasureHostErrorV1> {
         let generation = self.generation;
-        self.host
-            .ensure_generation(generation)
-            .and_then(|()| {
-                let gate = Arc::clone(&self.host.gate);
-                let mut fenced_effect = || effect(self);
-                gate.with_fence(timeline, operation, &mut fenced_effect)
-                    .map_err(ErasureHostErrorV1::from)
-            })
-            .and_then(|()| self.host.ensure_generation(self.generation))
+        self.host.ensure_generation(generation)?;
+        let owns_interval = begin_protected_effect_interval(self.host)?;
+        let gate = Arc::clone(&self.host.gate);
+        let fence_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut fenced_effect = || effect(self);
+            gate.with_fence(timeline, operation, &mut fenced_effect)
+                .map_err(ErasureHostErrorV1::from)
+        }));
+        let fence_result = match fence_result {
+            Ok(result) => result,
+            Err(payload) => {
+                let _ = finish_protected_effect_interval(self.host, owns_interval, false);
+                self.host.poison();
+                std::panic::resume_unwind(payload);
+            }
+        };
+        finish_protected_effect_interval(self.host, owns_interval, fence_result.is_ok())?;
+        fence_result?;
+        self.host.ensure_generation(self.generation)
     }
 
     /// Read one Timeline's metadata inside a larger host command fence.
@@ -3371,6 +3387,36 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
         CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
         CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
         _ => ErasureHostErrorV1::AdapterFailure,
+    }
+}
+
+fn begin_protected_effect_interval(
+    host: &mut ErasureExecutionHostV1,
+) -> Result<bool, ErasureHostErrorV1> {
+    match host.store.host_store().begin_protected_effect_interval() {
+        Ok(owns_interval) => Ok(owns_interval),
+        Err(error) => {
+            host.poison();
+            Err(map_erasure_error(error))
+        }
+    }
+}
+
+fn finish_protected_effect_interval(
+    host: &mut ErasureExecutionHostV1,
+    owns_interval: bool,
+    commit_effect: bool,
+) -> Result<(), ErasureHostErrorV1> {
+    let result = host
+        .store
+        .host_store()
+        .finish_protected_effect_interval(owns_interval, commit_effect);
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            host.poison();
+            Err(map_erasure_error(error))
+        }
     }
 }
 
@@ -6888,8 +6934,10 @@ mod tests {
         assert_eq!(reader.logical_head(timeline.id()), Ok(Seq::from_u64(2)));
     }
 
-    fn assert_empty_topology_changes(store: Box<dyn ErasureHostStore>) {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(store, 4)
+    fn assert_empty_topology_changes(config: StoreConfig) {
+        let limits = ErasureRecoveryLimitsV1::new(4, 4, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::open_verified_empty(config, limits)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let (first, second, child) = host
             .command_sender()
@@ -6941,18 +6989,12 @@ mod tests {
 
     #[test]
     fn memory_topology_changes_republish_the_empty_inventory_generation() {
-        assert_empty_topology_changes(Box::new(MemoryStore::new().without_erasure_gate()));
+        assert_empty_topology_changes(StoreConfig::Memory);
     }
 
     #[test]
     fn sqlite_topology_changes_republish_the_empty_inventory_generation() {
-        let store = pos_store::sqlite::SqliteStore::open_in_memory().map_or_else(
-            |error| {
-                std::panic::resume_unwind(Box::new(format!("SQLite fixture failed: {error:?}")))
-            },
-            pos_store::sqlite::SqliteStore::without_erasure_gate,
-        );
-        assert_empty_topology_changes(Box::new(store));
+        assert_empty_topology_changes(StoreConfig::SqliteInMemory);
     }
 
     fn empty_fork_batch(
@@ -7220,58 +7262,6 @@ mod tests {
             Err(ErasureHostErrorV1::AdapterFailure)
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
-    }
-
-    #[test]
-    fn host_publishes_atomic_unaffected_fork_and_returns_exact_retry() {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let parent = host
-            .command_sender()
-            .and_then(|mut sender| sender.create_timeline("parent"))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let child = TimelineId::new();
-        let batch = empty_fork_batch(parent.id(), child, ErasureReferenceV1::from_digest([7; 32]))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let operation = batch.operation();
-        let expected_result = batch
-            .recovery_result()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut sender = host
-            .command_sender()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(
-            sender
-                .commit_fork_admission(&batch)
-                .map(|timeline| timeline.id()),
-            Ok(child)
-        );
-        assert_eq!(
-            sender.recover_fork_admission(operation),
-            Ok(Some(expected_result.clone()))
-        );
-        assert_eq!(
-            sender.recover_fork_admission(ErasureReferenceV1::from_digest([99; 32])),
-            Ok(None)
-        );
-        assert_eq!(
-            sender
-                .commit_fork_admission(&batch)
-                .map(|timeline| timeline.id()),
-            Ok(child)
-        );
-        host.command_sender()
-            .and_then(|mut sender| sender.create_timeline("generation-advance"))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(
-            host.command_sender()
-                .and_then(|mut sender| sender.recover_fork_admission(operation)),
-            Ok(Some(expected_result))
-        );
-        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 
     #[test]

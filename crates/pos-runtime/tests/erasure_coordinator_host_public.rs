@@ -2919,6 +2919,62 @@ fn stale_sqlite_host_scenario() -> Result<StaleSqliteHostScenario, Box<dyn std::
 }
 
 #[test]
+fn sqlite_stale_host_cannot_append_or_enter_a_protected_effect_callback(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut scenario = stale_sqlite_host_scenario()?;
+    let draft = EventDraft::new(
+        EntityId::new(),
+        Kind::new("stale-host.protected-effect"),
+        CanonicalBytes::from_static(b"must not append"),
+    );
+    {
+        let mut commands = test_stage(
+            "open stale host for protected append",
+            scenario.stale_host.command_sender(),
+        )?;
+        assert_eq!(
+            commands.append(scenario.unaffected_parent, std::slice::from_ref(&draft)),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+
+    let mut callback_entered = false;
+    {
+        let mut commands = test_stage(
+            "open stale host for protected callback",
+            scenario.stale_host.command_sender(),
+        )?;
+        assert_eq!(
+            commands.with_protected_effect_fence(
+                scenario.unaffected_parent,
+                pos_core::ErasureProtectedOperationV1::Append,
+                &mut |_| callback_entered = true,
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+    assert!(!callback_entered);
+    assert_eq!(scenario.stale_host.status(), ErasureHostStatusV1::Poisoned);
+    assert_eq!(scenario.current_host.status(), ErasureHostStatusV1::Ready);
+    {
+        let mut reads = test_stage(
+            "verify stale append was rejected",
+            scenario.current_host.read_sender(),
+        )?;
+        assert!(test_stage(
+            "read unaffected Timeline after stale append",
+            reads.read_bounded(
+                scenario.unaffected_parent,
+                SeqRange::all(),
+                EventReadBounds::new(8, 32, 4, 4),
+            ),
+        )?
+        .is_empty());
+    }
+    scenario.cleanup()
+}
+
+#[test]
 fn sqlite_failed_unaffected_fork_cannot_revalidate_a_stale_host_gate(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut scenario = stale_sqlite_host_scenario()?;
