@@ -3877,6 +3877,7 @@ mod tests {
             .step(TimelineId::new(), ObservationView::empty())
             .test_ok();
         fixture.commit_step();
+        fixture.commit_step();
     }
 
     #[cfg(target_os = "linux")]
