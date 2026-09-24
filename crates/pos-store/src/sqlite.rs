@@ -12079,11 +12079,17 @@ mod tests {
                 };
                 signing_store.append_signed_authorized(timeline_id, &expected, &mut callback)
             });
-            if entered_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-                release_tx.send(()).test_ok();
-                sign_handle.join().test_ok();
-                panic!("signing callback did not enter its transaction");
+            let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+            if entered.is_err() {
+                assert!(
+                    release_tx.send(()).is_ok(),
+                    "signing worker exited before callback: {entered:?}"
+                );
             }
+            assert!(
+                entered.is_ok(),
+                "signing callback did not enter its transaction: {entered:?}"
+            );
             let rotation_handle = scope.spawn(move || {
                 rotation_result_tx
                     .send(rotation_store.save_key_registry(&rotation_attempt))
