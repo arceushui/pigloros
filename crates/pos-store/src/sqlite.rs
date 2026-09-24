@@ -11456,6 +11456,7 @@ mod tests {
             .remove(0);
         ev.id = EventId::new();
         ev.seq = Seq::from_u64(2);
+        ev.origin = None;
         ev.payload_hash = hash_payload(&ev.payload);
         store.conn.execute_batch("BEGIN IMMEDIATE").test_ok();
         store.append_committed(tl.id(), &[ev]).test_ok();
@@ -11638,6 +11639,7 @@ mod tests {
         let other = store.create_timeline_with_meta(meta).test_ok();
         ev.seq = Seq::from_u64(1);
         ev.id = EventId::new();
+        ev.origin = None;
         ev.signature = Some(pos_core::Signature::from_bytes([7u8; 64]));
         ev.signature_identity = Some(KeyIdentityV1::new(
             "test-owner",
@@ -11858,6 +11860,7 @@ mod tests {
             .test_ok()
             .remove(0);
         event.id = EventId::new();
+        event.origin = None;
         let mut create_event = |_: &KeyRegistryStateV1, seq: Seq| {
             event.seq = seq;
             Ok::<Event, CoreError>(event.clone())
@@ -12107,6 +12110,7 @@ mod tests {
             .next()
             .test_ok();
         event.id = EventId::new();
+        event.origin = None;
         let mut callback_called = false;
         let mut callback = |_registry: &KeyRegistryStateV1, seq: Seq| {
             callback_called = true;
@@ -12163,6 +12167,7 @@ mod tests {
             .next()
             .test_ok();
         event.id = EventId::new();
+        event.origin = None;
         drop(setup);
 
         let mut signing_store = open_store_at(path);
@@ -12247,6 +12252,7 @@ mod tests {
             .next()
             .test_ok();
         event.id = EventId::new();
+        event.origin = None;
         store
             .conn
             .execute_batch(
@@ -14717,6 +14723,7 @@ pub(super) mod key_registry_coverage {
         let timeline = store.create_timeline("registry-coverage")?;
         let mut event = seed_event(&mut store, timeline.id())?;
         event.id = EventId::new();
+        event.origin = None;
         let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
             event.seq = seq;
             Ok::<Event, CoreError>(event.clone())
