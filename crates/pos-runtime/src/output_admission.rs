@@ -202,9 +202,7 @@ impl InstalledOutputPolicySourceV1 {
             Self::RuleAgent => actual == "pos_plugin_rule_agent::RuleAgentDriver",
             Self::SyntheticObservation => actual == "pos_plugin_synthetic_obs::SyntheticDriver",
             Self::Experiment => match plugin_name {
-                "successful-sibling" => {
-                    actual == "pos_experiment::moat_proof::SiblingProbeDriver"
-                }
+                "successful-sibling" => actual == "pos_experiment::moat_proof::SiblingProbeDriver",
                 "failure-probe" => actual == "pos_experiment::moat_proof::FailureProbeDriver",
                 "proof-agent" => actual == "pos_experiment::moat_proof::ProofAgentDriver",
                 "society" => actual == "pos_experiment::moat_proof::ProofSocietyDriver",

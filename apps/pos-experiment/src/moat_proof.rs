@@ -2378,8 +2378,7 @@ mod tests {
     #[test]
     fn experiment_binding_rejects_driver_for_another_plugin() {
         let plugin = ProofAgentPlugin::new();
-        let binding =
-            proof_agent_output_binding(&plugin, 0.5, "deterministic-local-v1").test_ok();
+        let binding = proof_agent_output_binding(&plugin, 0.5, "deterministic-local-v1").test_ok();
         assert!(matches!(
             binding.with_installed_driver(FailureProbeDriver {
                 class: "invalid_payload",
