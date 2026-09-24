@@ -350,7 +350,10 @@ fn public_child_rejects_more_leaves_than_distinct_keys_in_range() -> TestResult 
         Err(WorldDependencyBranchErrorV1::InvalidRange)
     );
 
-    let old_last = key(WorldArtifactKindV1::OptionalView, Hash::from_bytes([u8::MAX; 32]))?;
+    let old_last = key(
+        WorldArtifactKindV1::OptionalView,
+        Hash::from_bytes([u8::MAX; 32]),
+    )?;
     let closure_first = key(WorldArtifactKindV1::OutputPolicyClosure, indexed_hash(1))?;
     let closure_second = key(WorldArtifactKindV1::OutputPolicyClosure, indexed_hash(2))?;
     assert!(child(old_last, closure_first, 2, hash(40)).is_ok());
