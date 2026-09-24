@@ -250,3 +250,132 @@ fn sqlite_insert_failure_discards_signed_event_and_allows_retry(
     );
     Ok(())
 }
+
+#[test]
+fn sqlite_rotation_waits_until_signed_event_commit() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("sign-and-rotate.sqlite");
+    let path = path.to_str().ok_or("temporary SQLite path is not UTF-8")?;
+    let (material, identity, registry) = signing_fixture()?;
+    let mut setup = SqliteStore::open(path)?;
+    setup.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    setup.save_key_registry(&registry)?;
+    let timeline = setup.create_timeline("sign-before-rotation")?;
+    drop(setup);
+
+    let (replacement_key, _) = generate_keypair();
+    let replacement = SigningKeyMaterial::new(replacement_key);
+    let next_identity =
+        KeyIdentityV1::new("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 2);
+    let mut rotated = registry.clone();
+    rotated.register_key(KeyRegistrationV1::new(
+        next_identity,
+        replacement.material_digest(),
+        Some(replacement.public_verification_key()),
+    ))?;
+    let mut signing_store = SqliteStore::open(path)?;
+    signing_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let mut rotation_store = SqliteStore::open(path)?;
+    rotation_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (rotation_done_tx, rotation_done_rx) = std::sync::mpsc::channel();
+    let expected = registry.clone();
+    let proposed = rotated.clone();
+    let timeline_id = timeline.id();
+    let public_key = material.public_verification_key();
+    let material_digest = material.material_digest();
+    let (signed, rotation_result, rotation_waited) = std::thread::scope(|scope| {
+        let signing = scope.spawn(move || {
+            let mut sign = |authorized: &mut KeyRegistryStateV1,
+                            envelope: &TimelineEventEnvelopeV1,
+                            payload: &CanonicalBytes| {
+                entered_tx.send(()).expect("signal signing callback");
+                release_rx.recv().expect("release signing callback");
+                sign_timeline_event_for_registered_role(authorized, &material, envelope, payload)
+                    .map_err(|error| CoreError::Storage(error.to_string()))
+            };
+            signing_store.append_timeline_signed_authorized(
+                timeline_id,
+                &expected,
+                draft(b"before-rotation"),
+                identity,
+                material_digest,
+                public_key,
+                &mut sign,
+            )
+        });
+        entered_rx.recv().expect("signing callback entered");
+        let rotation = scope.spawn(move || {
+            attempt_tx.send(()).expect("signal rotation attempt");
+            let result = rotation_store.save_key_registry(&proposed);
+            rotation_done_tx
+                .send(())
+                .expect("signal rotation completion");
+            result
+        });
+        attempt_rx.recv().expect("rotation attempted");
+        let rotation_waited = rotation_done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err();
+        release_tx.send(()).expect("release signer");
+        (
+            signing.join().expect("signing thread panicked"),
+            rotation.join().expect("rotation thread panicked"),
+            rotation_waited,
+        )
+    });
+    let signed = signed?;
+    rotation_result?;
+    assert!(rotation_waited);
+    let reopened = SqliteStore::open(path)?;
+    let persisted = reopened.load_key_registry()?.ok_or("missing registry")?;
+    assert_eq!(persisted, rotated);
+    assert_eq!(reopened.read(timeline.id(), SeqRange::all())?, vec![signed]);
+    Ok(())
+}
+
+#[test]
+fn sqlite_destruction_winning_first_rejects_late_signing() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("destroy-before-sign.sqlite");
+    let path = path.to_str().ok_or("temporary SQLite path is not UTF-8")?;
+    let (material, identity, registry) = signing_fixture()?;
+    let mut setup = SqliteStore::open(path)?;
+    setup.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    setup.save_key_registry(&registry)?;
+    let timeline = setup.create_timeline("destroy-before-sign")?;
+    drop(setup);
+
+    let mut destroyer = SqliteStore::open(path)?;
+    let request = KeyDestructionRequestV1::new(
+        identity,
+        material.material_digest(),
+        pos_core::Hash::from_bytes([91; 32]),
+    );
+    let (_, pending) =
+        std::thread::spawn(move || destroyer.begin_key_registry_destruction(request))
+            .join()
+            .expect("destruction thread panicked")?;
+    let mut signer = SqliteStore::open(path)?;
+    signer.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let mut not_called =
+        |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+            panic!("signer ran after destruction began");
+        };
+    assert!(signer
+        .append_timeline_signed_authorized(
+            timeline.id(),
+            &pending,
+            draft(b"too-late"),
+            identity,
+            material.material_digest(),
+            material.public_verification_key(),
+            &mut not_called,
+        )
+        .is_err());
+    assert!(signer.read_own(timeline.id(), SeqRange::all())?.is_empty());
+    Ok(())
+}
