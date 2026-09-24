@@ -716,6 +716,45 @@ fn structural_validation_rejects_misclassified_optional_view() {
 }
 
 #[test]
+fn structural_validation_rejects_optional_mandatory_artifact() {
+    let mut input = closure_input();
+    let mut schema = input.artifacts[7].as_input().clone();
+    schema.optionality = ArtifactOptionalityV1::Optional;
+    input.artifacts[7] = test_ok(WorldArtifactLeafV1::new(schema));
+    input.consumer_set = consumer_set(
+        &input.artifacts,
+        input.artifacts[8].digest(),
+        input.artifacts[0].digest(),
+    );
+    assert_eq!(
+        WorldReplayClosureV1::new(input),
+        Err(WorldReplayClosureErrorV1::MissingRequiredArtifact)
+    );
+}
+
+#[test]
+fn structural_validation_preserves_owner_selected_optional_view_transition() {
+    let mut input = closure_input();
+    let mut view = input.artifacts[13].as_input().clone();
+    view.transition = ArtifactTransitionRuleV1::RetainStructure;
+    input.artifacts[13] = test_ok(WorldArtifactLeafV1::new(view));
+    input.consumer_set = consumer_set(
+        &input.artifacts,
+        input.artifacts[8].digest(),
+        input.artifacts[0].digest(),
+    );
+    let closure = test_ok(WorldReplayClosureV1::new(input));
+    assert_eq!(
+        closure
+            .artifacts()
+            .iter()
+            .find(|leaf| leaf.as_input().kind == WorldArtifactKindV1::OptionalView)
+            .map(|leaf| leaf.as_input().transition),
+        Some(ArtifactTransitionRuleV1::RetainStructure)
+    );
+}
+
+#[test]
 fn unselected_optional_view_cannot_enter_the_admitted_closure() {
     let mut extra = closure_input();
     extra.artifacts.push(leaf(
