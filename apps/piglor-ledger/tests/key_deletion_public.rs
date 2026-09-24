@@ -326,6 +326,60 @@ fn destroy_key_requires_durable_owner_path_binding() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn bound_deletion_failures_keep_the_identity_pending() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    make_key(&key)?;
+    drop(open_store(&Source::Store(database.clone()), Some(&key))?);
+
+    let mut store = authorized_store(&database)?;
+    let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1);
+    let digest = store
+        .load_key_registry()?
+        .ok_or("key registry missing")?
+        .key_record(identity)
+        .and_then(|record| record.private_material_digest)
+        .ok_or("signing material digest missing")?;
+    let request = KeyDestructionRequestV1::new(identity, digest, Hash::from_bytes([7; 32]));
+    store.begin_key_registry_destruction(request)?;
+    let wrong_authorization =
+        KeyDestructionRequestV1::new(identity, digest, Hash::from_bytes([8; 32]));
+    assert!(piglor_ledger::key_output::destroy_owned_secret_key(
+        &mut store,
+        &database,
+        &key,
+        wrong_authorization,
+    )
+    .is_err());
+    assert!(key.exists());
+    assert_eq!(
+        store
+            .load_key_registry()?
+            .ok_or("key registry missing")?
+            .pending_destruction_requests()
+            .count(),
+        1
+    );
+
+    std::fs::write(&key, b"wrong material")?;
+    assert!(piglor_ledger::key_output::destroy_owned_secret_key(
+        &mut store, &database, &key, request,
+    )
+    .is_err());
+    assert!(key.exists());
+    assert_eq!(
+        store
+            .load_key_registry()?
+            .ok_or("key registry missing")?
+            .pending_destruction_requests()
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn wrong_owned_file_leaves_pending_and_startup_recovers_with_the_correct_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::TempDir::new()?;

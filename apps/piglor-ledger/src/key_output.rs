@@ -38,7 +38,7 @@ pub(crate) fn bind_owned_secret_key(
         .ok_or_else(|| binding_error("key path has no parent"))?;
     validate_ancestors(&absolute, parent).map_err(binding_error)?;
     let metadata = std::fs::symlink_metadata(&absolute).map_err(binding_error)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if !metadata.is_file() {
         return Err(binding_error("owned key is not a regular file"));
     }
     let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
@@ -704,6 +704,134 @@ mod deletion_tests {
         let result = delete_owned_secret_key(&missing, request());
         clear_faults();
         assert!(result.is_err());
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod binding_tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use super::{
+        bind_owned_secret_key, clear_faults, install_faults, require_owned_secret_key_binding,
+        FaultStage,
+    };
+    use pos_core::{Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRoleV1};
+
+    fn identity(epoch: u64) -> KeyIdentityV1 {
+        KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, epoch)
+    }
+
+    fn digest() -> Hash {
+        Hash::from_bytes([9; 32])
+    }
+
+    fn request(epoch: u64, material_digest: Hash) -> KeyDestructionRequestV1 {
+        KeyDestructionRequestV1::new(identity(epoch), material_digest, Hash::from_bytes([7; 32]))
+    }
+
+    #[test]
+    fn binding_rejects_unsafe_paths_and_unavailable_storage(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let database = directory.path().join("ledger.db");
+        let key = directory.path().join("secret.key");
+        std::fs::write(&key, b"owned")?;
+        drop(rusqlite::Connection::open(&database)?);
+
+        assert!(bind_owned_secret_key(&database, Path::new("/"), identity(1), digest()).is_err());
+        assert!(bind_owned_secret_key(
+            &database,
+            &directory.path().join("missing.key"),
+            identity(1),
+            digest(),
+        )
+        .is_err());
+        assert!(bind_owned_secret_key(&database, directory.path(), identity(1), digest()).is_err());
+        let link = directory.path().join("link.key");
+        std::os::unix::fs::symlink(&key, &link)?;
+        assert!(bind_owned_secret_key(&database, &link, identity(1), digest()).is_err());
+
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777))?;
+        assert!(bind_owned_secret_key(&database, &key, identity(1), digest()).is_err());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+
+        let missing_database = directory.path().join("missing").join("ledger.db");
+        assert!(bind_owned_secret_key(&missing_database, &key, identity(1), digest()).is_err());
+        assert!(bind_owned_secret_key(&database, &key, identity(u64::MAX), digest()).is_err());
+
+        let relative = Path::new("binding-relative.key");
+        install_faults(relative, &[FaultStage::ResolveRelative]);
+        assert!(bind_owned_secret_key(&database, relative, identity(1), digest()).is_err());
+        clear_faults();
+        install_faults(relative, &[FaultStage::ResolveRelative]);
+        assert!(
+            require_owned_secret_key_binding(&database, relative, request(1, digest())).is_err()
+        );
+        clear_faults();
+        Ok(())
+    }
+
+    #[test]
+    fn binding_rejects_conflicts_missing_rows_and_malformed_storage(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let database = directory.path().join("ledger.db");
+        let key = directory.path().join("secret.key");
+        std::fs::write(&key, b"owned")?;
+        drop(rusqlite::Connection::open(&database)?);
+        bind_owned_secret_key(&database, &key, identity(1), digest())?;
+        require_owned_secret_key_binding(&database, &key, request(1, digest()))?;
+
+        assert!(require_owned_secret_key_binding(
+            &database,
+            &key,
+            request(1, Hash::from_bytes([8; 32])),
+        )
+        .is_err());
+        assert!(require_owned_secret_key_binding(
+            &database,
+            &directory.path().join("other.key"),
+            request(1, digest()),
+        )
+        .is_err());
+        assert!(require_owned_secret_key_binding(&database, &key, request(2, digest())).is_err());
+        assert!(
+            require_owned_secret_key_binding(&database, &key, request(u64::MAX, digest())).is_err()
+        );
+        assert!(require_owned_secret_key_binding(
+            &directory.path().join("missing").join("ledger.db"),
+            &key,
+            request(1, digest()),
+        )
+        .is_err());
+
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.execute_batch(
+            "DELETE FROM ledger_owned_key_binding_v1;
+             CREATE TRIGGER reject_owner_binding BEFORE INSERT ON ledger_owned_key_binding_v1
+             BEGIN SELECT RAISE(ABORT, 'binding denied'); END;",
+        )?;
+        assert!(bind_owned_secret_key(&database, &key, identity(1), digest()).is_err());
+        connection.execute_batch(
+            "DROP TRIGGER reject_owner_binding;
+             DROP TABLE ledger_owned_key_binding_v1;
+             CREATE TABLE ledger_owned_key_binding_v1 (
+                 owner_id TEXT, role INTEGER, epoch INTEGER,
+                 material_digest INTEGER, absolute_path BLOB
+             );
+             INSERT INTO ledger_owned_key_binding_v1 VALUES ('piglor-ledger', 2, 1, 9, X'01');",
+        )?;
+        assert!(require_owned_secret_key_binding(&database, &key, request(1, digest())).is_err());
+        connection.execute_batch("DROP TABLE ledger_owned_key_binding_v1")?;
+        assert!(require_owned_secret_key_binding(&database, &key, request(1, digest())).is_err());
+
+        let view_database = directory.path().join("view.db");
+        let view_connection = rusqlite::Connection::open(&view_database)?;
+        view_connection.execute_batch("CREATE VIEW ledger_owned_key_binding_v1 AS SELECT 1")?;
+        assert!(bind_owned_secret_key(&view_database, &key, identity(1), digest()).is_err());
         Ok(())
     }
 }
