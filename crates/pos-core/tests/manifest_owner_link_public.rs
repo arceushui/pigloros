@@ -14,7 +14,7 @@ const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
-fn plugin(byte: u8) -> PluginId {
+const fn plugin(byte: u8) -> PluginId {
     PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
 }
 
@@ -55,7 +55,7 @@ fn binding_input() -> ManifestSlotBindingInputV1 {
     }
 }
 
-fn receipt_input() -> ManifestSlotAdmissionReceiptInputV1 {
+const fn receipt_input() -> ManifestSlotAdmissionReceiptInputV1 {
     ManifestSlotAdmissionReceiptInputV1 {
         owner_id: [9; 32],
         configuration_generation: 7,
@@ -188,7 +188,7 @@ fn complete_same_name_rows_roundtrip_without_key_collapse() -> TestResult {
 }
 
 #[test]
-fn catalog_row_bounds_order_slots_ids_and_hashes_fail_closed() -> TestResult {
+fn catalog_row_bounds_order_slots_ids_and_hashes_fail_closed() {
     let mut catalog = catalog_input();
     catalog.rows[1].stable_slot = catalog.rows[0].stable_slot.clone();
     assert_eq!(
@@ -269,7 +269,6 @@ fn catalog_row_bounds_order_slots_ids_and_hashes_fail_closed() -> TestResult {
         ManifestAdmissionCatalogV1::new(catalog),
         Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
     );
-    Ok(())
 }
 
 #[test]
