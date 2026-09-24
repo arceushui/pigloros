@@ -72,6 +72,9 @@ fn read_complete_world_replay(
     }
     let first = range.from.as_u64().max(1);
     let last = range.to.map_or(head, pos_core::Seq::as_u64);
+    if first > head.saturating_add(1) {
+        return Err(CoreError::ArtifactUnavailable);
+    }
     let expected = if first > last { 0 } else { last - first + 1 };
     // An unrepresentable count cannot fit a verifier's finite max_events.
     let expected = usize::try_from(expected).unwrap_or(usize::MAX);
