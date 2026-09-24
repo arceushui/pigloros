@@ -563,6 +563,36 @@ fn catalog_preflights_lengths_counts_and_utf8_before_decoding() -> TestResult {
 }
 
 #[test]
+fn binding_and_receipt_reject_wrong_outer_shape_and_trailing_bytes() -> TestResult {
+    let wrong_top = encoded(&Value::Map(Vec::new()))?;
+    let binding = ManifestSlotBindingV1::new(binding_input())?.to_canonical_cbor();
+    let receipt = ManifestSlotAdmissionReceiptV1::new(receipt_input())?.to_canonical_cbor();
+    for malformed in [&wrong_top[..], &[0x84][..]] {
+        assert_eq!(
+            ManifestSlotBindingV1::from_canonical_cbor(malformed),
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            ManifestSlotAdmissionReceiptV1::from_canonical_cbor(malformed),
+            Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+        );
+    }
+    let mut trailing_binding = binding;
+    trailing_binding.push(0);
+    assert_eq!(
+        ManifestSlotBindingV1::from_canonical_cbor(&trailing_binding),
+        Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+    );
+    let mut trailing_receipt = receipt;
+    trailing_receipt.push(0);
+    assert_eq!(
+        ManifestSlotAdmissionReceiptV1::from_canonical_cbor(&trailing_receipt),
+        Err(ManifestOwnerLinkErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
 fn wrong_catalog_cbor_shapes_and_field_widths_reject() -> TestResult {
     assert_eq!(
         ManifestAdmissionCatalogV1::from_canonical_cbor(&encoded(&Value::Map(Vec::new()))?),

@@ -140,12 +140,23 @@ impl ManifestAdmissionCatalogV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
         let mut wire = preflight(bytes, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1)?;
         wire.array(5)?;
-        check_magic(wire.fixed_bytes(4)?, *b"MCA1")?;
-        check_version(wire.head(0)?)?;
+        wire.fixed_bytes(4)
+            .and_then(|magic| check_magic(magic, *b"MCA1"))?;
+        wire.head(0).and_then(check_version)?;
         let owner_id = wire.bytes()?;
         let configuration_generation = wire.head(0)?;
-        let mut row_views = [None; MAX_MANIFEST_OWNER_PLUGINS_V1];
-        for row in row_views.iter_mut().take(wire.row_count()?) {
+        // Each fixed stack block stays below the 16 KiB local-array limit.
+        let mut rows_0 = [None; 64];
+        let mut rows_1 = [None; 64];
+        let mut rows_2 = [None; 64];
+        let mut rows_3 = [None; 64];
+        for row in rows_0
+            .iter_mut()
+            .chain(rows_1.iter_mut())
+            .chain(rows_2.iter_mut())
+            .chain(rows_3.iter_mut())
+            .take(wire.row_count()?)
+        {
             wire.array(7)?;
             *row = Some(CatalogRowView {
                 slot: wire.text(64)?,
@@ -158,8 +169,11 @@ impl ManifestAdmissionCatalogV1 {
             });
         }
         wire.finish()?;
-        let rows = row_views
+        let rows = rows_0
             .into_iter()
+            .chain(rows_1)
+            .chain(rows_2)
+            .chain(rows_3)
             .flatten()
             .map(|row| ManifestAdmissionCatalogRowV1 {
                 stable_slot: row.slot.to_owned(),
@@ -275,12 +289,18 @@ impl ManifestSlotBindingV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
         let mut wire = preflight(bytes, MAX_MANIFEST_SLOT_BINDING_BYTES_V1)?;
         wire.array(5)?;
-        check_magic(wire.fixed_bytes(4)?, *b"MSB1")?;
-        check_version(wire.head(0)?)?;
+        wire.fixed_bytes(4)
+            .and_then(|magic| check_magic(magic, *b"MSB1"))?;
+        wire.head(0).and_then(check_version)?;
         let scope = Hash::from_bytes(wire.bytes()?);
         let wcs1_hash = Hash::from_bytes(wire.bytes()?);
-        let mut row_views = [None; MAX_MANIFEST_OWNER_PLUGINS_V1];
-        for row in row_views.iter_mut().take(wire.row_count()?) {
+        let mut rows_0 = [None; 128];
+        let mut rows_1 = [None; 128];
+        for row in rows_0
+            .iter_mut()
+            .chain(rows_1.iter_mut())
+            .take(wire.row_count()?)
+        {
             wire.array(4)?;
             *row = Some(BindingRowView {
                 slot: wire.text(64)?,
@@ -290,8 +310,9 @@ impl ManifestSlotBindingV1 {
             });
         }
         wire.finish()?;
-        let rows = row_views
+        let rows = rows_0
             .into_iter()
+            .chain(rows_1)
             .flatten()
             .map(|row| ManifestSlotBindingRowV1 {
                 stable_slot: row.slot.to_owned(),
@@ -420,8 +441,9 @@ impl ManifestSlotAdmissionReceiptV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestOwnerLinkErrorV1> {
         let mut wire = preflight(bytes, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1)?;
         wire.array(13)?;
-        check_magic(wire.fixed_bytes(4)?, *b"MSR1")?;
-        check_version(wire.head(0)?)?;
+        wire.fixed_bytes(4)
+            .and_then(|magic| check_magic(magic, *b"MSR1"))?;
+        wire.head(0).and_then(check_version)?;
         let input = ManifestSlotAdmissionReceiptInputV1 {
             owner_id: wire.bytes()?,
             configuration_generation: wire.head(0)?,
@@ -606,8 +628,9 @@ impl<'a> WirePreflight<'a> {
         if length == 0 || length > maximum {
             return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
         }
-        std::str::from_utf8(self.slice(length)?)
-            .map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)
+        self.slice(length).and_then(|bytes| {
+            std::str::from_utf8(bytes).map_err(|_| ManifestOwnerLinkErrorV1::InvalidEncoding)
+        })
     }
 
     fn optional_hash(&mut self) -> Result<Option<Hash>, ManifestOwnerLinkErrorV1> {
@@ -619,7 +642,7 @@ impl<'a> WirePreflight<'a> {
         }
     }
 
-    fn finish(&self) -> Result<(), ManifestOwnerLinkErrorV1> {
+    const fn finish(&self) -> Result<(), ManifestOwnerLinkErrorV1> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
@@ -628,7 +651,10 @@ impl<'a> WirePreflight<'a> {
     }
 }
 
-fn preflight(bytes: &[u8], maximum: usize) -> Result<WirePreflight<'_>, ManifestOwnerLinkErrorV1> {
+const fn preflight(
+    bytes: &[u8],
+    maximum: usize,
+) -> Result<WirePreflight<'_>, ManifestOwnerLinkErrorV1> {
     if bytes.len() > maximum {
         return Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds);
     }
