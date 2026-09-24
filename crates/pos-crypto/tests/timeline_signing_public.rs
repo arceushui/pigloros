@@ -28,16 +28,15 @@ fn input(identity: KeyIdentityV1) -> TimelineEventEnvelopeInputV1 {
     }
 }
 
-fn committed_fixture() -> Result<
-    (
-        Event,
-        KeyRegistryStateV1,
-        KeyIdentityV1,
-        PublicKey,
-        SigningKey,
-    ),
-    Box<dyn std::error::Error>,
-> {
+type CommittedFixture = (
+    Event,
+    KeyRegistryStateV1,
+    KeyIdentityV1,
+    PublicKey,
+    SigningKey,
+);
+
+fn committed_fixture() -> Result<CommittedFixture, Box<dyn std::error::Error>> {
     let identity = KeyIdentityV1::new("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let key = SigningKey::from_bytes(&[31; 32]);
     let public_key = public_key_from_verifying_key(&key.verifying_key());
