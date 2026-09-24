@@ -1,8 +1,10 @@
 use ed25519_dalek::{Signer, SigningKey};
 use pos_core::{
-    CanonicalBytes, EntityId, Event, EventId, EventOriginV1, Hash, KeyDestructionRequestV1,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, CanonicalBytes, EntityId, ErasureArtifactClassV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Event, EventId, EventOriginV1, Hash, KeyDestructionRequestV1,
     KeyIdentityV1, KeyRegistrationV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1, Kind,
-    PublicKey, SchemaVersion, Seq, Signature, TimelineEventEnvelopeErrorV1,
+    PublicKey, RegisteredArtifactV1, SchemaVersion, Seq, Signature, TimelineEventEnvelopeErrorV1,
     TimelineEventEnvelopeInputV1, TimelineEventEnvelopeV1, TimelineEventVerificationV1, TimelineId,
     WallTime,
 };
@@ -12,6 +14,9 @@ use pos_crypto::key_roles::{
     TimelineEventSigningErrorV1,
 };
 use pos_crypto::signing::public_key_from_verifying_key;
+use pos_crypto::timeline_erasure::{
+    evaluate_timeline_event_erasure_v1, TimelineEventErasureInputV1,
+};
 
 fn input(identity: KeyIdentityV1) -> TimelineEventEnvelopeInputV1 {
     TimelineEventEnvelopeInputV1 {
@@ -236,6 +241,424 @@ fn committed_verifier_distinguishes_missing_context_and_retained_epochs(
         verify_committed_timeline_event_v1(&event, Some(&registry), anchor),
         TimelineEventVerificationV1::Verified
     );
+    Ok(())
+}
+
+fn erasure_artifact(
+    digest: u8,
+    data_class: ArtifactDataClassV1,
+    transition_rule: ArtifactTransitionRuleV1,
+    state: ArtifactStateV1,
+) -> ArtifactClaimInputV1 {
+    ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            ErasureArtifactClassV1::TimelineReplay,
+            ErasureReferenceV1::from_digest([digest; 32]),
+            data_class,
+            None,
+            ErasureReferenceV1::from_digest([90; 32]),
+            ArtifactOptionalityV1::Required,
+            transition_rule,
+        ),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state,
+    }
+}
+
+fn erasure_input<'a>(
+    event: Option<&'a Event>,
+    registry: Option<&'a KeyRegistryStateV1>,
+    trust_anchor: Option<(KeyIdentityV1, PublicKey)>,
+    payload_artifact: ArtifactClaimInputV1,
+    signed_context_artifact: ArtifactClaimInputV1,
+    enclosing_claim: ErasureReplayClaimV1,
+) -> TimelineEventErasureInputV1<'a> {
+    TimelineEventErasureInputV1 {
+        event,
+        registry,
+        trust_anchor,
+        enclosing_claim,
+        payload_artifact,
+        signed_context_artifact,
+    }
+}
+
+#[test]
+fn erasure_report_keeps_signature_and_replay_claim_independent(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (event, registry, identity, public_key, _) = committed_fixture()?;
+    let payload = erasure_artifact(
+        91,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::RetainStructure,
+        ArtifactStateV1::Retained,
+    );
+    let context = erasure_artifact(
+        92,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let anchor = Some((identity, public_key));
+    let exact = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        anchor,
+        payload,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(exact.verification(), TimelineEventVerificationV1::Verified);
+    assert_eq!(exact.replay_claim(), ErasureReplayClaimV1::Exact);
+
+    let already_structural = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        anchor,
+        payload,
+        context,
+        ErasureReplayClaimV1::StructuralOnly,
+    ))?;
+    assert_eq!(
+        already_structural.verification(),
+        TimelineEventVerificationV1::Verified
+    );
+    assert_eq!(
+        already_structural.replay_claim(),
+        ErasureReplayClaimV1::StructuralOnly
+    );
+
+    let missing_anchor = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        None,
+        payload,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(
+        missing_anchor.verification(),
+        TimelineEventVerificationV1::MissingRequiredContext
+    );
+    assert_eq!(
+        missing_anchor.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+
+    let mut invalid = event;
+    invalid.signature = Some(Signature::from_bytes([0; 64]));
+    let invalid_report = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&invalid),
+        Some(&registry),
+        anchor,
+        payload,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(
+        invalid_report.verification(),
+        TimelineEventVerificationV1::Invalid
+    );
+    assert_eq!(invalid_report.replay_claim(), ErasureReplayClaimV1::Exact);
+    Ok(())
+}
+
+#[test]
+fn payload_erasure_and_context_loss_degrade_to_different_claims(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut event, registry, identity, public_key, _) = committed_fixture()?;
+    let payload = erasure_artifact(
+        93,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::RetainStructure,
+        ArtifactStateV1::TransitionApplied,
+    );
+    let context = erasure_artifact(
+        94,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    event.payload = CanonicalBytes::from_static(b"<erased>");
+    let anchor = Some((identity, public_key));
+    let report = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        anchor,
+        payload,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(
+        report.verification(),
+        TimelineEventVerificationV1::MissingRequiredContext
+    );
+    assert_eq!(report.replay_claim(), ErasureReplayClaimV1::StructuralOnly);
+
+    let missing_context = erasure_artifact(
+        94,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::Remove,
+        ArtifactStateV1::TransitionApplied,
+    );
+    for lost in [
+        erasure_input(
+            Some(&event),
+            Some(&registry),
+            anchor,
+            payload,
+            missing_context,
+            ErasureReplayClaimV1::Exact,
+        ),
+        erasure_input(
+            None,
+            Some(&registry),
+            anchor,
+            payload,
+            context,
+            ErasureReplayClaimV1::Exact,
+        ),
+        erasure_input(
+            Some(&event),
+            Some(&registry),
+            None,
+            payload,
+            context,
+            ErasureReplayClaimV1::Exact,
+        ),
+    ] {
+        let report = evaluate_timeline_event_erasure_v1(lost)?;
+        assert_eq!(
+            report.verification(),
+            TimelineEventVerificationV1::MissingRequiredContext
+        );
+        assert_eq!(
+            report.replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
+    }
+
+    let wrong_anchor = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        Some((identity, PublicKey::from_bytes([7; 32]))),
+        payload,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(
+        wrong_anchor.verification(),
+        TimelineEventVerificationV1::Invalid
+    );
+    assert_eq!(
+        wrong_anchor.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    Ok(())
+}
+
+#[test]
+fn optional_ids_distinguish_authenticated_null_from_erased_presence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut event, mut registry, identity, public_key, key) = committed_fixture()?;
+    let payload = erasure_artifact(
+        95,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let context = erasure_artifact(
+        96,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    assert!(event.causation_id.is_none());
+    let absent = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        Some((identity, public_key)),
+        payload,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(absent.verification(), TimelineEventVerificationV1::Verified);
+
+    event.causation_id = Some(EventId::new());
+    let envelope = TimelineEventEnvelopeV1::from_committed_event(&event)?;
+    event.signature = Some(sign_timeline_event_for_registered_role(
+        &mut registry,
+        &SigningKeyMaterial::new(key),
+        &envelope,
+        &event.payload,
+    )?);
+    let present = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        Some((identity, public_key)),
+        payload,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(
+        present.verification(),
+        TimelineEventVerificationV1::Verified
+    );
+
+    event.causation_id = None;
+    let missing_context = erasure_artifact(
+        96,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::Remove,
+        ArtifactStateV1::TransitionApplied,
+    );
+    let erased = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        Some((identity, public_key)),
+        payload,
+        missing_context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(
+        erased.verification(),
+        TimelineEventVerificationV1::MissingRequiredContext
+    );
+    assert_eq!(
+        erased.replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    Ok(())
+}
+
+#[test]
+fn erasure_report_requires_registered_required_timeline_artifacts(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (event, registry, identity, public_key, _) = committed_fixture()?;
+    let payload = erasure_artifact(
+        97,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::RetainStructure,
+        ArtifactStateV1::Retained,
+    );
+    let context = erasure_artifact(
+        98,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let mut optional = payload;
+    optional.registration = RegisteredArtifactV1::new(
+        ErasureArtifactClassV1::TimelineReplay,
+        ErasureReferenceV1::from_digest([97; 32]),
+        ArtifactDataClassV1::PrivateSubjectData,
+        None,
+        ErasureReferenceV1::from_digest([90; 32]),
+        ArtifactOptionalityV1::Optional,
+        ArtifactTransitionRuleV1::RetainStructure,
+    );
+    let mut wrong_class = payload;
+    wrong_class.registration = RegisteredArtifactV1::new(
+        ErasureArtifactClassV1::Export,
+        ErasureReferenceV1::from_digest([97; 32]),
+        ArtifactDataClassV1::PrivateSubjectData,
+        None,
+        ErasureReferenceV1::from_digest([90; 32]),
+        ArtifactOptionalityV1::Required,
+        ArtifactTransitionRuleV1::RetainStructure,
+    );
+    for (candidate, context_candidate) in [
+        (optional, context),
+        (wrong_class, context),
+        (payload, payload),
+    ] {
+        let error = evaluate_timeline_event_erasure_v1(erasure_input(
+            Some(&event),
+            Some(&registry),
+            Some((identity, public_key)),
+            candidate,
+            context_candidate,
+            ErasureReplayClaimV1::Exact,
+        ))
+        .err()
+        .ok_or("expected invalid artifact registration")?;
+        assert_eq!(error, pos_core::ErasureErrorV1::PolicyConflict);
+    }
+    Ok(())
+}
+
+#[test]
+fn erasure_report_distinguishes_structural_and_missing_artifact_states(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut event, registry, identity, public_key, _) = committed_fixture()?;
+    let anchor = Some((identity, public_key));
+    let context = erasure_artifact(
+        100,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let redacted_view = erasure_artifact(
+        99,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::RedactViews,
+        ArtifactStateV1::TransitionApplied,
+    );
+    let report = evaluate_timeline_event_erasure_v1(erasure_input(
+        Some(&event),
+        Some(&registry),
+        anchor,
+        redacted_view,
+        context,
+        ErasureReplayClaimV1::Exact,
+    ))?;
+    assert_eq!(report.verification(), TimelineEventVerificationV1::Verified);
+    assert_eq!(
+        report.replay_claim(),
+        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
+    );
+
+    event.payload = CanonicalBytes::from_static(b"<erased>");
+    let payload_removed = erasure_artifact(
+        99,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::Remove,
+        ArtifactStateV1::TransitionApplied,
+    );
+    let context_structural = erasure_artifact(
+        100,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::RetainStructure,
+        ArtifactStateV1::TransitionApplied,
+    );
+    let context_missing = erasure_artifact(
+        100,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::MissingKey,
+    );
+    for (payload, context_artifact) in [
+        (payload_removed, context),
+        (redacted_view, context_structural),
+        (redacted_view, context_missing),
+    ] {
+        let report = evaluate_timeline_event_erasure_v1(erasure_input(
+            Some(&event),
+            Some(&registry),
+            anchor,
+            payload,
+            context_artifact,
+            ErasureReplayClaimV1::Exact,
+        ))?;
+        assert_eq!(
+            report.verification(),
+            TimelineEventVerificationV1::MissingRequiredContext
+        );
+        assert_eq!(
+            report.replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
+    }
     Ok(())
 }
 
