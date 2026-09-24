@@ -136,6 +136,7 @@ struct TestAuthority {
     fail_fork_child_scope: AtomicBool,
     fail_fork_scope_extension: AtomicBool,
     use_closed_scope_resolution: AtomicBool,
+    omit_fork_lineage_rule: AtomicBool,
     fork_child_scope: std::sync::atomic::AtomicU8,
     fork_extension_provenance: std::sync::atomic::AtomicU8,
 }
@@ -160,6 +161,7 @@ impl Default for TestAuthority {
             fail_fork_child_scope: AtomicBool::new(false),
             fail_fork_scope_extension: AtomicBool::new(false),
             use_closed_scope_resolution: AtomicBool::new(false),
+            omit_fork_lineage_rule: AtomicBool::new(false),
             fork_child_scope: std::sync::atomic::AtomicU8::new(19),
             fork_extension_provenance: std::sync::atomic::AtomicU8::new(20),
         }
@@ -362,7 +364,8 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             request,
             scope_members: vec![reference(9)],
             target_closure: target_closure_digest(&targets),
-            lineage_rule: Some(reference(100)),
+            lineage_rule: (!self.omit_fork_lineage_rule.load(Ordering::Acquire))
+                .then_some(reference(100)),
         };
         let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
         let evidence = requested.provenance.digest();
@@ -927,6 +930,194 @@ fn sqlite_host_admits_active_unaffected_roots_and_forks() -> Result<(), Box<dyn 
     assert_active_unaffected_topology_parity(StoreConfig::SqliteInMemory)
 }
 
+#[derive(Clone, Copy)]
+enum FrozenMembershipRefresh {
+    Topology,
+    Coordinator,
+}
+
+fn assert_topology_refresh_cannot_clear_frozen_membership(
+    config: StoreConfig,
+    refresh: FrozenMembershipRefresh,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open frozen-membership topology host",
+        open_with_authority(
+            config,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage(
+        "open frozen-membership command sender",
+        host.command_sender(),
+    )?;
+    let parent = test_stage(
+        "create frozen-membership parent",
+        commands.create_timeline("frozen-membership-parent"),
+    )?;
+    test_stage(
+        "publish frozen-membership parent",
+        authority.set_timeline(parent.id()),
+    )?;
+    let request = test_stage("construct frozen-membership request", persistence_request())?;
+    let request_reference = request.reference();
+    let provenance = request.provenance();
+    test_stage(
+        "submit frozen-membership request",
+        commands.submit_erasure_request(request, provenance),
+    )?;
+    test_stage(
+        "authorize frozen-membership request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze parent membership",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    assert_eq!(
+        commands.timeline(parent.id()),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+
+    test_stage(
+        "attempt to reclassify frozen parent",
+        authority.set_timeline_unaffected(parent.id()),
+    )?;
+    let refresh_result = match refresh {
+        FrozenMembershipRefresh::Topology => commands
+            .create_timeline("frozen-membership-refresh")
+            .map(|_| ()),
+        FrozenMembershipRefresh::Coordinator => {
+            let next_request =
+                test_stage("construct refresh-trigger request", persistence_request())?;
+            let provenance = next_request.provenance();
+            commands
+                .submit_erasure_request(next_request, provenance)
+                .map(|_| ())
+        }
+    };
+    assert_eq!(refresh_result, Err(ErasureHostErrorV1::RecoveryUnavailable));
+    assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    assert_eq!(
+        commands.timeline(parent.id()),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_host_preserves_frozen_membership_during_topology_refresh(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_topology_refresh_cannot_clear_frozen_membership(
+        StoreConfig::Memory,
+        FrozenMembershipRefresh::Topology,
+    )?;
+    assert_topology_refresh_cannot_clear_frozen_membership(
+        StoreConfig::Memory,
+        FrozenMembershipRefresh::Coordinator,
+    )
+}
+
+#[test]
+fn sqlite_host_preserves_frozen_membership_during_topology_refresh(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_topology_refresh_cannot_clear_frozen_membership(
+        StoreConfig::SqliteInMemory,
+        FrozenMembershipRefresh::Topology,
+    )?;
+    assert_topology_refresh_cannot_clear_frozen_membership(
+        StoreConfig::SqliteInMemory,
+        FrozenMembershipRefresh::Coordinator,
+    )
+}
+
+fn assert_identified_fork_requires_admitted_lineage(
+    config: StoreConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    authority
+        .omit_fork_lineage_rule
+        .store(true, Ordering::Release);
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open no-lineage Fork host",
+        open_with_authority(
+            config,
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let mut commands = test_stage("open no-lineage Fork sender", host.command_sender())?;
+    let parent = test_stage(
+        "create no-lineage Fork parent",
+        commands.create_timeline("no-lineage-parent"),
+    )?;
+    test_stage(
+        "append data to no-lineage Fork parent",
+        commands.append(
+            parent.id(),
+            &[pos_core::EventDraft::new(
+                pos_core::EntityId::new(),
+                pos_core::Kind::new("test.no-lineage.parent"),
+                pos_core::CanonicalBytes::from_vec(vec![1]),
+            )],
+        ),
+    )?;
+    test_stage(
+        "publish no-lineage Fork parent",
+        authority.set_timeline(parent.id()),
+    )?;
+    let request = test_stage("construct no-lineage Fork request", persistence_request())?;
+    let request_reference = request.reference();
+    let provenance = request.provenance();
+    test_stage(
+        "submit no-lineage Fork request",
+        commands.submit_erasure_request(request, provenance),
+    )?;
+    test_stage(
+        "authorize no-lineage Fork request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    test_stage(
+        "freeze no-lineage Fork parent",
+        commands.freeze_access(request_reference, &freeze_transition()),
+    )?;
+    assert_eq!(
+        commands.timeline(parent.id()),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    assert_eq!(
+        commands.fork_timeline_identified(
+            reference(40),
+            parent.id(),
+            pos_core::Seq::from_u64(1),
+            "no-lineage-child",
+        ),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    assert_eq!(
+        commands.timeline(parent.id()),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_identified_fork_requires_admitted_lineage() -> Result<(), Box<dyn std::error::Error>> {
+    assert_identified_fork_requires_admitted_lineage(StoreConfig::Memory)
+}
+
+#[test]
+fn sqlite_identified_fork_requires_admitted_lineage() -> Result<(), Box<dyn std::error::Error>> {
+    assert_identified_fork_requires_admitted_lineage(StoreConfig::SqliteInMemory)
+}
+
 #[test]
 fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -969,7 +1160,7 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
             StoreConfig::Sqlite {
                 path: path_text.clone(),
             },
-            authority.clone(),
+            authority,
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
@@ -1025,6 +1216,14 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
 
     drop(second_host);
     drop(first_host);
+    remove_sqlite_store_files(path, &path_text)?;
+    Ok(())
+}
+
+fn remove_sqlite_store_files(
+    path: std::path::PathBuf,
+    path_text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     for candidate in [
         path,
         std::path::PathBuf::from(format!("{path_text}-wal")),
@@ -2593,6 +2792,7 @@ fn assert_retried_fork_membership(
     authority: &TestAuthority,
     child_membership: LaterRequestChildMembership,
     operation: ErasureReferenceV1,
+    original_successor_generation: ErasureReferenceV1,
     parent: TimelineId,
     original_child: TimelineId,
     intervening: TimelineId,
@@ -2625,6 +2825,16 @@ fn assert_retried_fork_membership(
         ),
     )?;
     assert_eq!(retried_child.id(), original_child);
+    let recovered = test_stage(
+        "recover original Fork result after exact retry",
+        commands.recover_fork_admission(operation),
+    )?
+    .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+    assert_eq!(recovered.child().id, original_child);
+    assert_eq!(
+        recovered.successor_generation(),
+        original_successor_generation
+    );
     if let Some(later_child) = later_child {
         assert_eq!(
             commands.timeline(later_child.id()),
@@ -2688,6 +2898,13 @@ fn assert_exact_fork_retry_after_later_request(
                 "pre-freeze-child",
             ),
         )?;
+        let original_successor = test_stage(
+            "recover original Fork result after commit",
+            commands.recover_fork_admission(operation),
+        )?
+        .ok_or(ErasureHostErrorV1::RecoveryUnavailable)?;
+        assert_eq!(original_successor.child().id, original_child.id());
+        let original_successor_generation = original_successor.successor_generation();
         let intervening = test_stage(
             "create an intervening unaffected timeline",
             commands.create_timeline("pre-freeze-intervening"),
@@ -2727,6 +2944,7 @@ fn assert_exact_fork_retry_after_later_request(
             &authority,
             child_membership,
             operation,
+            original_successor_generation,
             parent.id(),
             original_child.id(),
             intervening.id(),

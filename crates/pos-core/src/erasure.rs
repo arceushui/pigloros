@@ -628,6 +628,22 @@ impl ErasureContainmentGateV1 {
         }
     }
 
+    fn validate_inventory_successor(
+        &self,
+        candidate: &ErasureVerifiedInventoryV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let current = self
+            .authority
+            .read()
+            .map_err(containment_recovery_failure)?;
+        if let Some(current) = &current.inventory {
+            current
+                .validate_frozen_membership_successor(candidate)
+                .map_err(containment_recovery_failure)?;
+        }
+        Ok(())
+    }
+
     /// Bind one Timeline/Fork to its resolved immutable scope reference.
     ///
     /// Conflicting bindings fail closed and leave the original binding intact.
@@ -930,6 +946,7 @@ impl ErasureContainmentGateV1 {
             .lock()
             .map_err(containment_recovery_failure)?;
         self.ensure_available()?;
+        self.validate_inventory_successor(&candidate)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(candidate),
             ..ErasureGateStateV1::default()
@@ -975,6 +992,7 @@ impl ErasureContainmentGateV1 {
             _private: (),
         };
         let (candidate, result) = transition(&permit).map_err(containment_recovery_failure)?;
+        self.validate_inventory_successor(&candidate)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(Arc::new(candidate.clone())),
             ..ErasureGateStateV1::default()
@@ -4715,12 +4733,81 @@ impl ErasureVerifiedInventoryV1 {
         self.request_heads.len()
     }
 
+    /// Verify that a successor inventory preserves every existing frozen
+    /// request's Timeline membership exactly.
+    ///
+    /// New Timeline/Fork entries may be added by their separately authorized
+    /// transition, but an existing frozen classification cannot be removed,
+    /// reclassified, or weakened during an unrelated inventory refresh.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when the successor omits
+    /// or changes any frozen request classification from this inventory.
+    pub fn validate_frozen_membership_successor(
+        &self,
+        successor: &Self,
+    ) -> Result<(), ErasureErrorV1> {
+        for (timeline, previous_classifications) in &self.classifications {
+            let Some(successor_classifications) = successor.classification_for(*timeline) else {
+                if previous_classifications
+                    .iter()
+                    .any(|classification| classification.frozen)
+                {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+                continue;
+            };
+            for previous in previous_classifications
+                .iter()
+                .filter(|classification| classification.frozen)
+            {
+                let current = successor_classifications
+                    .binary_search_by_key(&previous.request, |classification| {
+                        classification.request
+                    })
+                    .map(|index| &successor_classifications[index])
+                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+                if !current.frozen || current.membership != previous.membership {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_fork_parent_has_admitted_lineage(
+        &self,
+        parent: TimelineId,
+    ) -> Result<(), ErasureErrorV1> {
+        let classifications = self
+            .classification_for(parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if classifications.len() != self.request_heads.len() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        for ((state, _), classification) in self.members.iter().zip(classifications) {
+            let request = state.request().reference();
+            if classification.request != request {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            if classification.membership.included_scope().is_some()
+                && state
+                    .scope()
+                    .is_none_or(|scope| scope.lineage_rule().is_none())
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+        }
+        Ok(())
+    }
+
     /// Derive the complete set of active requests which require an ERSE1
     /// extension before a child Fork may become visible.
     ///
-    /// Requests which positively exclude the parent, or whose immutable scope
-    /// has no future-Fork lineage rule, require no mutation and remain
-    /// unaffected in the successor inventory.
+    /// Requests which positively exclude the parent require no mutation.
+    /// An included parent requires an explicitly admitted future-Fork lineage
+    /// rule; without one, the affected Fork is rejected rather than treated as
+    /// unaffected.
     ///
     /// # Errors
     /// Returns a closed provenance error when the parent is absent from the
@@ -4729,6 +4816,7 @@ impl ErasureVerifiedInventoryV1 {
         &self,
         parent: TimelineId,
     ) -> Result<Vec<ErasureForkScopeRequirementV1>, ErasureErrorV1> {
+        self.validate_fork_parent_has_admitted_lineage(parent)?;
         let classifications = self
             .classification_for(parent)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
@@ -4762,10 +4850,9 @@ impl ErasureVerifiedInventoryV1 {
     /// Require positive exclusion of a Timeline/Fork from every recovered
     /// request scope.
     ///
-    /// This is deliberately stricter than [`Self::fork_scope_requirements`]:
-    /// an included scope without a future-Fork lineage rule is still affected
-    /// and cannot be treated as unaffected merely because no ERSE1 mutation is
-    /// required.
+    /// This rejects any included parent. Use
+    /// [`Self::fork_scope_requirements`] to identify whether an affected Fork
+    /// has an explicit lineage rule and can be admitted with ERSE1 evidence.
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::PolicyConflict`] when any request includes
@@ -4935,6 +5022,7 @@ impl ErasureVerifiedInventoryV1 {
             .classifications
             .binary_search_by_key(&parent, |(timeline, _)| *timeline)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        self.validate_fork_parent_has_admitted_lineage(parent)?;
         if self.members.iter().any(|(state, _)| {
             state
                 .scope()
