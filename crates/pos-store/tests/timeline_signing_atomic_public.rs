@@ -65,7 +65,7 @@ fn append_signed(
     )
 }
 
-fn timeline_artifact(
+const fn timeline_artifact(
     digest: u8,
     data_class: ArtifactDataClassV1,
     transition_rule: ArtifactTransitionRuleV1,
