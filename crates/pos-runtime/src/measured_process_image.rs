@@ -82,7 +82,7 @@ impl MeasuredProcessImageV1 {
         let before = image
             .stamp()
             .map_err(|_| WorldInstallationErrorV1::MeasurementMetadataFailed)?;
-        if before.len() == 0 {
+        if before.len == 0 {
             return Err(WorldInstallationErrorV1::MeasurementEmpty);
         }
         let mut hasher = blake3::Hasher::new();
