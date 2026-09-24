@@ -3841,6 +3841,42 @@ mod tests {
                 WorldInstallationErrorV1::RetainedConfigMissing
             ))
         ));
+
+        let events = installed_history(body_id, TimelineId::new());
+        assert!(matches!(
+            driver.preflight_installed_step(&[events[0].clone(), events[0].clone()]),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigAmbiguous
+            ))
+        ));
+
+        let installed = WorldDriver::new_live(Vec::new(), HostWorldProfileV1::standard()).test_ok();
+        if let WorldDriverBackend::Installed(backend) = &installed.backend {
+            assert!(backend.step(&[], 16_667).is_empty());
+        }
+        assert!(WorldDriver::default().preflight_installed_step(&[]).is_ok());
+
+        let mut fixture_registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        fixture_registry
+            .register(
+                &WorldPlugin::new(),
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::default())),
+            )
+            .test_ok();
+        fixture_registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO)],
+                &[],
+            )
+            .test_ok();
+
+        let mut fixture = WorldDriver::default();
+        fixture
+            .step(TimelineId::new(), ObservationView::empty())
+            .test_ok();
+        fixture.commit_step();
     }
 
     #[cfg(target_os = "linux")]

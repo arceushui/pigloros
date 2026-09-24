@@ -2770,6 +2770,24 @@ mod coverage_entrypoints {
     fn missing_config_evidence_and_failed_gate_are_exercised() {
         let input = input();
         let topology = test_ok(ProofTopology::new(input.clone()));
+        let malformed_config = Event {
+            id: EventId::new(),
+            entity: fixed_id(1),
+            event_type: Kind::new(EVENT_TYPE_CONFIG_V1),
+            payload: CanonicalBytes::from_static(b"malformed WCF1"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        assert!(matches!(
+            artifact_closure_digest(&topology, &[malformed_config]),
+            Err(MoatProofError::WorldCodec(_))
+        ));
         let projections = pos_state::ProjectionRegistry::new();
         let plugin_versions = BTreeMap::new();
         let host_closure = HostClosureAuditV1 {

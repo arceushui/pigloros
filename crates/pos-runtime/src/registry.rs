@@ -3900,6 +3900,64 @@ mod tests {
     }
 
     #[test]
+    fn verified_prefix_driver_rejects_missing_anchor_and_extra_history() {
+        struct PrefixDriver;
+
+        impl Driver for PrefixDriver {
+            fn name(&self) -> &'static str {
+                "verified-prefix-test"
+            }
+
+            fn requires_verified_event_prefix(&self) -> bool {
+                true
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+
+        let mut store = gated_store();
+        let timeline = store.create_timeline("verified-prefix").test_ok();
+        let mut registry = gated_registry();
+        registry.register_driver(Box::new(PrefixDriver));
+        let id = *registry.plugins.keys().next().test_ok();
+        assert!(matches!(
+            registry.invoke_selected_driver(
+                id,
+                timeline.id(),
+                &ObservationSnapshot::default(),
+                &[]
+            ),
+            Err(RuntimeError::MissingSnapshotAnchor { .. })
+        ));
+
+        let snapshot = ObservationSnapshot::from_anchored_subscriptions(
+            SnapshotAnchor::new(timeline.id(), Seq::ZERO),
+            std::iter::empty::<&ProjectionKey>(),
+            |_| None,
+        );
+        let committed = store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("ordinary.event"),
+                    CanonicalBytes::from_static(b"extra"),
+                )],
+            )
+            .test_ok();
+        assert!(matches!(
+            registry.invoke_selected_driver(id, timeline.id(), &snapshot, &committed),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn selected_driver_never_receives_gateway_owned_consent_events() {
         struct EventDriver {
