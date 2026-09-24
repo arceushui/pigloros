@@ -802,14 +802,18 @@ fn assert_owner_scoped_registry_isolation<S: EventStore>(
         ),
         Ok("authorized")
     );
-    assert!(matches!(
+    assert_eq!(
         persisted.register_key(KeyRegistrationV1::new(
             first,
             Hash::from_bytes([18; 32]),
             Some(pos_core::PublicKey::from_bytes([19; 32])),
         )),
-        Err(pos_core::KeyRegistryErrorV1::StaleEpoch { .. })
-    ));
+        Err(pos_core::KeyRegistryErrorV1::StaleEpoch {
+            role: first.role,
+            requested: first.epoch,
+            active: rotated.epoch,
+        })
+    );
     Ok(())
 }
 
