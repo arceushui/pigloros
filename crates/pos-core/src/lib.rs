@@ -38,6 +38,7 @@ pub mod retention;
 pub mod state;
 pub mod store;
 pub mod timeline;
+pub mod timeline_envelope;
 pub mod world_artifact;
 pub mod world_closure_binding;
 pub mod world_consumer_set;
@@ -210,6 +211,10 @@ pub use store::{
     EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
+pub use timeline_envelope::{
+    TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeInputV1, TimelineEventEnvelopeV1,
+    MAX_TIMELINE_EVENT_ENVELOPE_BYTES_V1, MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
+};
 pub use world_consumer_set::{
     WorldConsumerSetErrorV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
     WorldProducerV1, WORLD_CONSUMER_SET_MAX_BYTES, WORLD_CONSUMER_SET_MAX_CONSUMERS,

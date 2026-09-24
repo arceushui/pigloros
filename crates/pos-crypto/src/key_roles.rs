@@ -6,7 +6,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
     deletion_receipt, CanonicalBytes, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
-    KeyRegistrySigningPortV1, Signature,
+    KeyRegistrySigningPortV1, Signature, TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -315,6 +315,66 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     registry.with_signing_authorization(identity, material_digest, public_verification_key, || {
         sign_for_role_unchecked(signing_key_ref, identity, payload)
     })
+}
+
+/// Failure at the dedicated Timeline signing boundary.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum TimelineEventSigningErrorV1 {
+    #[error(transparent)]
+    Envelope(#[from] TimelineEventEnvelopeErrorV1),
+    #[error(transparent)]
+    Authorization(#[from] KeyRegistryErrorV1),
+}
+
+/// Sign exactly the finalized ADR-065 envelope inside registry authorization.
+///
+/// The production append adapter must hold its store transaction through this
+/// operation and insertion; this standalone primitive never commits an Event.
+///
+/// # Errors
+/// Rejects mismatched payload bytes, a destroyed or inactive signing identity,
+/// or key material that differs from the registry record.
+pub fn sign_timeline_event_for_registered_role<R: KeyRegistrySigningPortV1>(
+    registry: &mut R,
+    signing_key: &SigningKeyMaterial,
+    envelope: &TimelineEventEnvelopeV1,
+    payload: &CanonicalBytes,
+) -> Result<Signature, TimelineEventSigningErrorV1> {
+    envelope.validate_payload(payload)?;
+    let signing_key_ref = signing_key.as_key()?;
+    let identity = envelope.identity();
+    let material_digest = signing_key.material_digest;
+    let public_verification_key = signing_key.public_verification_key;
+    registry
+        .with_signing_authorization(identity, material_digest, public_verification_key, || {
+            Signature::from_bytes(signing_key_ref.sign(envelope.canonical_bytes()).to_bytes())
+        })
+        .map_err(Into::into)
+}
+
+/// Verify pure Ed25519 over the exact canonical Timeline envelope bytes.
+///
+/// The caller must resolve the public key for the complete owner/role/epoch
+/// identity before treating success as trusted Timeline integrity. This
+/// operation makes no ReplayClaim and does not consult mutable registry state.
+///
+/// # Errors
+/// Rejects a different identity, mismatched payload, or invalid signature.
+pub fn verify_timeline_event_for_role(
+    verifying_key: &VerifyingKey,
+    identity: KeyIdentityV1,
+    envelope: &TimelineEventEnvelopeV1,
+    payload: &CanonicalBytes,
+    signature: &Signature,
+) -> Result<(), TimelineEventEnvelopeErrorV1> {
+    if identity != envelope.identity() {
+        return Err(TimelineEventEnvelopeErrorV1::InvalidIdentity);
+    }
+    envelope.validate_payload(payload)?;
+    let signature = ed25519_dalek::Signature::from_bytes(signature.as_bytes());
+    verifying_key
+        .verify(envelope.canonical_bytes(), &signature)
+        .map_err(|_| TimelineEventEnvelopeErrorV1::InvalidSignature)
 }
 
 /// Authorize one encryption operation under an active registry identity.
