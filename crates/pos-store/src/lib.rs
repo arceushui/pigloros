@@ -618,26 +618,6 @@ fn resolve_import_event_key(
     Ok(*public_key)
 }
 
-// Exercise the resolver's dispatch against existing fixture signatures. This
-// helper is test-only: production verified import waits for #202's envelope
-// verifier and cannot be called through the public crate API.
-#[cfg(test)]
-fn fixture_import_with_resolved_keys<F>(
-    store: &mut dyn EventStore,
-    export: TimelineExport,
-    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
-    mut verify_event: F,
-) -> Result<pos_core::Timeline, CoreError>
-where
-    F: FnMut(&pos_core::Event, &pos_core::PublicKey) -> Result<(), CoreError>,
-{
-    let public_keys = resolve_timeline_import_public_keys_v1(store, &export, trust_anchors)?;
-    for (event, public_key) in export.events.iter().zip(&public_keys) {
-        verify_event(event, public_key)?;
-    }
-    import_timeline_with_id(store, export)
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -701,23 +681,6 @@ mod tests {
             ),
             public_key,
         )]
-    }
-
-    // The old role-message fixtures exercise anchor dispatch only. #202 owns
-    // production Timeline envelope verification over full Event context.
-    fn verify_role_message_fixture(
-        event: &pos_core::Event,
-        public_key: &pos_core::PublicKey,
-    ) -> Result<(), CoreError> {
-        let identity = event
-            .signature_identity
-            .ok_or(CoreError::SignatureVerificationFailed)?;
-        let signature = event
-            .signature
-            .as_ref()
-            .ok_or(CoreError::SignatureVerificationFailed)?;
-        let verifying_key = pos_crypto::signing::verifying_key_from_public_key(public_key)?;
-        pos_crypto::key_roles::verify_for_role(&verifying_key, identity, &event.payload, signature)
     }
 
     #[test]
@@ -1311,7 +1274,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn fixture_import_resolves_anchors_and_checks_role_message_signatures() {
+    fn import_anchor_resolution_checks_exact_registry_keys() {
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, SchemaVersion},
@@ -1321,12 +1284,11 @@ mod tests {
             KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
         };
         use pos_crypto::{
-            key_roles::{key_material_digest, sign_for_registered_role, SigningKeyMaterial},
+            key_roles::key_material_digest,
             signing::{generate_keypair, public_key_from_verifying_key},
         };
 
         let (sk, vk) = generate_keypair();
-        let signing_material = SigningKeyMaterial::new(sk.clone());
         let pk = public_key_from_verifying_key(&vk);
         let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let mut registry = KeyRegistryStateV1::new();
@@ -1338,8 +1300,6 @@ mod tests {
             ))
             .test_ok();
         let payload = CanonicalBytes::from_vec(b"signed".to_vec());
-        let sig = sign_for_registered_role(&mut registry, &signing_material, identity, &payload)
-            .test_ok();
         let entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1351,19 +1311,17 @@ mod tests {
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
-            signature: Some(sig),
+            // Anchor resolution treats signature bytes as opaque. #202 owns
+            // TimelineEventEnvelopeV1 signature verification.
+            signature: Some(pos_core::Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let second_payload = CanonicalBytes::from_vec(b"signed-second".to_vec());
-        let second_sig =
-            sign_for_registered_role(&mut registry, &signing_material, identity, &second_payload)
-                .test_ok();
         let mut second_event = event.clone();
         second_event.id = EventId::new();
         second_event.payload = second_payload.clone();
         second_event.seq = Seq::from_u64(2);
-        second_event.signature = Some(second_sig);
         second_event.payload_hash = pos_crypto::chain::hash_payload(&second_payload);
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("signed")),
@@ -1373,30 +1331,32 @@ mod tests {
 
         let mut ok_store = open_fixture_store(StoreConfig::Memory);
         ok_store.save_key_registry(&registry).test_ok();
-        fixture_import_with_resolved_keys(
-            ok_store.as_mut(),
-            export.clone(),
-            &fixture_anchors(pk),
-            verify_role_message_fixture,
-        )
-        .test_ok();
-        assert_verified_import_rejections(&export, &registry, &pk);
+        assert_eq!(
+            resolve_timeline_import_public_keys_v1(
+                ok_store.as_ref(),
+                &export,
+                &fixture_anchors(pk),
+            )
+            .test_ok(),
+            vec![pk, pk]
+        );
+        assert!(ok_store.list_timelines().test_ok().is_empty());
+        assert_anchor_resolution_rejections(&export, &registry, &pk);
 
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
         let mut bad_store = open_fixture_store(StoreConfig::Memory);
         bad_store.save_key_registry(&registry).test_ok();
-        let err = fixture_import_with_resolved_keys(
-            bad_store.as_mut(),
-            export,
+        let err = resolve_timeline_import_public_keys_v1(
+            bad_store.as_ref(),
+            &export,
             &fixture_anchors(reject_key),
-            verify_role_message_fixture,
         )
         .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
-    fn assert_verified_import_rejections(
+    fn assert_anchor_resolution_rejections(
         export: &pos_core::store::TimelineExport,
         registry: &pos_core::KeyRegistryStateV1,
         public_key: &pos_core::PublicKey,
@@ -1404,12 +1364,11 @@ mod tests {
         use pos_core::{KeyIdentityV1, KeyRoleV1};
         let anchors = fixture_anchors(*public_key);
 
-        let mut missing_registry_store = open_fixture_store(StoreConfig::Memory);
-        let missing_registry = fixture_import_with_resolved_keys(
-            missing_registry_store.as_mut(),
-            export.clone(),
+        let missing_registry_store = open_fixture_store(StoreConfig::Memory);
+        let missing_registry = resolve_timeline_import_public_keys_v1(
+            missing_registry_store.as_ref(),
+            export,
             &anchors,
-            verify_role_message_fixture,
         )
         .test_err();
         assert!(missing_registry
@@ -1421,11 +1380,10 @@ mod tests {
         let mut missing_identity_store = open_fixture_store(StoreConfig::Memory);
         missing_identity_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            fixture_import_with_resolved_keys(
-                missing_identity_store.as_mut(),
-                missing_identity,
+            resolve_timeline_import_public_keys_v1(
+                missing_identity_store.as_ref(),
+                &missing_identity,
                 &anchors,
-                verify_role_message_fixture,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1440,11 +1398,10 @@ mod tests {
         let mut wrong_role_store = open_fixture_store(StoreConfig::Memory);
         wrong_role_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            fixture_import_with_resolved_keys(
-                wrong_role_store.as_mut(),
-                wrong_role,
+            resolve_timeline_import_public_keys_v1(
+                wrong_role_store.as_ref(),
+                &wrong_role,
                 &anchors,
-                verify_role_message_fixture,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1461,11 +1418,10 @@ mod tests {
             .save_key_registry(registry)
             .test_ok();
         assert!(matches!(
-            fixture_import_with_resolved_keys(
-                mismatched_identity_store.as_mut(),
-                mismatched_identity,
+            resolve_timeline_import_public_keys_v1(
+                mismatched_identity_store.as_ref(),
+                &mismatched_identity,
                 &anchors,
-                verify_role_message_fixture,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1481,28 +1437,10 @@ mod tests {
         let mut missing_record_store = open_fixture_store(StoreConfig::Memory);
         missing_record_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            fixture_import_with_resolved_keys(
-                missing_record_store.as_mut(),
-                missing_record,
+            resolve_timeline_import_public_keys_v1(
+                missing_record_store.as_ref(),
+                &missing_record,
                 &anchors,
-                verify_role_message_fixture,
-            )
-            .test_err(),
-            CoreError::SignatureVerificationFailed
-        ));
-
-        let mut invalid_signature = export.clone();
-        invalid_signature.events[0].signature = Some(pos_core::Signature::from_bytes([0; 64]));
-        let mut invalid_signature_store = open_fixture_store(StoreConfig::Memory);
-        invalid_signature_store
-            .save_key_registry(registry)
-            .test_ok();
-        assert!(matches!(
-            fixture_import_with_resolved_keys(
-                invalid_signature_store.as_mut(),
-                invalid_signature,
-                &anchors,
-                verify_role_message_fixture,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1524,26 +1462,22 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let mut store = open_fixture_store(StoreConfig::Memory);
+        let store = open_fixture_store(StoreConfig::Memory);
         let (_, verifying_key) = generate_keypair();
         let valid = public_key_from_verifying_key(&verifying_key);
-        fixture_import_with_resolved_keys(
-            store.as_mut(),
-            export.clone(),
-            &fixture_anchors(valid),
-            verify_role_message_fixture,
+        assert!(resolve_timeline_import_public_keys_v1(
+            store.as_ref(),
+            &export,
+            &fixture_anchors(valid)
         )
-        .test_ok();
+        .test_ok()
+        .is_empty());
         let mut bytes = [0u8; 32];
         bytes[31] = 0xff;
         let bad = PublicKey::from_bytes(bytes);
-        let err = fixture_import_with_resolved_keys(
-            store.as_mut(),
-            export,
-            &fixture_anchors(bad),
-            verify_role_message_fixture,
-        )
-        .test_err();
+        let err =
+            resolve_timeline_import_public_keys_v1(store.as_ref(), &export, &fixture_anchors(bad))
+                .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
@@ -1585,13 +1519,9 @@ mod tests {
         store
             .save_key_registry(&KeyRegistryStateV1::new())
             .test_ok();
-        let err = fixture_import_with_resolved_keys(
-            store.as_mut(),
-            export,
-            &fixture_anchors(pk),
-            verify_role_message_fixture,
-        )
-        .test_err();
+        let err =
+            resolve_timeline_import_public_keys_v1(store.as_ref(), &export, &fixture_anchors(pk))
+                .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
@@ -1906,14 +1836,9 @@ mod coverage_entrypoints {
             }],
             parent_fork_hash: None,
         };
-        let mut missing_registry = ok(open_store(StoreConfig::Memory));
+        let missing_registry = ok(open_store(StoreConfig::Memory));
         assert!(matches!(
-            fixture_import_with_resolved_keys(
-                missing_registry.as_mut(),
-                export,
-                &[],
-                |_, _| Ok(()),
-            ),
+            resolve_timeline_import_public_keys_v1(missing_registry.as_ref(), &export, &[]),
             Err(CoreError::Storage(_))
         ));
     }
@@ -1939,9 +1864,9 @@ mod coverage_entrypoints {
             }],
             parent_fork_hash: None,
         };
-        let mut store = RegistryLoadErrorStore;
+        let store = RegistryLoadErrorStore;
         assert!(matches!(
-            fixture_import_with_resolved_keys(&mut store, export, &[], |_, _| Ok(())),
+            resolve_timeline_import_public_keys_v1(&store, &export, &[]),
             Err(CoreError::Storage(message)) if message == "registry load failed"
         ));
     }
