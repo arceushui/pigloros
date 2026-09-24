@@ -1001,11 +1001,11 @@ fn assert_topology_refresh_cannot_clear_frozen_membership(
         }
     };
     assert_eq!(refresh_result, Err(ErasureHostErrorV1::RecoveryUnavailable));
-    assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
     assert_eq!(
         commands.timeline(parent.id()),
         Err(ErasureHostErrorV1::RecoveryUnavailable)
     );
+    assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
     Ok(())
 }
 
@@ -1100,11 +1100,11 @@ fn assert_identified_fork_requires_admitted_lineage(
         ),
         Err(ErasureHostErrorV1::Conflict)
     );
-    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     assert_eq!(
         commands.timeline(parent.id()),
         Err(ErasureHostErrorV1::AccessFrozen)
     );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
 }
 
