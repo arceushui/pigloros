@@ -174,6 +174,9 @@ pub enum WorldReplayClosureErrorV1 {
     /// An optional view is not selected by the immutable WCS1 root set.
     #[error("World Replay closure contains an unselected optional view")]
     UnselectedOptionalView,
+    /// A required leaf is not selected by WCS1 or the flat closure's singleton slots.
+    #[error("World Replay closure contains an unselected required artifact")]
+    UnselectedRequiredArtifact,
     /// The retention clock or artifact authority could not be read.
     #[error("World Replay artifact authority is unavailable")]
     AuthorityUnavailable,
@@ -670,6 +673,50 @@ fn validate_consumer_set_references(
             && !consumer_set.optional_view_roots().contains(&leaf.digest())
     }) {
         return Err(WorldReplayClosureErrorV1::UnselectedOptionalView);
+    }
+    // This flat, test-support closure has no WDB1 directory. Fail closed on
+    // extra Required leaves rather than treating a verified native digest as
+    // evidence that the leaf belongs to the selected closure.
+    if artifacts.iter().any(|leaf| {
+        let address = leaf.digest();
+        match leaf.as_input().kind {
+            WorldArtifactKindV1::OutputPolicy => !consumer_set
+                .producers()
+                .iter()
+                .any(|producer| producer.output_policy_hash() == address),
+            WorldArtifactKindV1::Schema => !consumer_set
+                .consumers()
+                .iter()
+                .any(|consumer| consumer.schema_hash() == address),
+            WorldArtifactKindV1::ReducerImplementation => !consumer_set
+                .consumers()
+                .iter()
+                .any(|consumer| consumer.reducer_hash() == address),
+            WorldArtifactKindV1::RuntimeIdentity => !consumer_set
+                .consumers()
+                .iter()
+                .any(|consumer| consumer.runtime_hash() == address),
+            _ => false,
+        }
+    }) || REQUIRED_KINDS.iter().any(|kind| {
+        !matches!(
+            *kind,
+            WorldArtifactKindV1::OutputPolicy
+                | WorldArtifactKindV1::Schema
+                | WorldArtifactKindV1::ReducerImplementation
+                | WorldArtifactKindV1::RuntimeIdentity
+        ) && artifacts
+            .iter()
+            .filter(|leaf| leaf.as_input().kind == *kind)
+            .count()
+            != 1
+    }) || artifacts
+        .iter()
+        .filter(|leaf| leaf.as_input().kind == WorldArtifactKindV1::KeyDependencyEvidence)
+        .count()
+        > 1
+    {
+        return Err(WorldReplayClosureErrorV1::UnselectedRequiredArtifact);
     }
     Ok(())
 }

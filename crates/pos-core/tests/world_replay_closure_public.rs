@@ -773,6 +773,34 @@ fn unselected_optional_view_cannot_enter_the_admitted_closure() {
 }
 
 #[test]
+fn unselected_required_leaves_cannot_enter_the_admitted_closure() {
+    for (kind, native_digest) in [
+        (WorldArtifactKindV1::OutputPolicy, hash(70)),
+        (WorldArtifactKindV1::Schema, hash(71)),
+        (WorldArtifactKindV1::ReducerImplementation, hash(72)),
+        (WorldArtifactKindV1::RuntimeIdentity, hash(73)),
+        (WorldArtifactKindV1::BaseConfiguration, hash(74)),
+        (WorldArtifactKindV1::KeyDependencyEvidence, hash(75)),
+    ] {
+        let mut input = closure_input();
+        input.artifacts.push(leaf(
+            scope(),
+            input.retention_lease.digest(),
+            kind,
+            native_digest,
+            [115; 32],
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+        ));
+        assert_eq!(
+            WorldReplayClosureV1::new(input),
+            Err(WorldReplayClosureErrorV1::UnselectedRequiredArtifact),
+            "unselected {kind:?} leaf entered the closure"
+        );
+    }
+}
+
+#[test]
 fn authority_failures_are_not_treated_as_replay_evidence() {
     let mut clock_failure =
         Authority::new(WallTime::from_micros(1)).with_mode(AuthorityMode::FailNow);
