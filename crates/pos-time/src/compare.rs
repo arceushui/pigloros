@@ -38,7 +38,10 @@ pub struct ForkDiff {
 /// 4. Collect entity IDs that appear in either side and compare final state.
 ///
 /// # Errors
-/// Propagates [`CoreError`] from the underlying store.
+/// Fails closed when protected-use authorization, native evidence, read bounds,
+/// or final rechecks are unavailable. Host errors are mapped to
+/// [`CoreError::ArtifactUnavailable`], [`CoreError::ErasureAccessFrozen`], or
+/// [`CoreError::ErasureContainmentUnavailable`], not exposed as raw store errors.
 pub fn compare(
     sender: &mut ErasureReadSenderV1<'_>,
     timelines: [TimelineId; 2],

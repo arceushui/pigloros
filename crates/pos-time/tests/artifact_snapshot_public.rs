@@ -55,7 +55,8 @@ impl Reducer for NoopReducer {
 
 fn registry(gate: &Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistry {
     let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
-    registry.register("noop", Box::new(NoopReducer));
+    // The public closure fixture authorizes the "count" consumer.
+    registry.register("count", Box::new(NoopReducer));
     registry
 }
 
