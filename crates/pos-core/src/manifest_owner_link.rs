@@ -589,6 +589,7 @@ impl<'a> WirePreflight<'a> {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn row_count(&mut self) -> Result<usize, ManifestOwnerLinkErrorV1> {
         let count = self.head(4)?;
         if count > MAX_MANIFEST_OWNER_PLUGINS_V1 as u64 {
