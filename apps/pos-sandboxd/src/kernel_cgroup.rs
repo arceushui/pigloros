@@ -11,6 +11,13 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::{CgroupRoot, TransientServiceUnitName};
 
+mod limit_events;
+
+pub use limit_events::{
+    AttemptLimitEventCounter, AttemptLimitEventDelta, AttemptLimitEventSnapshot,
+    AttemptLimitEventSource,
+};
+
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
 const MAX_CONTROL_GROUP_BYTES: usize = 4096;
@@ -62,6 +69,35 @@ pub enum AttemptCgroupError {
     /// A missing path did not prove that the retained cgroup itself was deleted.
     #[error("the attempt cgroup path disappeared without proven deletion")]
     DeletionUnproven,
+    /// An exact limit-event source could not be opened beneath the retained cgroup.
+    #[error("failed to open attempt cgroup limit-event source {property}")]
+    LimitEventOpen {
+        property: &'static str,
+        #[source]
+        error: Errno,
+    },
+    /// An exact limit-event source could not be read completely.
+    #[error("failed to read attempt cgroup limit-event source {property}")]
+    LimitEventRead {
+        property: &'static str,
+        #[source]
+        error: std::io::Error,
+    },
+    /// An exact limit-event source exceeded the closed read bound.
+    #[error("attempt cgroup limit-event source {property} exceeded the read bound")]
+    LimitEventTooLong { property: &'static str },
+    /// A source had malformed, duplicate, or missing required counters.
+    #[error("attempt cgroup limit-event source {property} was malformed")]
+    MalformedLimitEvents { property: &'static str },
+    /// Two snapshots did not refer to the exact same bound attempt cgroup.
+    #[error("attempt cgroup limit-event snapshots have different identities")]
+    LimitEventIdentityMismatch,
+    /// A later snapshot carried an earlier monotonic observation time.
+    #[error("attempt cgroup limit-event observation time moved backwards")]
+    LimitEventTimeReversed,
+    /// A kernel event counter decreased between the two snapshots.
+    #[error("attempt cgroup limit-event counter {counter:?} decreased")]
+    LimitEventCounterDecreased { counter: AttemptLimitEventCounter },
 }
 
 impl CgroupRoot {
