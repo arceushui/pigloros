@@ -1957,7 +1957,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
-                    rotation: Default::default(),
+                    rotation: BodyRotationV1::default(),
                     x: f64::NAN,
                     y: body.y,
                     z: body.z,
@@ -1981,7 +1981,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
-                    rotation: Default::default(),
+                    rotation: BodyRotationV1::default(),
                     x: body.x,
                     y: f64::NAN,
                     z: body.z,
@@ -2005,7 +2005,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
-                    rotation: Default::default(),
+                    rotation: BodyRotationV1::default(),
                     x: f64::MAX,
                     y: body.y,
                     z: body.z,
@@ -2047,7 +2047,7 @@ mod tests {
                 .map(|body| {
                     let mut observed = WorldObservation {
                         entity_id: body.entity_id,
-                        rotation: Default::default(),
+                        rotation: BodyRotationV1::default(),
                         x: body.x,
                         y: body.y,
                         z: body.z,
@@ -2100,7 +2100,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -2125,7 +2125,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -2150,7 +2150,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -2207,7 +2207,7 @@ mod tests {
         ] {
             let initial = Body {
                 entity_id: EntityId::new(),
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,
@@ -3158,7 +3158,7 @@ mod tests {
                     WorldDriver::new(
                         vec![Body {
                             entity_id: body,
-                            rotation: Default::default(),
+                            rotation: BodyRotationV1::default(),
                             x: 0.0,
                             y: 0.0,
                             z: 0.0,
@@ -3283,7 +3283,7 @@ mod tests {
             .into_iter()
             .map(|entity_id| Body {
                 entity_id,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -3584,7 +3584,7 @@ mod tests {
                 Some(Box::new(WorldDriver::new(
                     vec![Body {
                         entity_id: body,
-                        rotation: Default::default(),
+                        rotation: BodyRotationV1::default(),
                         x: 0.0,
                         y: 0.0,
                         z: 0.0,
@@ -3770,7 +3770,7 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -3795,7 +3795,7 @@ mod tests {
         let bodies = vec![
             Body {
                 entity_id: entity1,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -3805,7 +3805,7 @@ mod tests {
             },
             Body {
                 entity_id: entity2,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 10.0,
                 y: 10.0,
                 z: 0.0,
@@ -3914,7 +3914,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -3947,7 +3947,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 5.0,
             y: 10.0,
             z: 0.0,
@@ -3978,7 +3978,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4009,7 +4009,7 @@ mod tests {
         fn step(&self, _bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             vec![WorldObservation {
                 entity_id: EntityId::new(),
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 9.0,
                 y: 9.0,
                 z: 9.0,
@@ -4035,7 +4035,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
-                    rotation: Default::default(),
+                    rotation: BodyRotationV1::default(),
                     x: body.x + body.vx,
                     y: body.y + body.vy,
                     z: body.z + body.vz,
@@ -4046,7 +4046,7 @@ mod tests {
                 .collect();
             out.push(WorldObservation {
                 entity_id: self.extra,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4080,7 +4080,7 @@ mod tests {
         let known = EntityId::new();
         let body = Body {
             entity_id: known,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
             z: 0.0,
@@ -4106,7 +4106,7 @@ mod tests {
         let unknown = EntityId::new();
         let body = Body {
             entity_id: known,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4130,7 +4130,7 @@ mod tests {
     fn driver_rejects_duplicate_staged_bodies() {
         let body = Body {
             entity_id: EntityId::new(),
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4157,7 +4157,7 @@ mod tests {
         ids.sort_unstable();
         let first = Body {
             entity_id: ids[0],
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -4167,7 +4167,7 @@ mod tests {
         };
         let second = Body {
             entity_id: ids[1],
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             ..first
         };
         let mut driver = WorldDriver::new(
@@ -4345,7 +4345,7 @@ mod tests {
         let entity = EntityId::new();
         let b1 = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
             z: 0.0,
@@ -4355,7 +4355,7 @@ mod tests {
         };
         let b2 = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
             z: 0.0,
@@ -4365,7 +4365,7 @@ mod tests {
         };
         let b3 = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 3.0,
             y: 4.0,
             z: 0.0,
@@ -4383,7 +4383,7 @@ mod tests {
         let entity = EntityId::new();
         let o1 = WorldObservation {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -4393,7 +4393,7 @@ mod tests {
         };
         let o2 = WorldObservation {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -4403,7 +4403,7 @@ mod tests {
         };
         let o3 = WorldObservation {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 3.0,
             y: 4.0,
             z: 5.0,
@@ -4439,7 +4439,7 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 5.0,
             y: 7.0,
             z: 0.0,
@@ -4461,7 +4461,7 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 10.0,
             y: 10.0,
             z: 0.0,
@@ -4484,7 +4484,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4515,7 +4515,7 @@ mod tests {
             let entity = EntityId::new();
             let body = Body {
                 entity_id: entity,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4571,7 +4571,7 @@ mod tests {
             let entity = EntityId::new();
             let body = Body {
                 entity_id: entity,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4647,7 +4647,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4719,7 +4719,7 @@ mod tests {
         // High initial velocity; TargetVelocity must override it entirely.
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4769,7 +4769,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: body_id,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 3.0,
                 z: 0.0,
@@ -4848,7 +4848,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: body_id,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4879,7 +4879,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
-                rotation: Default::default(),
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4923,7 +4923,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4970,7 +4970,7 @@ mod tests {
         let body_id = EntityId::new();
         let initial = Body {
             entity_id: body_id,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -5028,7 +5028,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
-            rotation: Default::default(),
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
