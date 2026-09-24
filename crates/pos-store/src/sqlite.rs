@@ -5493,7 +5493,7 @@ fn sqlite_recovery_proof_objects_are_exact(
     }
     for object in mutation.objects() {
         let bytes = load_sqlite_erasure_evidence(conn, object.reference())?;
-        if ErasureForkRecoveryProofV1::bytes_digest(&bytes) != object.bytes() {
+        if ErasureForkRecoveryProofV1::bytes_digest(&bytes) != object.bytes_digest() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
     }
@@ -5508,7 +5508,7 @@ fn sqlite_recovery_proof_states_are_exact(
         let row = load_sqlite_erasure_state_row(conn, state.reference())?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         if reference_from_sql(row.request_digest)? != mutation.request()
-            || ErasureForkRecoveryProofV1::bytes_digest(&row.state_cbor) != state.bytes()
+            || ErasureForkRecoveryProofV1::bytes_digest(&row.state_cbor) != state.bytes_digest()
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -5521,19 +5521,7 @@ fn sqlite_recovery_proof_indexes_are_exact(
     mutation: &ErasureForkRecoveryMutationV1,
 ) -> Result<(), ErasureErrorV1> {
     for index in mutation.index_inserts() {
-        let (index, ordinal, reference) = match *index {
-            ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
-                (SqliteErasureIndex::Attempt, ordinal, reference)
-            }
-            ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
-                (SqliteErasureIndex::Scope, ordinal, reference)
-            }
-            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
-                SqliteErasureIndex::AdministrativeResolution,
-                ordinal,
-                reference,
-            ),
-        };
+        let (index, ordinal, reference) = sqlite_erasure_index_parts(*index);
         if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -5551,7 +5539,7 @@ fn sqlite_recovery_proof_effect_is_exact(
         || effect.identity() != mutation.effect()
         || effect.subject() != mutation.effect_subject()
         || ErasureForkRecoveryProofV1::bytes_digest(&effect_row.effect_cbor)
-            != mutation.effect_bytes()
+            != mutation.effect_bytes_digest()
         || effect_row
             .subject_digest
             .map(reference_from_sql)
@@ -5570,13 +5558,7 @@ fn sqlite_recovery_proof_subject_is_exact(
     let Some(subject) = mutation.effect_subject() else {
         return Ok(());
     };
-    let subject_manifest = conn
-        .query_row(
-            "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
-            params![subject.digest().as_slice()],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
+    let subject_manifest = sqlite_effect_manifest_digest_for_subject(conn, subject)
         .map_err(map_erasure_receipt_failure)?
         .map(reference_from_sql)
         .transpose()?;
@@ -5584,6 +5566,18 @@ fn sqlite_recovery_proof_subject_is_exact(
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     Ok(())
+}
+
+fn sqlite_effect_manifest_digest_for_subject(
+    conn: &Connection,
+    subject: ErasureReferenceV1,
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    conn.query_row(
+        "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
+        params![subject.digest().as_slice()],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 fn sqlite_erasure_effect_row(
@@ -5939,6 +5933,14 @@ enum SqliteErasureIndex {
 }
 
 impl SqliteErasureIndex {
+    const fn insert_query(self) -> &'static str {
+        match self {
+            Self::Attempt => "INSERT INTO erasure_attempt_pages(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
+            Self::Scope => "INSERT INTO erasure_scope_nodes(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
+            Self::AdministrativeResolution => "INSERT INTO erasure_administrative_resolutions(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
+        }
+    }
+
     const fn reference_query(self) -> &'static str {
         match self {
             Self::Attempt => "SELECT reference_digest FROM erasure_attempt_pages WHERE request_digest=?1 AND ordinal=?2",
@@ -5955,6 +5957,24 @@ impl SqliteErasureIndex {
                 "SELECT COUNT(*) FROM erasure_administrative_resolutions WHERE request_digest=?1"
             }
         }
+    }
+}
+
+fn sqlite_erasure_index_parts(
+    index: ErasureIndexInsertV1,
+) -> (SqliteErasureIndex, u64, ErasureReferenceV1) {
+    match index {
+        ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+            (SqliteErasureIndex::Attempt, ordinal, reference)
+        }
+        ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+            (SqliteErasureIndex::Scope, ordinal, reference)
+        }
+        ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+            SqliteErasureIndex::AdministrativeResolution,
+            ordinal,
+            reference,
+        ),
     }
 }
 
@@ -6141,28 +6161,9 @@ fn insert_sqlite_index(
     request: ErasureReferenceV1,
     index: ErasureIndexInsertV1,
 ) -> Result<(), ErasureErrorV1> {
-    let (sql, index, ordinal, reference) = match index {
-        ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (
-            "INSERT INTO erasure_attempt_pages(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            SqliteErasureIndex::Attempt,
-            ordinal,
-            reference,
-        ),
-        ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (
-            "INSERT INTO erasure_scope_nodes(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            SqliteErasureIndex::Scope,
-            ordinal,
-            reference,
-        ),
-        ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
-            "INSERT INTO erasure_administrative_resolutions(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            SqliteErasureIndex::AdministrativeResolution,
-            ordinal,
-            reference,
-        ),
-    };
+    let (index, ordinal, reference) = sqlite_erasure_index_parts(index);
     conn.execute(
-        sql,
+        index.insert_query(),
         params![
             request.digest().as_slice(),
             i64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?,
@@ -6244,19 +6245,7 @@ fn sqlite_mutation_is_exact(
         }
     }
     for index in mutation.index_inserts() {
-        let (index, ordinal, reference) = match *index {
-            ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
-                (SqliteErasureIndex::Attempt, ordinal, reference)
-            }
-            ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
-                (SqliteErasureIndex::Scope, ordinal, reference)
-            }
-            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
-                SqliteErasureIndex::AdministrativeResolution,
-                ordinal,
-                reference,
-            ),
-        };
+        let (index, ordinal, reference) = sqlite_erasure_index_parts(*index);
         if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
             return Ok(false);
         }
@@ -6269,15 +6258,10 @@ fn sqlite_mutation_is_exact(
         .effect()
         .subject()
         .map(|subject| {
-            conn.query_row(
-                "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
-                params![subject.digest().as_slice()],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-            .map(reference_from_sql)
-            .transpose()
+            sqlite_effect_manifest_digest_for_subject(conn, subject)
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+                .map(reference_from_sql)
+                .transpose()
         })
         .transpose()?;
     Ok(subject_manifest.is_none_or(|manifest| manifest == Some(mutation.next_manifest().digest())))
@@ -14182,7 +14166,7 @@ mod tests {
             digest(reference(62)),
         ]);
         let proof_value = Value::Array(vec![
-            Value::Text(ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+            Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
             Value::Integer(1.into()),
             digest(reference(58)),
             digest(reference(62)),

@@ -218,6 +218,7 @@ fn bind_fork_registry_erasure_gate(
     Ok(())
 }
 
+#[cfg(test)]
 fn bind_backtest_erasure_gate(
     store: &mut dyn pos_core::store::EventStore,
     registry: &mut PluginRegistry,
@@ -232,20 +233,10 @@ fn bind_backtest_erasure_gate(
 fn start_backtest_train(
     store: &mut dyn pos_core::store::EventStore,
     registry: &mut PluginRegistry,
-    store_gate: Option<Arc<ErasureContainmentGateV1>>,
-    runtime_gate: Option<Arc<dyn ErasureGate>>,
+    runtime_gate: Arc<dyn ErasureGate>,
     name: &str,
 ) -> Result<(Arc<dyn ErasureGate>, Timeline), pos_core::CoreError> {
-    let runtime_gate = runtime_gate.ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-    if let Some(store_gate) = store_gate {
-        let bound_gate = bind_backtest_erasure_gate(store, registry, store_gate)?;
-        let bound_gate: Arc<dyn ErasureGate> = bound_gate;
-        if !Arc::ptr_eq(&bound_gate, &runtime_gate) {
-            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
-        }
-    } else {
-        ensure_registry_erasure_gate(registry, Arc::clone(&runtime_gate))?;
-    }
+    ensure_registry_erasure_gate(registry, Arc::clone(&runtime_gate))?;
     let timeline = store.create_timeline(name)?;
     Ok((runtime_gate, timeline))
 }
@@ -2499,7 +2490,7 @@ impl BacktestRunner {
                 ));
             }
         }
-        self.run_on_store_with_gate_bindings(&mut store, None, Some(host_gate))
+        self.run_on_store_with_gate_bindings(&mut store, host_gate)
     }
 
     /// Run backtest phases on an already-opened store (test seam for fault injection).
@@ -2508,32 +2499,27 @@ impl BacktestRunner {
         self,
         store: &mut dyn pos_core::store::EventStore,
     ) -> Result<BacktestResult, ExperimentError> {
-        let store_gate = self.erasure_gate.clone();
-        let runtime_gate = store_gate.as_ref().map(|gate| {
-            let gate: Arc<dyn ErasureGate> = gate.clone();
-            gate
-        });
-        self.run_on_store_with_gate_bindings(store, store_gate, runtime_gate)
+        let store_gate = self
+            .erasure_gate
+            .clone()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        store.bind_erasure_gate(store_gate.clone())?;
+        let runtime_gate: Arc<dyn ErasureGate> = store_gate;
+        self.run_on_store_with_gate_bindings(store, runtime_gate)
     }
 
     fn run_on_store_with_gate_bindings(
         self,
         store: &mut dyn pos_core::store::EventStore,
-        store_gate: Option<Arc<ErasureContainmentGateV1>>,
-        runtime_gate: Option<Arc<dyn ErasureGate>>,
+        runtime_gate: Arc<dyn ErasureGate>,
     ) -> Result<BacktestResult, ExperimentError> {
         let store_config = self.config.store_config.clone();
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
         let mut train_registry = (self.registry_factory)();
-        let (erasure_gate, train_tl) = start_backtest_train(
-            store,
-            &mut train_registry,
-            store_gate,
-            runtime_gate,
-            &train_name,
-        )?;
+        let (erasure_gate, train_tl) =
+            start_backtest_train(store, &mut train_registry, runtime_gate, &train_name)?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
@@ -7844,19 +7830,6 @@ mod coverage_entrypoints {
 
     #[test]
     fn host_gate_binding_and_startup_errors_are_closed() {
-        let mut store = pos_store::memory::MemoryStore::new();
-        let mut registry = PluginRegistry::new();
-        assert!(matches!(
-            start_backtest_train(
-                &mut store,
-                &mut registry,
-                None,
-                None,
-                "missing-runtime-gate"
-            ),
-            Err(pos_core::CoreError::ErasureContainmentUnavailable)
-        ));
-
         let unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
         assert!(matches!(
             unbound_store.get_timeline(TimelineId::new()),

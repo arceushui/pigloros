@@ -5940,14 +5940,14 @@ fn bytes_digest(bytes: &[u8]) -> ErasureReferenceV1 {
 }
 
 struct ForkAdmissionPersistenceEvidenceDigestInput<'a, Objects, States> {
-    next_manifest_bytes: ErasureReferenceV1,
+    next_manifest_bytes_digest: ErasureReferenceV1,
     object_count: usize,
     objects: Objects,
     state_count: usize,
     states: States,
     index_inserts: &'a [ErasureIndexInsertV1],
     effect: ErasureReferenceV1,
-    effect_bytes: ErasureReferenceV1,
+    effect_bytes_digest: ErasureReferenceV1,
     effect_subject: Option<ErasureReferenceV1>,
 }
 
@@ -5960,24 +5960,24 @@ where
 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/erasure-fork-persistence-evidence/v1");
-    hasher.update(&evidence.next_manifest_bytes.digest());
+    hasher.update(&evidence.next_manifest_bytes_digest.digest());
     hasher.update(
         &u64::try_from(evidence.object_count)
             .unwrap_or(u64::MAX)
             .to_be_bytes(),
     );
-    for (reference, bytes) in evidence.objects {
+    for (reference, bytes_digest) in evidence.objects {
         hasher.update(&reference.digest());
-        hasher.update(&bytes.digest());
+        hasher.update(&bytes_digest.digest());
     }
     hasher.update(
         &u64::try_from(evidence.state_count)
             .unwrap_or(u64::MAX)
             .to_be_bytes(),
     );
-    for (reference, bytes) in evidence.states {
+    for (reference, bytes_digest) in evidence.states {
         hasher.update(&reference.digest());
-        hasher.update(&bytes.digest());
+        hasher.update(&bytes_digest.digest());
     }
     hasher.update(
         &u64::try_from(evidence.index_inserts.len())
@@ -5991,7 +5991,7 @@ where
         hasher.update(&reference.digest());
     }
     hasher.update(&evidence.effect.digest());
-    hasher.update(&evidence.effect_bytes.digest());
+    hasher.update(&evidence.effect_bytes_digest.digest());
     match evidence.effect_subject {
         Some(subject) => {
             hasher.update(&[1]);
@@ -6008,20 +6008,20 @@ fn fork_recovery_mutation_evidence_digest(
     mutation: &ErasureForkRecoveryMutationV1,
 ) -> ErasureReferenceV1 {
     fork_admission_persistence_evidence_digest(ForkAdmissionPersistenceEvidenceDigestInput {
-        next_manifest_bytes: mutation.next_manifest_bytes,
+        next_manifest_bytes_digest: mutation.next_manifest_bytes_digest,
         object_count: mutation.objects.len(),
         objects: mutation
             .objects
             .iter()
-            .map(|object| (object.reference(), object.bytes())),
+            .map(|object| (object.reference(), object.bytes_digest())),
         state_count: mutation.states.len(),
         states: mutation
             .states
             .iter()
-            .map(|state| (state.reference(), state.bytes())),
+            .map(|state| (state.reference(), state.bytes_digest())),
         index_inserts: &mutation.index_inserts,
         effect: mutation.effect,
-        effect_bytes: mutation.effect_bytes,
+        effect_bytes_digest: mutation.effect_bytes_digest,
         effect_subject: mutation.effect_subject,
     })
 }
@@ -6237,7 +6237,7 @@ impl PreparedErasureForkAdmissionV1 {
         let effect_bytes = mutation.effect().to_canonical_cbor()?;
         let persistence_evidence = fork_admission_persistence_evidence_digest(
             ForkAdmissionPersistenceEvidenceDigestInput {
-                next_manifest_bytes: bytes_digest(mutation.next_manifest().canonical_cbor()),
+                next_manifest_bytes_digest: bytes_digest(mutation.next_manifest().canonical_cbor()),
                 object_count: mutation.new_objects().len(),
                 objects: mutation
                     .new_objects()
@@ -6250,7 +6250,7 @@ impl PreparedErasureForkAdmissionV1 {
                     .map(|state| (state.reference(), bytes_digest(state.canonical_cbor()))),
                 index_inserts: mutation.index_inserts(),
                 effect: mutation.effect().identity(),
-                effect_bytes: bytes_digest(&effect_bytes),
+                effect_bytes_digest: bytes_digest(&effect_bytes),
                 effect_subject: mutation.effect().subject(),
             },
         );
@@ -6459,12 +6459,12 @@ pub struct ErasureForkRecoveryMutationV1 {
     request: ErasureReferenceV1,
     predecessor: Option<ErasureReferenceV1>,
     next_manifest: ErasureReferenceV1,
-    next_manifest_bytes: ErasureReferenceV1,
+    next_manifest_bytes_digest: ErasureReferenceV1,
     objects: Vec<ErasureForkRecoveryObjectV1>,
     states: Vec<ErasureForkRecoveryObjectV1>,
     index_inserts: Vec<ErasureIndexInsertV1>,
     effect: ErasureReferenceV1,
-    effect_bytes: ErasureReferenceV1,
+    effect_bytes_digest: ErasureReferenceV1,
     effect_subject: Option<ErasureReferenceV1>,
     binding_digest: ErasureReferenceV1,
 }
@@ -6473,7 +6473,7 @@ pub struct ErasureForkRecoveryMutationV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureForkRecoveryObjectV1 {
     reference: ErasureReferenceV1,
-    bytes: ErasureReferenceV1,
+    bytes_digest: ErasureReferenceV1,
 }
 
 impl ErasureForkRecoveryProofV1 {
@@ -6488,7 +6488,7 @@ impl ErasureForkRecoveryProofV1 {
                     .iter()
                     .map(|object| ErasureForkRecoveryObjectV1 {
                         reference: object.reference(),
-                        bytes: bytes_digest(object.canonical_cbor()),
+                        bytes_digest: bytes_digest(object.canonical_cbor()),
                     })
                     .collect();
                 let states = mutation
@@ -6496,7 +6496,7 @@ impl ErasureForkRecoveryProofV1 {
                     .iter()
                     .map(|state| ErasureForkRecoveryObjectV1 {
                         reference: state.reference(),
-                        bytes: bytes_digest(state.canonical_cbor()),
+                        bytes_digest: bytes_digest(state.canonical_cbor()),
                     })
                     .collect();
                 let effect_bytes = mutation.effect.to_canonical_cbor()?;
@@ -6508,12 +6508,14 @@ impl ErasureForkRecoveryProofV1 {
                     request: mutation.request(),
                     predecessor: mutation.expected_manifest_digest,
                     next_manifest: mutation.next_manifest.digest(),
-                    next_manifest_bytes: bytes_digest(mutation.next_manifest.canonical_cbor()),
+                    next_manifest_bytes_digest: bytes_digest(
+                        mutation.next_manifest.canonical_cbor(),
+                    ),
                     objects,
                     states,
                     index_inserts: mutation.index_inserts.clone(),
                     effect: mutation.effect.identity(),
-                    effect_bytes: bytes_digest(&effect_bytes),
+                    effect_bytes_digest: bytes_digest(&effect_bytes),
                     effect_subject: mutation.effect.subject(),
                     binding_digest: admission.binding_digest(),
                 })
@@ -6808,8 +6810,8 @@ impl ErasureForkRecoveryMutationV1 {
 
     /// Return the raw successor manifest byte digest.
     #[must_use]
-    pub const fn next_manifest_bytes(&self) -> ErasureReferenceV1 {
-        self.next_manifest_bytes
+    pub const fn next_manifest_bytes_digest(&self) -> ErasureReferenceV1 {
+        self.next_manifest_bytes_digest
     }
 
     /// Return all expected immutable evidence objects.
@@ -6838,8 +6840,8 @@ impl ErasureForkRecoveryMutationV1 {
 
     /// Return the canonical effect byte digest.
     #[must_use]
-    pub const fn effect_bytes(&self) -> ErasureReferenceV1 {
-        self.effect_bytes
+    pub const fn effect_bytes_digest(&self) -> ErasureReferenceV1 {
+        self.effect_bytes_digest
     }
 
     /// Return the effect subject, if the effect consumes one.
@@ -6858,8 +6860,8 @@ impl ErasureForkRecoveryObjectV1 {
 
     /// Return the raw canonical-byte digest.
     #[must_use]
-    pub const fn bytes(self) -> ErasureReferenceV1 {
-        self.bytes
+    pub const fn bytes_digest(self) -> ErasureReferenceV1 {
+        self.bytes_digest
     }
 }
 
@@ -6895,12 +6897,12 @@ fn recovery_mutation_from_value(
         request: bytes32(&fields[4])?,
         predecessor: optional_bytes32(&fields[5])?,
         next_manifest: bytes32(&fields[6])?,
-        next_manifest_bytes: bytes32(&fields[7])?,
+        next_manifest_bytes_digest: bytes32(&fields[7])?,
         objects,
         states,
         index_inserts,
         effect: bytes32(&fields[11])?,
-        effect_bytes: bytes32(&fields[12])?,
+        effect_bytes_digest: bytes32(&fields[12])?,
         effect_subject: optional_bytes32(&fields[13])?,
         binding_digest: bytes32(&fields[14])?,
     })
@@ -6912,7 +6914,7 @@ fn recovery_object_from_value(
     let fields = exact_array(value, 2)?;
     Ok(ErasureForkRecoveryObjectV1 {
         reference: bytes32(&fields[0])?,
-        bytes: bytes32(&fields[1])?,
+        bytes_digest: bytes32(&fields[1])?,
     })
 }
 
@@ -6966,7 +6968,7 @@ fn recovery_mutation_value(mutation: &ErasureForkRecoveryMutationV1) -> Value {
         digest(mutation.request),
         optional_digest(mutation.predecessor),
         digest(mutation.next_manifest),
-        digest(mutation.next_manifest_bytes),
+        digest(mutation.next_manifest_bytes_digest),
         Value::Array(mutation.objects.iter().map(recovery_object_value).collect()),
         Value::Array(mutation.states.iter().map(recovery_object_value).collect()),
         Value::Array(
@@ -6977,14 +6979,14 @@ fn recovery_mutation_value(mutation: &ErasureForkRecoveryMutationV1) -> Value {
                 .collect(),
         ),
         digest(mutation.effect),
-        digest(mutation.effect_bytes),
+        digest(mutation.effect_bytes_digest),
         optional_digest(mutation.effect_subject),
         digest(mutation.binding_digest),
     ])
 }
 
 fn recovery_object_value(object: &ErasureForkRecoveryObjectV1) -> Value {
-    Value::Array(vec![digest(object.reference), digest(object.bytes)])
+    Value::Array(vec![digest(object.reference), digest(object.bytes_digest)])
 }
 
 fn recovery_index_value(index: &ErasureIndexInsertV1) -> Value {
@@ -9334,13 +9336,13 @@ mod coverage_paths {
         assert_eq!(admission.predecessor(), Some(reference(189)));
         assert_eq!(admission.next_manifest(), reference(190));
         assert_eq!(
-            admission.next_manifest_bytes(),
+            admission.next_manifest_bytes_digest(),
             ErasureForkRecoveryProofV1::bytes_digest(&[1, 2, 3])
         );
         assert_eq!(admission.objects().len(), 1);
         assert_eq!(admission.objects()[0].reference(), reference(191));
         assert_eq!(
-            admission.objects()[0].bytes(),
+            admission.objects()[0].bytes_digest(),
             ErasureForkRecoveryProofV1::bytes_digest(&[4, 5])
         );
         assert_eq!(admission.states().len(), 1);
@@ -9348,7 +9350,7 @@ mod coverage_paths {
         assert_eq!(admission.index_inserts().len(), 3);
         assert_eq!(admission.effect(), ErasureCasEffectV1::None.identity());
         assert_eq!(
-            admission.effect_bytes(),
+            admission.effect_bytes_digest(),
             ErasureForkRecoveryProofV1::bytes_digest(
                 &ErasureCasEffectV1::None.to_canonical_cbor()?
             )
@@ -9746,7 +9748,7 @@ mod coverage_paths {
         assert_eq!(proof.validate(&result), Ok(()));
         assert_recovery_proof_rejects_missing_persisted_components(&proof, &result);
         let mut changed_manifest_bytes = proof.clone();
-        changed_manifest_bytes.admissions[0].next_manifest_bytes = reference(195);
+        changed_manifest_bytes.admissions[0].next_manifest_bytes_digest = reference(195);
         assert_eq!(
             changed_manifest_bytes.validate(&result),
             Err(ErasureErrorV1::ProvenanceMissing)

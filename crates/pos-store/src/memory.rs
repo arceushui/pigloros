@@ -1661,7 +1661,7 @@ impl MemoryStore {
                 let Some(bytes) = self.erasure_evidence.get(&object.reference()) else {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 };
-                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != object.bytes() {
+                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != object.bytes_digest() {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
@@ -1669,7 +1669,7 @@ impl MemoryStore {
                 let Some(bytes) = self.erasure_states.get(&state.reference()) else {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 };
-                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != state.bytes() {
+                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != state.bytes_digest() {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
@@ -1701,7 +1701,7 @@ impl MemoryStore {
             let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes)?;
             if effect.identity() != *effect_digest
                 || effect.subject() != mutation.effect_subject()
-                || ErasureForkRecoveryProofV1::bytes_digest(bytes) != mutation.effect_bytes()
+                || ErasureForkRecoveryProofV1::bytes_digest(bytes) != mutation.effect_bytes_digest()
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
