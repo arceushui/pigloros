@@ -7,6 +7,7 @@ use pos_core::{
     deletion_receipt, CanonicalBytes, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
     KeyRegistrySigningPortV1, Signature, TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1,
+    TimelineEventVerificationV1,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -375,6 +376,65 @@ pub fn verify_timeline_event_for_role(
     verifying_key
         .verify(envelope.canonical_bytes(), &signature)
         .map_err(|_| TimelineEventEnvelopeErrorV1::InvalidSignature)
+}
+
+/// Verify one retained committed Event against its exact registry identity and
+/// an independently selected owner/role/epoch trust anchor.
+///
+/// The registry may contain an inactive or destroyed identity as long as its
+/// public verification key remains retained. This checks one Event only; it
+/// does not establish a contiguous signed range or make a `ReplayClaim`.
+#[must_use]
+pub fn verify_committed_timeline_event_v1(
+    event: &pos_core::Event,
+    registry: Option<&pos_core::KeyRegistryStateV1>,
+    trust_anchor: Option<(KeyIdentityV1, pos_core::PublicKey)>,
+) -> TimelineEventVerificationV1 {
+    let Some(identity) = event.signature_identity else {
+        return TimelineEventVerificationV1::MissingRequiredContext;
+    };
+    if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning || identity.epoch == 0 {
+        return TimelineEventVerificationV1::Invalid;
+    }
+    let (Some(signature), Some(_origin), Some(registry), Some((anchor_identity, anchor_key))) = (
+        event.signature.as_ref(),
+        event.origin,
+        registry,
+        trust_anchor,
+    ) else {
+        return TimelineEventVerificationV1::MissingRequiredContext;
+    };
+    if anchor_identity != identity {
+        return TimelineEventVerificationV1::Invalid;
+    }
+    let Some(public_key) = registry
+        .key_record(identity)
+        .and_then(|record| record.public_verification_key)
+    else {
+        return TimelineEventVerificationV1::MissingRequiredContext;
+    };
+    if public_key != anchor_key {
+        return TimelineEventVerificationV1::Invalid;
+    }
+    let Ok(envelope) = TimelineEventEnvelopeV1::from_committed_event(event) else {
+        return TimelineEventVerificationV1::Invalid;
+    };
+    let Ok(verifying_key) = crate::signing::verifying_key_from_public_key(&public_key) else {
+        return TimelineEventVerificationV1::Invalid;
+    };
+    if verify_timeline_event_for_role(
+        &verifying_key,
+        identity,
+        &envelope,
+        &event.payload,
+        signature,
+    )
+    .is_ok()
+    {
+        TimelineEventVerificationV1::Verified
+    } else {
+        TimelineEventVerificationV1::Invalid
+    }
 }
 
 /// Authorize one encryption operation under an active registry identity.
