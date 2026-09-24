@@ -20,26 +20,26 @@ const MAX_PAGE_ROWS: usize = 64;
 const MAX_BRANCH_CHILDREN: usize = 240;
 const MAX_TABLE_NODE_BYTES: usize = 65_536;
 
-/// Closed structural LCS2 errors; none represents an owner decision.
+/// Closed structural seal and table errors; none represents an owner decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LocalCutSealErrorV2 {
-    #[error("invalid LCS2 encoding")]
+    #[error("invalid local-cut encoding")]
     InvalidEncoding,
-    #[error("noncanonical LCS2 encoding")]
+    #[error("noncanonical local-cut encoding")]
     NonCanonical,
-    #[error("unsupported LCS2 version")]
+    #[error("unsupported local-cut wire version")]
     UnsupportedVersion,
-    #[error("LCS2 field is out of bounds")]
+    #[error("local-cut field is out of bounds")]
     FieldOutOfBounds,
-    #[error("LCS2 content address is zero")]
+    #[error("local-cut content address is zero")]
     ZeroContentAddress,
-    #[error("LCS2 table reference has an invalid count/root pair")]
+    #[error("local-cut table reference has an invalid count/root pair")]
     InvalidTableReference,
-    #[error("LCS2 manifest-binding rows are not sorted and unique")]
+    #[error("local-cut manifest-binding rows are not sorted and unique")]
     RowsNotSorted,
-    #[error("LCS2 table node has an invalid kind, scope, ordinal, or packing")]
+    #[error("local-cut table node has an invalid kind, scope, ordinal, or packing")]
     InvalidTableNode,
-    #[error("LCS2 table records do not match their reference")]
+    #[error("local-cut table records do not match their reference")]
     TableMismatch,
 }
 
@@ -85,10 +85,15 @@ impl LocalCutTableRefV1 {
 /// One prospective kind-14 manifest binding; only the installed owner can authenticate it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalCutManifestBindingRowV1 {
+    /// The exact Timeline bound by this manifest row.
     pub timeline_id: TimelineId,
+    /// Scope chosen by the installed cut owner.
     pub scope: Hash,
+    /// The selected WCS1 World consumer-set digest.
     pub wcs_hash: Hash,
+    /// The selected MSR1 manifest-slot admission receipt digest.
     pub msr_hash: Hash,
+    /// The selected MSB1 manifest-slot binding digest.
     pub msb_hash: Hash,
 }
 
@@ -104,6 +109,19 @@ impl LocalCutManifestBindingRowV1 {
             Ok(self)
         }
     }
+}
+
+fn validate_binding_rows(
+    rows: &[LocalCutManifestBindingRowV1],
+) -> Result<(), LocalCutSealErrorV2> {
+    if rows.windows(2).any(|pair| {
+        pair[0].timeline_id.inner().to_bytes() >= pair[1].timeline_id.inner().to_bytes()
+    }) {
+        return Err(LocalCutSealErrorV2::RowsNotSorted);
+    }
+    rows.iter()
+        .copied()
+        .try_for_each(|row| row.validate().map(|_| ()))
 }
 
 /// Derive the ADR-082 cut tree scope, without asserting that the cut exists.
@@ -145,14 +163,7 @@ impl LocalCutManifestBindingPageV1 {
         {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
-        if rows.windows(2).any(|pair| {
-            pair[0].timeline_id.inner().to_bytes() >= pair[1].timeline_id.inner().to_bytes()
-        }) {
-            return Err(LocalCutSealErrorV2::RowsNotSorted);
-        }
-        for row in &rows {
-            row.validate()?;
-        }
+        validate_binding_rows(&rows)?;
         Ok(Self {
             tree_scope,
             first_ordinal,
@@ -282,10 +293,17 @@ impl LocalCutManifestBindingBranchV1 {
         {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
+        let child_capacity = if height == 1 {
+            MAX_PAGE_ROWS as u64
+        } else {
+            (MAX_PAGE_ROWS * MAX_BRANCH_CHILDREN) as u64
+        };
         let mut next = first_ordinal;
-        for child in &children {
+        for (index, child) in children.iter().enumerate() {
             if child.first_ordinal != next
                 || child.row_count == 0
+                || child.row_count > child_capacity
+                || (index + 1 < children.len() && child.row_count != child_capacity)
                 || child.node_hash == Hash::zero()
             {
                 return Err(LocalCutSealErrorV2::InvalidTableNode);
@@ -435,14 +453,7 @@ impl LocalCutManifestBindingTableV1 {
         if cut_id == 0 || rows.len() as u64 > MAX_LOCAL_CUT_TABLE_ROWS_V1 {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
-        if rows.windows(2).any(|pair| {
-            pair[0].timeline_id.inner().to_bytes() >= pair[1].timeline_id.inner().to_bytes()
-        }) {
-            return Err(LocalCutSealErrorV2::RowsNotSorted);
-        }
-        for row in &rows {
-            row.validate()?;
-        }
+        validate_binding_rows(&rows)?;
         let tree_scope = local_cut_tree_scope_v1(owner_id, cut_id);
         let mut records = Vec::new();
         let mut level = Vec::new();
@@ -696,10 +707,7 @@ impl LocalCutSealV2 {
     /// Ordinary BLAKE3 over the approved LCS2 domain, NUL and exact bytes.
     #[must_use]
     pub fn digest(&self) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(DOMAIN);
-        hasher.update(&self.to_canonical_cbor());
-        Hash::from_bytes(*hasher.finalize().as_bytes())
+        domain_digest(DOMAIN, &self.to_canonical_cbor())
     }
 
     /// Decode one bounded preferred LCS2 structure; old LCS1 is not upcast.

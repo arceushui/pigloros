@@ -142,7 +142,7 @@ fn lcs2_rejects_unpreferred_and_wrong_wire_shapes() -> TestResult {
         LocalCutSealV2::from_canonical_cbor(&overlong_version),
         Err(LocalCutSealErrorV2::NonCanonical)
     );
-    let mut trailing = canonical.clone();
+    let mut trailing = canonical;
     trailing.push(0xf6);
     assert_eq!(
         LocalCutSealV2::from_canonical_cbor(&trailing),
@@ -165,7 +165,9 @@ fn lcs2_rejects_truncated_and_mistyped_fields_at_the_public_decoder() -> TestRes
             "truncated LCS2 prefix {length} was accepted"
         );
     }
-    for index in [2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21] {
+    for index in [
+        2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21,
+    ] {
         let malformed = replace_array_field(&canonical, index, Value::Bool(false))?;
         assert_eq!(
             LocalCutSealV2::from_canonical_cbor(&malformed),
@@ -229,7 +231,10 @@ fn lcs2_roundtrips_large_preferred_unsigned_fields() -> TestResult {
         input.cut_id = value;
         input.schedule_ns = value;
         let record = LocalCutSealV2::new(input)?;
-        assert_eq!(LocalCutSealV2::from_canonical_cbor(&record.to_canonical_cbor())?, record);
+        assert_eq!(
+            LocalCutSealV2::from_canonical_cbor(&record.to_canonical_cbor())?,
+            record
+        );
     }
     Ok(())
 }
@@ -381,6 +386,24 @@ fn kind14_page_and_branch_roundtrip_and_reject_wrong_code() -> TestResult {
     assert_eq!(branch.first_ordinal(), 0);
     assert_eq!(branch.row_count(), 65);
     assert_eq!(branch.children().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn kind14_nodes_reject_wrong_codes_and_branch_ranges() -> TestResult {
+    let page = LocalCutManifestBindingPageV1::new(hash(1), 0, vec![binding_row(1)])?;
+    let page_bytes = page.to_canonical_cbor();
+    let branch = LocalCutManifestBindingBranchV1::new(
+        hash(1),
+        1,
+        0,
+        vec![LocalCutBranchChildV1 {
+            first_ordinal: 0,
+            row_count: 1,
+            node_hash: page.digest(),
+        }],
+    )?;
+    let branch_bytes = branch.to_canonical_cbor();
 
     let mut wrong_kind = page_bytes.clone();
     wrong_kind[7] = 13;
@@ -455,20 +478,9 @@ fn kind14_page_and_branch_roundtrip_and_reject_wrong_code() -> TestResult {
 }
 
 #[test]
-fn kind14_node_decoders_reject_truncation_and_mistyped_rows() -> TestResult {
+fn kind14_page_decoder_rejects_truncation_and_mistyped_rows() -> TestResult {
     let page = LocalCutManifestBindingPageV1::new(hash(1), 0, vec![binding_row(1)])?;
     let page_bytes = page.to_canonical_cbor();
-    let branch = LocalCutManifestBindingBranchV1::new(
-        hash(1),
-        1,
-        0,
-        vec![LocalCutBranchChildV1 {
-            first_ordinal: 0,
-            row_count: 1,
-            node_hash: page.digest(),
-        }],
-    )?;
-    let branch_bytes = branch.to_canonical_cbor();
     for length in 0..page_bytes.len() {
         assert!(
             LocalCutManifestBindingPageV1::from_canonical_cbor(hash(1), &page_bytes[..length])
@@ -476,20 +488,7 @@ fn kind14_node_decoders_reject_truncation_and_mistyped_rows() -> TestResult {
             "truncated LCP1 prefix {length} was accepted"
         );
     }
-    for length in 0..branch_bytes.len() {
-        assert!(
-            LocalCutManifestBindingBranchV1::from_canonical_cbor(
-                hash(1),
-                &branch_bytes[..length],
-            )
-            .is_err(),
-            "truncated LCT1 prefix {length} was accepted"
-        );
-    }
-    for (index, replacement) in [
-        (0, Value::Bytes(b"LCP2".to_vec())),
-        (4, Value::Bool(false)),
-    ] {
+    for (index, replacement) in [(0, Value::Bytes(b"LCP2".to_vec())), (4, Value::Bool(false))] {
         let malformed = replace_array_field(&page_bytes, index, replacement)?;
         assert_eq!(
             LocalCutManifestBindingPageV1::from_canonical_cbor(hash(1), &malformed),
@@ -541,6 +540,32 @@ fn kind14_node_decoders_reject_truncation_and_mistyped_rows() -> TestResult {
         LocalCutManifestBindingPageV1::from_canonical_cbor(hash(1), &trailing_page),
         Err(LocalCutSealErrorV2::InvalidEncoding)
     );
+    Ok(())
+}
+
+#[test]
+fn kind14_branch_decoder_rejects_truncation_and_mistyped_children() -> TestResult {
+    let branch = LocalCutManifestBindingBranchV1::new(
+        hash(1),
+        1,
+        0,
+        vec![LocalCutBranchChildV1 {
+            first_ordinal: 0,
+            row_count: 1,
+            node_hash: hash(7),
+        }],
+    )?;
+    let branch_bytes = branch.to_canonical_cbor();
+    for length in 0..branch_bytes.len() {
+        let result = LocalCutManifestBindingBranchV1::from_canonical_cbor(
+            hash(1),
+            &branch_bytes[..length],
+        );
+        assert!(
+            result.is_err(),
+            "truncated LCT1 prefix {length} was accepted"
+        );
+    }
 
     let wrong_magic = replace_array_field(&branch_bytes, 0, Value::Bytes(b"LCT2".to_vec()))?;
     assert_eq!(
@@ -601,7 +626,7 @@ fn kind14_node_decoders_reject_truncation_and_mistyped_rows() -> TestResult {
 }
 
 #[test]
-fn kind14_nodes_enforce_finite_public_shape_bounds() -> TestResult {
+fn kind14_nodes_enforce_finite_public_shape_bounds() {
     let row = binding_row(1);
     assert_eq!(
         LocalCutManifestBindingPageV1::new(Hash::zero(), 0, vec![row]),
@@ -691,7 +716,47 @@ fn kind14_nodes_enforce_finite_public_shape_bounds() -> TestResult {
         LocalCutManifestBindingBranchV1::from_canonical_cbor(hash(1), &oversized),
         Err(LocalCutSealErrorV2::FieldOutOfBounds)
     );
-    Ok(())
+}
+
+#[test]
+fn kind14_branch_rejects_over_capacity_and_unpacked_children() {
+    for (height, child_count) in [(1, 65), (2, 15_361)] {
+        assert_eq!(
+            LocalCutManifestBindingBranchV1::new(
+                hash(1),
+                height,
+                0,
+                vec![LocalCutBranchChildV1 {
+                    first_ordinal: 0,
+                    row_count: child_count,
+                    node_hash: hash(7),
+                }],
+            ),
+            Err(LocalCutSealErrorV2::InvalidTableNode)
+        );
+    }
+    for (height, first_count, second_count) in [(1, 63, 2), (2, 15_359, 2)] {
+        assert_eq!(
+            LocalCutManifestBindingBranchV1::new(
+                hash(1),
+                height,
+                0,
+                vec![
+                    LocalCutBranchChildV1 {
+                        first_ordinal: 0,
+                        row_count: first_count,
+                        node_hash: hash(7),
+                    },
+                    LocalCutBranchChildV1 {
+                        first_ordinal: first_count,
+                        row_count: second_count,
+                        node_hash: hash(8),
+                    },
+                ],
+            ),
+            Err(LocalCutSealErrorV2::InvalidTableNode)
+        );
+    }
 }
 
 #[test]
@@ -770,6 +835,49 @@ fn kind14_table_uses_minimal_packed_height_and_complete_nodes() -> TestResult {
 }
 
 #[test]
+fn kind14_two_page_tree_matches_independent_content_addresses() -> TestResult {
+    // Independently encoded CBOR and BLAKE3 vectors for rows 1..=65, owner [9; 32], cut 1.
+    let table = LocalCutManifestBindingTableV1::new([9; 32], 1, binding_rows(65))?;
+    assert_eq!(
+        hex(table.tree_scope().as_bytes())?,
+        "39c79ca723aab188f0e540bc79a356bd98d9387c9fea3e53082ad888f9c8adad"
+    );
+    let page0 = LocalCutManifestBindingPageV1::from_canonical_cbor(
+        table.tree_scope(),
+        &table.records()[0],
+    )?;
+    let page1 = LocalCutManifestBindingPageV1::from_canonical_cbor(
+        table.tree_scope(),
+        &table.records()[1],
+    )?;
+    assert_eq!((page0.first_ordinal(), page0.rows().len()), (0, 64));
+    assert_eq!((page1.first_ordinal(), page1.rows().len()), (64, 1));
+    assert_eq!(table.records()[0].len(), 9_901);
+    assert_eq!(table.records()[1].len(), 199);
+    assert_eq!(
+        hex(page0.digest().as_bytes())?,
+        "3ded40e89c3be0e7e5569f3306e65df86295979ceab41914346239c55380ae25"
+    );
+    assert_eq!(
+        hex(page1.digest().as_bytes())?,
+        "8031590c7dcc5da0db0205ba855f7e47dfeb961f46ebde6f4e0ce677e73f07f1"
+    );
+    let branch = LocalCutManifestBindingBranchV1::from_canonical_cbor(
+        table.tree_scope(),
+        &table.records()[2],
+    )?;
+    assert_eq!(branch.children()[0].node_hash, page0.digest());
+    assert_eq!(branch.children()[1].node_hash, page1.digest());
+    assert_eq!(table.records()[2].len(), 123);
+    assert_eq!(
+        hex(branch.digest().as_bytes())?,
+        "cab8e64583cc35444b3b3999be75a052f1d31b22b165ac4c97a3cf412ef23e56"
+    );
+    assert_eq!(table.table_ref().root_hash(), Some(branch.digest()));
+    Ok(())
+}
+
+#[test]
 fn kind14_table_rejects_duplicate_missing_extra_and_misaddressed_nodes() -> TestResult {
     let owner_id = [9; 32];
     let table = LocalCutManifestBindingTableV1::new(owner_id, 1, binding_rows(65))?;
@@ -833,42 +941,73 @@ fn kind14_table_rejects_duplicate_missing_extra_and_misaddressed_nodes() -> Test
         LocalCutManifestBindingTableV1::from_records(owner_id, 2, table.table_ref(), &wrong_cut),
         Err(LocalCutSealErrorV2::InvalidTableNode)
     );
+    Ok(())
+}
+
+#[test]
+fn kind14_table_rejects_unpacked_pages() -> TestResult {
+    let owner_id = [9; 32];
+    let table = LocalCutManifestBindingTableV1::new(owner_id, 1, binding_rows(65))?;
 
     let scope = table.tree_scope();
     let short_page = LocalCutManifestBindingPageV1::new(scope, 0, binding_rows(63))?;
     let last_page =
         LocalCutManifestBindingPageV1::new(scope, 63, (64..=65).map(binding_row).collect())?;
-    let unpacked_branch = LocalCutManifestBindingBranchV1::new(
+    let branch = LocalCutManifestBindingBranchV1::new(
         scope,
         1,
         0,
         vec![
             LocalCutBranchChildV1 {
                 first_ordinal: 0,
-                row_count: 63,
+                row_count: 64,
                 node_hash: short_page.digest(),
             },
             LocalCutBranchChildV1 {
-                first_ordinal: 63,
-                row_count: 2,
+                first_ordinal: 64,
+                row_count: 1,
                 node_hash: last_page.digest(),
             },
         ],
     )?;
+    let unpacked_branch = replace_array_field(
+        &branch.to_canonical_cbor(),
+        7,
+        Value::Array(vec![
+            Value::Array(vec![
+                Value::Integer(0.into()),
+                Value::Integer(63.into()),
+                Value::Bytes(short_page.digest().as_bytes().to_vec()),
+            ]),
+            Value::Array(vec![
+                Value::Integer(63.into()),
+                Value::Integer(2.into()),
+                Value::Bytes(last_page.digest().as_bytes().to_vec()),
+            ]),
+        ]),
+    )?;
     let unpacked_records = vec![
         short_page.to_canonical_cbor(),
         last_page.to_canonical_cbor(),
-        unpacked_branch.to_canonical_cbor(),
+        unpacked_branch,
     ];
     assert_eq!(
         LocalCutManifestBindingTableV1::from_records(
             owner_id,
             1,
-            LocalCutTableRefV1::new(65, Some(unpacked_branch.digest()))?,
+            table.table_ref(),
             &unpacked_records
         ),
-        Err(LocalCutSealErrorV2::TableMismatch)
+        Err(LocalCutSealErrorV2::InvalidTableNode)
     );
+    Ok(())
+}
+
+#[test]
+fn kind14_table_rejects_missing_shifted_and_substituted_nodes() -> TestResult {
+    let owner_id = [9; 32];
+    let table = LocalCutManifestBindingTableV1::new(owner_id, 1, binding_rows(65))?;
+    let scope = table.tree_scope();
 
     let mut malformed_magic = table.records().to_vec();
     malformed_magic[0][4] = b'X';
@@ -887,32 +1026,21 @@ fn kind14_table_rejects_duplicate_missing_extra_and_misaddressed_nodes() -> Test
         0,
         vec![LocalCutBranchChildV1 {
             first_ordinal: 0,
-            row_count: 65,
+            row_count: 64,
             node_hash: hash(99),
         }],
     )?;
     let mut missing_page = table.records().to_vec();
     missing_page[1] = alternate_branch.to_canonical_cbor();
     assert_eq!(
-        LocalCutManifestBindingTableV1::from_records(
-            owner_id,
-            1,
-            table.table_ref(),
-            &missing_page
-        ),
+        LocalCutManifestBindingTableV1::from_records(owner_id, 1, table.table_ref(), &missing_page),
         Err(LocalCutSealErrorV2::TableMismatch)
     );
     let mut shifted_page = table.records().to_vec();
     shifted_page[1] =
-        LocalCutManifestBindingPageV1::new(scope, 65, vec![binding_row(65)])?
-            .to_canonical_cbor();
+        LocalCutManifestBindingPageV1::new(scope, 65, vec![binding_row(65)])?.to_canonical_cbor();
     assert_eq!(
-        LocalCutManifestBindingTableV1::from_records(
-            owner_id,
-            1,
-            table.table_ref(),
-            &shifted_page
-        ),
+        LocalCutManifestBindingTableV1::from_records(owner_id, 1, table.table_ref(), &shifted_page),
         Err(LocalCutSealErrorV2::InvalidTableNode)
     );
     assert_eq!(
