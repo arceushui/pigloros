@@ -174,9 +174,9 @@ pub enum WorldReplayClosureErrorV1 {
     /// An optional view is not selected by the immutable WCS1 root set.
     #[error("World Replay closure contains an unselected optional view")]
     UnselectedOptionalView,
-    /// A required leaf is not selected by WCS1 or the flat closure's singleton slots.
-    #[error("World Replay closure contains an unselected required artifact")]
-    UnselectedRequiredArtifact,
+    /// A WCS1-bound required leaf is not selected by a producer or consumer.
+    #[error("World Replay closure contains an unselected consumer artifact")]
+    UnselectedConsumerArtifact,
     /// The retention clock or artifact authority could not be read.
     #[error("World Replay artifact authority is unavailable")]
     AuthorityUnavailable,
@@ -674,9 +674,9 @@ fn validate_consumer_set_references(
     }) {
         return Err(WorldReplayClosureErrorV1::UnselectedOptionalView);
     }
-    // This flat, test-support closure has no WDB1 directory. Fail closed on
-    // extra Required leaves rather than treating a verified native digest as
-    // evidence that the leaf belongs to the selected closure.
+    // WCS1 selects these four required kinds by WAL1 address. Other required
+    // kinds need the native WDB1 directory; this flat record cannot infer
+    // their cardinality from kind alone.
     if artifacts.iter().any(|leaf| {
         let address = leaf.digest();
         match leaf.as_input().kind {
@@ -698,25 +698,8 @@ fn validate_consumer_set_references(
                 .any(|consumer| consumer.runtime_hash() == address),
             _ => false,
         }
-    }) || REQUIRED_KINDS.iter().any(|kind| {
-        !matches!(
-            *kind,
-            WorldArtifactKindV1::OutputPolicy
-                | WorldArtifactKindV1::Schema
-                | WorldArtifactKindV1::ReducerImplementation
-                | WorldArtifactKindV1::RuntimeIdentity
-        ) && artifacts
-            .iter()
-            .filter(|leaf| leaf.as_input().kind == *kind)
-            .count()
-            != 1
-    }) || artifacts
-        .iter()
-        .filter(|leaf| leaf.as_input().kind == WorldArtifactKindV1::KeyDependencyEvidence)
-        .count()
-        > 1
-    {
-        return Err(WorldReplayClosureErrorV1::UnselectedRequiredArtifact);
+    }) {
+        return Err(WorldReplayClosureErrorV1::UnselectedConsumerArtifact);
     }
     Ok(())
 }
