@@ -2128,6 +2128,7 @@ mod tests {
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
+                eprintln!("unexpected test error: {error:?}");
                 std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
             })
         }
@@ -2663,6 +2664,7 @@ mod coverage_entrypoints {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         result.unwrap_or_else(|error| {
+            eprintln!("unexpected coverage error: {error:?}");
             std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
         })
     }
@@ -2838,6 +2840,7 @@ mod run_coverage_entrypoints {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         result.unwrap_or_else(|error| {
+            eprintln!("unexpected coverage fixture error: {error:?}");
             std::panic::resume_unwind(Box::new(format!(
                 "unexpected coverage fixture error: {error:?}"
             )))
