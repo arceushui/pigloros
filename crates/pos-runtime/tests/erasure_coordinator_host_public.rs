@@ -766,7 +766,7 @@ fn assert_frozen_fork_retries(
 
 fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::clone(&authority);
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut host = test_stage(
         "open coordinator host",
         open_with_authority(
@@ -936,13 +936,14 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
     ));
     let path_text = path.to_string_lossy().into_owned();
     let authority = Arc::new(TestAuthority::default());
+    let first_authority: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
     let mut first_host = test_stage(
         "open first SQLite host",
         open_with_authority(
             StoreConfig::Sqlite {
                 path: path_text.clone(),
             },
-            Arc::clone(&authority),
+            first_authority,
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
@@ -968,7 +969,7 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
             StoreConfig::Sqlite {
                 path: path_text.clone(),
             },
-            Arc::clone(&authority),
+            authority.clone(),
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
