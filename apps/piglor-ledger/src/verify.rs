@@ -57,9 +57,9 @@ impl std::fmt::Display for VerifyReport {
 ///
 /// If `manifest_path` is provided (TOML tier), the recomputed hashes are
 /// compared against that manifest. For the store tier, the persisted registry
-/// resolves each event identity. Store verification requires `pubkey_hex` as
+/// resolves each event identity. Store verification requires `--pubkey` as
 /// an external trust anchor. Each anchor must use the explicit
-/// `owner/role-code/epoch=hex` format.
+/// V1 `base64url_nopad(owner)/role-code/epoch=hex` format.
 ///
 /// # Errors
 /// Returns [`CliError`] on adapter failure. Verification *failures* are
@@ -67,12 +67,12 @@ impl std::fmt::Display for VerifyReport {
 /// readable report — only infrastructure errors propagate as `Err`.
 pub fn run(
     source: &Source,
-    pubkey_hex: Option<&str>,
+    trust_anchor_arg: Option<&str>,
     manifest_path: Option<&Path>,
 ) -> Result<VerifyReport, CliError> {
     match source {
         Source::Toml(dir) => verify_toml(dir, manifest_path),
-        Source::Store(db) => verify_store(db, pubkey_hex),
+        Source::Store(db) => verify_store(db, trust_anchor_arg),
     }
 }
 
@@ -165,8 +165,8 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
     Ok(out)
 }
 
-fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
-    let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
+fn verify_store(db: &Path, trust_anchor_arg: Option<&str>) -> Result<VerifyReport, CliError> {
+    let supplied_public_keys = parse_supplied_public_keys(trust_anchor_arg)?;
 
     let store: Box<dyn pos_core::store::EventStore> = Box::new(
         crate::HostedLedgerStore::open_read_only(&db.to_string_lossy())
@@ -222,54 +222,128 @@ struct TrustedPublicKey {
 }
 
 fn parse_public_key_hex(value: &str) -> Result<pos_core::PublicKey, CliError> {
-    let bytes =
-        hex_decode(value).map_err(|error| CliError::BadKey(format!("--pubkey: {error}")))?;
-    let array: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
+    let array = decode_public_key_hex(value)?;
+    require_canonical_public_key_hex(value, &array)?;
     Ok(pos_core::PublicKey::from_bytes(array))
 }
 
+fn decode_public_key_hex(value: &str) -> Result<[u8; 32], CliError> {
+    let bytes =
+        hex_decode(value).map_err(|error| CliError::BadKey(format!("--pubkey: {error}")))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))
+}
+
+fn require_canonical_public_key_hex(value: &str, bytes: &[u8; 32]) -> Result<(), CliError> {
+    if crate::hex_encode(bytes) != value {
+        return Err(CliError::BadKey(
+            "--pubkey hex must use canonical lowercase encoding".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
+    let invalid =
+        || CliError::BadKey("--pubkey owner must be canonical base64url_nopad".to_owned());
+    if value.is_empty() || value.len() > 172 || value.len() % 4 == 1 {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::with_capacity(value.len() * 3 / 4);
+    let mut bits = 0_u8;
+    let mut remainder = 0_u8;
+    for byte in value.bytes() {
+        let sextet = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return Err(invalid()),
+        };
+        match bits {
+            0 => {
+                remainder = sextet;
+                bits = 6;
+            }
+            6 => {
+                bytes.push((remainder << 2) | (sextet >> 4));
+                remainder = sextet & 0x0f;
+                bits = 4;
+            }
+            4 => {
+                bytes.push((remainder << 4) | (sextet >> 2));
+                remainder = sextet & 0x03;
+                bits = 2;
+            }
+            _ => {
+                bytes.push((remainder << 6) | sextet);
+                remainder = 0;
+                bits = 0;
+            }
+        }
+    }
+    if remainder != 0 {
+        return Err(invalid());
+    }
+    let owner = String::from_utf8(bytes).map_err(|_| invalid())?;
+    OwnerIdV1::new(owner).map_err(|_| invalid())
+}
+
 fn parse_supplied_public_keys(
-    pubkey_hex: Option<&str>,
+    trust_anchor_arg: Option<&str>,
 ) -> Result<Option<Vec<TrustedPublicKey>>, CliError> {
-    let Some(value) = pubkey_hex else {
-        return Ok(None);
-    };
+    trust_anchor_arg.map(parse_anchor_list).transpose()
+}
+
+fn parse_anchor_list(value: &str) -> Result<Vec<TrustedPublicKey>, CliError> {
     let anchors = value
         .split(',')
         .map(|entry| {
             let (identity, public_key) = entry.split_once('=').ok_or_else(|| {
                 CliError::BadKey(
-                    "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
+                    "--pubkey entries must use base64url-owner/role-code/epoch=hex format"
+                        .to_owned(),
                 )
             })?;
             let mut identity_parts = identity.rsplitn(3, '/');
-            let epoch = identity_parts.next().unwrap_or_default();
-            let role = identity_parts.next().ok_or_else(|| {
+            let epoch_text = identity_parts.next().unwrap_or_default();
+            let role_text = identity_parts.next().ok_or_else(|| {
                 CliError::BadKey(
-                    "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
+                    "--pubkey entries must use base64url-owner/role-code/epoch=hex format"
+                        .to_owned(),
                 )
             })?;
             let owner = identity_parts.next().ok_or_else(|| {
                 CliError::BadKey(
-                    "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
+                    "--pubkey entries must use base64url-owner/role-code/epoch=hex format"
+                        .to_owned(),
                 )
             })?;
-            let owner_id = OwnerIdV1::new(owner.to_owned())
-                .map_err(|_| CliError::BadKey("--pubkey owner is invalid".to_owned()))?;
-            let role_code = role
+            let owner_id = decode_anchor_owner(owner)?;
+            let role_code = role_text
                 .parse::<u8>()
                 .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
             let role = KeyRoleV1::from_code(role_code)
                 .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
-            let epoch = epoch
+            if role_code.to_string() != role_text || !role.is_signing() {
+                return Err(CliError::BadKey(
+                    "--pubkey role code is noncanonical".to_owned(),
+                ));
+            }
+            let epoch = epoch_text
                 .parse::<u64>()
                 .map_err(|_| CliError::BadKey("--pubkey epoch is invalid".to_owned()))?;
             if epoch == 0 {
                 return Err(CliError::BadKey(
                     "--pubkey epoch must be greater than zero".to_owned(),
+                ));
+            }
+            if epoch.to_string() != epoch_text {
+                return Err(CliError::BadKey(
+                    "--pubkey epoch is noncanonical".to_owned(),
                 ));
             }
             Ok(TrustedPublicKey {
@@ -278,7 +352,20 @@ fn parse_supplied_public_keys(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(anchors))
+    require_distinct_anchor_identities(&anchors)?;
+    Ok(anchors)
+}
+
+fn require_distinct_anchor_identities(anchors: &[TrustedPublicKey]) -> Result<(), CliError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for anchor in anchors {
+        if !seen.insert(anchor.identity) {
+            return Err(CliError::BadKey(
+                "--pubkey contains a duplicate owner/role/epoch identity".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verify_store_event(
@@ -360,7 +447,7 @@ mod tests {
     }
 
     fn ledger_trust_anchor(public_key: &str) -> String {
-        format!("piglor-ledger/2/1={public_key}")
+        format!("cGlnbG9yLWxlZGdlcg/2/1={public_key}")
     }
 
     fn assert_host_rejection(error: &crate::CliError) {
@@ -375,7 +462,43 @@ mod tests {
         let error = parse_supplied_public_keys(Some(&"aa".repeat(32))).test_err()?;
         assert!(error
             .to_string()
-            .contains("owner/role-code/epoch=hex format"));
+            .contains("base64url-owner/role-code/epoch=hex format"));
+        Ok(())
+    }
+
+    #[test]
+    fn v1_trust_anchor_parser_rejects_legacy_and_noncanonical_entries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let key = "aa".repeat(32);
+        let valid = format!("bGVkZ2VyLW93bmVy/2/1={key}");
+        let all_valid = format!("{valid},8J-YgA/2/1={key},4L-_/2/1={key}");
+        let anchors =
+            parse_supplied_public_keys(Some(&all_valid))?.ok_or("parsed anchor set missing")?;
+        assert_eq!(anchors.len(), 3);
+        assert_eq!(anchors[0].identity.owner_id.as_str(), "ledger-owner");
+        assert_eq!(anchors[1].identity.owner_id.as_str(), "😀");
+        assert_eq!(anchors[2].identity.owner_id.as_str(), "࿿");
+        for invalid in [
+            format!("/2/1={key}"),
+            format!("{}/2/1={key}", "A".repeat(173)),
+            format!("{}/2/1={key}", "A".repeat(172)),
+            format!("AAAAA/2/1={key}"),
+            format!("_w/2/1={key}"),
+            format!("ledger-owner/2/1={key}"),
+            format!("bGVkZ2VyLW93bmVy=/2/1={key}"),
+            format!("YR/2/1={key}"),
+            format!("!A/2/1={key}"),
+            format!("bGVkZ2VyLW93bmVy/02/1={key}"),
+            format!("bGVkZ2VyLW93bmVy/2/01={key}"),
+            format!("bGVkZ2VyLW93bmVy/0/1={key}"),
+            format!("bGVkZ2VyLW93bmVy/2/1={}", "AA".repeat(32)),
+            format!("{valid},{valid}"),
+        ] {
+            assert!(
+                parse_supplied_public_keys(Some(&invalid)).is_err(),
+                "{invalid}"
+            );
+        }
         Ok(())
     }
 
@@ -427,8 +550,8 @@ mod tests {
             });
             format!(
                 "{}/{}/{}={}",
-                identity.owner_id.as_str(),
-                identity.role.code(),
+                "bGVkZ2VyLW93bmVy",
+                pos_core::KeyRoleV1::TimelineIntegritySigning.code(),
                 identity.epoch,
                 crate::hex_encode(key.as_bytes())
             )
@@ -838,14 +961,14 @@ mod tests {
         // Odd-length: fails before nib() is called (hex_decode returns early).
         let err = run(
             &Source::Store(db.clone()),
-            Some("piglor-ledger/2/1=not-hex"),
+            Some("cGlnbG9yLWxlZGdlcg/2/1=not-hex"),
             None,
         )
         .test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
 
         // Even-length with non-hex char: exercises the `_` error arm in nib().
-        let err2 = run(&Source::Store(db), Some("piglor-ledger/2/1=zz"), None).test_err()?;
+        let err2 = run(&Source::Store(db), Some("cGlnbG9yLWxlZGdlcg/2/1=zz"), None).test_err()?;
         assert!(err2.to_string().contains("--pubkey"), "{err2}");
 
         Ok(())
@@ -862,7 +985,12 @@ mod tests {
         })
         .test_ok()?;
         // "aabb" is valid hex (2 bytes) but not a 32-byte key.
-        let err = run(&Source::Store(db), Some("piglor-ledger/2/1=aabb"), None).test_err()?;
+        let err = run(
+            &Source::Store(db),
+            Some("cGlnbG9yLWxlZGdlcg/2/1=aabb"),
+            None,
+        )
+        .test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
 
         Ok(())
@@ -1546,7 +1674,7 @@ mod tests {
         })
         .test_ok()?;
         // "ag" = valid 'a' then invalid 'g' — triggers nib(l) error.
-        let err = run(&Source::Store(db), Some("piglor-ledger/2/1=ag"), None).test_err()?;
+        let err = run(&Source::Store(db), Some("cGlnbG9yLWxlZGdlcg/2/1=ag"), None).test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
 
         Ok(())

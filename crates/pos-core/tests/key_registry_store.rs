@@ -17,6 +17,28 @@ fn source_controlled_owner_identifier_preserves_literal_bytes() {
     );
 }
 
+#[test]
+fn registry_snapshot_requires_exact_version_one() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = KeyRegistryStateV1::new();
+    let mut snapshot = serde_json::to_value(&registry)?;
+    assert_eq!(snapshot["version"], 1);
+    assert_eq!(
+        serde_json::from_value::<KeyRegistryStateV1>(snapshot.clone())?,
+        registry
+    );
+
+    snapshot["version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<KeyRegistryStateV1>(snapshot.clone()).is_err());
+    snapshot["version"] = serde_json::json!(0);
+    assert!(serde_json::from_value::<KeyRegistryStateV1>(snapshot.clone()).is_err());
+    let Some(object) = snapshot.as_object_mut() else {
+        return Err("registry snapshot must be a map".into());
+    };
+    object.remove("version");
+    assert!(serde_json::from_value::<KeyRegistryStateV1>(snapshot).is_err());
+    Ok(())
+}
+
 struct RegistryStore {
     registry: Option<KeyRegistryStateV1>,
     timeline: Option<Timeline>,
@@ -147,6 +169,56 @@ impl EventStore for RegistryStore {
     ) -> Result<(), CoreError> {
         self.committed = true;
         Ok(())
+    }
+
+    fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+    ) -> Result<(), CoreError> {
+        let persisted = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        if persisted != *expected_registry {
+            return Err(CoreError::Storage(
+                "durable key registry changed during signing".to_owned(),
+            ));
+        }
+        let head = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let event = create_event(&persisted, head.head.next())?;
+        self.append_committed(timeline, &[event])
+    }
+
+    fn begin_key_registry_destruction(
+        &mut self,
+        request: KeyDestructionRequestV1,
+    ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .begin_key_destruction(request)
+            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
+    }
+
+    fn complete_key_registry_destruction(
+        &mut self,
+        request: KeyDestructionRequestV1,
+        receipt: Hash,
+    ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .complete_key_destruction(request, receipt)
+            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
     }
 }
 
@@ -339,8 +411,7 @@ fn event_store_key_registry_defaults_are_closed_and_exercised() -> Result<(), Co
 }
 
 #[test]
-fn event_store_key_registry_defaults_cover_authorized_paths(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn explicit_registry_store_covers_authorized_paths() -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registered_state()?;
     let mut store = RegistryStore::new(Some(registry.clone()));
     let timeline = store
@@ -462,7 +533,7 @@ fn event_signature_contract_rejects_incomplete_and_ineligible_bindings() {
 }
 
 #[test]
-fn generic_import_rejects_signed_events_before_stripping_identity() {
+fn generic_import_accepts_signed_source_as_unsigned_clone() {
     let mut event = event_at(Seq::from_u64(1));
     event.signature = Some(Signature::from_bytes([1; 64]));
     event.signature_identity = Some(KeyIdentityV1::new(
@@ -475,11 +546,7 @@ fn generic_import_rejects_signed_events_before_stripping_identity() {
         events: vec![event],
         parent_fork_hash: None,
     };
-    assert!(matches!(
-        pos_core::store::import_timeline(&mut MinimalStore::new(), export),
-        Err(CoreError::Storage(message))
-            if message.contains("generic import of signed events is disabled")
-    ));
+    assert!(pos_core::store::import_timeline(&mut MinimalStore::new(), export).is_ok());
 }
 
 #[test]

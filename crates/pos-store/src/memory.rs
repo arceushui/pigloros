@@ -2976,6 +2976,58 @@ impl EventStore for MemoryStore {
         )
     }
 
+    fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+    ) -> Result<(), CoreError> {
+        // A MemoryStore has one mutable owner; no second handle can change its
+        // registry between this check and the all-or-nothing committed append.
+        let persisted = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        if persisted != *expected_registry {
+            return Err(CoreError::Storage(
+                "key registry changed during signing".to_owned(),
+            ));
+        }
+        let head = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let event = create_event(&persisted, head.head.next())?;
+        self.append_committed(timeline, &[event])
+    }
+
+    fn begin_key_registry_destruction(
+        &mut self,
+        request: pos_core::KeyDestructionRequestV1,
+    ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .begin_key_destruction(request)
+            .map_err(|error| CoreError::Storage(format!("key destruction: {error}")))?;
+        self.save_key_registry(&registry)
+            .map(|()| (outcome, registry))
+    }
+
+    fn complete_key_registry_destruction(
+        &mut self,
+        request: pos_core::KeyDestructionRequestV1,
+        deletion_receipt: Hash,
+    ) -> Result<(pos_core::KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .complete_key_destruction(request, deletion_receipt)
+            .map_err(|error| CoreError::Storage(format!("key destruction: {error}")))?;
+        self.save_key_registry(&registry)
+            .map(|()| (outcome, registry))
+    }
+
     fn append_bounded(
         &mut self,
         timeline: TimelineId,
@@ -7424,6 +7476,27 @@ mod coverage_entrypoints {
         store.key_registry = Some(invalid.clone());
         assert!(store.load_key_registry().is_err());
         assert!(store.save_key_registry(&invalid).is_err());
+        let identity = KeyIdentityV1::new("corrupt-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let request = pos_core::KeyDestructionRequestV1::new(
+            identity,
+            Hash::from_bytes([11; 32]),
+            Hash::from_bytes([12; 32]),
+        );
+        let calls = std::cell::Cell::new(0);
+        let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            calls.set(calls.get() + 1);
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(store
+            .append_signed_authorized(TimelineId::new(), &invalid, &mut callback)
+            .is_err());
+        assert_eq!(calls.get(), 0);
+        // Cover the fixture separately while asserting the store never called it.
+        assert!(callback(&invalid, Seq::ZERO).is_err());
+        assert!(store.begin_key_registry_destruction(request).is_err());
+        assert!(store
+            .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))
+            .is_err());
     }
 
     #[test]
