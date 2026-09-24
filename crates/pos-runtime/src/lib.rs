@@ -28,10 +28,12 @@ pub mod composition;
 pub mod driver;
 pub mod erasure_host;
 pub mod error;
+pub mod measured_process_image;
 pub mod recorder;
 pub mod registry;
 pub mod scheduler;
 pub mod schema;
+pub mod world_profile;
 
 pub use composition::{
     DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1,
@@ -48,8 +50,10 @@ pub use erasure_host::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostStatusV1,
     ErasureReadSenderV1,
 };
-pub use error::{ActionSubmissionError, RuntimeError};
+pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
+pub use measured_process_image::MeasuredProcessImageV1;
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
+pub use world_profile::HostWorldProfileV1;

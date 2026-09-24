@@ -2,6 +2,43 @@ use pos_core::ids::{PluginId, TimelineId};
 use pos_core::{ActionRejected, ConsentError, ErasureContainmentErrorV1};
 use thiserror::Error;
 
+/// Closed failure classes for an installed World Live backend.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum WorldInstallationErrorV1 {
+    #[error("unsupported Live platform")]
+    UnsupportedPlatform,
+    #[error("unsupported World profile")]
+    UnsupportedProfile,
+    #[error("unsupported World backend factory")]
+    UnsupportedFactory,
+    #[error("process image could not be opened")]
+    MeasurementOpenFailed,
+    #[error("process image could not be read")]
+    MeasurementReadFailed,
+    #[error("process image metadata could not be read")]
+    MeasurementMetadataFailed,
+    #[error("process image is empty")]
+    MeasurementEmpty,
+    #[error("process image changed during measurement")]
+    MeasurementChanged,
+    #[error("retained World configuration is missing")]
+    RetainedConfigMissing,
+    #[error("retained World configuration is malformed")]
+    RetainedConfigMalformed,
+    #[error("retained World configuration is ambiguous")]
+    RetainedConfigAmbiguous,
+    #[error("retained World configuration is out of order")]
+    RetainedConfigOutOfOrder,
+    #[error("World backend ID differs from the installed backend")]
+    BackendIdMismatch,
+    #[error("World backend version differs from the installed backend")]
+    BackendVersionMismatch,
+    #[error("World backend digest differs from the installed backend")]
+    BackendDigestMismatch,
+    #[error("World profile differs from the installed profile")]
+    ProfileMismatch,
+}
+
 /// Closed result of one Timeline-bound proposed-action admission.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ActionSubmissionError {
@@ -18,6 +55,9 @@ pub enum ActionSubmissionError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error(transparent)]
+    WorldInstallation(#[from] WorldInstallationErrorV1),
+
     #[error(transparent)]
     Composition(#[from] crate::PluginCompositionErrorV1),
 

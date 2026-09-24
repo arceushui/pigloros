@@ -18,8 +18,8 @@ use pos_core::{
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEvent, RecoveryEventHeader,
-    RuntimeError, StepOutput,
+    Driver, DriverRecoveryEvidence, HostWorldProfileV1, MeasuredProcessImageV1, ObservationView,
+    RecoveryEvent, RecoveryEventHeader, RuntimeError, StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1130,7 +1130,7 @@ impl ActionApprover for WorldPlugin {
 pub struct WorldDriver {
     initial_entities: Vec<Body>,
     entities: Vec<Body>,
-    backend: Box<dyn WorldBackend>,
+    backend: WorldDriverBackend,
     tick: u64,
     /// Counts simulation steps independently of timeline ticks (same value in V1).
     step_index: u64,
@@ -1141,6 +1141,28 @@ pub struct WorldDriver {
     config_entity: EntityId,
     staged_step: Option<WorldDriverState>,
     staged_restore: Option<WorldDriverState>,
+}
+
+struct InstalledWorldBackendV1 {
+    image: MeasuredProcessImageV1,
+    sealed_config: CanonicalBytes,
+    backend: Box<dyn WorldBackend>,
+}
+
+enum WorldDriverBackend {
+    Installed(InstalledWorldBackendV1),
+    #[cfg(test)]
+    Fixture(Box<dyn WorldBackend>),
+}
+
+impl WorldDriverBackend {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        match self {
+            Self::Installed(installed) => installed.backend.step(bodies, timestep_micros),
+            #[cfg(test)]
+            Self::Fixture(backend) => backend.step(bodies, timestep_micros),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1160,11 +1182,52 @@ struct WorldRecoveryCursor {
 }
 
 impl WorldDriver {
-    /// Create a new world driver with the given backend and session config.
-    #[must_use]
-    pub fn new(
+    /// Create Live World stepping with the measured built-in backend and a fixed host profile.
+    ///
+    /// # Errors
+    /// Fails closed when the running process cannot be measured or the profile cannot be sealed.
+    pub fn new_live(
+        entities: Vec<Body>,
+        profile: HostWorldProfileV1,
+    ) -> Result<Self, RuntimeError> {
+        let image = MeasuredProcessImageV1::capture()?;
+        let [gravity_x, gravity_y, gravity_z] = profile.gravity();
+        let config = WorldConfigV1 {
+            timestep_micros: profile.timestep_micros(),
+            coord_convention: profile.coord_convention(),
+            gravity_x,
+            gravity_y,
+            gravity_z,
+            backend_id: "simple-kinematic".to_owned(),
+            backend_version: "1.0.0".to_owned(),
+            backend_content_hash: image.digest(),
+            action_schema_version: profile.action_schema_version(),
+            observation_schema_version: profile.observation_schema_version(),
+            sensor_min_resolution_mm: profile.sensor_min_resolution_mm(),
+            actuator_catalogue_version: profile.actuator_catalogue_version(),
+        };
+        let sealed_config = config
+            .encode()
+            .map_err(|_| WorldInstallationErrorV1::UnsupportedProfile)?;
+        Ok(Self::with_backend(
+            entities,
+            WorldDriverBackend::Installed(InstalledWorldBackendV1 {
+                image,
+                sealed_config,
+                backend: Box::new(SimpleKinematicBackend::new()),
+            }),
+            config,
+        ))
+    }
+
+    #[cfg(test)]
+    fn new(entities: Vec<Body>, backend: Box<dyn WorldBackend>, config: WorldConfigV1) -> Self {
+        Self::with_backend(entities, WorldDriverBackend::Fixture(backend), config)
+    }
+
+    fn with_backend(
         mut entities: Vec<Body>,
-        backend: Box<dyn WorldBackend>,
+        backend: WorldDriverBackend,
         config: WorldConfigV1,
     ) -> Self {
         entities.sort_unstable_by_key(|body| body.entity_id);
@@ -1209,6 +1272,66 @@ impl WorldDriver {
         self.config_emitted = state.config_emitted;
         self.applied_action_seqs = state.applied_action_seqs;
         self.causation_by_body = state.causation_by_body;
+    }
+
+    fn preflight_installed_recovery(
+        &self,
+        evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        let installed = match &self.backend {
+            WorldDriverBackend::Installed(installed) => installed,
+            #[cfg(test)]
+            WorldDriverBackend::Fixture(_) => return Ok(()),
+        };
+        let fresh = MeasuredProcessImageV1::capture()?;
+        if fresh.digest() != installed.image.digest() {
+            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
+        }
+        let mut retained = None;
+        let mut saw_observation = false;
+        for event in evidence.events() {
+            match event.header().event_type().as_str() {
+                EVENT_TYPE_CONFIG_V1 => {
+                    if saw_observation {
+                        return Err(WorldInstallationErrorV1::RetainedConfigOutOfOrder.into());
+                    }
+                    if retained.is_some() {
+                        return Err(WorldInstallationErrorV1::RetainedConfigAmbiguous.into());
+                    }
+                    retained = Some(
+                        event
+                            .payload()
+                            .ok_or(WorldInstallationErrorV1::RetainedConfigMalformed)?,
+                    );
+                }
+                EVENT_TYPE_OBSERVATION_V1 => {
+                    saw_observation = true;
+                }
+                _ => {}
+            }
+        }
+        let Some(retained) = retained else {
+            return if saw_observation {
+                Err(WorldInstallationErrorV1::RetainedConfigMissing.into())
+            } else {
+                Ok(())
+            };
+        };
+        let decoded = WorldConfigV1::decode(retained)
+            .map_err(|_| WorldInstallationErrorV1::RetainedConfigMalformed)?;
+        if decoded.backend_id != self.config.backend_id {
+            return Err(WorldInstallationErrorV1::BackendIdMismatch.into());
+        }
+        if decoded.backend_version != self.config.backend_version {
+            return Err(WorldInstallationErrorV1::BackendVersionMismatch.into());
+        }
+        if decoded.backend_content_hash != fresh.digest() {
+            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
+        }
+        if retained != &installed.sealed_config {
+            return Err(WorldInstallationErrorV1::ProfileMismatch.into());
+        }
+        Ok(())
     }
 
     fn apply_recovery_event(
@@ -1543,6 +1666,7 @@ impl WorldDriver {
     }
 }
 
+#[cfg(test)]
 impl Default for WorldDriver {
     fn default() -> Self {
         Self::new(
@@ -1587,6 +1711,7 @@ impl Driver for WorldDriver {
         &mut self,
         evidence: &DriverRecoveryEvidence,
     ) -> Result<(), RuntimeError> {
+        self.preflight_installed_recovery(evidence)?;
         let mut restored = WorldDriverState {
             entities: self.initial_entities.clone(),
             tick: 0,
@@ -1810,6 +1935,8 @@ mod tests {
     };
     use pos_runtime::{PluginRegistry, TimelineHistorySegment};
     use pos_store::{open_store as open_unbound_store, StoreConfig};
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn open_store(config: StoreConfig) -> Result<Box<dyn pos_core::EventStore>, CoreError> {
@@ -3436,6 +3563,214 @@ mod tests {
                 &complete,
             )
             .test_ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    struct CountedInstalledBackend(Arc<AtomicUsize>);
+
+    #[cfg(target_os = "linux")]
+    impl WorldBackend for CountedInstalledBackend {
+        fn name(&self) -> &'static str {
+            "counted-installed-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            SimpleKinematicBackend::new().step(bodies, timestep_micros)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_body(body_id: EntityId) -> Body {
+        Body {
+            entity_id: body_id,
+            rotation: BodyRotationV1::default(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_history(body_id: EntityId, timeline: TimelineId) -> Vec<Event> {
+        let mut driver = WorldDriver::new_live(
+            vec![installed_body(body_id)],
+            HostWorldProfileV1::standard(),
+        )
+        .test_ok();
+        let output = driver.step(timeline, ObservationView::empty()).test_ok();
+        output
+            .drafts
+            .iter()
+            .enumerate()
+            .map(|(index, draft)| {
+                make_versioned_event(
+                    u64::try_from(index).test_ok() + 1,
+                    draft.entity,
+                    draft.event_type.as_str(),
+                    draft.payload.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_registry(body_id: EntityId) -> (PluginRegistry, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut driver = WorldDriver::new_live(
+            vec![installed_body(body_id)],
+            HostWorldProfileV1::standard(),
+        )
+        .test_ok();
+        if let WorldDriverBackend::Installed(installed) = &mut driver.backend {
+            installed.backend = Box::new(CountedInstalledBackend(Arc::clone(&calls)));
+        }
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        registry
+            .register(
+                &WorldPlugin::new().with_bodies([body_id]),
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(driver)),
+            )
+            .test_ok();
+        (registry, calls)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_installed_recovery_rejected(
+        body_id: EntityId,
+        timeline: TimelineId,
+        events: &[Event],
+        expected: WorldInstallationErrorV1,
+    ) {
+        let (mut registry, calls) = installed_registry(body_id);
+        let head = Seq::from_u64(u64::try_from(events.len()).test_ok());
+        let error = registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, head)], events)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::WorldInstallation(actual) if actual == expected
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_resume_matches_retained_config_before_backend_step() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+        let config = WorldConfigV1::decode(&events[0].payload).test_ok();
+        assert_eq!(
+            config.backend_content_hash,
+            MeasuredProcessImageV1::capture().test_ok().digest()
+        );
+        let (mut registry, calls) = installed_registry(body_id);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_resume_rejects_ambiguous_and_mismatched_config() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+        let original = WorldConfigV1::decode(&events[0].payload).test_ok();
+        for (config, expected) in [
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_id = "other".to_owned();
+                    value
+                },
+                WorldInstallationErrorV1::BackendIdMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_version = "other".to_owned();
+                    value
+                },
+                WorldInstallationErrorV1::BackendVersionMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_content_hash = [7; 32];
+                    value
+                },
+                WorldInstallationErrorV1::BackendDigestMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.timestep_micros += 1;
+                    value
+                },
+                WorldInstallationErrorV1::ProfileMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.gravity_x = -0.0;
+                    value
+                },
+                WorldInstallationErrorV1::ProfileMismatch,
+            ),
+        ] {
+            let mut modified = events.clone();
+            modified[0].payload = config.encode().test_ok();
+            assert_installed_recovery_rejected(body_id, timeline, &modified, expected);
+        }
+        let mut malformed = events.clone();
+        malformed[0].payload = CanonicalBytes::from_static(b"bad WCF1");
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &malformed,
+            WorldInstallationErrorV1::RetainedConfigMalformed,
+        );
+        let mut missing = vec![events[1].clone()];
+        missing[0].seq = Seq::from_u64(1);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &missing,
+            WorldInstallationErrorV1::RetainedConfigMissing,
+        );
+        let mut duplicate = vec![events[0].clone(), events[0].clone(), events[1].clone()];
+        duplicate[1].seq = Seq::from_u64(2);
+        duplicate[2].seq = Seq::from_u64(3);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &duplicate,
+            WorldInstallationErrorV1::RetainedConfigAmbiguous,
+        );
+        let mut late = vec![events[1].clone(), events[0].clone()];
+        late[0].seq = Seq::from_u64(1);
+        late[1].seq = Seq::from_u64(2);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &late,
+            WorldInstallationErrorV1::RetainedConfigOutOfOrder,
+        );
     }
 
     fn assert_malformed_recovery_events(

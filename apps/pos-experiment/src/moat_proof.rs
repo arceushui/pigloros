@@ -27,13 +27,13 @@ use pos_core::{
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
 use pos_plugin_world::{
-    encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, SimpleKinematicBackend,
-    WorldActionV1, WorldConfigV1, WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
-    COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
-    SENSOR_MIN_RESOLUTION_MM,
+    encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldConfigV1,
+    WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1,
+    EVENT_TYPE_CONFIG_V1, EVENT_TYPE_OBSERVATION_V1,
 };
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
+    Driver, DriverRecoveryEvidence, HostWorldProfileV1, ObservationView, RecoveryEventHeader,
+    RuntimeError, StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -61,7 +61,6 @@ macro_rules! result_pipeline {
 const AGENT_EVENT_TYPE: &str = "proof.agent.reaction.v1";
 const AGENT_ENTITY_KIND: &str = "proof-agent";
 const SOCIETY_ENTITY_KIND: &str = "proof-society";
-const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1";
 const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
@@ -472,14 +471,11 @@ fn register_plugins(
     topology: &ProofTopology,
 ) -> Result<(), RuntimeError> {
     result_pipeline! {
+        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
         experiment.register_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
-                &topology.input,
-                topology.body,
-                topology.config_entity,
-            ))),
+            Some(Box::new(driver)),
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
@@ -503,14 +499,11 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
     result_pipeline! {
+        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
         registry.register_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
-                &topology.input,
-                topology.body,
-                topology.config_entity,
-            ))),
+            Some(Box::new(driver)),
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
@@ -531,8 +524,12 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
     }
 }
 
-fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityId) -> WorldDriver {
-    WorldDriver::new(
+fn world_driver(
+    input: &MoatProofInputV1,
+    body: EntityId,
+    config_entity: EntityId,
+) -> Result<WorldDriver, RuntimeError> {
+    WorldDriver::new_live(
         vec![Body {
             entity_id: body,
             rotation: BodyRotationV1::default(),
@@ -543,23 +540,9 @@ fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityI
             vy: 0.0,
             vz: input.initial_velocity[1],
         }],
-        Box::new(SimpleKinematicBackend::new()),
-        WorldConfigV1 {
-            timestep_micros: 1_000_000,
-            coord_convention: COORD_CONVENTION_RIGHT_HANDED_Y_UP,
-            gravity_x: 0.0,
-            gravity_y: 0.0,
-            gravity_z: 0.0,
-            backend_id: "simple-kinematic".to_owned(),
-            backend_version: "1.0.0".to_owned(),
-            backend_content_hash: *blake3::hash(WORLD_BACKEND_CONTENT).as_bytes(),
-            action_schema_version: 1,
-            observation_schema_version: 1,
-            sensor_min_resolution_mm: SENSOR_MIN_RESOLUTION_MM,
-            actuator_catalogue_version: 1,
-        },
+        HostWorldProfileV1::moat_proof(),
     )
-    .with_config_entity(config_entity)
+    .map(|driver| driver.with_config_entity(config_entity))
 }
 
 fn payload_digest(event: &Event) -> [u8; 32] {
@@ -694,6 +677,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
     let causal_trace = causal_trace(events, &ids);
     let uncertainty = uncertainty_from_events(events);
     let participant_views = participant_views(events);
+    let artifact_closure_digest = artifact_closure_digest(topology, factual_events)?;
     build_wave8_contract(
         context,
         &event_summaries,
@@ -717,7 +701,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
                 b"PiglorOS.TrustPolicySnapshot.v1",
                 TRUST_POLICY_CONTENT,
             ),
-            artifact_closure_digest: artifact_closure_digest(topology),
+            artifact_closure_digest,
             evaluator_digest: digest_domain(b"PiglorOS.Evaluator.v1", EVALUATOR_CONTENT),
             replay_claim: ReplayClaimV1::Exact,
             plugin_versions: plugin_versions.clone(),
@@ -847,7 +831,17 @@ fn profile_digest() -> [u8; 32] {
     digest_domain(EXECUTION_PROFILE_CONTENT, b"profile-v1")
 }
 
-fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
+fn artifact_closure_digest(
+    topology: &ProofTopology,
+    factual_events: &[Event],
+) -> Result<[u8; 32], MoatProofError> {
+    let config_event = factual_events
+        .iter()
+        .find(|event| event.event_type.as_str() == EVENT_TYPE_CONFIG_V1)
+        .ok_or(RuntimeError::WorldInstallation(
+            WorldInstallationErrorV1::RetainedConfigMissing,
+        ))?;
+    let world_config = WorldConfigV1::decode(&config_event.payload)?;
     let mut bytes = Vec::new();
     for (name, version) in [
         ("world", "1.0.0"),
@@ -860,11 +854,11 @@ fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
         bytes.push(0);
     }
     bytes.extend_from_slice(&topology.input_digest);
-    bytes.extend_from_slice(blake3::hash(WORLD_BACKEND_CONTENT).as_bytes());
+    bytes.extend_from_slice(&world_config.backend_content_hash);
     bytes.extend_from_slice(blake3::hash(EXECUTION_PROFILE_CONTENT).as_bytes());
     bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
     bytes.extend_from_slice(blake3::hash(EVALUATOR_CONTENT).as_bytes());
-    digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes)
+    Ok(digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes))
 }
 
 fn scheduler_digest() -> [u8; 32] {
@@ -2547,11 +2541,14 @@ mod tests {
             .register(
                 &agent_duplicate.world_plugin,
                 Some(Box::new(WorldReducer)),
-                Some(Box::new(world_driver(
-                    &agent_duplicate.input,
-                    agent_duplicate.body,
-                    agent_duplicate.config_entity,
-                ))),
+                Some(Box::new(
+                    world_driver(
+                        &agent_duplicate.input,
+                        agent_duplicate.body,
+                        agent_duplicate.config_entity,
+                    )
+                    .test_ok(),
+                )),
             )
             .test_ok();
         assert!(register_plugins(&mut experiment, &agent_duplicate).is_err());
@@ -3015,11 +3012,9 @@ mod run_coverage_entrypoints {
         test_ok(experiment.register(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
-                &topology.input,
-                topology.body,
-                topology.config_entity,
-            ))),
+            Some(Box::new(
+                world_driver(&topology.input, topology.body, topology.config_entity).test_ok(),
+            )),
         ));
         assert!(register_plugins(&mut experiment, &topology).is_err());
 

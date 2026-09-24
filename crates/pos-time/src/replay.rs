@@ -142,10 +142,9 @@ mod tests {
         CoreError, ErasureContainmentGateV1, Event, Reducer, State,
     };
     use pos_plugin_world::{
-        encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, SimpleKinematicBackend,
-        WorldActionV1, WorldConfigV1, WorldDriver, WorldObservationV1, WorldReducer,
-        ACTION_SCOPE_SINGLE_BODY, COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1,
-        EVENT_TYPE_OBSERVATION_V1, SENSOR_MIN_RESOLUTION_MM,
+        encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldDriver,
+        WorldObservationV1, WorldReducer, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1,
+        EVENT_TYPE_OBSERVATION_V1,
     };
     use pos_runtime::{Driver, ObservationView};
     use pos_state::ProjectionRegistry;
@@ -315,21 +314,7 @@ mod tests {
         .test_ok();
         let mut bodies = [EntityId::new(), EntityId::new()];
         bodies.sort_unstable();
-        let config = WorldConfigV1 {
-            timestep_micros: 1_000_000,
-            coord_convention: COORD_CONVENTION_RIGHT_HANDED_Y_UP,
-            gravity_x: 0.0,
-            gravity_y: -9.81,
-            gravity_z: 0.0,
-            backend_id: "simple-kinematic".to_owned(),
-            backend_version: "1.0.0".to_owned(),
-            backend_content_hash: [3; 32],
-            action_schema_version: 1,
-            observation_schema_version: 1,
-            sensor_min_resolution_mm: SENSOR_MIN_RESOLUTION_MM,
-            actuator_catalogue_version: 1,
-        };
-        let mut driver = WorldDriver::new(
+        let mut driver = WorldDriver::new_live(
             vec![
                 Body {
                     entity_id: bodies[1],
@@ -352,9 +337,9 @@ mod tests {
                     vz: 0.0,
                 },
             ],
-            Box::new(SimpleKinematicBackend::new()),
-            config,
-        );
+            pos_runtime::HostWorldProfileV1::moat_proof(),
+        )
+        .test_ok();
         let action = WorldActionV1 {
             actor_entity_id: bodies[0],
             body_entity_id: bodies[0],
