@@ -356,7 +356,7 @@ pub fn sign_timeline_event_for_registered_role<R: KeyRegistrySigningPortV1>(
 ///
 /// The caller must resolve the public key for the complete owner/role/epoch
 /// identity before treating success as trusted Timeline integrity. This
-/// operation makes no ReplayClaim and does not consult mutable registry state.
+/// operation makes no `ReplayClaim` and does not consult mutable registry state.
 ///
 /// # Errors
 /// Rejects a different identity, mismatched payload, or invalid signature.
