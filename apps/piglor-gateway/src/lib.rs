@@ -45,9 +45,8 @@ use pos_plugin_world::{
     ActionKindV1, WorldActionV1, WorldPlugin, EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
-    ActionSubmissionError, DomainImplementationKindV1, ErasureExecutionHostV1,
-    ErasureHostStatusV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
-    PluginRegistrationV1, PluginRegistry,
+    ActionSubmissionError, DomainImplementationKindV1, ErasureExecutionHostV1, ErasureHostStatusV1,
+    PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -152,12 +151,12 @@ mod coverage_tests {
         CanonicalBytes, Capability, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Plugin, PluginId, Seq,
     };
-    use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use pos_runtime::{
         DomainImplementationKindV1, OutputAdmissionErrorV1, PluginAvailabilityV1,
         PluginCompositionErrorV1, PluginIsolationV1, PluginPinFieldV1, PluginPinV1,
         PluginRegistrationV1, PluginRegistry, RuntimeError,
     };
+    use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
 
     struct InvalidVersionPlugin;
@@ -395,13 +394,9 @@ mod coverage_tests {
             ),
         ];
         for (kind, isolation, configuration_digest, role, expected_field) in cases {
-            let pin = PluginPinV1::try_new(
-                kind,
-                isolation,
-                configuration_digest,
-                vec![role.to_owned()],
-            )
-            .test_ok();
+            let pin =
+                PluginPinV1::try_new(kind, isolation, configuration_digest, vec![role.to_owned()])
+                    .test_ok();
             let mut rejected = PluginRegistry::new().without_erasure_gate();
             let result = rejected.register_installed_output(
                 &plugin,

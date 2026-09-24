@@ -7,8 +7,8 @@ use pos_core::{
     plugin::PluginOwnerTokenV1,
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
     ActionApprover, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
-    Hash, Plugin,
-    PluginCpuReservationV1, PluginId, WorkloadProfileV1, MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
+    Hash, Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
+    MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
 };
 use std::{any::type_name, sync::Mutex};
 

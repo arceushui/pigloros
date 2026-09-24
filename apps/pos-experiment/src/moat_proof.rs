@@ -559,7 +559,13 @@ impl ProofTopology {
 fn installed_world_registration(
     topology: &ProofTopology,
     profile_id: &str,
-) -> Result<(pos_runtime::OutputPolicyBindingV1, pos_runtime::PluginRegistrationV1), RuntimeError> {
+) -> Result<
+    (
+        pos_runtime::OutputPolicyBindingV1,
+        pos_runtime::PluginRegistrationV1,
+    ),
+    RuntimeError,
+> {
     result_pipeline! {
         world_output_binding(
             &topology.world_plugin,
@@ -584,7 +590,13 @@ fn installed_world_registration(
 fn installed_agent_registration(
     topology: &ProofTopology,
     profile_id: &str,
-) -> Result<(pos_runtime::OutputPolicyBindingV1, pos_runtime::PluginRegistrationV1), RuntimeError> {
+) -> Result<
+    (
+        pos_runtime::OutputPolicyBindingV1,
+        pos_runtime::PluginRegistrationV1,
+    ),
+    RuntimeError,
+> {
     result_pipeline! {
         proof_agent_output_binding(
             &topology.agent_plugin,
@@ -603,7 +615,13 @@ fn installed_agent_registration(
 fn installed_society_registration(
     topology: &ProofTopology,
     profile_id: &str,
-) -> Result<(pos_runtime::OutputPolicyBindingV1, pos_runtime::PluginRegistrationV1), RuntimeError> {
+) -> Result<
+    (
+        pos_runtime::OutputPolicyBindingV1,
+        pos_runtime::PluginRegistrationV1,
+    ),
+    RuntimeError,
+> {
     result_pipeline! {
         proof_society_output_binding(&topology.society_plugin, profile_id) => |binding|;
         binding.with_installed_driver(ProofSocietyDriver::new(topology.society))
