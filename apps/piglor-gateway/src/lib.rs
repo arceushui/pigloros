@@ -193,6 +193,20 @@ mod coverage_tests {
         let plugin = GatewayActionPlugin {
             id: PluginId::new(),
         };
+        let binding = gateway_output_binding_with_inputs(
+            &plugin,
+            &[],
+            "deterministic-local-v1",
+            "world.action.v1",
+        )
+        .expect("installed Gateway output binding");
+        assert!(binding
+            .implementation_artifact()
+            .ends_with(include_bytes!("../../../plugins/world/src/lib.rs")));
+        assert_eq!(
+            binding.policy().fields().implementation_hash,
+            pos_runtime::implementation_artifact_hash_v1(binding.implementation_artifact()),
+        );
         assert!(gateway_output_binding_with_inputs(
             &plugin,
             &[],

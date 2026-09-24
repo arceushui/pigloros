@@ -226,6 +226,10 @@ impl InstalledOutputPolicySourceV1 {
                     "src/main.rs",
                     include_bytes!("../../../apps/piglor-gateway/src/main.rs"),
                 ),
+                (
+                    "plugins/world/src/lib.rs",
+                    include_bytes!("../../../plugins/world/src/lib.rs"),
+                ),
             ]),
             Self::World => source_artifact_bundle(&[(
                 "src/lib.rs",
