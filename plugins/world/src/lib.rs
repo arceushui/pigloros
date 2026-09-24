@@ -18,7 +18,8 @@ use pos_core::{
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
+    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEvent, RecoveryEventHeader,
+    RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1210,6 +1211,64 @@ impl WorldDriver {
         self.causation_by_body = state.causation_by_body;
     }
 
+    fn apply_recovery_event(
+        &self,
+        restored: &mut WorldDriverState,
+        cursor: &mut WorldRecoveryCursor,
+        event: &RecoveryEvent,
+    ) -> Result<(), RuntimeError> {
+        let Some(payload) = event.payload() else {
+            return Ok(());
+        };
+        match event.header().event_type().as_str() {
+            EVENT_TYPE_ACTION_V1 => {
+                let (action, velocity) = self.decode_configured_action(payload)?;
+                if !Self::apply_action_to_entities(&mut restored.entities, &action, velocity) {
+                    return Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: "action target is not a staged world body".to_owned(),
+                    });
+                }
+                restored
+                    .applied_action_seqs
+                    .push(event.header().seq().as_u64());
+                Self::record_causation(
+                    &mut restored.causation_by_body,
+                    action.body_entity_id,
+                    event.header().id(),
+                );
+            }
+            EVENT_TYPE_OBSERVATION_V1 => {
+                let observation = WorldObservationV1::decode(payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                Self::apply_recovered_observation(restored, cursor, event.header(), &observation)?;
+            }
+            EVENT_TYPE_CONFIG_V1 => {
+                let config = WorldConfigV1::decode(payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                if config != self.config {
+                    return Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                        reason:
+                            "recovered world configuration differs from the pinned configuration"
+                                .to_owned(),
+                    });
+                }
+                restored.config_emitted = true;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn apply_recovered_observation(
         restored: &mut WorldDriverState,
         cursor: &mut WorldRecoveryCursor,
@@ -1538,56 +1597,7 @@ impl Driver for WorldDriver {
         };
         let mut cursor = WorldRecoveryCursor::default();
         for event in evidence.events() {
-            let event_type = event.header().event_type().as_str();
-            let Some(payload) = event.payload() else {
-                continue;
-            };
-            if event_type == EVENT_TYPE_ACTION_V1 {
-                let (action, velocity) = self.decode_configured_action(payload)?;
-                if !Self::apply_action_to_entities(&mut restored.entities, &action, velocity) {
-                    return Err(RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                        reason: "action target is not a staged world body".to_owned(),
-                    });
-                }
-                restored
-                    .applied_action_seqs
-                    .push(event.header().seq().as_u64());
-                Self::record_causation(
-                    &mut restored.causation_by_body,
-                    action.body_entity_id,
-                    event.header().id(),
-                );
-            } else if event_type == EVENT_TYPE_OBSERVATION_V1 {
-                let observation = WorldObservationV1::decode(payload).map_err(|error| {
-                    RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                Self::apply_recovered_observation(
-                    &mut restored,
-                    &mut cursor,
-                    event.header(),
-                    &observation,
-                )?;
-            } else if event_type == EVENT_TYPE_CONFIG_V1 {
-                let config = WorldConfigV1::decode(payload).map_err(|error| {
-                    RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                if config != self.config {
-                    return Err(RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
-                        reason:
-                            "recovered world configuration differs from the pinned configuration"
-                                .to_owned(),
-                    });
-                }
-                restored.config_emitted = true;
-            }
+            self.apply_recovery_event(&mut restored, &mut cursor, event)?;
         }
         if cursor.step.is_some() && cursor.observed_bodies != restored.entities.len() {
             return Err(RuntimeError::InvalidRecoveryEvidence {
