@@ -133,6 +133,7 @@ fn event(entity: EntityId, sequence: u64) -> Event {
         schema_version: SchemaVersion::V1,
         signature: None,
         signature_identity: None,
+        origin: None,
         payload_hash: hash_from_repeated_byte(1),
     }
 }

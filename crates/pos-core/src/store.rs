@@ -305,6 +305,8 @@ impl SeqRange {
 
 /// A portable snapshot of a timeline and all its events.
 /// Used for export/import across different `EventStore` backends.
+/// Identity-preserving exports retain each Event's first-commit origin;
+/// flattened Fork exports assign new origin context to reminted Events.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TimelineExport {
     pub timeline: Timeline,
@@ -951,8 +953,9 @@ fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
 ///
 /// When the source was a fork, `fork_point` is cleared and every event receives a
 /// **fresh** [`EventId`] (causation links remapped within the export; signatures
-/// cleared). That yields an independent root that will not collide with parent
-/// `EventId`s on import. For `CoW` fork round-trips that must keep `fork_point` and
+/// cleared, origin rebound to the new root). That yields an independent root
+/// that will not collide with parent `EventId`s on import. For `CoW` fork
+/// round-trips that must keep `fork_point` and
 /// original ids, use [`export_timeline_own`].
 ///
 /// # Errors
@@ -1223,6 +1226,10 @@ fn materialize_fork_export_as_root(export: &mut TimelineExport) {
         }
         event.signature = None;
         event.signature_identity = None;
+        event.origin = Some(crate::EventOriginV1 {
+            origin_timeline_id: export.timeline.id(),
+            origin_logical_seq: event.seq,
+        });
     }
 }
 
@@ -1539,6 +1546,7 @@ mod tests {
                         schema_version: d.schema_version,
                         signature: None,
                         signature_identity: None,
+                        origin: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1604,6 +1612,7 @@ mod tests {
                         schema_version: d.schema_version,
                         signature: None,
                         signature_identity: None,
+                        origin: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1945,6 +1954,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let meta = TimelineMeta::root("original");
@@ -2089,6 +2099,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -2209,6 +2220,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -2295,6 +2307,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: Hash::from_bytes([0u8; 32]),
             }],
             parent_fork_hash: None,
@@ -2473,6 +2486,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         }
     }
@@ -3316,6 +3330,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([1u8; 64])),
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         };
         let original_id = event.id;
@@ -3404,6 +3419,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([9u8; 64])),
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -3497,6 +3513,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -3803,6 +3820,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -3844,6 +3862,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -4100,6 +4119,7 @@ mod key_registry_coverage {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         }
     }

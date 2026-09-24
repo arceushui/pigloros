@@ -80,6 +80,7 @@ fn fixture_event(id: Ulid, seq: u64, value: f64) -> Event {
         schema_version: SchemaVersion::V1,
         signature: None,
         signature_identity: None,
+        origin: None,
         payload_hash: payload_hash(&payload),
     }
 }

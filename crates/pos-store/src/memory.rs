@@ -14,7 +14,7 @@ use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     crypto::Hash,
     error::CoreError,
-    event::{Event, EventDraft, Kind},
+    event::{Event, EventDraft, EventOriginV1, Kind},
     geo_admission::{
         GeoLocationAdmissionFingerprintV1, GeoLocationAdmissionIntentV1,
         GeoLocationAdmissionLinkV1, GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1,
@@ -579,10 +579,10 @@ impl MemoryStore {
         let event = {
             let (timelines, event_ids, hasher) =
                 (&mut self.timelines, &mut self.event_ids, &self.hasher);
-            mutable_state(timelines, timeline).map(|state| {
-                let event = Self::append_one_to_state(state, draft, hasher.as_ref());
+            mutable_state(timelines, timeline).and_then(|state| {
+                let event = Self::append_one_to_state(state, draft, hasher.as_ref())?;
                 event_ids.insert(event.id);
-                event
+                Ok(event)
             })
         };
         event.and_then(|event| {
@@ -640,8 +640,15 @@ impl MemoryStore {
         state: &mut TimelineState,
         draft: &EventDraft,
         hasher: &dyn Hasher,
-    ) -> Event {
+    ) -> Result<Event, CoreError> {
         let seq = state.timeline.head.next();
+        let origin_logical_seq = state
+            .timeline
+            .meta
+            .fork_point
+            .map_or(0, |(_, fork)| fork.as_u64())
+            .checked_add(seq.as_u64())
+            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
         let event_id = EventId::new();
         let id_bytes = event_id.to_string();
         let payload_hash = hasher.hash_payload(&draft.payload);
@@ -660,10 +667,14 @@ impl MemoryStore {
             schema_version: draft.schema_version,
             signature: None,
             signature_identity: None,
+            origin: Some(EventOriginV1 {
+                origin_timeline_id: state.timeline.id(),
+                origin_logical_seq: Seq::from_u64(origin_logical_seq),
+            }),
             payload_hash,
         };
         state.events.push(event.clone());
-        event
+        Ok(event)
     }
 
     fn chain_head(&self, id: TimelineId) -> Hash {
@@ -1227,11 +1238,11 @@ impl MemoryStore {
     ) -> Result<Vec<Event>, CoreError> {
         let committed = {
             let (timelines, hasher) = (&mut self.timelines, &self.hasher);
-            mutable_state(timelines, timeline).map(|state| {
+            mutable_state(timelines, timeline).and_then(|state| {
                 drafts
                     .iter()
                     .map(|draft| Self::append_one_to_state(state, draft, hasher.as_ref()))
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>, _>>()
             })
         };
         committed
@@ -2133,10 +2144,10 @@ impl GeoLocationAdmissionStore for MemoryStore {
         let event = {
             let (timelines, event_ids, hasher) =
                 (&mut self.timelines, &mut self.event_ids, &self.hasher);
-            mutable_state(timelines, timeline).map(|state| {
-                let event = Self::append_one_to_state(state, &draft, hasher.as_ref());
+            mutable_state(timelines, timeline).and_then(|state| {
+                let event = Self::append_one_to_state(state, &draft, hasher.as_ref())?;
                 event_ids.insert(event.id);
-                event
+                Ok(event)
             })?
         };
         let snapshot = request.snapshot().clone();
@@ -2321,6 +2332,10 @@ impl GeographicAdmissionStore for MemoryStore {
         let mut staged_state = existing_state.clone();
         let event_id = EventId::new();
         let event_seq = staged_state.timeline.head.next();
+        let origin_logical_seq = self
+            .logical_prefix(timeline)?
+            .checked_add(event_seq.as_u64())
+            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
         let snapshot_id = AdmissionSnapshotId::new();
         let snapshot =
             AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);
@@ -2347,6 +2362,10 @@ impl GeographicAdmissionStore for MemoryStore {
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: Some(EventOriginV1 {
+                origin_timeline_id: timeline,
+                origin_logical_seq: Seq::from_u64(origin_logical_seq),
+            }),
             payload_hash,
         };
         staged_state.timeline.head = event_seq;
@@ -3011,11 +3030,19 @@ impl EventStore for MemoryStore {
 
                     let mut timeline_state = store.state(timeline).timeline.clone();
                     let head = timeline_state.head;
-                    let ordered = pos_core::store::validate_committed_batch(
+                    let mut ordered = pos_core::store::validate_committed_batch(
                         head,
                         events,
                         &mut |id| store.event_ids.contains(id),
                         &*store.hasher,
+                    )?;
+                    crate::finalize_committed_origins(
+                        timeline,
+                        timeline_state
+                            .meta
+                            .fork_point
+                            .map_or(0, |(_, fork)| fork.as_u64()),
+                        &mut ordered,
                     )?;
                     let mut new_head = head;
                     let mut previous_hash = store.chain_head(timeline);
@@ -5572,6 +5599,7 @@ mod tests {
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }
         };
@@ -5598,6 +5626,7 @@ mod tests {
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         assert!(store.append_committed(timeline.id(), &[event]).is_err());
@@ -5842,6 +5871,7 @@ mod tests {
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         store.append_committed(leaf.id(), &[ev]).test_ok();
