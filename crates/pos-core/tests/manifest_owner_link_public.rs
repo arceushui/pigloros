@@ -74,6 +74,32 @@ const fn receipt_input() -> ManifestSlotAdmissionReceiptInputV1 {
     }
 }
 
+fn literal_receipt_bytes(previous: Option<u8>, inventory: Option<u8>) -> Vec<u8> {
+    // Independent positional CBOR oracle for the thirteen ADR-089 MSR1 fields.
+    let mut bytes = vec![0x8d, 0x44, b'M', b'S', b'R', b'1', 1, 0x58, 0x20];
+    bytes.extend_from_slice(&[9; 32]);
+    bytes.push(7);
+    for byte in [2, 3, 4, 5] {
+        bytes.extend_from_slice(&[0x58, 0x20]);
+        bytes.extend_from_slice(&[byte; 32]);
+    }
+    for optional_byte in [previous, inventory] {
+        if let Some(byte) = optional_byte {
+            bytes.extend_from_slice(&[0x58, 0x20]);
+            bytes.extend_from_slice(&[byte; 32]);
+        } else {
+            bytes.push(0xf6);
+        }
+    }
+    for byte in [6, 7] {
+        bytes.extend_from_slice(&[0x58, 0x20]);
+        bytes.extend_from_slice(&[byte; 32]);
+    }
+    bytes.extend_from_slice(&[0x58, 0x40]);
+    bytes.extend_from_slice(&[8; 64]);
+    bytes
+}
+
 fn encoded(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
@@ -436,6 +462,13 @@ fn binding_row_bounds_order_ids_and_hashes_fail_closed() {
         Err(ManifestOwnerLinkErrorV1::DuplicatePluginId)
     );
     let mut binding = binding_input();
+    let duplicate_slot = binding.rows[0].stable_slot.clone();
+    binding.rows[1].stable_slot = duplicate_slot;
+    assert_eq!(
+        ManifestSlotBindingV1::new(binding),
+        Err(ManifestOwnerLinkErrorV1::InvalidRowOrder)
+    );
+    let mut binding = binding_input();
     binding.rows[0].eop1_wal1_hash = Hash::zero();
     assert_eq!(
         ManifestSlotBindingV1::new(binding),
@@ -518,47 +551,75 @@ fn full_256_row_limit_is_preserved_without_truncation() -> TestResult {
 
 #[test]
 fn receipt_pins_signature_preimage_and_all_three_null_pairs() -> TestResult {
-    for (previous, inventory) in [
-        (None, None),
-        (None, Some(hash(15))),
-        (Some(hash(14)), Some(hash(15))),
-    ] {
+    let cases = [
+        (
+            None,
+            None,
+            314,
+            [
+                0x17, 0x28, 0x45, 0xb7, 0xe7, 0x70, 0x0c, 0x28, 0x47, 0xb3, 0xed, 0xbd, 0x6a,
+                0x8f, 0x75, 0xdd, 0x8a, 0x42, 0x15, 0xb4, 0xc3, 0x4a, 0xd6, 0x6c, 0xa1, 0x2c,
+                0x1e, 0xbd, 0xe4, 0x7c, 0x5d, 0xe6,
+            ],
+            [
+                0xcf, 0x77, 0x03, 0x9c, 0xa5, 0xab, 0x9f, 0x94, 0xd7, 0xf8, 0x7c, 0x09, 0xf3,
+                0x2f, 0x2b, 0xa9, 0x02, 0x23, 0xb5, 0x9c, 0xf9, 0x10, 0xd1, 0x91, 0xdf, 0x6b,
+                0x4c, 0xf3, 0xbb, 0x13, 0x4f, 0x89,
+            ],
+        ),
+        (
+            None,
+            Some(15),
+            347,
+            [
+                0xe0, 0xce, 0x2e, 0x80, 0x23, 0x45, 0x1e, 0x66, 0x83, 0x31, 0x05, 0x41, 0xc4,
+                0xf5, 0x1f, 0x52, 0xe2, 0x9e, 0x7a, 0x1f, 0x96, 0x8a, 0x16, 0xc1, 0x13, 0x07,
+                0xb1, 0xd4, 0x4d, 0x14, 0x0f, 0x87,
+            ],
+            [
+                0xb0, 0x7f, 0xad, 0x70, 0x39, 0x79, 0x1b, 0x8a, 0x7b, 0xb9, 0x2f, 0xd8, 0x70,
+                0x80, 0xbf, 0xdf, 0x0c, 0xcf, 0x2f, 0x47, 0x92, 0x32, 0x74, 0xb2, 0x71, 0xa0,
+                0x02, 0xc2, 0xe6, 0xdb, 0x65, 0xc8,
+            ],
+        ),
+        (
+            Some(14),
+            Some(15),
+            380,
+            [
+                0xf5, 0xca, 0xee, 0xd1, 0x53, 0x0a, 0xbc, 0x1c, 0x18, 0x97, 0x1b, 0x27, 0x4e,
+                0x77, 0x90, 0x4c, 0xcd, 0x68, 0x0f, 0x69, 0x15, 0x6b, 0x78, 0x84, 0x8e, 0xc9,
+                0x3a, 0x4a, 0x92, 0xd9, 0x83, 0x2e,
+            ],
+            [
+                0x6a, 0x39, 0xf1, 0x98, 0x9b, 0xf8, 0xfc, 0x38, 0x24, 0x7e, 0xe3, 0xee, 0xaf,
+                0xb9, 0xc8, 0x7b, 0x3d, 0xfc, 0x95, 0x33, 0x59, 0x74, 0xf8, 0xa7, 0x0c, 0x09,
+                0x99, 0xc3, 0x2f, 0x4a, 0x2c, 0xb0,
+            ],
+        ),
+    ];
+    for (previous, inventory, expected_len, expected_digest, expected_preimage_digest) in cases {
         let mut input = receipt_input();
-        input.previous_visible_lcq1_hash = previous;
-        input.expected_inventory_generation = inventory;
+        input.previous_visible_lcq1_hash = previous.map(hash);
+        input.expected_inventory_generation = inventory.map(hash);
         let record = ManifestSlotAdmissionReceiptV1::new(input)?;
         let bytes = record.to_canonical_cbor();
-        assert_eq!(bytes[0], 0x8d);
+        let expected_bytes = literal_receipt_bytes(previous, inventory);
+        assert_eq!(expected_bytes.len(), expected_len);
+        assert_eq!(bytes, expected_bytes);
         assert_eq!(
             ManifestSlotAdmissionReceiptV1::from_canonical_cbor(&bytes)?,
             record
         );
         let mut expected = b"pigloros.manifest-slot-admission-signature.v1\0".to_vec();
         expected.push(0x8c);
-        expected.extend_from_slice(&bytes[1..bytes.len() - 66]);
+        expected.extend_from_slice(&expected_bytes[1..expected_bytes.len() - 66]);
         assert_eq!(record.signature_preimage(), expected);
+        assert_eq!(record.digest().as_bytes(), &expected_digest);
+        let mut preimage_hasher = blake3::Hasher::new();
+        preimage_hasher.update(&record.signature_preimage());
+        assert_eq!(preimage_hasher.finalize().as_bytes(), &expected_preimage_digest);
     }
-    let record = ManifestSlotAdmissionReceiptV1::new(receipt_input())?;
-    let bytes = record.to_canonical_cbor();
-    assert_eq!(bytes.len(), 314);
-    assert_eq!(
-        record.digest().as_bytes(),
-        &[
-            0x17, 0x28, 0x45, 0xb7, 0xe7, 0x70, 0x0c, 0x28, 0x47, 0xb3, 0xed, 0xbd, 0x6a, 0x8f,
-            0x75, 0xdd, 0x8a, 0x42, 0x15, 0xb4, 0xc3, 0x4a, 0xd6, 0x6c, 0xa1, 0x2c, 0x1e, 0xbd,
-            0xe4, 0x7c, 0x5d, 0xe6,
-        ]
-    );
-    let mut preimage_hasher = blake3::Hasher::new();
-    preimage_hasher.update(&record.signature_preimage());
-    assert_eq!(
-        preimage_hasher.finalize().as_bytes(),
-        &[
-            0xcf, 0x77, 0x03, 0x9c, 0xa5, 0xab, 0x9f, 0x94, 0xd7, 0xf8, 0x7c, 0x09, 0xf3, 0x2f,
-            0x2b, 0xa9, 0x02, 0x23, 0xb5, 0x9c, 0xf9, 0x10, 0xd1, 0x91, 0xdf, 0x6b, 0x4c, 0xf3,
-            0xbb, 0x13, 0x4f, 0x89,
-        ]
-    );
     Ok(())
 }
 
