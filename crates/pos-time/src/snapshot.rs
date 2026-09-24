@@ -34,8 +34,10 @@ pub struct Snapshot {
 /// [`Snapshot`].
 ///
 /// # Errors
-/// Returns [`CoreError::ArtifactUnavailable`] when snapshot creation is not
-/// authoritative; otherwise propagates [`CoreError`] from the store.
+/// Fails closed when protected Snapshot authority or complete reads are
+/// unavailable. Host failures map to [`CoreError::ArtifactUnavailable`],
+/// [`CoreError::ErasureAccessFrozen`], or
+/// [`CoreError::ErasureContainmentUnavailable`].
 pub fn snapshot(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
@@ -94,7 +96,7 @@ pub enum SnapshotError {
     /// ADR-060 no longer permits the snapshot as authoritative state.
     #[error("snapshot artifact is unavailable for authoritative use")]
     ArtifactUnavailable,
-    /// A store I/O error occurred.
+    /// A non-artifact host, containment, or store error occurred.
     #[error("store error: {0}")]
     Store(CoreError),
     /// The snapshot and full-replay state disagree for an entity.
@@ -129,8 +131,9 @@ impl From<CoreError> for SnapshotError {
 ///
 /// # Errors
 /// Returns [`SnapshotError::ArtifactUnavailable`] when the registered snapshot
-/// may no longer be used authoritatively, [`SnapshotError::Store`] on I/O
-/// failure, or [`SnapshotError::Inconsistent`] if the states differ.
+/// may no longer be used authoritatively, [`SnapshotError::Store`] on a
+/// non-artifact host or store error, or [`SnapshotError::Inconsistent`] if the
+/// states differ.
 pub fn verify_snapshot_consistency(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,

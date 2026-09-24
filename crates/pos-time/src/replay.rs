@@ -16,8 +16,10 @@ use pos_state::ProjectionRegistry;
 /// Returns the events that were replayed so callers do not need a second read.
 ///
 /// # Errors
-/// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
-/// longer authoritative; otherwise propagates [`CoreError`] from the store.
+/// Fails closed when protected Replay authority or complete reads are
+/// unavailable. Host failures map to [`CoreError::ArtifactUnavailable`],
+/// [`CoreError::ErasureAccessFrozen`], or
+/// [`CoreError::ErasureContainmentUnavailable`].
 pub fn replay(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
@@ -32,8 +34,10 @@ pub fn replay(
 /// Reads [`SeqRange::bounded`](`Seq::ZERO`, `at_seq`) and folds through `registry`.
 ///
 /// # Errors
-/// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
-/// longer authoritative; otherwise propagates [`CoreError`] from the store.
+/// Fails closed when protected Replay authority or complete reads are
+/// unavailable. Host failures map to [`CoreError::ArtifactUnavailable`],
+/// [`CoreError::ErasureAccessFrozen`], or
+/// [`CoreError::ErasureContainmentUnavailable`].
 pub fn replay_at(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
