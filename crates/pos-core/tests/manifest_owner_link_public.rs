@@ -86,7 +86,11 @@ fn changed_wire(
     encoded(&value)
 }
 
-fn replace_top(bytes: &[u8], index: usize, replacement: Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn replace_top(
+    bytes: &[u8],
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     changed_wire(bytes, |value| {
         if let Value::Array(fields) = value {
             fields[index] = replacement;
@@ -695,14 +699,37 @@ fn catalog_decode_rejects_every_untrusted_field_and_excess_rows() -> TestResult 
 fn binding_decode_rejects_every_untrusted_field_and_excess_rows() -> TestResult {
     let bytes = ManifestSlotBindingV1::new(binding_input())?.to_canonical_cbor();
     for (index, replacement, expected) in [
-        (0, Value::Bytes(b"BAD1".to_vec()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (1, Value::Integer(2.into()), ManifestOwnerLinkErrorV1::UnsupportedVersion),
-        (2, Value::Text("scope".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (3, Value::Bytes(vec![1; 31]), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (4, Value::Text("rows".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (
+            0,
+            Value::Bytes(b"BAD1".to_vec()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            1,
+            Value::Integer(2.into()),
+            ManifestOwnerLinkErrorV1::UnsupportedVersion,
+        ),
+        (
+            2,
+            Value::Text("scope".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            3,
+            Value::Bytes(vec![1; 31]),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            4,
+            Value::Text("rows".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
     ] {
         let wrong = replace_top(&bytes, index, replacement)?;
-        assert_eq!(ManifestSlotBindingV1::from_canonical_cbor(&wrong), Err(expected));
+        assert_eq!(
+            ManifestSlotBindingV1::from_canonical_cbor(&wrong),
+            Err(expected)
+        );
     }
     for (index, replacement) in [
         (0, Value::Bytes(b"first".to_vec())),
@@ -735,17 +762,61 @@ fn receipt_decode_rejects_every_untrusted_field_and_nonpreferred_width() -> Test
     assert_eq!(receipt.as_input().configuration_generation, 7);
     let bytes = receipt.to_canonical_cbor();
     for (index, replacement, expected) in [
-        (0, Value::Bytes(b"BAD1".to_vec()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (1, Value::Integer(2.into()), ManifestOwnerLinkErrorV1::UnsupportedVersion),
-        (2, Value::Text("owner".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (3, Value::Integer((-1).into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (4, Value::Text("scope".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (5, Value::Text("wcs1".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (6, Value::Text("mca1".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (7, Value::Text("operation".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (9, Value::Text("inventory".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (10, Value::Text("msb1".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
-        (11, Value::Text("key".into()), ManifestOwnerLinkErrorV1::InvalidEncoding),
+        (
+            0,
+            Value::Bytes(b"BAD1".to_vec()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            1,
+            Value::Integer(2.into()),
+            ManifestOwnerLinkErrorV1::UnsupportedVersion,
+        ),
+        (
+            2,
+            Value::Text("owner".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            3,
+            Value::Integer((-1).into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            4,
+            Value::Text("scope".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            5,
+            Value::Text("wcs1".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            6,
+            Value::Text("mca1".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            7,
+            Value::Text("operation".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            9,
+            Value::Text("inventory".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            10,
+            Value::Text("msb1".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
+        (
+            11,
+            Value::Text("key".into()),
+            ManifestOwnerLinkErrorV1::InvalidEncoding,
+        ),
     ] {
         let wrong = replace_top(&bytes, index, replacement)?;
         assert_eq!(
