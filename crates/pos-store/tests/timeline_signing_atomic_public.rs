@@ -472,7 +472,8 @@ fn sqlite_rotation_waits_until_signed_event_commit() -> Result<(), Box<dyn std::
     let signed = signed?;
     rotation_result?;
     assert!(rotation_waited);
-    let reopened = SqliteStore::open(path)?;
+    let mut reopened = SqliteStore::open(path)?;
+    reopened.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let persisted = reopened.load_key_registry()?.ok_or("missing registry")?;
     assert_eq!(persisted, rotated);
     assert_eq!(reopened.read(timeline.id(), SeqRange::all())?, vec![signed]);
