@@ -2719,7 +2719,73 @@ impl EventStore for MemoryStore {
             .get_timeline(timeline)?
             .ok_or(CoreError::TimelineNotFound(timeline))?;
         let event = create_event(&persisted, head.head.next())?;
+        if event
+            .signature_identity
+            .is_some_and(|identity| identity.role == pos_core::KeyRoleV1::TimelineIntegritySigning)
+        {
+            return Err(CoreError::Storage(
+                "Timeline signatures require the atomic envelope append seam".to_owned(),
+            ));
+        }
         self.append_committed(timeline, &[event])
+    }
+
+    fn append_timeline_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        identity: pos_core::KeyIdentityV1,
+        material_digest: Hash,
+        public_verification_key: pos_core::PublicKey,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &pos_core::CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        let mut persisted = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        if persisted != *expected_registry {
+            return Err(CoreError::Storage(
+                "key registry changed during signing".to_owned(),
+            ));
+        }
+        let owning_timeline = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let inherited_prefix = owning_timeline
+            .meta
+            .fork_point
+            .map_or(0, |(_, at)| at.as_u64());
+        let (mut event, envelope) = crate::prepare_timeline_signing_event(
+            timeline,
+            owning_timeline.head,
+            inherited_prefix,
+            draft,
+            identity,
+            self.hasher.as_ref(),
+        )?;
+        let mut signing_registry = persisted.clone();
+        persisted
+            .with_signing_authorization(identity, material_digest, public_verification_key, || {
+                let signature = sign(&mut signing_registry, &envelope, &event.payload)?;
+                crate::verify_new_timeline_signature(
+                    public_verification_key,
+                    identity,
+                    &envelope,
+                    &event.payload,
+                    &signature,
+                )?;
+                event.signature = Some(signature);
+                event.signature_identity = Some(identity);
+                self.append_committed(timeline, std::slice::from_ref(&event))?;
+                Ok(event)
+            })
+            .map_err(|error| {
+                CoreError::Storage(format!("Timeline signing authorization: {error}"))
+            })?
     }
 
     fn begin_key_registry_destruction(

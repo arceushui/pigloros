@@ -2294,6 +2294,43 @@ impl ErasureCommandSenderV1<'_> {
         )
     }
 
+    /// Finalize and commit a Timeline envelope signature inside the protected
+    /// append fence and the store's registry transaction.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn append_timeline_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        identity: pos_core::KeyIdentityV1,
+        material_digest: pos_core::Hash,
+        public_verification_key: pos_core::PublicKey,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &pos_core::CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, ErasureHostErrorV1> {
+        self.host.with_store_fence(
+            self.generation,
+            timeline,
+            ErasureProtectedOperationV1::Append,
+            |store| {
+                store.append_timeline_signed_authorized(
+                    timeline,
+                    expected_registry,
+                    draft.clone(),
+                    identity,
+                    material_digest,
+                    public_verification_key,
+                    sign,
+                )
+            },
+        )
+    }
+
     /// Persist the pending phase of signing-key destruction inside the
     /// ledger Timeline's protected-effect fence.
     ///
