@@ -24,7 +24,7 @@ fn input() -> TimelineEventEnvelopeInputV1 {
     }
 }
 
-fn payload() -> CanonicalBytes {
+const fn payload() -> CanonicalBytes {
     CanonicalBytes::from_static(b"abc")
 }
 
