@@ -1,11 +1,13 @@
 #![cfg(feature = "sqlite")]
 
+use std::sync::Arc;
+
 use pos_core::{
     store::SeqRange, ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, CanonicalBytes, EntityId, ErasureArtifactClassV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventId, EventOriginV1,
-    KeyIdentityV1, KeyRoleV1, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1, Seq, Signature,
-    TimelineId,
+    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventId,
+    EventOriginV1, KeyIdentityV1, KeyRoleV1, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    Seq, Signature, TimelineId,
 };
 use pos_store::{
     export_timeline, export_timeline_own, import_timeline_with_id, memory::MemoryStore,
@@ -13,6 +15,10 @@ use pos_store::{
 };
 
 const EXPORT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([181; 32]);
+
+fn bind_test_erasure_gate(store: &mut dyn EventStore) -> Result<(), pos_core::CoreError> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+}
 
 fn export_evaluation() -> pos_core::ReplayClaimEvaluationV1 {
     ReplayClaimEvaluatorV1::evaluate(
@@ -63,6 +69,7 @@ fn assert_origin(event: &Event, owner: TimelineId, origin_seq: u64, visible_seq:
 fn exercise_fork_origins(
     store: &mut dyn EventStore,
 ) -> Result<(TimelineId, TimelineId, TimelineId), Box<dyn std::error::Error>> {
+    bind_test_erasure_gate(store)?;
     let root = store.create_timeline("origin-root")?;
     let first = append(store, root.id(), 1)?;
     let second = append(store, root.id(), 2)?;
@@ -120,6 +127,7 @@ fn cow_round_trip_and_flattening_keep_the_correct_origin() -> Result<(), Box<dyn
     source.append_committed(nested, &[signed])?;
     let evaluation = export_evaluation();
     let mut destination = SqliteStore::open_in_memory()?;
+    bind_test_erasure_gate(&mut destination)?;
     for id in [root, child, nested] {
         let exported = export_timeline_own(&source, id, EXPORT_DIGEST, &evaluation)?;
         assert!(exported.events.iter().all(|event| event.origin.is_some()));
@@ -141,6 +149,7 @@ fn cow_round_trip_and_flattening_keep_the_correct_origin() -> Result<(), Box<dyn
         assert_origin(event, nested, (index + 1) as u64, (index + 1) as u64);
     }
     let mut flat_destination = MemoryStore::new();
+    bind_test_erasure_gate(&mut flat_destination)?;
     import_timeline_with_id(&mut flat_destination, flat)?;
     let flattened = flat_destination.read(nested, SeqRange::all())?;
     assert!(flattened.iter().all(|event| event.origin.is_some()));
@@ -157,7 +166,8 @@ fn sqlite_file_reopen_preserves_origin_columns() -> Result<(), Box<dyn std::erro
         let (_, _, nested) = exercise_fork_origins(&mut store)?;
         nested
     };
-    let reopened = SqliteStore::open(path)?;
+    let mut reopened = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut reopened)?;
     let events = reopened.read(nested, SeqRange::all())?;
     assert_eq!(events.len(), 4);
     assert_origin(&events[3], nested, 4, 4);
@@ -178,11 +188,13 @@ fn cow_import_rejects_a_transplanted_origin_in_both_stores(
     });
 
     let mut memory = MemoryStore::new();
+    bind_test_erasure_gate(&mut memory)?;
     import_timeline_with_id(&mut memory, root_export.clone())?;
     assert!(import_timeline_with_id(&mut memory, child_export.clone()).is_err());
     assert!(memory.get_timeline(child)?.is_none());
 
     let mut sqlite = SqliteStore::open_in_memory()?;
+    bind_test_erasure_gate(&mut sqlite)?;
     import_timeline_with_id(&mut sqlite, root_export)?;
     assert!(import_timeline_with_id(&mut sqlite, child_export).is_err());
     assert!(sqlite.get_timeline(child)?.is_none());
@@ -196,6 +208,7 @@ fn sqlite_read_rejects_corrupt_persisted_origin() -> Result<(), Box<dyn std::err
     let path = path.to_str().ok_or("temporary SQLite path is not UTF-8")?;
     let root = {
         let mut store = SqliteStore::open(path)?;
+        bind_test_erasure_gate(&mut store)?;
         let root = store.create_timeline("origin-corruption")?;
         append(&mut store, root.id(), 1)?;
         root.id()
@@ -206,7 +219,8 @@ fn sqlite_read_rejects_corrupt_persisted_origin() -> Result<(), Box<dyn std::err
         rusqlite::params![TimelineId::new().to_string(), root.to_string()],
     )?;
     drop(conn);
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(store.read(root, SeqRange::all()).is_err());
     drop(store);
 
@@ -216,7 +230,8 @@ fn sqlite_read_rejects_corrupt_persisted_origin() -> Result<(), Box<dyn std::err
         rusqlite::params![root.to_string()],
     )?;
     drop(conn);
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut store)?;
     assert!(store.read(root, SeqRange::all()).is_err());
     Ok(())
 }
