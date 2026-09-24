@@ -243,7 +243,10 @@ mod hosted_cli_store_tests {
         );
         let child = store.fork(parent.id(), Seq::from_u64(1), "cli-child")?;
         assert_eq!(child.meta.fork_point, Some((parent.id(), Seq::from_u64(1))));
-        assert!(store.committed_key_destruction_facts()?.is_empty());
+        assert_eq!(
+            store.with_read_sender_and_destruction_facts(|_, facts| Ok(facts.len()))?,
+            0
+        );
         let identity = pos_core::KeyIdentityV1::new(
             "cli-owner",
             pos_core::KeyRoleV1::TimelineIntegritySigning,
@@ -275,7 +278,10 @@ mod hosted_cli_store_tests {
             host.command_sender()
                 .and_then(|mut sender| sender.save_key_registry(parent.id(), &keys))
         })?;
-        assert_eq!(store.committed_key_destruction_facts()?.len(), 1);
+        assert_eq!(
+            store.with_read_sender_and_destruction_facts(|_, facts| Ok(facts.len()))?,
+            1
+        );
         Ok(())
     }
 
