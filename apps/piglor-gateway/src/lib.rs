@@ -401,26 +401,30 @@ mod coverage_tests {
         ));
     }
 
+    fn installed_gateway_binding(
+        plugin: &GatewayActionPlugin,
+    ) -> pos_runtime::OutputPolicyBindingV1 {
+        gateway_output_binding_with_inputs(
+            plugin,
+            &[],
+            "deterministic-local-v1",
+            "world.action.v1",
+        )
+        .test_ok()
+        .with_installed_action_approver(
+            super::GatewayWorldActionApprover(super::WorldPlugin::new()),
+            [Kind::new("world.action.v1")],
+        )
+        .test_ok()
+    }
+
     #[test]
-    fn installed_gateway_records_exact_pin_and_rejects_incompatible_pins() {
+    fn installed_gateway_records_exact_pin() {
         let plugin = GatewayActionPlugin {
             id: PluginId::new(),
         };
-        let binding = || {
-            gateway_output_binding_with_inputs(
-                &plugin,
-                &[],
-                "deterministic-local-v1",
-                "world.action.v1",
-            )
-            .test_ok()
-            .with_installed_action_approver(
-                super::GatewayWorldActionApprover(super::WorldPlugin::new()),
-                [Kind::new("world.action.v1")],
-            )
-            .test_ok()
-        };
-        let digest = binding().policy().digest();
+        let binding = installed_gateway_binding(&plugin);
+        let digest = binding.policy().digest();
         let role = pos_runtime::installed_plugin_role_v1(&plugin);
         let mut registry = PluginRegistry::new().without_erasure_gate();
         let pin = PluginPinV1::try_new(
@@ -433,7 +437,7 @@ mod coverage_tests {
         registry
             .register_installed_output(
                 &plugin,
-                binding(),
+                binding,
                 PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
                 None,
             )
@@ -447,7 +451,16 @@ mod coverage_tests {
             digest
         );
         assert_eq!(registry.output_policy_digests().next().test_ok().1, digest);
+    }
 
+    #[test]
+    fn installed_gateway_rejects_incompatible_pins() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        let binding = || installed_gateway_binding(&plugin);
+        let digest = binding().policy().digest();
+        let role = pos_runtime::installed_plugin_role_v1(&plugin);
         let wrong_digest = pos_core::Hash::from_bytes([0x55; 32]);
         assert_ne!(wrong_digest, digest);
         let cases = [
