@@ -15,6 +15,7 @@ use crate::{
     SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
     TransientUnitRequest, TransientUnitRequestError,
 };
+use crate::{SystemdDynamicPropertyKind, SystemdOperatingLimitProperty};
 
 const START_JOB_MODE: &str = "fail";
 // A stop must displace a conflicting queued start job for the same attempt unit.
@@ -676,30 +677,63 @@ async fn read_property(
         SystemdTransientUnitPropertyKind::Hardening(property) => read_hardening(service, property)
             .await
             .map(SystemdTransientUnitReadbackValue::Static),
-        SystemdTransientUnitPropertyKind::RootDirectory => service
+        SystemdTransientUnitPropertyKind::Dynamic(property) => {
+            read_dynamic_property(service, property).await
+        }
+    }
+}
+
+async fn read_dynamic_property(
+    service: &ServiceProxy<'_>,
+    kind: SystemdDynamicPropertyKind,
+) -> Result<SystemdTransientUnitReadbackValue, zbus::Error> {
+    match kind {
+        SystemdDynamicPropertyKind::RootDirectory => service
             .root_directory()
             .await
             .map(SystemdTransientUnitReadbackValue::String),
-        SystemdTransientUnitPropertyKind::BindReadOnlyPaths => service
+        SystemdDynamicPropertyKind::BindReadOnlyPaths => service
             .bind_read_only_paths()
             .await
             .map(SystemdTransientUnitReadbackValue::BindReadOnlyPaths),
-        SystemdTransientUnitPropertyKind::SystemCallFilter => service
+        SystemdDynamicPropertyKind::SystemCallFilter => service
             .system_call_filter()
             .await
             .map(SystemdTransientUnitReadbackValue::BoolStringArray),
-        SystemdTransientUnitPropertyKind::RestrictAddressFamilies => service
+        SystemdDynamicPropertyKind::RestrictAddressFamilies => service
             .restrict_address_families()
             .await
             .map(SystemdTransientUnitReadbackValue::BoolStringArray),
-        SystemdTransientUnitPropertyKind::FileDescriptorStoreMax => service
+        SystemdDynamicPropertyKind::OperatingLimit(property) => {
+            read_operating_limit(service, property)
+                .await
+                .map(SystemdTransientUnitReadbackValue::U64)
+        }
+        SystemdDynamicPropertyKind::FileDescriptorStoreMax => service
             .file_descriptor_store_max()
             .await
             .map(SystemdTransientUnitReadbackValue::U32),
-        SystemdTransientUnitPropertyKind::ExtraFileDescriptors => service
+        SystemdDynamicPropertyKind::ExtraFileDescriptors => service
             .extra_file_descriptor_names()
             .await
             .map(SystemdTransientUnitReadbackValue::StringArray),
+    }
+}
+
+async fn read_operating_limit(
+    service: &ServiceProxy<'_>,
+    property: SystemdOperatingLimitProperty,
+) -> Result<u64, zbus::Error> {
+    match property {
+        SystemdOperatingLimitProperty::MemoryMax => service.memory_max().await,
+        SystemdOperatingLimitProperty::MemorySwapMax => service.memory_swap_max().await,
+        SystemdOperatingLimitProperty::TasksMax => service.tasks_max().await,
+        SystemdOperatingLimitProperty::CpuQuotaPerSecUSec => {
+            service.cpu_quota_per_sec_u_sec().await
+        }
+        SystemdOperatingLimitProperty::RuntimeMaxUSec => service.runtime_max_u_sec().await,
+        SystemdOperatingLimitProperty::LimitNofile => service.limit_nofile().await,
+        SystemdOperatingLimitProperty::LimitFsize => service.limit_fsize().await,
     }
 }
 
@@ -809,7 +843,7 @@ fn encode_property_with<O>(
 where
     O: FnOnce(Value<'static>) -> Result<OwnedValue, zvariant::Error>,
 {
-    owned_value(property_value(value))
+    owned_value(value.into_dbus_value())
         .map(|value| (name.to_owned(), value))
         .map_err(SystemdTransientUnitTransportError::Serialization)
 }
@@ -821,24 +855,32 @@ fn classify_call_error(error: zbus::Error) -> SystemdTransientUnitTransportError
     }
 }
 
-fn property_value(value: SystemdTransientUnitValue) -> Value<'static> {
-    match value {
-        SystemdTransientUnitValue::Static(value) => match value {
-            SystemdHardeningValue::Bool(value) => Value::from(value),
-            SystemdHardeningValue::String(value) => Value::from(value.to_owned()),
-            SystemdHardeningValue::U64(value) => Value::from(value),
-            SystemdHardeningValue::U32(value) => Value::from(value),
-            SystemdHardeningValue::StringArray(value) => {
-                Value::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
+impl SystemdTransientUnitValue {
+    fn into_dbus_value(self) -> Value<'static> {
+        match self {
+            Self::Static(value) => match value {
+                SystemdHardeningValue::Bool(value) => Value::from(value),
+                SystemdHardeningValue::String(value) => Value::from(value.to_owned()),
+                SystemdHardeningValue::U64(value) => Value::from(value),
+                SystemdHardeningValue::U32(value) => Value::from(value),
+                SystemdHardeningValue::StringArray(value) => {
+                    Value::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
+                }
+            },
+            Self::RootDirectory(value) => Value::from(value),
+            Self::BindReadOnlyPaths(value) => Value::from(value),
+            Self::SystemCallFilter(value) | Self::RestrictAddressFamilies(value) => {
+                Value::from(value)
             }
-        },
-        SystemdTransientUnitValue::RootDirectory(value) => Value::from(value),
-        SystemdTransientUnitValue::BindReadOnlyPaths(value) => Value::from(value),
-        SystemdTransientUnitValue::SystemCallFilter(value)
-        | SystemdTransientUnitValue::RestrictAddressFamilies(value) => Value::from(value),
-        SystemdTransientUnitValue::FileDescriptorStoreMax(value) => Value::from(value),
-        SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
-            extra_file_descriptors_value(value)
+            Self::Numeric(value) => match value {
+                crate::SystemdTransientUnitNumericValue::OperatingLimit(value) => {
+                    Value::from(value)
+                }
+                crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value) => {
+                    Value::from(value)
+                }
+            },
+            Self::ExtraFileDescriptors(value) => extra_file_descriptors_value(value),
         }
     }
 }
