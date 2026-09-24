@@ -2984,7 +2984,7 @@ mod tests {
             request: request.reference(),
             scope_commitment: reference(48),
             fork: reference(49),
-            child_timeline: TimelineId::new(),
+            child_timeline: crate::TimelineId::new(),
             lineage_rule: reference(50),
             predecessor_extension: None,
             admission_provenance: reference(51),

@@ -150,7 +150,7 @@ pub struct SqliteStore {
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
-    /// SQLite revision observed with the last complete host inventory.
+    /// `SQLite` revision observed with the last complete host inventory.
     erasure_inventory_data_version: i64,
     /// Host-managed topology may only change through verified transitions.
     erasure_topology_requires_permit: bool,
