@@ -578,8 +578,8 @@ fn installed_world_registration(
             topology.body,
             topology.config_entity,
         )).map_err(Into::into) => |binding|;
-        binding.with_installed_action_approver(
-            topology.world_plugin.clone(),
+        binding.with_installed_plugin_action_approver(
+            &topology.world_plugin,
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ).map_err(Into::into) => |binding|;
         reviewed_output_registration(&topology.world_plugin, &binding) => |registration|;
@@ -2373,6 +2373,20 @@ mod tests {
             &[],
         )
         .is_err());
+    }
+
+    #[test]
+    fn experiment_binding_rejects_driver_for_another_plugin() {
+        let plugin = ProofAgentPlugin::new();
+        let binding =
+            proof_agent_output_binding(&plugin, 0.5, "deterministic-local-v1").test_ok();
+        assert!(matches!(
+            binding.with_installed_driver(FailureProbeDriver {
+                class: "invalid_payload",
+                resource_limit: 1,
+            }),
+            Err(pos_runtime::OutputAdmissionErrorV1::CallbackMismatch { kind: "driver" })
+        ));
     }
 
     #[test]

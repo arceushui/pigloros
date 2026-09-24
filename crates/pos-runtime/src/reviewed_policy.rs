@@ -27,7 +27,7 @@ pub const MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1: usize =
 
 /// Host role for one exact installed Plugin instance.
 ///
-/// A Plugin name is not an identity: distinct PluginIds may share it in one
+/// A Plugin name is not an identity: distinct `PluginIds` may share it in one
 /// admitted composition. The role therefore includes the registered ID.
 #[must_use]
 pub fn installed_plugin_role_v1<P: Plugin + ?Sized>(plugin: &P) -> String {

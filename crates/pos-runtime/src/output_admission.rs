@@ -192,26 +192,24 @@ impl InstalledOutputPolicySourceV1 {
         }
     }
 
-    fn accepts_driver<D: Driver + 'static>(self) -> bool {
+    fn accepts_driver<D: Driver + 'static>(self, plugin_name: &str) -> bool {
         let actual = type_name::<D>();
         match self {
             #[cfg(any(test, feature = "test-support"))]
             Self::Generated => true,
-            Self::Gateway | Self::Society => false,
+            Self::Gateway | Self::Agent | Self::Society => false,
             Self::World => actual == "pos_plugin_world::WorldDriver",
             Self::RuleAgent => actual == "pos_plugin_rule_agent::RuleAgentDriver",
-            Self::Agent => {
-                actual == "pos_plugin_agent::AgentDriver"
-                    || actual == "pos_plugin_agent::provider_driver::ProviderBackedAgentDriver"
-            }
             Self::SyntheticObservation => actual == "pos_plugin_synthetic_obs::SyntheticDriver",
-            Self::Experiment => [
-                "pos_experiment::moat_proof::SiblingProbeDriver",
-                "pos_experiment::moat_proof::FailureProbeDriver",
-                "pos_experiment::moat_proof::ProofAgentDriver",
-                "pos_experiment::moat_proof::ProofSocietyDriver",
-            ]
-            .contains(&actual),
+            Self::Experiment => match plugin_name {
+                "successful-sibling" => {
+                    actual == "pos_experiment::moat_proof::SiblingProbeDriver"
+                }
+                "failure-probe" => actual == "pos_experiment::moat_proof::FailureProbeDriver",
+                "proof-agent" => actual == "pos_experiment::moat_proof::ProofAgentDriver",
+                "society" => actual == "pos_experiment::moat_proof::ProofSocietyDriver",
+                _ => false,
+            },
         }
     }
 
@@ -504,12 +502,20 @@ fn hash_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(bytes);
 }
 
+/// Concrete callbacks retained with one installed output-policy binding.
+pub(crate) struct InstalledCallbacksV1 {
+    pub(crate) driver: Option<Box<dyn Driver>>,
+    pub(crate) approver: Option<Box<dyn ActionApprover>>,
+    pub(crate) approver_event_types: Vec<Kind>,
+}
+
 /// A host-owned output policy binding with no caller-supplied artifact leaves.
 pub struct OutputPolicyBindingV1 {
     policy: OutputPolicyV1,
     budget: ExecutableBudgetPolicyV1,
     artifacts: OutputPolicyArtifactInputV1,
     source: InstalledOutputPolicySourceV1,
+    plugin_name: &'static str,
     owner_token: PluginOwnerTokenV1,
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
@@ -595,6 +601,7 @@ impl OutputPolicyBindingV1 {
             budget,
             artifacts,
             source,
+            plugin_name: plugin.name(),
             owner_token: plugin.installed_owner_token(),
             driver: None,
             approver: None,
@@ -610,14 +617,14 @@ impl OutputPolicyBindingV1 {
         mut self,
         driver: D,
     ) -> Result<Self, OutputAdmissionErrorV1> {
-        if self.driver.is_some() || !self.source.accepts_driver::<D>() {
+        if self.driver.is_some() || !self.source.accepts_driver::<D>(self.plugin_name) {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "driver" });
         }
         self.driver = Some(Box::new(driver));
         Ok(self)
     }
 
-    /// Attach only the concrete ActionApprover compiled into this installed source.
+    /// Attach only the concrete `ActionApprover` compiled into this installed source.
     ///
     /// # Errors
     /// Rejects a foreign or duplicate approver before registration can mutate state.
@@ -626,7 +633,10 @@ impl OutputPolicyBindingV1 {
         approver: A,
         event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<Self, OutputAdmissionErrorV1> {
-        if self.approver.is_some() || !self.source.accepts_approver::<A>() {
+        if self.approver.is_some()
+            || self.source == InstalledOutputPolicySourceV1::World
+            || !self.source.accepts_approver::<A>()
+        {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
         }
         self.approver = Some(Box::new(approver));
@@ -634,18 +644,36 @@ impl OutputPolicyBindingV1 {
         Ok(self)
     }
 
-    pub(crate) fn take_callbacks(
-        &mut self,
-    ) -> (
-        Option<Box<dyn Driver>>,
-        Option<Box<dyn ActionApprover>>,
-        Vec<Kind>,
-    ) {
-        (
-            self.driver.take(),
-            self.approver.take(),
-            std::mem::take(&mut self.approver_event_types),
-        )
+    /// Clone the World approver from the exact `Plugin` instance that owns this binding.
+    ///
+    /// # Errors
+    /// Rejects a foreign instance, foreign implementation, or duplicate approver.
+    pub fn with_installed_plugin_action_approver<A>(
+        mut self,
+        plugin: &A,
+        event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<Self, OutputAdmissionErrorV1>
+    where
+        A: Plugin + ActionApprover + Clone + 'static,
+    {
+        if self.approver.is_some()
+            || self.source != InstalledOutputPolicySourceV1::World
+            || self.owner_token != plugin.installed_owner_token()
+            || !self.source.accepts_approver::<A>()
+        {
+            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
+        }
+        self.approver = Some(Box::new(plugin.clone()));
+        self.approver_event_types = event_types.into_iter().collect();
+        Ok(self)
+    }
+
+    pub(crate) fn take_callbacks(&mut self) -> InstalledCallbacksV1 {
+        InstalledCallbacksV1 {
+            driver: self.driver.take(),
+            approver: self.approver.take(),
+            approver_event_types: std::mem::take(&mut self.approver_event_types),
+        }
     }
 
     pub(crate) fn into_parts(

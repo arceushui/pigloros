@@ -18,6 +18,7 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
+use crate::output_admission::InstalledCallbacksV1;
 #[cfg(any(test, feature = "test-support"))]
 use crate::output_admission::InstalledOutputPolicySourceV1;
 use crate::{
@@ -2812,7 +2813,11 @@ impl PluginRegistry {
             .into());
         }
         self.validate_registration_roles(&registration)?;
-        let (driver, approver, approver_event_types) = binding.take_callbacks();
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,

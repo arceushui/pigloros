@@ -34,7 +34,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
-pos-experiment = { path = "../pos-experiment" }
+pos-experiment = { path = "../pos-experiment", features = ["test-support"] }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 pos-state = { path = "../../crates/pos-state" }
 pos-plugin-agent = { path = "../../plugins/agent" }

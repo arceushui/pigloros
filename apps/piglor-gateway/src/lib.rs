@@ -148,6 +148,7 @@ mod coverage_tests {
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
+        plugin::PluginOwnerTokenV1,
         CanonicalBytes, Capability, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Plugin, PluginId, Seq,
     };
@@ -203,6 +204,39 @@ mod coverage_tests {
     struct ForeignActionApprover;
 
     impl pos_core::ActionApprover for ForeignActionApprover {
+        fn approve(
+            &self,
+            _proposal: &pos_core::ProposedAction,
+        ) -> Result<EventDraft, pos_core::ActionRejected> {
+            Err(pos_core::ActionRejected::UnknownEventType)
+        }
+    }
+
+    #[derive(Clone)]
+    struct SpoofedOwnerActionApprover {
+        id: PluginId,
+        owner_token: PluginOwnerTokenV1,
+    }
+
+    impl Plugin for SpoofedOwnerActionApprover {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "world"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+
+        fn installed_owner_token(&self) -> PluginOwnerTokenV1 {
+            self.owner_token
+        }
+    }
+
+    impl pos_core::ActionApprover for SpoofedOwnerActionApprover {
         fn approve(
             &self,
             _proposal: &pos_core::ProposedAction,
@@ -310,6 +344,59 @@ mod coverage_tests {
                 super::GatewayWorldActionApprover(super::WorldPlugin::new()),
                 [Kind::new("world.action.v1")],
             ),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
+    }
+
+    #[test]
+    fn installed_world_approver_must_come_from_bound_plugin_instance() {
+        let world = super::WorldPlugin::new();
+        let foreign = world.clone().with_bodies([EntityId::new()]);
+        let binding = || {
+            pos_runtime::OutputPolicyBindingV1::from_installed_source(
+                &world,
+                pos_runtime::InstalledOutputPolicySourceV1::World,
+                &[],
+                "deterministic-local-v1",
+            )
+            .test_ok()
+        };
+        let action_kind = [Kind::new("world.action.v1")];
+        let gateway = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        assert!(matches!(
+            gateway_output_binding_with_inputs(
+                &gateway,
+                &[],
+                "deterministic-local-v1",
+                "world.action.v1",
+            )
+            .test_ok()
+            .with_installed_plugin_action_approver(&world, action_kind.clone()),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
+        assert!(matches!(
+            binding().with_installed_action_approver(world.clone(), action_kind.clone()),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
+        assert!(matches!(
+            binding().with_installed_plugin_action_approver(&foreign, action_kind.clone()),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
+        let spoofed = SpoofedOwnerActionApprover {
+            id: world.id(),
+            owner_token: world.installed_owner_token(),
+        };
+        assert!(matches!(
+            binding().with_installed_plugin_action_approver(&spoofed, action_kind.clone()),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
+        let bound = binding()
+            .with_installed_plugin_action_approver(&world, action_kind)
+            .test_ok();
+        assert!(matches!(
+            bound.with_installed_plugin_action_approver(&world, [Kind::new("world.action.v1")]),
             Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
         ));
     }
