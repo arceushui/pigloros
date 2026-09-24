@@ -28,6 +28,7 @@ pub mod geo_cell_admission;
 pub mod hasher;
 pub mod ids;
 pub mod key_registry;
+pub mod local_cut_seal;
 pub mod manifest;
 pub mod manifest_owner_link;
 pub mod output_policy;
@@ -47,6 +48,12 @@ pub mod world_history;
 pub mod world_recording_receipt;
 pub mod world_transform;
 
+pub use local_cut_seal::{
+    local_cut_tree_scope_v1, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,
+    LocalCutManifestBindingPageV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
+    LocalCutSealErrorV2, LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1,
+    MAX_LOCAL_CUT_SEAL_BYTES_V2, MAX_LOCAL_CUT_TABLE_ROWS_V1,
+};
 pub use manifest_owner_link::{
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestOwnerLinkErrorV1, ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
