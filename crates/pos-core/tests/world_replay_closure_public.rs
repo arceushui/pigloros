@@ -773,14 +773,12 @@ fn unselected_optional_view_cannot_enter_the_admitted_closure() {
 }
 
 #[test]
-fn unselected_required_leaves_cannot_enter_the_admitted_closure() {
+fn unselected_consumer_leaves_cannot_enter_the_admitted_closure() {
     for (kind, native_digest) in [
         (WorldArtifactKindV1::OutputPolicy, hash(70)),
         (WorldArtifactKindV1::Schema, hash(71)),
         (WorldArtifactKindV1::ReducerImplementation, hash(72)),
         (WorldArtifactKindV1::RuntimeIdentity, hash(73)),
-        (WorldArtifactKindV1::BaseConfiguration, hash(74)),
-        (WorldArtifactKindV1::KeyDependencyEvidence, hash(75)),
     ] {
         let mut input = closure_input();
         input.artifacts.push(leaf(
@@ -794,10 +792,30 @@ fn unselected_required_leaves_cannot_enter_the_admitted_closure() {
         ));
         assert_eq!(
             WorldReplayClosureV1::new(input),
-            Err(WorldReplayClosureErrorV1::UnselectedRequiredArtifact),
+            Err(WorldReplayClosureErrorV1::UnselectedConsumerArtifact),
             "unselected {kind:?} leaf entered the closure"
         );
     }
+}
+
+#[test]
+fn flat_structure_does_not_assume_one_payload_or_key_leaf() {
+    let mut input = closure_input();
+    for (kind, native_digest) in [
+        (WorldArtifactKindV1::TimelinePayload, hash(74)),
+        (WorldArtifactKindV1::KeyDependencyEvidence, hash(75)),
+    ] {
+        input.artifacts.push(leaf(
+            scope(),
+            input.retention_lease.digest(),
+            kind,
+            native_digest,
+            [115; 32],
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+        ));
+    }
+    assert!(WorldReplayClosureV1::new(input).is_ok());
 }
 
 #[test]
