@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use pos_core::{
     CanonicalBytes, CoreError, EntityId, ErasureContainmentGateV1, Event, EventDraft, EventStore,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Kind,
-    Seq, SeqRange, Signature, TimelineEventEnvelopeV1,
+    Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+    Kind, Seq, SeqRange, Signature, TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1,
 };
 use pos_crypto::{
     key_roles::{sign_timeline_event_for_registered_role, SigningKeyMaterial},
@@ -106,6 +106,127 @@ fn both_adapters_commit_exact_root_and_fork_envelope_signatures(
 ) -> Result<(), Box<dyn std::error::Error>> {
     exercise_signed_fork(&mut MemoryStore::new())?;
     exercise_signed_fork(&mut SqliteStore::open_in_memory()?)?;
+    Ok(())
+}
+
+#[test]
+fn committed_envelope_rejects_missing_or_modified_first_commit_context(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (material, identity, registry) = signing_fixture()?;
+    store.save_key_registry(&registry)?;
+    let timeline = store.create_timeline("signed-context")?;
+    let event = append_signed(
+        &mut store,
+        timeline.id(),
+        &registry,
+        identity,
+        &material,
+        b"original",
+    )?;
+
+    let mut missing_identity = event.clone();
+    missing_identity.signature_identity = None;
+    assert_eq!(
+        TimelineEventEnvelopeV1::from_committed_event(&missing_identity),
+        Err(TimelineEventEnvelopeErrorV1::InvalidIdentity)
+    );
+
+    let mut missing_origin = event.clone();
+    missing_origin.origin = None;
+    assert_eq!(
+        TimelineEventEnvelopeV1::from_committed_event(&missing_origin),
+        Err(TimelineEventEnvelopeErrorV1::FieldOutOfBounds)
+    );
+
+    let mut invalid_origin = event.clone();
+    invalid_origin.origin = event.origin.map(|mut origin| {
+        origin.origin_logical_seq = Seq::ZERO;
+        origin
+    });
+    assert_eq!(
+        TimelineEventEnvelopeV1::from_committed_event(&invalid_origin),
+        Err(TimelineEventEnvelopeErrorV1::FieldOutOfBounds)
+    );
+
+    let mut altered_payload = event.clone();
+    altered_payload.payload = CanonicalBytes::from_static(b"altered");
+    assert_eq!(
+        TimelineEventEnvelopeV1::from_committed_event(&altered_payload),
+        Err(TimelineEventEnvelopeErrorV1::PayloadHashMismatch)
+    );
+
+    let mut altered_hash = event;
+    altered_hash.payload_hash = Hash::zero();
+    assert_eq!(
+        TimelineEventEnvelopeV1::from_committed_event(&altered_hash),
+        Err(TimelineEventEnvelopeErrorV1::PayloadHashMismatch)
+    );
+    Ok(())
+}
+
+struct WrongPayloadHasher;
+
+impl pos_core::hasher::Hasher for WrongPayloadHasher {
+    fn genesis_hash(&self) -> Hash {
+        pos_core::hasher::Hasher::genesis_hash(&pos_crypto::chain::Blake3Hasher)
+    }
+
+    fn hash_payload(&self, _: &CanonicalBytes) -> Hash {
+        Hash::zero()
+    }
+
+    fn hash_event(
+        &self,
+        previous_hash: &Hash,
+        event_id_bytes: &[u8],
+        payload: &CanonicalBytes,
+    ) -> Hash {
+        pos_core::hasher::Hasher::hash_event(
+            &pos_crypto::chain::Blake3Hasher,
+            previous_hash,
+            event_id_bytes,
+            payload,
+        )
+    }
+}
+
+fn reject_mismatched_payload_hasher(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (material, identity, registry) = signing_fixture()?;
+    store.save_key_registry(&registry)?;
+    let timeline = store.create_timeline("wrong-hash")?;
+    let calls = std::cell::Cell::new(0);
+    let mut sign = |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+        calls.set(calls.get() + 1);
+        Err(CoreError::Storage("signer must not run".to_owned()))
+    };
+    assert!(store
+        .append_timeline_signed_authorized(
+            timeline.id(),
+            &registry,
+            draft(b"wrong-hash"),
+            identity,
+            material.material_digest(),
+            material.public_verification_key(),
+            &mut sign,
+        )
+        .is_err());
+    assert_eq!(calls.get(), 0);
+    assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn both_adapters_reject_a_hasher_that_disagrees_with_the_envelope(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_mismatched_payload_hasher(&mut MemoryStore::with_hasher(Box::new(WrongPayloadHasher)))?;
+    reject_mismatched_payload_hasher(&mut SqliteStore::open_in_memory_with_hasher(Box::new(
+        WrongPayloadHasher,
+    ))?)?;
     Ok(())
 }
 
