@@ -766,7 +766,7 @@ fn assert_frozen_fork_retries(
 
 fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
     let authority = Arc::new(TestAuthority::default());
-    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::clone(&authority);
     let mut host = test_stage(
         "open coordinator host",
         open_with_authority(
@@ -925,6 +925,115 @@ fn memory_host_admits_active_unaffected_roots_and_forks() -> Result<(), Box<dyn 
 fn sqlite_host_admits_active_unaffected_roots_and_forks() -> Result<(), Box<dyn std::error::Error>>
 {
     assert_active_unaffected_topology_parity(StoreConfig::SqliteInMemory)
+}
+
+#[test]
+fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-topology-request-count-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let mut first_host = test_stage(
+        "open first SQLite host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            Arc::clone(&authority),
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    {
+        let mut commands = test_stage("open first host sender", first_host.command_sender())?;
+        let request = test_stage("construct first host request", persistence_request())?;
+        let request_reference = request.reference();
+        let provenance = request.provenance();
+        test_stage(
+            "submit first host request",
+            commands.submit_erasure_request(request, provenance),
+        )?;
+        test_stage(
+            "authorize first host request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+    }
+
+    let mut second_host = test_stage(
+        "open second SQLite host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            Arc::clone(&authority),
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    {
+        let mut commands = test_stage("open second host sender", second_host.command_sender())?;
+        let request = test_stage(
+            "construct second host request",
+            erasure_support::request(erasure_support::RequestFixtureInput {
+                request: reference(11),
+                subject: reference(12),
+                scope: ErasureScopeV1::PrivateSubjectData,
+                selectors: vec![reference(13)],
+                requester: reference(14),
+                authorization: reference(15),
+                policy: reference(16),
+                request_position: 10,
+                horizon_position: 21,
+                provenance: reference(17),
+            }),
+        )?;
+        let request_reference = request.reference();
+        let provenance = request.provenance();
+        test_stage(
+            "submit second host request",
+            commands.submit_erasure_request(request, provenance),
+        )?;
+        test_stage(
+            "authorize second host request",
+            commands.authorize_erasure_request(request_reference, reference(33)),
+        )?;
+    }
+
+    let root = {
+        let mut commands = test_stage("reopen first host sender", first_host.command_sender())?;
+        test_stage(
+            "create root after peer request",
+            commands.create_timeline("request-count-refresh-root"),
+        )?
+        .id()
+    };
+    {
+        let mut reads = test_stage(
+            "read through refreshed first host",
+            first_host.read_sender(),
+        )?;
+        assert_eq!(
+            test_stage("read new root through first host", reads.timeline(root))?
+                .map(|timeline| timeline.id()),
+            Some(root)
+        );
+    }
+
+    drop(second_host);
+    drop(first_host);
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+    Ok(())
 }
 
 #[test]
