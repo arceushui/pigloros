@@ -366,6 +366,38 @@ fn public_child_rejects_more_leaves_than_distinct_keys_in_range() -> TestResult 
 }
 
 #[test]
+fn public_wdb1_key_roundtrips_closure_and_rejects_next_kind() -> TestResult {
+    let first = key(WorldArtifactKindV1::OutputPolicy, hash(10))?;
+    let closure = key(WorldArtifactKindV1::OutputPolicyClosure, hash(11))?;
+    let directory = WorldDependencyBranchV1::new(WorldDependencyBranchInputV1 {
+        scope: hash(1),
+        height: 1,
+        children: vec![
+            child(first, first, 1, hash(50))?,
+            child(closure, closure, 1, hash(51))?,
+        ],
+    })?;
+    let bytes = directory.encode().to_vec();
+    assert_eq!(
+        WorldDependencyBranchV1::decode(&CanonicalBytes::from_vec(bytes.clone()))?,
+        directory
+    );
+    assert_eq!(directory.last_key(), closure);
+
+    let mut unsupported = bytes;
+    let kind_offset = unsupported
+        .windows(4)
+        .position(|window| window == [0x82, 14, 0x58, 0x20])
+        .ok_or("missing encoded closure key")?;
+    unsupported[kind_offset + 1] = 15;
+    assert_eq!(
+        WorldDependencyBranchV1::decode(&CanonicalBytes::from_vec(unsupported)),
+        Err(WorldDependencyBranchErrorV1::UnsupportedKind)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_directory_checks_child_count_sums_and_all_uint_widths() -> TestResult {
     let child_capacity = 1_u64 << 56;
     let mut overflowing_children = Vec::new();
