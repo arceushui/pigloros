@@ -142,7 +142,7 @@ impl EventStore for HostedLedgerStore {
             host.command_sender()?.append_timeline_signed_authorized(
                 timeline,
                 expected_registry,
-                draft,
+                &draft,
                 identity,
                 material_digest,
                 public_verification_key,
