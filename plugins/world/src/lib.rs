@@ -1857,11 +1857,12 @@ impl Driver for WorldDriver {
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         if matches!(&self.backend, WorldDriverBackend::Installed(_)) {
-            let anchor = observations
-                .anchor()
-                .ok_or(RuntimeError::MissingSnapshotAnchor {
-                    driver: self.name().to_owned(),
-                })?;
+            let anchor =
+                observations
+                    .anchor()
+                    .ok_or_else(|| RuntimeError::MissingSnapshotAnchor {
+                        driver: self.name().to_owned(),
+                    })?;
             if anchor.timeline_id() != timeline {
                 return Err(RuntimeError::SnapshotTimelineMismatch {
                     expected: timeline,

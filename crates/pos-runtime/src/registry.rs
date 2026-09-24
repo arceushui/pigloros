@@ -1355,11 +1355,12 @@ impl PluginRegistry {
         };
         let complete_prefix_required = driver.requires_complete_event_prefix();
         if complete_prefix_required {
-            let anchor = snapshot.view_for(driver.subscriptions()).anchor().ok_or(
-                RuntimeError::MissingSnapshotAnchor {
+            let anchor = snapshot
+                .view_for(driver.subscriptions())
+                .anchor()
+                .ok_or_else(|| RuntimeError::MissingSnapshotAnchor {
                     driver: driver.name().to_owned(),
-                },
-            )?;
+                })?;
             validate_recovery_evidence(
                 &[TimelineHistorySegment::new(
                     timeline,
