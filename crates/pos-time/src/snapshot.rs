@@ -115,8 +115,8 @@ impl From<CoreError> for SnapshotError {
 /// Verify that `snapshot` + tail events produces the same state as a full replay.
 ///
 /// Steps:
-/// 1. Read events after `snapshot.at_seq` (the "tail") and all events.
-/// 2. Restore `registry` to `snap.registry` state, then fold the tail to build
+/// 1. Read all events once, then select the tail after `snapshot.at_seq`.
+/// 2. Restore `registry` to `snapshot.registry` state, then fold the tail to build
 ///    the incremental projection.
 /// 3. Reset `registry` to empty and fold all events to build the full-replay
 ///    reference projection.
@@ -124,7 +124,8 @@ impl From<CoreError> for SnapshotError {
 ///
 /// `registry` must be pre-populated with the same reducers used when the
 /// snapshot was originally taken. Its accumulated state is managed internally
-/// and will be in the full-replay state when this function returns.
+/// and is in the full-replay state on success. On failure, its original
+/// accumulated state is restored.
 ///
 /// # Errors
 /// Returns [`SnapshotError::ArtifactUnavailable`] when the registered snapshot
