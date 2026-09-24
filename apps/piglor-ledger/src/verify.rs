@@ -796,7 +796,8 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_with_signed_events_passes() -> Result<(), Box<dyn std::error::Error>> {
+    fn verify_store_rejects_envelope_signatures_until_full_verifier(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
@@ -836,7 +837,10 @@ mod tests {
         let trust_anchor = ledger_trust_anchor(&pubkey);
         let report = run(&Source::Store(db.clone()), Some(&trust_anchor), None).test_ok()?;
         assert_eq!(report.tier, "store");
-        assert_eq!(report.outcome, VerifyOutcome::Ok);
+        // #409 replaces the payload-only CLI verifier with the exact envelope verifier.
+        let (which, reason) = expect_mismatch(report.outcome)?;
+        assert_eq!(which, "seq=1");
+        assert!(reason.contains("signature verification failed"), "{reason}");
         assert!(report.n >= 1);
 
         let error = run(&Source::Store(db), None, None).test_err()?;
