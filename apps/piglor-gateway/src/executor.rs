@@ -2406,13 +2406,13 @@ fn execute_host_action(
     context: &ActionCommandContext<'_>,
     reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
 ) {
-    let mut reply = Some(reply);
-    let outcome = host
+    let mut result = Err(host_action_error(ErasureHostErrorV1::RecoveryUnavailable));
+    let fence_result = host
         .command_sender()
         .map_err(host_action_error)
         .and_then(|mut sender| {
             let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
-                let result = prepare_and_append_action(
+                result = prepare_and_append_action(
                     sender.timeline(context.timeline).map_err(host_action_error),
                     |draft| {
                         sender
@@ -2429,11 +2429,6 @@ fn execute_host_action(
                     context.authorization,
                     context.decision,
                 );
-                retain_action_release(context, &result);
-                let release = reply.take();
-                if let Some(reply) = release {
-                    drop(reply.send(result));
-                }
             };
             sender
                 .with_protected_effect_fence(
@@ -2443,9 +2438,11 @@ fn execute_host_action(
                 )
                 .map_err(host_action_error)
         });
-    if let (Err(error), Some(reply)) = (outcome, reply) {
-        drop(reply.send(Err(error)));
+    if let Err(error) = fence_result {
+        result = Err(error);
     }
+    retain_action_release(context, &result);
+    drop(reply.send(result));
 }
 
 fn execute_host_identified_action(
@@ -2456,13 +2453,13 @@ fn execute_host_identified_action(
         Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
     >,
 ) {
-    let mut reply = Some(reply);
-    let outcome = host
+    let mut result = Err(host_action_error(ErasureHostErrorV1::RecoveryUnavailable));
+    let fence_result = host
         .command_sender()
         .map_err(host_action_error)
         .and_then(|mut sender| {
             let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
-                let result = prepare_action(
+                result = prepare_action(
                     sender.timeline(context.timeline).map_err(host_action_error),
                     context.timeline,
                     context.registry,
@@ -2492,11 +2489,6 @@ fn execute_host_identified_action(
                             )
                         })
                 });
-                retain_identified_action_release(context, &result);
-                let release = reply.take();
-                if let Some(reply) = release {
-                    drop(reply.send(result));
-                }
             };
             sender
                 .with_protected_effect_fence(
@@ -2506,9 +2498,11 @@ fn execute_host_identified_action(
                 )
                 .map_err(host_action_error)
         });
-    if let (Err(error), Some(reply)) = (outcome, reply) {
-        drop(reply.send(Err(error)));
+    if let Err(error) = fence_result {
+        result = Err(error);
     }
+    retain_identified_action_release(context, &result);
+    drop(reply.send(result));
 }
 
 fn publish_action_notice(

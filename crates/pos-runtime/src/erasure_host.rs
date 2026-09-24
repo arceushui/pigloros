@@ -17,13 +17,15 @@ use pos_core::{
     ErasureForkRecoveryV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureGate,
     ErasureHostErrorV1, ErasureInventoryObservationV1, ErasureInventoryPersistencePortV1,
-    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
-    ErasureReceiptInputV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureRequestV1, ErasureRetryAdmissionV1,
-    ErasureScopeExtensionV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureTopologyTransitionPermitV1, ErasureVerifiedEmptyInventoryQueryV1,
-    ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
-    ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1,
+    ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
+    ErasureProtectedOperationV1, ErasureReceiptInputV1, ErasureReceiptV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureRequestV1, ErasureRetryAdmissionV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureTopologyTransitionPermitV1,
+    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
+    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
     KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
     KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1,
     PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
@@ -2443,7 +2445,7 @@ impl ErasureCommandSenderV1<'_> {
     ) -> Result<(), ErasureHostErrorV1> {
         let generation = self.generation;
         self.host.ensure_generation(generation)?;
-        let owns_interval = begin_protected_effect_interval(self.host)?;
+        let interval = begin_protected_effect_interval(self.host)?;
         let gate = Arc::clone(&self.host.gate);
         let fence_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut fenced_effect = || effect(self);
@@ -2453,12 +2455,21 @@ impl ErasureCommandSenderV1<'_> {
         let fence_result = match fence_result {
             Ok(result) => result,
             Err(payload) => {
-                let _ = finish_protected_effect_interval(self.host, owns_interval, false);
+                let _ = finish_protected_effect_interval(
+                    self.host,
+                    interval,
+                    ErasureProtectedEffectDispositionV1::Rollback,
+                );
                 self.host.poison();
                 std::panic::resume_unwind(payload);
             }
         };
-        finish_protected_effect_interval(self.host, owns_interval, fence_result.is_ok())?;
+        let disposition = if fence_result.is_ok() {
+            ErasureProtectedEffectDispositionV1::Commit
+        } else {
+            ErasureProtectedEffectDispositionV1::Rollback
+        };
+        finish_protected_effect_interval(self.host, interval, disposition)?;
         fence_result?;
         self.host.ensure_generation(self.generation)
     }
@@ -3243,12 +3254,33 @@ impl ErasureReadSenderV1<'_> {
         effect: &mut dyn FnMut(&mut Self),
     ) -> Result<(), ErasureHostErrorV1> {
         let generation = self.generation;
-        self.host.ensure_generation(generation).and_then(|()| {
-            let gate = Arc::clone(&self.host.gate);
+        self.host.ensure_generation(generation)?;
+        let interval = begin_protected_effect_interval(self.host)?;
+        let gate = Arc::clone(&self.host.gate);
+        let fence_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut fenced_effect = || effect(self);
             gate.with_fence(timeline, operation, &mut fenced_effect)
                 .map_err(ErasureHostErrorV1::from)
-        })?;
+        }));
+        let fence_result = match fence_result {
+            Ok(result) => result,
+            Err(payload) => {
+                let _ = finish_protected_effect_interval(
+                    self.host,
+                    interval,
+                    ErasureProtectedEffectDispositionV1::Rollback,
+                );
+                self.host.poison();
+                std::panic::resume_unwind(payload);
+            }
+        };
+        let disposition = if fence_result.is_ok() {
+            ErasureProtectedEffectDispositionV1::Commit
+        } else {
+            ErasureProtectedEffectDispositionV1::Rollback
+        };
+        finish_protected_effect_interval(self.host, interval, disposition)?;
+        fence_result?;
         self.host.ensure_generation(self.generation)
     }
 
@@ -3392,7 +3424,7 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
 
 fn begin_protected_effect_interval(
     host: &mut ErasureExecutionHostV1,
-) -> Result<bool, ErasureHostErrorV1> {
+) -> Result<ErasureProtectedEffectIntervalV1, ErasureHostErrorV1> {
     match host.store.host_store().begin_protected_effect_interval() {
         Ok(owns_interval) => Ok(owns_interval),
         Err(error) => {
@@ -3404,13 +3436,13 @@ fn begin_protected_effect_interval(
 
 fn finish_protected_effect_interval(
     host: &mut ErasureExecutionHostV1,
-    owns_interval: bool,
-    commit_effect: bool,
+    interval: ErasureProtectedEffectIntervalV1,
+    disposition: ErasureProtectedEffectDispositionV1,
 ) -> Result<(), ErasureHostErrorV1> {
     let result = host
         .store
         .host_store()
-        .finish_protected_effect_interval(owns_interval, commit_effect);
+        .finish_protected_effect_interval(interval, disposition);
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -5846,15 +5878,13 @@ mod tests {
 
     #[test]
     fn empty_topology_change_rejects_a_candidate_over_the_deployment_ceiling() {
-        let mut store = MemoryStore::new().without_erasure_gate();
-        store
-            .create_timeline("ceiling-parent")
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let limits = ErasureRecoveryLimitsV1::new(1, 1, 1)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut host =
-            ErasureExecutionHostV1::recover_verified_empty_with_limits(Box::new(store), limits)
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, limits)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        host.command_sender()
+            .and_then(|mut sender| sender.create_timeline("ceiling-parent"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             host.command_sender()
                 .and_then(|mut sender| sender.create_timeline("ceiling-candidate")),
@@ -6879,11 +6909,10 @@ mod tests {
 
     #[test]
     fn read_sender_exposes_generation_bound_events_and_metadata() {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let limits = ErasureRecoveryLimitsV1::new(4, 4, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, limits)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let timeline = host
             .command_sender()
             .and_then(|mut sender| {
@@ -7988,6 +8017,31 @@ mod tests {
             ),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
+    }
+
+    #[test]
+    fn read_effect_panic_rolls_back_the_interval_and_poisons_the_host() {
+        let limits = ErasureRecoveryLimitsV1::new(4, 4, 4)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut host = ErasureExecutionHostV1::open_verified_empty(StoreConfig::Memory, limits)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timeline = host
+            .command_sender()
+            .and_then(|mut sender| sender.create_timeline("read-effect-panic"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut reads = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reads.with_protected_effect_fence(
+                timeline.id(),
+                ErasureProtectedOperationV1::Read,
+                &mut |_| panic!("injected protected read panic"),
+            )
+        }));
+        assert!(panic_result.is_err());
+        drop(reads);
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
     }
 
     #[test]

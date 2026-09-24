@@ -1699,6 +1699,11 @@ impl ErasureScopeCommitmentV1 {
             || input.scope_members.len() > ERASURE_MAX_SCOPE_EXTENSIONS
             || !strictly_increasing(&input.scope_members)
             || input.scope_timeline_ids.len() > ERASURE_MAX_INVENTORY_TIMELINES
+            || input
+                .scope_members
+                .len()
+                .saturating_add(input.scope_timeline_ids.len())
+                > ERASURE_MAX_INVENTORY_TIMELINES
             || !strictly_increasing(&input.scope_timeline_ids)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
@@ -1762,7 +1767,7 @@ impl ErasureScopeCommitmentV1 {
             ERASURE_SCOPE_LEDGER_MAX_BYTES,
             ERASURE_MAX_INVENTORY_TIMELINES,
         )
-        .and_then(|value| exact_array(&value, 7).and_then(scope_commitment_from_fields))
+        .and_then(|value| exact_array(&value, 6).and_then(scope_commitment_from_fields))
     }
     fn with_digest(self) -> Result<Self, ErasureErrorV1> {
         encode_limited(
@@ -4005,7 +4010,7 @@ impl ErasureScopeExtensionV1 {
             ERASURE_PORTABLE_RECORD_MAX_BYTES,
             ERASURE_MAX_SCOPE_EXTENSIONS,
         )
-        .and_then(|value| exact_array(&value, 9).and_then(scope_extension_from_fields))
+        .and_then(|value| exact_array(&value, 8).and_then(scope_extension_from_fields))
     }
 
     fn with_digest(self) -> Result<Self, ErasureErrorV1> {
@@ -4453,6 +4458,23 @@ fn canonical_cbor_major_length(major: u8, length: usize) -> ([u8; 9], usize) {
 }
 
 /// Adapter capability for one bounded, complete inventory read snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureProtectedEffectIntervalV1 {
+    /// This call joined an enclosing interval, or the adapter needs no interval.
+    Unowned,
+    /// This call began the interval and must close it exactly once.
+    Owned,
+}
+
+/// Commit or roll back a host-owned protected-effect interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureProtectedEffectDispositionV1 {
+    /// The protected fence and its effect completed successfully.
+    Commit,
+    /// The protected fence rejected the operation or unwound.
+    Rollback,
+}
+
 pub trait ErasureInventoryPersistencePortV1 {
     /// Read every durable erasure head and Timeline/Fork ID atomically.
     ///
@@ -4491,30 +4513,32 @@ pub trait ErasureInventoryPersistencePortV1 {
     ///
     /// Adapters sharing durable state across hosts should acquire the same
     /// write boundary used by inventory-changing operations and reject a stale
-    /// inventory before the caller's effect runs. The returned flag is true
-    /// only when this call owns the interval; false means it joined an outer
+    /// inventory before the caller's effect runs. The returned token is owned
+    /// only when this call began the interval; otherwise it joined an outer
     /// protected effect interval or the adapter does not need one.
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::StaleGeneration`] when the durable inventory
     /// changed since this adapter installed its verified inventory, or a
     /// persistence error when the exclusion interval cannot be established.
-    fn begin_protected_effect_interval(&mut self) -> Result<bool, ErasureErrorV1> {
-        Ok(false)
+    fn begin_protected_effect_interval(
+        &self,
+    ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
+        Ok(ErasureProtectedEffectIntervalV1::Unowned)
     }
 
     /// End an interval started by [`Self::begin_protected_effect_interval`].
     ///
-    /// `commit_effect` is false when the local Tick Boundary rejected the
+    /// The disposition is `Rollback` when the local Tick Boundary rejected the
     /// protected operation. Implementations must release or roll back only an
     /// interval owned by the matching begin call.
     ///
     /// # Errors
     /// Returns a persistence error when the interval cannot be closed safely.
     fn finish_protected_effect_interval(
-        &mut self,
-        _owns_interval: bool,
-        _commit_effect: bool,
+        &self,
+        _interval: ErasureProtectedEffectIntervalV1,
+        _disposition: ErasureProtectedEffectDispositionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
@@ -6643,8 +6667,8 @@ pub struct ErasureForkRecoveryMutationV1 {
     predecessor: Option<ErasureReferenceV1>,
     next_manifest: ErasureReferenceV1,
     next_manifest_bytes_digest: ErasureReferenceV1,
-    objects: Vec<ErasureForkRecoveryObjectV1>,
-    states: Vec<ErasureForkRecoveryObjectV1>,
+    objects: Vec<ErasureForkRecoveryContentV1>,
+    states: Vec<ErasureForkRecoveryContentV1>,
     index_inserts: Vec<ErasureIndexInsertV1>,
     effect: ErasureReferenceV1,
     effect_bytes_digest: ErasureReferenceV1,
@@ -6652,9 +6676,9 @@ pub struct ErasureForkRecoveryMutationV1 {
     binding_digest: ErasureReferenceV1,
 }
 
-/// One content-addressed object digest retained in a Fork recovery proof.
+/// One content-addressed object or state digest retained in a Fork recovery proof.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ErasureForkRecoveryObjectV1 {
+pub struct ErasureForkRecoveryContentV1 {
     reference: ErasureReferenceV1,
     bytes_digest: ErasureReferenceV1,
 }
@@ -6669,7 +6693,7 @@ impl ErasureForkRecoveryProofV1 {
                 let objects = mutation
                     .new_objects
                     .iter()
-                    .map(|object| ErasureForkRecoveryObjectV1 {
+                    .map(|object| ErasureForkRecoveryContentV1 {
                         reference: object.reference(),
                         bytes_digest: bytes_digest(object.canonical_cbor()),
                     })
@@ -6677,7 +6701,7 @@ impl ErasureForkRecoveryProofV1 {
                 let states = mutation
                     .new_states
                     .iter()
-                    .map(|state| ErasureForkRecoveryObjectV1 {
+                    .map(|state| ErasureForkRecoveryContentV1 {
                         reference: state.reference(),
                         bytes_digest: bytes_digest(state.canonical_cbor()),
                     })
@@ -6999,13 +7023,13 @@ impl ErasureForkRecoveryMutationV1 {
 
     /// Return all expected immutable evidence objects.
     #[must_use]
-    pub fn objects(&self) -> &[ErasureForkRecoveryObjectV1] {
+    pub fn objects(&self) -> &[ErasureForkRecoveryContentV1] {
         &self.objects
     }
 
     /// Return all expected ERS1 state objects.
     #[must_use]
-    pub fn states(&self) -> &[ErasureForkRecoveryObjectV1] {
+    pub fn states(&self) -> &[ErasureForkRecoveryContentV1] {
         &self.states
     }
 
@@ -7034,7 +7058,7 @@ impl ErasureForkRecoveryMutationV1 {
     }
 }
 
-impl ErasureForkRecoveryObjectV1 {
+impl ErasureForkRecoveryContentV1 {
     /// Return the object or state reference.
     #[must_use]
     pub const fn reference(self) -> ErasureReferenceV1 {
@@ -7093,9 +7117,9 @@ fn recovery_mutation_from_value(
 
 fn recovery_object_from_value(
     value: &Value,
-) -> Result<ErasureForkRecoveryObjectV1, ErasureErrorV1> {
+) -> Result<ErasureForkRecoveryContentV1, ErasureErrorV1> {
     let fields = exact_array(value, 2)?;
-    Ok(ErasureForkRecoveryObjectV1 {
+    Ok(ErasureForkRecoveryContentV1 {
         reference: bytes32(&fields[0])?,
         bytes_digest: bytes32(&fields[1])?,
     })
@@ -7168,7 +7192,7 @@ fn recovery_mutation_value(mutation: &ErasureForkRecoveryMutationV1) -> Value {
     ])
 }
 
-fn recovery_object_value(object: &ErasureForkRecoveryObjectV1) -> Value {
+fn recovery_object_value(object: &ErasureForkRecoveryContentV1) -> Value {
     Value::Array(vec![digest(object.reference), digest(object.bytes_digest)])
 }
 

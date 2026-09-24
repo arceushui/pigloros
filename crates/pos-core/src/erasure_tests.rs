@@ -339,6 +339,14 @@ fn scope_commitment_binds_canonical_initial_timeline_ids() -> Result<(), Erasure
         target_closure: reference(8),
         lineage_rule: Some(reference(9)),
     })?;
+    let Value::Array(scope_fields) = decode_value(&scope.to_canonical_cbor()?)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(scope_fields.len(), 6);
+    let Value::Array(affected_scope) = &scope_fields[3] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(affected_scope.len(), 3);
     assert_eq!(scope.scope_timeline_ids(), &[first, second]);
     assert_eq!(
         ErasureScopeCommitmentV1::from_canonical_cbor(&scope.to_canonical_cbor()?)?,
@@ -349,9 +357,31 @@ fn scope_commitment_binds_canonical_initial_timeline_ids() -> Result<(), Erasure
     let Value::Array(fields) = &mut malformed else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
-    fields[4] = Value::Array(vec![Value::Bytes(vec![1])]);
+    fields[3] = Value::Array(vec![Value::Array(vec![
+        Value::Integer(2_u64.into()),
+        Value::Null,
+    ])]);
     assert_eq!(
         ErasureScopeCommitmentV1::from_canonical_cbor(&encode_value(&malformed)?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let mut reordered = decode_value(&scope.to_canonical_cbor()?)?;
+    let Value::Array(fields) = &mut reordered else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[3] = Value::Array(vec![
+        Value::Array(vec![
+            Value::Integer(1_u64.into()),
+            Value::Bytes(first.inner().to_bytes().to_vec()),
+        ]),
+        Value::Array(vec![
+            Value::Integer(0_u64.into()),
+            Value::Bytes(reference(7).digest().to_vec()),
+        ]),
+    ]);
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&encode_value(&reordered)?),
         Err(ErasureErrorV1::InvalidEncoding)
     );
 
@@ -373,6 +403,30 @@ fn scope_commitment_binds_canonical_initial_timeline_ids() -> Result<(), Erasure
             request: reference(1),
             scope_members: vec![reference(7)],
             scope_timeline_ids: vec![first; ERASURE_MAX_INVENTORY_TIMELINES + 1],
+            target_closure: reference(8),
+            lineage_rule: Some(reference(9)),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let scope_members = (0..ERASURE_MAX_SCOPE_EXTENSIONS)
+        .map(|index| {
+            let mut digest = [0; 32];
+            digest[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_be_bytes());
+            ErasureReferenceV1::from_digest(digest)
+        })
+        .collect();
+    let scope_timeline_ids = (1..=ERASURE_MAX_INVENTORY_TIMELINES - ERASURE_MAX_SCOPE_EXTENSIONS
+        + 1)
+        .map(|index| {
+            TimelineId::from_ulid(ulid::Ulid::from(u128::try_from(index).unwrap_or(u128::MAX)))
+        })
+        .collect();
+    assert_eq!(
+        ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: reference(1),
+            scope_members,
+            scope_timeline_ids,
             target_closure: reference(8),
             lineage_rule: Some(reference(9)),
         }),
@@ -628,6 +682,14 @@ fn freeze_and_scope_codecs_reject_header_and_length_mutations() -> Result<(), Er
         predecessor_extension: None,
         admission_provenance: reference(5),
     })?;
+    let Value::Array(extension_fields) = decode_value(&extension.to_canonical_cbor()?)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(extension_fields.len(), 8);
+    let Value::Array(fork_scope_reference) = &extension_fields[4] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(fork_scope_reference.len(), 2);
     codec_shape_guards!(
         extension.to_canonical_cbor()?,
         ErasureScopeExtensionV1::from_canonical_cbor

@@ -49,7 +49,8 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
     ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate,
     ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
-    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
+    ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
+    ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
     ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, Hash, KeyDestructionOutcomeV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
@@ -143,6 +144,9 @@ fn bounded_read_delay_for_test(phase: u8) {
 
 pub struct SqliteStore {
     conn: Connection,
+    /// Writable lock connection used only to serialize protected effects for
+    /// a read-only store connection. It never performs application writes.
+    erasure_effect_lock_connection: Option<Connection>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
@@ -782,6 +786,21 @@ impl SqliteStore {
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
+        let erasure_effect_lock_connection = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+            )
+            .ok()
+            .and_then(|connection| {
+                Self::configure_busy_timeout(&connection)
+                    .ok()
+                    .map(|()| connection)
+            })
+        } else {
+            None
+        };
+
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
@@ -792,6 +811,7 @@ impl SqliteStore {
 
         let store = Self {
             conn,
+            erasure_effect_lock_connection,
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
@@ -2217,7 +2237,7 @@ impl SqliteStore {
     }
 
     fn append_or_duplicate_with_limit_visible(
-        &mut self,
+        &self,
         timeline: TimelineId,
         identity: AppendIdentity,
         admitted_at: WallTime,
@@ -2478,7 +2498,7 @@ impl SqliteStore {
     }
 
     fn append_visible(
-        &mut self,
+        &self,
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
@@ -2511,7 +2531,7 @@ impl SqliteStore {
     }
 
     fn append_bounded_visible(
-        &mut self,
+        &self,
         timeline: TimelineId,
         drafts: &[EventDraft],
         max_owned_events: u64,
@@ -3699,7 +3719,7 @@ impl SqliteStore {
     }
 
     fn fork_unchecked(
-        &mut self,
+        &self,
         parent: TimelineId,
         at_seq: Seq,
         name: &str,
@@ -3780,7 +3800,7 @@ impl SqliteStore {
     }
 
     fn create_timeline_with_meta_for_host_transition_unchecked(
-        &mut self,
+        &self,
         meta: &TimelineMeta,
     ) -> Result<Timeline, CoreError> {
         let scope = begin_immediate_scope(&self.conn)?;
@@ -5137,45 +5157,52 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         Ok(snapshot)
     }
 
-    fn begin_protected_effect_interval(&mut self) -> Result<bool, ErasureErrorV1> {
-        if !self.conn.is_autocommit() {
-            return Ok(false);
+    fn begin_protected_effect_interval(
+        &self,
+    ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
+        let interval_connection = self
+            .erasure_effect_lock_connection
+            .as_ref()
+            .unwrap_or(&self.conn);
+        if !interval_connection.is_autocommit() {
+            return Ok(ErasureProtectedEffectIntervalV1::Unowned);
         }
-        self.conn
+        interval_connection
             .execute_batch(begin_immediate_sql())
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        let observed = match sqlite_data_version(&self.conn) {
-            Ok(version) => version,
-            Err(_) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                return Err(ErasureErrorV1::ReceiptCommitFailed);
-            }
+        let Ok(observed) = sqlite_data_version(&self.conn) else {
+            drop(interval_connection.execute_batch("ROLLBACK"));
+            return Err(ErasureErrorV1::ReceiptCommitFailed);
         };
         if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
-            return match self.conn.execute_batch("ROLLBACK") {
+            return match interval_connection.execute_batch("ROLLBACK") {
                 Ok(()) => Err(ErasureErrorV1::StaleGeneration),
                 Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
             };
         }
-        Ok(true)
+        Ok(ErasureProtectedEffectIntervalV1::Owned)
     }
 
     fn finish_protected_effect_interval(
-        &mut self,
-        owns_interval: bool,
-        commit_effect: bool,
+        &self,
+        interval: ErasureProtectedEffectIntervalV1,
+        disposition: ErasureProtectedEffectDispositionV1,
     ) -> Result<(), ErasureErrorV1> {
-        if !owns_interval {
+        if interval == ErasureProtectedEffectIntervalV1::Unowned {
             return Ok(());
         }
-        let statement = if commit_effect { "COMMIT" } else { "ROLLBACK" };
-        match self.conn.execute_batch(statement) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(ErasureErrorV1::ReceiptCommitFailed)
-            }
-        }
+        let interval_connection = self
+            .erasure_effect_lock_connection
+            .as_ref()
+            .unwrap_or(&self.conn);
+        let statement = match disposition {
+            ErasureProtectedEffectDispositionV1::Commit => "COMMIT",
+            ErasureProtectedEffectDispositionV1::Rollback => "ROLLBACK",
+        };
+        interval_connection.execute_batch(statement).map_err(|_| {
+            drop(interval_connection.execute_batch("ROLLBACK"));
+            ErasureErrorV1::ReceiptCommitFailed
+        })
     }
 }
 
