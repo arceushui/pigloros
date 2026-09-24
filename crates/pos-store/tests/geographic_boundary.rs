@@ -65,6 +65,7 @@ fn geographic_event(kind: &str, entity: EntityId) -> Event {
         schema_version: SchemaVersion::V1,
         signature: None,
         signature_identity: None,
+        origin: None,
         payload_hash: pos_crypto::chain::hash_payload(&payload),
     }
 }

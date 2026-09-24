@@ -16,7 +16,7 @@ use std::{
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
-    event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    event::{CanonicalBytes, Event, EventDraft, EventOriginV1, Kind, SchemaVersion},
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
         GeoLocationReplayEvidenceV1, GeoLocationReplayVerifier,
@@ -559,16 +559,17 @@ impl SqliteStore {
         draft: EventDraft,
     ) -> Result<Event, CoreError> {
         let head = tx.query_row(
-            "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
+            "SELECT head_seq, chain_head, fork_seq FROM timelines WHERE id = ?1",
             params![timeline.to_string()],
             |row| {
-                row.get::<_, i64>(0).and_then(|head_seq| {
-                    row.get::<_, Vec<u8>>(1)
-                        .map(|chain_head| (head_seq, chain_head))
-                })
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
             },
         );
-        let (head_seq, chain_head) = match head {
+        let (head_seq, chain_head, fork_seq) = match head {
             Ok(value) => value,
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return Err(CoreError::TimelineNotFound(timeline));
@@ -580,6 +581,18 @@ impl SqliteStore {
             Err(_) => return Err(CoreError::Serialization("bad hash length".to_owned())),
         };
         let seq = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)).next();
+        let inherited_prefix = fork_seq
+            .map(|value| {
+                u64::try_from(value)
+                    .map_err(|_| CoreError::Storage("invalid Fork prefix sequence".to_owned()))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let origin_logical_seq = inherited_prefix
+            .checked_add(seq.as_u64())
+            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
+        let origin_sql_seq = i64::try_from(origin_logical_seq)
+            .map_err(|_| CoreError::Storage("origin sequence exceeds SQLite range".to_owned()))?;
         let event_id = EventId::new();
         let event_id_text = event_id.to_string();
         let payload_hash = hasher.hash_payload(&draft.payload);
@@ -592,8 +605,9 @@ impl SqliteStore {
         if let Err(error) = tx.execute(
             "INSERT INTO events
              (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-              causation_id, correlation_id, schema_version, payload_hash, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              causation_id, correlation_id, schema_version, payload_hash, signature,
+              origin_timeline_id, origin_logical_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 timeline.to_string(),
                 i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
@@ -607,6 +621,8 @@ impl SqliteStore {
                 i64::from(draft.schema_version.as_u32()),
                 payload_hash.as_bytes().as_slice(),
                 Option::<&[u8]>::None,
+                timeline.to_string(),
+                origin_sql_seq,
             ],
         ) {
             return Err(CoreError::Storage(error.to_string()));
@@ -633,6 +649,10 @@ impl SqliteStore {
             schema_version: draft.schema_version,
             signature: None,
             signature_identity: None,
+            origin: Some(EventOriginV1 {
+                origin_timeline_id: timeline,
+                origin_logical_seq: Seq::from_u64(origin_logical_seq),
+            }),
             payload_hash,
         })
     }
@@ -898,6 +918,8 @@ impl SqliteStore {
                  signature_owner_id TEXT,
                  signature_role INTEGER,
                  signature_epoch INTEGER,
+                 origin_timeline_id TEXT NOT NULL,
+                 origin_logical_seq INTEGER NOT NULL CHECK (origin_logical_seq >= 1),
                  PRIMARY KEY (timeline_id, seq)
              );
              CREATE TABLE IF NOT EXISTS key_registry (
@@ -1148,16 +1170,20 @@ impl SqliteStore {
             columns.insert(row.map_err(Self::into_storage_error)?);
         }
         drop(statement);
-        match (
-            columns.contains("signature_owner_id"),
-            columns.contains("signature_role"),
-            columns.contains("signature_epoch"),
-        ) {
-            (true, true, true) => Ok(()),
-            _ => Err(CoreError::Storage(
+        if !columns.contains("signature_owner_id")
+            || !columns.contains("signature_role")
+            || !columns.contains("signature_epoch")
+        {
+            return Err(CoreError::Storage(
                 "SQLite events table is missing required signature identity columns".to_owned(),
-            )),
+            ));
         }
+        if !columns.contains("origin_timeline_id") || !columns.contains("origin_logical_seq") {
+            return Err(CoreError::Storage(
+                "SQLite events table is missing required origin context columns".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn geographic_fence_permits(
@@ -1450,9 +1476,24 @@ impl SqliteStore {
         started: Option<Instant>,
         max_elapsed_micros: u64,
     ) -> Result<Vec<Event>, CoreError> {
+        let fork_seq: Option<i64> = conn
+            .query_row(
+                "SELECT fork_seq FROM timelines WHERE id = ?1",
+                params![timeline_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let inherited_prefix = fork_seq
+            .map(|value| {
+                u64::try_from(value)
+                    .map_err(|_| CoreError::Storage("invalid Fork prefix sequence".to_owned()))
+            })
+            .transpose()?
+            .unwrap_or(0);
         const SQL: &str = "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
                                 causation_id, correlation_id, schema_version, payload_hash, signature,
-                                signature_owner_id, signature_role, signature_epoch
+                                signature_owner_id, signature_role, signature_epoch,
+                                origin_timeline_id, origin_logical_seq
                          FROM events
                          WHERE timeline_id = ?1
                            AND seq >= ?2
@@ -1498,7 +1539,13 @@ impl SqliteStore {
             if limit.is_some() {
                 BOUNDED_EVENT_ROWS.with(|count| count.set(count.get().saturating_add(1)));
             }
-            events.push(decode_event_row(row)?);
+            let mut event = decode_event_row(row)?;
+            crate::finalize_committed_origins(
+                timeline_id,
+                inherited_prefix,
+                std::slice::from_mut(&mut event),
+            )?;
+            events.push(event);
         }
 
         #[cfg(test)]
@@ -2664,17 +2711,29 @@ impl SqliteStore {
         payload: CanonicalBytes,
         wall_time: WallTime,
     ) -> Result<Event, CoreError> {
-        let (head_seq, chain_head): (i64, Vec<u8>) = tx
+        let (head_seq, chain_head, fork_seq): (i64, Vec<u8>, Option<i64>) = tx
             .query_row(
-                "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
+                "SELECT head_seq, chain_head, fork_seq FROM timelines WHERE id = ?1",
                 params![timeline.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|error| Self::storage_error(&error))?;
         let chain_head: [u8; 32] = chain_head
             .try_into()
             .map_err(|_| CoreError::Serialization("bad hash length".to_owned()))?;
         let seq = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)).next();
+        let inherited_prefix = fork_seq
+            .map(|value| {
+                u64::try_from(value)
+                    .map_err(|_| CoreError::Storage("invalid Fork prefix sequence".to_owned()))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let origin_logical_seq = inherited_prefix
+            .checked_add(seq.as_u64())
+            .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
+        let origin_sql_seq = i64::try_from(origin_logical_seq)
+            .map_err(|_| CoreError::Storage("origin sequence exceeds SQLite range".to_owned()))?;
         let payload_hash = hasher.hash_payload(&payload);
         let event_id_text = event_id.to_string();
         let next_chain_head = hasher.hash_event(
@@ -2685,8 +2744,9 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO events
              (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-              causation_id, correlation_id, schema_version, payload_hash, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, 1, ?8, NULL)",
+              causation_id, correlation_id, schema_version, payload_hash, signature,
+              origin_timeline_id, origin_logical_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, 1, ?8, NULL, ?9, ?10)",
             params![
                 timeline.to_string(),
                 i64::try_from(seq.as_u64()).unwrap_or(i64::MAX),
@@ -2696,6 +2756,8 @@ impl SqliteStore {
                 payload.as_slice(),
                 i64::try_from(wall_time.as_micros()).unwrap_or(i64::MAX),
                 payload_hash.as_bytes().as_slice(),
+                timeline.to_string(),
+                origin_sql_seq,
             ],
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
@@ -2720,6 +2782,10 @@ impl SqliteStore {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: Some(EventOriginV1 {
+                origin_timeline_id: timeline,
+                origin_logical_seq: Seq::from_u64(origin_logical_seq),
+            }),
             payload_hash,
         })
     }
@@ -4426,21 +4492,35 @@ impl EventStore for SqliteStore {
             crate::ensure_non_geographic_events(events, timeline)
                 .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
                 .and_then(|()| {
-                    let (head_seq, prev_hash) = match store.conn.query_row(
-                        "SELECT head_seq, chain_head FROM timelines WHERE id = ?1",
+                    let (head_seq, prev_hash, inherited_prefix) = match store.conn.query_row(
+                        "SELECT head_seq, chain_head, fork_seq FROM timelines WHERE id = ?1",
                         params![timeline.to_string()],
-                        |row| match (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)) {
-                            (Ok(n), Ok(bytes)) => Ok((n, bytes)),
-                            (Err(e), _) | (_, Err(e)) => Err(e),
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, Vec<u8>>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                            ))
                         },
                     ) {
-                        Ok((n, bytes)) => {
+                        Ok((n, bytes, fork_seq)) => {
                             let arr: [u8; 32] = bytes.try_into().map_err(|_| {
                                 CoreError::Serialization("bad hash length".to_owned())
                             })?;
+                            let inherited_prefix = fork_seq
+                                .map(|value| {
+                                    u64::try_from(value).map_err(|_| {
+                                        CoreError::Storage(
+                                            "invalid Fork prefix sequence".to_owned(),
+                                        )
+                                    })
+                                })
+                                .transpose()?
+                                .unwrap_or(0);
                             (
                                 Seq::from_u64(u64::try_from(n).unwrap_or(0)),
                                 pos_core::Hash::from_bytes(arr),
+                                inherited_prefix,
                             )
                         }
                         Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -4449,7 +4529,7 @@ impl EventStore for SqliteStore {
                         Err(e) => return Err(CoreError::Storage(e.to_string())),
                     };
 
-                    let ordered = pos_core::store::validate_committed_batch(
+                    let mut ordered = pos_core::store::validate_committed_batch(
                         head_seq,
                         events,
                         &mut |id| {
@@ -4465,6 +4545,7 @@ impl EventStore for SqliteStore {
                         },
                         &*store.hasher,
                     )?;
+                    crate::finalize_committed_origins(timeline, inherited_prefix, &mut ordered)?;
 
                     // Join an outer import transaction when present; otherwise own the txn.
                     let own_tx = store.conn.is_autocommit();
@@ -4675,13 +4756,25 @@ impl SqliteStore {
                     })
                 })
                 .transpose()?;
+            let origin_timeline_id = event
+                .origin
+                .map(|origin| origin.origin_timeline_id.to_string());
+            let origin_logical_seq = event
+                .origin
+                .map(|origin| {
+                    i64::try_from(origin.origin_logical_seq.as_u64()).map_err(|_| {
+                        CoreError::Storage("origin sequence exceeds SQLite range".to_owned())
+                    })
+                })
+                .transpose()?;
             self.conn
                 .execute(
                     "INSERT INTO events
                      (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
                       causation_id, correlation_id, schema_version, payload_hash, signature,
-                      signature_owner_id, signature_role, signature_epoch)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                      signature_owner_id, signature_role, signature_epoch,
+                      origin_timeline_id, origin_logical_seq)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         timeline.to_string(),
                         seq_as_i64(event.seq),
@@ -4698,6 +4791,8 @@ impl SqliteStore {
                         signature_owner_id,
                         signature_role,
                         signature_epoch,
+                        origin_timeline_id,
+                        origin_logical_seq,
                     ],
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -5977,6 +6072,12 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
     let signature_role: Option<i64> = row.get(12).map_err(|e| CoreError::Storage(e.to_string()))?;
     let signature_epoch: Option<i64> =
         row.get(13).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let origin_timeline_id: String = row.get(14).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let origin_logical_seq: i64 = row.get(15).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let origin_logical_seq = u64::try_from(origin_logical_seq)
+        .ok()
+        .filter(|seq| *seq >= 1)
+        .ok_or_else(|| CoreError::Serialization("invalid Event origin sequence".to_owned()))?;
     let ph_arr: [u8; 32] = ph_bytes
         .try_into()
         .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
@@ -5998,6 +6099,10 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         schema_version: SchemaVersion::V1,
         signature,
         signature_identity,
+        origin: Some(EventOriginV1 {
+            origin_timeline_id: parse_timeline_id(&origin_timeline_id)?,
+            origin_logical_seq: Seq::from_u64(origin_logical_seq),
+        }),
         payload_hash: pos_core::Hash::from_bytes(ph_arr),
     };
     pos_core::store::validate_event_signature(&event)?;
@@ -12602,6 +12707,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         assert!(store.append_committed(timeline.id(), &[event]).is_err());
@@ -12864,6 +12970,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         corrupt_store

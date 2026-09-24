@@ -1041,6 +1041,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: Some(Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let supplied_public_keys = [TrustedPublicKey {
@@ -1304,6 +1305,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None, // unsigned
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;
@@ -1367,6 +1369,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;
@@ -1411,6 +1414,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: hash_payload(&payload),
             }
         };

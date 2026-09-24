@@ -155,7 +155,9 @@ pub use erasure::{
     ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
 };
 pub use error::CoreError;
-pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
+pub use event::{
+    CanonicalBytes, Determinism, Event, EventDraft, EventOriginV1, Kind, RunMode, SchemaVersion,
+};
 pub use executable_budget::{
     ExecutableBudgetErrorV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
     FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
