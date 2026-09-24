@@ -105,7 +105,15 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         &first_material,
         b"root",
     )?;
-    let child = source.fork(root, Seq::from_u64(1), "verified-child")?.id();
+    append_signed(
+        &mut source,
+        root,
+        &registry,
+        first,
+        &first_material,
+        b"root-2",
+    )?;
+    let child = source.fork(root, Seq::from_u64(2), "verified-child")?.id();
     append_signed(
         &mut source,
         child,
@@ -115,7 +123,7 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         b"child",
     )?;
     let nested = source
-        .fork(child, Seq::from_u64(2), "verified-nested")?
+        .fork(child, Seq::from_u64(3), "verified-nested")?
         .id();
 
     let (second_key, _) = generate_keypair();
@@ -165,7 +173,10 @@ fn verify_round_trip(store: &mut dyn EventStore) -> Result<(), Box<dyn std::erro
     let evaluation = export_evaluation()?;
     for timeline in [fixture.root, fixture.child, fixture.nested] {
         let export = export_timeline_own(&fixture.source, timeline, EXPORT_DIGEST, &evaluation)?;
-        assert_eq!(export.events.len(), 1);
+        assert_eq!(
+            export.events.len(),
+            usize::from(timeline == fixture.root) + 1
+        );
         import_timeline_verified_v1(store, export, &fixture.anchors)?;
     }
     assert_eq!(
@@ -203,14 +214,9 @@ fn invalid_signature_origin_and_trust_reject_without_partial_import(
     let fixture = fixture()?;
     let evaluation = export_evaluation()?;
     let original = export_timeline_own(&fixture.source, fixture.root, EXPORT_DIGEST, &evaluation)?;
-    let mut second_event = original.events[0].clone();
-    second_event.seq = Seq::from_u64(2);
-    second_event.origin = Some(EventOriginV1 {
-        origin_timeline_id: fixture.root,
-        origin_logical_seq: Seq::from_u64(2),
-    });
+    assert_eq!(original.events.len(), 2);
     let mut bad_signature = original.clone();
-    bad_signature.events.push(second_event);
+    bad_signature.events[1].signature = Some(pos_core::Signature::from_bytes([0; 64]));
     reject_export(
         &mut MemoryStore::new(),
         &fixture,
@@ -236,6 +242,15 @@ fn invalid_signature_origin_and_trust_reject_without_partial_import(
         &mut MemoryStore::new(),
         &fixture,
         transplanted,
+        &fixture.anchors,
+    )?;
+
+    let mut wrong_epoch = original.clone();
+    wrong_epoch.events[1].signature_identity = Some(fixture.anchors[1].0);
+    reject_export(
+        &mut SqliteStore::open_in_memory()?,
+        &fixture,
+        wrong_epoch,
         &fixture.anchors,
     )?;
 

@@ -20,11 +20,11 @@
 //! |--------|--------|--------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
-//! | Verified identity | [`export_timeline_own`] | Pending `TimelineEventEnvelopeV1` verifier (#202) |
+//! | Verified identity | [`export_timeline_own`] | [`import_timeline_verified_v1`] |
 //!
 //! [`resolve_timeline_import_public_keys_v1`] checks exact owner/role/epoch
-//! trust anchors without importing Events. Verified identity import remains
-//! unavailable until #202 adds the normative Timeline envelope verifier.
+//! trust anchors without importing Events. [`import_timeline_verified_v1`]
+//! additionally verifies every exact Timeline envelope before atomic import.
 //!
 //! # Backend features
 //!
@@ -646,9 +646,7 @@ pub fn open_store_with_hasher(
 ///
 /// This checks identity and trust resolution only. It does not verify any
 /// signature or import any Event. A host must not treat the result as Timeline
-/// integrity evidence. Verified identity import remains unavailable until
-/// #202 adds the normative `TimelineEventEnvelopeV1` verifier; payload-only
-/// `verify_for_role` is not valid for Timeline Events.
+/// integrity evidence; use [`import_timeline_verified_v1`] for verified import.
 ///
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if any Event is unsigned,
@@ -1540,8 +1538,8 @@ mod tests {
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
-            // Anchor resolution treats signature bytes as opaque. #202 owns
-            // TimelineEventEnvelopeV1 signature verification.
+            // Anchor resolution treats signature bytes as opaque; the verified
+            // import boundary checks the full Timeline envelope separately.
             signature: Some(pos_core::Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
             origin: None,
