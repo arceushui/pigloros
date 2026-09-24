@@ -829,7 +829,12 @@ fn append_driver_drafts(
     registry: &mut PluginRegistry,
     observed_through: pos_core::clock::Seq,
 ) -> Result<u64, ExperimentError> {
-    let drafts = match registry.step_all_anchored(timeline_id, observed_through) {
+    let committed_events = read_completed_prefix(store, timeline_id, observed_through)?;
+    let drafts = match registry.step_all_anchored_with_events(
+        timeline_id,
+        observed_through,
+        &committed_events,
+    ) {
         Ok(drafts) => drafts,
         Err(error) => {
             registry.abort_step();
