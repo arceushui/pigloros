@@ -1770,7 +1770,7 @@ impl WorldDriver {
 
     fn simulate_staged_step(
         &mut self,
-        observations: ObservationView<'_>,
+        observations: &ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         let mut drafts = Vec::new();
         if let Some(config) = self.config_draft()? {
@@ -1934,7 +1934,7 @@ impl Driver for WorldDriver {
         self.installed_timeline = self
             .staged_step
             .take()
-            .and(self.staged_step_timeline.take())
+            .and_then(|_| self.staged_step_timeline.take())
             .or(self.installed_timeline);
     }
 
@@ -1952,7 +1952,7 @@ impl Driver for WorldDriver {
     ) -> Result<StepOutput, RuntimeError> {
         self.preflight_live_step(timeline, &observations)?;
         self.staged_step = Some(self.state());
-        let result = self.simulate_staged_step(observations);
+        let result = self.simulate_staged_step(&observations);
         if result.is_err() {
             self.abort_step();
         }
