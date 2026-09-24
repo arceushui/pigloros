@@ -46,6 +46,9 @@ pub fn compare(
     registries: [&mut ProjectionRegistry; 2],
     closures: [&WorldReplayClosureV1; 2],
 ) -> Result<ForkDiff, CoreError> {
+    if fork_seq.as_u64() == u64::MAX {
+        return Err(CoreError::ArtifactUnavailable);
+    }
     let [a, b] = timelines;
     let [registry_a, registry_b] = registries;
     let [requested_a, requested_b] =
@@ -515,6 +518,26 @@ mod tests {
         assert_eq!(diff.only_in_a.len(), 2);
         assert!(diff.only_in_b.is_empty());
         assert!(diff.diverged_entities.contains(&entity));
+        assert!(matches!(
+            super::compare(
+                &mut reads,
+                [fork_a, fork_b],
+                Seq::from_u64(4),
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert!(matches!(
+            super::compare(
+                &mut reads,
+                [fork_a, fork_b],
+                Seq::from_u64(u64::MAX),
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     #[test]
