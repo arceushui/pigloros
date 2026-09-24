@@ -196,14 +196,14 @@ pub(crate) fn bind_owned_secret_key(
 }
 
 #[cfg(all(test, unix))]
-macro_rules! deletion_fault {
+macro_rules! fault {
     ($path:expr_2021, $stage:expr_2021) => {
         injected_fault_result($path, $stage)
     };
 }
 
 #[cfg(all(not(test), unix))]
-macro_rules! deletion_fault {
+macro_rules! fault {
     ($path:expr_2021, $stage:expr_2021) => {{
         let _ = $path;
         Ok::<(), std::io::Error>(())
@@ -247,10 +247,10 @@ fn delete_owned_secret_key_with_identity(
         pos_core::CoreError::Storage("owned signing-key path has no parent".to_owned())
     })?;
     validate_ancestors(&absolute, parent_path).map_err(|error| storage_error(&error))?;
-    let parent = deletion_fault!(&absolute, FaultStage::DeleteOpenParent)
+    let parent = fault!(&absolute, FaultStage::DeleteOpenParent)
         .and_then(|()| std::fs::File::open(parent_path))
         .map_err(|error| storage_error(&error))?;
-    let opened = deletion_fault!(&absolute, FaultStage::DeleteOpenFile).and_then(|()| {
+    let opened = fault!(&absolute, FaultStage::DeleteOpenFile).and_then(|()| {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -260,14 +260,14 @@ fn delete_owned_secret_key_with_identity(
     let mut file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            deletion_fault!(&absolute, FaultStage::DeleteAbsentDirectorySync)
+            fault!(&absolute, FaultStage::DeleteAbsentDirectorySync)
                 .and_then(|()| parent.sync_all())
                 .map_err(|error| storage_error(&error))?;
             return Ok(pos_core::deletion_receipt(&request));
         }
         Err(error) => return Err(storage_error(&error)),
     };
-    let metadata = deletion_fault!(&absolute, FaultStage::DeleteMetadata)
+    let metadata = fault!(&absolute, FaultStage::DeleteMetadata)
         .and_then(|()| file.metadata())
         .map_err(|error| storage_error(&error))?;
     if expected_file.is_some_and(|expected| expected != BoundFileIdentity::from_metadata(&metadata))
@@ -287,7 +287,7 @@ fn delete_owned_secret_key_with_identity(
         ));
     }
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
-    deletion_fault!(&absolute, FaultStage::DeleteRead)
+    fault!(&absolute, FaultStage::DeleteRead)
         .and_then(|()| file.read_to_end(&mut encoded))
         .map_err(|error| storage_error(&error))?;
     let text = std::str::from_utf8(&encoded).map_err(|error| storage_error(&error))?;
@@ -302,12 +302,12 @@ fn delete_owned_secret_key_with_identity(
             "owned signing-key file does not match the pending material digest".to_owned(),
         ));
     }
-    deletion_fault!(&absolute, FaultStage::DeletePreRemoveFileSync)
+    fault!(&absolute, FaultStage::DeletePreRemoveFileSync)
         .and_then(|()| file.sync_all())
         .map_err(|error| storage_error(&error))?;
     #[cfg(test)]
     swap_deletion_target_for_test(&absolute);
-    let current = deletion_fault!(&absolute, FaultStage::DeleteInspectCurrent)
+    let current = fault!(&absolute, FaultStage::DeleteInspectCurrent)
         .and_then(|()| std::fs::symlink_metadata(&absolute))
         .map_err(|error| storage_error(&error))?;
     if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
@@ -315,13 +315,13 @@ fn delete_owned_secret_key_with_identity(
             "owned signing-key file changed before deletion".to_owned(),
         ));
     }
-    deletion_fault!(&absolute, FaultStage::DeleteRemove)
+    fault!(&absolute, FaultStage::DeleteRemove)
         .and_then(|()| std::fs::remove_file(&absolute))
         .map_err(|error| storage_error(&error))?;
-    deletion_fault!(&absolute, FaultStage::DeletePostRemoveFileSync)
+    fault!(&absolute, FaultStage::DeletePostRemoveFileSync)
         .and_then(|()| file.sync_all())
         .map_err(|error| storage_error(&error))?;
-    deletion_fault!(&absolute, FaultStage::DeleteDirectorySync)
+    fault!(&absolute, FaultStage::DeleteDirectorySync)
         .and_then(|()| parent.sync_all())
         .map_err(|error| storage_error(&error))?;
     Ok(pos_core::deletion_receipt(&request))
@@ -474,21 +474,6 @@ fn swap_deletion_target_for_test(path: &Path) {
         assert!(std::fs::write(&replacement, b"replacement").is_ok());
         assert!(std::fs::rename(replacement, path).is_ok());
     }
-}
-
-#[cfg(all(test, unix))]
-macro_rules! fault {
-    ($path:expr_2021, $stage:expr_2021) => {
-        injected_fault_result($path, $stage)
-    };
-}
-
-#[cfg(all(not(test), unix))]
-macro_rules! fault {
-    ($path:expr_2021, $stage:expr_2021) => {{
-        let _ = $path;
-        Ok::<(), std::io::Error>(())
-    }};
 }
 
 #[cfg(unix)]
