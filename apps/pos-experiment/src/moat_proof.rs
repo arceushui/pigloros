@@ -2775,14 +2775,14 @@ mod coverage_entrypoints {
             entity: fixed_id(1),
             event_type: Kind::new(EVENT_TYPE_CONFIG_V1),
             payload: CanonicalBytes::from_static(b"malformed WCF1"),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
+            wall_time: pos_core::clock::WallTime::from_micros(1),
+            seq: pos_core::clock::Seq::from_u64(1),
             causation_id: None,
             correlation_id: None,
-            schema_version: SchemaVersion::V1,
+            schema_version: pos_core::event::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
-            payload_hash: Hash::from_bytes([0; 32]),
+            payload_hash: pos_core::crypto::Hash::from_bytes([0; 32]),
         };
         assert!(matches!(
             artifact_closure_digest(&topology, &[malformed_config]),
