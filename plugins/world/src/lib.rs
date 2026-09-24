@@ -3093,13 +3093,11 @@ mod tests {
         let body = EntityId::new();
         let config_entity = EntityId::new();
         let timeline = TimelineId::new();
-        let mut params = Vec::new();
-        ciborium::into_writer(&vec![1.0_f32, 0.0_f32], &mut params).test_ok();
         let action = WorldActionV1 {
             actor_entity_id: body,
             body_entity_id: body,
             action_kind: ActionKindV1::TargetVelocity,
-            params_cbor: params,
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -3229,10 +3227,10 @@ mod tests {
             .test_ok();
         let expected = WorldObservationV1::decode(&next.drafts[0].payload).test_ok();
         assert!((expected.pos_x - 0.4).abs() < 0.001);
-        assert_eq!(expected.orient_x, 1.0);
-        assert_eq!(expected.vel_ang_x, 0.25);
-        assert_eq!(expected.vel_ang_y, -0.5);
-        assert_eq!(expected.vel_ang_z, 0.75);
+        assert_eq!(expected.orient_x.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(expected.vel_ang_x.to_bits(), 0.25_f32.to_bits());
+        assert_eq!(expected.vel_ang_y.to_bits(), (-0.5_f32).to_bits());
+        assert_eq!(expected.vel_ang_z.to_bits(), 0.75_f32.to_bits());
 
         let events: Vec<Event> = first
             .drafts
@@ -3324,13 +3322,13 @@ mod tests {
     fn assert_rejected_body_history(
         ids: [EntityId; 2],
         timeline: TimelineId,
-        events: Vec<Event>,
+        events: &[Event],
         reason: &str,
     ) {
         let mut registry = recovery_registry(ids);
         let head = Seq::from_u64(u64::try_from(events.len()).test_ok());
         let error = registry
-            .restore_driver_state(&[TimelineHistorySegment::new(timeline, head)], &events)
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, head)], events)
             .test_err();
         assert!(error.to_string().contains(reason), "{error:?}");
         let after_rejection = registry
@@ -3363,7 +3361,9 @@ mod tests {
             EVENT_TYPE_CONFIG_V1,
             sample_config().encode().test_ok(),
         );
-        let reject = |events, reason| assert_rejected_body_history(ids, timeline, events, reason);
+        let reject = |events: Vec<Event>, reason| {
+            assert_rejected_body_history(ids, timeline, &events, reason);
+        };
         let observation = recovery_observation;
 
         reject(vec![config.clone()], "no committed body observations");
