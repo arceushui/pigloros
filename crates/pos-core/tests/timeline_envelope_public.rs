@@ -49,6 +49,14 @@ fn exact_public_bytes_and_round_trip() -> Result<(), Box<dyn std::error::Error>>
     let envelope = TimelineEventEnvelopeV1::new(input.clone(), &payload())?;
     assert_eq!(envelope.input(), &input);
     assert_eq!(envelope.identity(), input.identity);
+    assert_eq!(
+        envelope.payload_hash(),
+        pos_core::Hash::from_bytes([
+            0x64, 0x37, 0xb3, 0xac, 0x38, 0x46, 0x51, 0x33, 0xff, 0xb6, 0x3b, 0x75, 0x27, 0x3a,
+            0x8d, 0xb5, 0x48, 0xc5, 0x58, 0x46, 0x5d, 0x79, 0xdb, 0x03, 0xfd, 0x35, 0x9c, 0x6c,
+            0xd5, 0xbd, 0x9d, 0x85,
+        ])
+    );
     let mut actual = String::new();
     for byte in envelope.canonical_bytes() {
         write!(&mut actual, "{byte:02x}")?;
@@ -176,6 +184,7 @@ fn decoder_rejects_wrong_shape_types_and_identity() -> Result<(), Box<dyn std::e
         (4, Value::Integer((-1).into())),
         (5, Value::Text("entity".into())),
         (6, Value::Bytes(b"kind".to_vec())),
+        (7, Value::Null),
         (8, Value::Null),
         (9, Value::Bytes(vec![0; 15])),
         (10, Value::Text("correlation".into())),
