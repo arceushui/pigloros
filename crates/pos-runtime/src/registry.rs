@@ -1996,6 +1996,18 @@ impl PluginRegistry {
         self.restore_driver_state_live(timeline_segments, events)
     }
 
+    /// Transfer restored Driver state to a child after the host commits a Fork.
+    ///
+    /// The host owns the parent/child relationship and invokes this only after
+    /// its store has created the child from the restored parent prefix.
+    pub fn commit_fork_timeline(&mut self, parent: TimelineId, child: TimelineId) {
+        for entry in self.plugins.values_mut() {
+            if let Some(driver) = entry.driver.as_mut() {
+                driver.commit_fork_timeline(parent, child);
+            }
+        }
+    }
+
     fn restore_driver_state_live(
         &mut self,
         timeline_segments: &[TimelineHistorySegment],

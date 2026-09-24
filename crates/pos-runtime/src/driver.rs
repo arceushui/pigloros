@@ -577,6 +577,13 @@ pub trait Driver: Send + Sync {
     /// Discards the preceding staged recovery after another Driver rejects it.
     fn abort_restore_from_history(&mut self) {}
 
+    /// Transfer a restored Driver to a child Timeline after the host commits a Fork.
+    ///
+    /// The host must first validate and restore the parent's complete prefix,
+    /// then create the child in the same store. Drivers that bind recovered
+    /// state to a Timeline can update that binding without replaying history.
+    fn commit_fork_timeline(&mut self, _parent: TimelineId, _child: TimelineId) {}
+
     /// Commit state staged by the preceding successful anchored step.
     fn commit_step(&mut self) {}
 

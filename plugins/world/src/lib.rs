@@ -1835,6 +1835,12 @@ impl Driver for WorldDriver {
         self.staged_restore_timeline = None;
     }
 
+    fn commit_fork_timeline(&mut self, parent: TimelineId, child: TimelineId) {
+        if self.installed_timeline == Some(parent) {
+            self.installed_timeline = Some(child);
+        }
+    }
+
     fn commit_step(&mut self) {
         if self.staged_step.take().is_some() {
             if let Some(timeline) = self.staged_step_timeline.take() {
@@ -3802,6 +3808,35 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         registry
             .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_fork_handoff_requires_the_restored_parent() {
+        let body_id = EntityId::new();
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let events = installed_history(body_id, parent);
+        let (mut registry, calls) = installed_registry(body_id);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(parent, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+
+        registry.commit_fork_timeline(TimelineId::new(), child);
+        assert!(matches!(
+            registry.step_all_anchored_with_events(child, Seq::from_u64(2), &events),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        registry.commit_fork_timeline(parent, child);
+        registry
+            .step_all_anchored_with_events(child, Seq::from_u64(2), &events)
             .test_ok();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }

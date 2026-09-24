@@ -2182,6 +2182,7 @@ impl ExperimentSession {
         };
 
         let timeline = self.fork_timeline_at(name, fork_head)?;
+        registry.commit_fork_timeline(self.timeline.id(), timeline.id());
         Ok(Self {
             config,
             registry,

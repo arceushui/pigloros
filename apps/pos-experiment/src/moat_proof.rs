@@ -2128,7 +2128,6 @@ mod tests {
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
-                eprintln!("unexpected test error: {error:?}");
                 std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
             })
         }
@@ -2592,21 +2591,24 @@ mod tests {
             closure_payload_digest: [0; 32],
             halted_at_tick_boundary: true,
         };
-        let evidence = evidence(&EvidenceContext {
-            input: &input,
-            mode: ExecutionModeV1::Local,
-            timeline_id: TimelineId::new(),
-            fork_cut_seq: None,
-            events: &[],
-            factual_events: &[],
-            projections: &projections,
-            topology: &topology,
-            plugin_versions: &versions,
-            failure_probes: &[],
-            host_closure: &host_closure,
-        })
-        .test_ok();
-        assert!(evidence.projections.is_empty());
+        assert!(matches!(
+            evidence(&EvidenceContext {
+                input: &input,
+                mode: ExecutionModeV1::Local,
+                timeline_id: TimelineId::new(),
+                fork_cut_seq: None,
+                events: &[],
+                factual_events: &[],
+                projections: &projections,
+                topology: &topology,
+                plugin_versions: &versions,
+                failure_probes: &[],
+                host_closure: &host_closure,
+            }),
+            Err(MoatProofError::Runtime(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            )))
+        ));
 
         assert_eq!(serialized_digest(&BrokenSerialize), [0; 32]);
         let custom = AuthoritativeEventV1 {
@@ -2664,7 +2666,6 @@ mod coverage_entrypoints {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         result.unwrap_or_else(|error| {
-            eprintln!("unexpected coverage error: {error:?}");
             std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
         })
     }
@@ -2766,7 +2767,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn empty_evidence_and_failed_gate_are_exercised() {
+    fn missing_config_evidence_and_failed_gate_are_exercised() {
         let input = input();
         let topology = test_ok(ProofTopology::new(input.clone()));
         let projections = pos_state::ProjectionRegistry::new();
@@ -2780,20 +2781,26 @@ mod coverage_entrypoints {
             closure_payload_digest: [0; 32],
             halted_at_tick_boundary: true,
         };
-        let empty = test_ok(evidence(&EvidenceContext {
-            input: &input,
-            mode: ExecutionModeV1::Local,
-            timeline_id: TimelineId::new(),
-            fork_cut_seq: None,
-            events: &[],
-            factual_events: &[],
-            projections: &projections,
-            topology: &topology,
-            plugin_versions: &plugin_versions,
-            failure_probes: &[],
-            host_closure: &host_closure,
-        }));
-        assert!(empty.projections.is_empty());
+        assert!(matches!(
+            evidence(&EvidenceContext {
+                input: &input,
+                mode: ExecutionModeV1::Local,
+                timeline_id: TimelineId::new(),
+                fork_cut_seq: None,
+                events: &[],
+                factual_events: &[],
+                projections: &projections,
+                topology: &topology,
+                plugin_versions: &plugin_versions,
+                failure_probes: &[],
+                host_closure: &host_closure,
+            }),
+            Err(MoatProofError::Runtime(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            )))
+        ));
+        let empty =
+            test_ok(test_ok(MoatProofRun::new(input, ExecutionModeV1::Local)).run()).baseline;
 
         let mut failed = MoatProofReport {
             baseline: empty.clone(),
@@ -2840,7 +2847,6 @@ mod run_coverage_entrypoints {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         result.unwrap_or_else(|error| {
-            eprintln!("unexpected coverage fixture error: {error:?}");
             std::panic::resume_unwind(Box::new(format!(
                 "unexpected coverage fixture error: {error:?}"
             )))
