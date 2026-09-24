@@ -787,9 +787,8 @@ mod tests {
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
             .ok_or("expected signing authorization error")?;
-        assert!(authorization_error
-            .to_string()
-            .contains("ledger signing authorization"));
+        assert!(matches!(authorization_error, LedgerError::Store(_)));
+        assert_eq!(authorization_store.head_seq()?, pos_core::Seq::ZERO);
 
         let (registry, identity) = registry_for(&signing_key)?;
         let mut memory = gated_memory_store();
