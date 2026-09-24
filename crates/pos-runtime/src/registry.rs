@@ -3423,6 +3423,7 @@ impl PluginRegistry {
         })();
         match result {
             Ok(drafts) => {
+                let stepped_driver_ids = stepped_driver_ids.into_iter().collect::<HashSet<_>>();
                 for (id, entry) in &mut self.plugins {
                     if stepped_driver_ids.contains(id) {
                         entry.last_tick = Some(now_ns);

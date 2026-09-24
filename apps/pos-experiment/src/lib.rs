@@ -7482,7 +7482,10 @@ mod coverage_entrypoints {
             Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(event_type)))
                 if event_type == "coverage.unknown"
         ));
-        assert!(matches!(session.step_tick(), Err(ExperimentError::SessionFaulted)));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
     }
 
     #[test]

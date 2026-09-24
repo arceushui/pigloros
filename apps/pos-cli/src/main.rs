@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_rejects_unverified_chain_head() {
+    fn cmd_experiment_reproduce_requires_owner_verified_manifest() {
         let manifest = ReproductionManifest {
             manifest: pos_core::ReproManifest::new(
                 TimelineId::new(),
