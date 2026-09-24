@@ -589,14 +589,13 @@ impl<'a> WirePreflight<'a> {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     fn row_count(&mut self) -> Result<usize, ManifestOwnerLinkErrorV1> {
-        let count = self.head(4)?;
-        if count > MAX_MANIFEST_OWNER_PLUGINS_V1 as u64 {
+        let count = usize::try_from(self.head(4)?)
+            .map_err(|_| ManifestOwnerLinkErrorV1::FieldOutOfBounds)?;
+        if count > MAX_MANIFEST_OWNER_PLUGINS_V1 {
             Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
         } else {
-            // The bound above makes this cast safe on every supported target.
-            Ok(count as usize)
+            Ok(count)
         }
     }
 
