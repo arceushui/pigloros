@@ -4802,8 +4802,9 @@ mod tests {
         assert_eq!(observation.vel_lin_y.to_bits(), 1.0_f32.to_bits());
         assert_eq!(observation.vel_lin_z.to_bits(), (-0.125_f32).to_bits());
 
-        // Four quarter-second steps must accumulate the unquantized backend
-        // position. Quantizing state after each step would still report zero.
+        // Each committed step advances from its canonical WOB1 position. The
+        // actuator velocity remains precise, but sub-resolution displacement
+        // does not accumulate as hidden Live-only state.
         for _ in 0..3 {
             driver.commit_step();
             let output = driver
@@ -4813,9 +4814,11 @@ mod tests {
         }
         assert_eq!(observation.tick, 3);
         assert_eq!(observation.step_index, 3);
-        assert!((observation.pos_x - 0.1).abs() < 0.001);
-        assert!((observation.pos_y - 4.0).abs() < 0.001);
-        assert!((observation.pos_z + 0.1).abs() < 0.001);
+        assert!(observation.pos_x.abs() < f32::EPSILON);
+        assert!((observation.pos_y - 4.2).abs() < 0.11);
+        assert!(observation.pos_z.abs() < f32::EPSILON);
+        assert_eq!(observation.vel_lin_x.to_bits(), 0.0625_f32.to_bits());
+        assert_eq!(observation.vel_lin_z.to_bits(), (-0.125_f32).to_bits());
     }
 
     #[test]
