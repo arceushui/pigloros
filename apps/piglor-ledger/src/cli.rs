@@ -199,23 +199,23 @@ fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStor
         )
         .map_err(|error| CliError::BadSource(error.to_string()))?;
     }
-    let timeline_id = event_store
+    event_store
         .initialize_timeline_with_key_registry("ledger", &registry_state)
-        .map_err(|error| CliError::BadSource(error.to_string()))?
-        .id();
-    let registry = Arc::new(Mutex::new(registry_state));
-    Ok(Box::new(
-        EventLedgerStore::new(
-            event_store,
-            timeline_id,
-            crate::well_known_entity(),
-            signing_key,
-            registry,
-            identity,
-            Box::new(Blake3Hasher),
-        )
-        .map_err(|error| CliError::BadSource(error.to_string()))?,
-    ))
+        .map_err(|error| CliError::BadSource(error.to_string()))
+        .and_then(|timeline| {
+            let registry = Arc::new(Mutex::new(registry_state));
+            EventLedgerStore::new(
+                event_store,
+                timeline.id(),
+                crate::well_known_entity(),
+                signing_key,
+                registry,
+                identity,
+                Box::new(Blake3Hasher),
+            )
+            .map_err(|error| CliError::BadSource(error.to_string()))
+            .map(|store| Box::new(store) as Box<dyn LedgerStore>)
+        })
 }
 
 /// Return today's date as `YYYY-MM-DD` (UTC) without pulling in a date crate.
