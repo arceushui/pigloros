@@ -5747,8 +5747,12 @@ fn sqlite_fork_admission_recovery_is_exact(
     if recovered != admission.recovery_result()? {
         return Ok(false);
     }
-    let Ok(stored_proof) = sqlite_fork_recovery_proof(conn, admission.operation()) else {
-        return Ok(false);
+    let stored_proof = match sqlite_fork_recovery_proof(conn, admission.operation()) {
+        Ok(proof) => proof,
+        Err(ErasureErrorV1::ProvenanceMissing | ErasureErrorV1::InvalidEncoding) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
     };
     if stored_proof.validate(&recovered).is_err() {
         return Ok(false);
@@ -5756,8 +5760,12 @@ fn sqlite_fork_admission_recovery_is_exact(
     if stored_proof != admission.recovery_proof()? {
         return Ok(false);
     }
-    if sqlite_recovery_proof_is_exact(conn, &stored_proof).is_err() {
-        return Ok(false);
+    match sqlite_recovery_proof_is_exact(conn, &stored_proof) {
+        Ok(()) => {}
+        Err(ErasureErrorV1::ProvenanceMissing | ErasureErrorV1::InvalidEncoding) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
     }
     Ok(true)
 }
