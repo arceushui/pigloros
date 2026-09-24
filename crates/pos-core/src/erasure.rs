@@ -644,6 +644,7 @@ impl ErasureContainmentGateV1 {
                 .validate_frozen_membership_successor(candidate)
                 .map_err(containment_recovery_failure)?;
         }
+        drop(current);
         Ok(())
     }
 
