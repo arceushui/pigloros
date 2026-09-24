@@ -528,6 +528,18 @@ pub struct WorldObservationV1 {
 }
 
 impl WorldObservationV1 {
+    fn rotation(&self) -> BodyRotationV1 {
+        BodyRotationV1 {
+            orient_w: self.orient_w,
+            orient_x: self.orient_x,
+            orient_y: self.orient_y,
+            orient_z: self.orient_z,
+            vel_ang_x: self.vel_ang_x,
+            vel_ang_y: self.vel_ang_y,
+            vel_ang_z: self.vel_ang_z,
+        }
+    }
+
     /// Encode to canonical CBOR bytes.
     ///
     /// # Errors
@@ -784,10 +796,37 @@ pub trait WorldBackend: Send + Sync {
     fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation>;
 }
 
+/// Orientation and angular velocity carried between canonical World steps.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BodyRotationV1 {
+    pub orient_w: f32,
+    pub orient_x: f32,
+    pub orient_y: f32,
+    pub orient_z: f32,
+    pub vel_ang_x: f32,
+    pub vel_ang_y: f32,
+    pub vel_ang_z: f32,
+}
+
+impl Default for BodyRotationV1 {
+    fn default() -> Self {
+        Self {
+            orient_w: 1.0,
+            orient_x: 0.0,
+            orient_y: 0.0,
+            orient_z: 0.0,
+            vel_ang_x: 0.0,
+            vel_ang_y: 0.0,
+            vel_ang_z: 0.0,
+        }
+    }
+}
+
 /// A body in the world.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Body {
     pub entity_id: EntityId,
+    pub rotation: BodyRotationV1,
     pub x: f64,
     pub y: f64,
     pub z: f64,
@@ -796,10 +835,11 @@ pub struct Body {
     pub vz: f64,
 }
 
-/// An observation of a body's position and linear velocity.
+/// An observation of a body's pose and velocity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldObservation {
     pub entity_id: EntityId,
+    pub rotation: BodyRotationV1,
     pub x: f64,
     pub y: f64,
     pub z: f64,
@@ -923,6 +963,7 @@ impl WorldBackend for SimpleKinematicBackend {
             .iter()
             .map(|body| WorldObservation {
                 entity_id: body.entity_id,
+                rotation: body.rotation,
                 x: body.vx.mul_add(seconds, body.x),
                 y: body.vy.mul_add(seconds, body.y),
                 z: body.vz.mul_add(seconds, body.z),
@@ -1111,6 +1152,12 @@ struct WorldDriverState {
     causation_by_body: Vec<(EntityId, EventId)>,
 }
 
+#[derive(Default)]
+struct WorldRecoveryCursor {
+    step: Option<(u64, u64)>,
+    observed_bodies: usize,
+}
+
 impl WorldDriver {
     /// Create a new world driver with the given backend and session config.
     #[must_use]
@@ -1161,6 +1208,68 @@ impl WorldDriver {
         self.config_emitted = state.config_emitted;
         self.applied_action_seqs = state.applied_action_seqs;
         self.causation_by_body = state.causation_by_body;
+    }
+
+    fn apply_recovered_observation(
+        restored: &mut WorldDriverState,
+        cursor: &mut WorldRecoveryCursor,
+        header: &RecoveryEventHeader,
+        observation: WorldObservationV1,
+    ) -> Result<(), RuntimeError> {
+        if !restored.config_emitted {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation precedes the pinned configuration",
+            });
+        }
+        if cursor.step != Some((observation.tick, observation.step_index)) {
+            if cursor.step.is_some() && cursor.observed_bodies != restored.entities.len() {
+                return Err(RuntimeError::InvalidRecoveryEvidence {
+                    reason: "World observation step has an incomplete body set",
+                });
+            }
+            if observation.tick != restored.tick || observation.step_index != restored.step_index {
+                return Err(RuntimeError::InvalidRecoveryEvidence {
+                    reason: "World observation tick or step is not the next committed step",
+                });
+            }
+            cursor.step = Some((observation.tick, observation.step_index));
+            cursor.observed_bodies = 0;
+        }
+        if restored
+            .entities
+            .get(cursor.observed_bodies)
+            .map(|body| body.entity_id)
+            != Some(observation.body_entity_id)
+            || header.entity() != observation.body_entity_id
+        {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation body is missing, repeated or out of order",
+            });
+        }
+        let expected_causation = restored
+            .causation_by_body
+            .iter()
+            .find(|(body, _)| *body == observation.body_entity_id)
+            .map(|(_, event_id)| *event_id);
+        if header.causation_id() != expected_causation {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation causation differs from accepted action order",
+            });
+        }
+        let body = &mut restored.entities[cursor.observed_bodies];
+        body.x = f64::from(observation.pos_x);
+        body.y = f64::from(observation.pos_y);
+        body.z = f64::from(observation.pos_z);
+        body.vx = f64::from(observation.vel_lin_x);
+        body.vy = f64::from(observation.vel_lin_y);
+        body.vz = f64::from(observation.vel_lin_z);
+        body.rotation = observation.rotation();
+        cursor.observed_bodies += 1;
+        if cursor.observed_bodies == restored.entities.len() {
+            restored.tick = observation.tick.wrapping_add(1);
+            restored.step_index = observation.step_index.wrapping_add(1);
+        }
+        Ok(())
     }
 
     fn apply_action_to_entities(
@@ -1304,7 +1413,7 @@ impl WorldDriver {
     fn emit_observations(
         &self,
         observations: &[WorldObservation],
-    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+    ) -> Result<Vec<(pos_core::event::EventDraft, WorldObservationV1)>, RuntimeError> {
         observations
             .iter()
             .map(|observation| {
@@ -1332,34 +1441,43 @@ impl WorldDriver {
                         pos_x: Self::quantize_sensor(x, self.config.sensor_min_resolution_mm),
                         pos_y: Self::quantize_sensor(y, self.config.sensor_min_resolution_mm),
                         pos_z: Self::quantize_sensor(z, self.config.sensor_min_resolution_mm),
-                        orient_w: 1.0,
-                        orient_x: 0.0,
-                        orient_y: 0.0,
-                        orient_z: 0.0,
+                        orient_w: observation.rotation.orient_w,
+                        orient_x: observation.rotation.orient_x,
+                        orient_y: observation.rotation.orient_y,
+                        orient_z: observation.rotation.orient_z,
                         vel_lin_x: vx,
                         vel_lin_y: vy,
                         vel_lin_z: vz,
-                        vel_ang_x: 0.0,
-                        vel_ang_y: 0.0,
-                        vel_ang_z: 0.0,
+                        vel_ang_x: observation.rotation.vel_ang_x,
+                        vel_ang_y: observation.rotation.vel_ang_y,
+                        vel_ang_z: observation.rotation.vel_ang_z,
                         sensor_kind: SensorKindV1::Proximity.as_u8(),
                         sensor_value: vec![],
                     };
-                    Self::validate_quantized_positions(&value).map(|()| {
-                        let payload = value.encode_validated();
-                        let mut draft = pos_core::event::EventDraft::new(
-                            observation.entity_id,
-                            Kind::new(EVENT_TYPE_OBSERVATION_V1),
-                            payload,
-                        );
-                        draft.causation_id = self
-                            .causation_by_body
-                            .iter()
-                            .rev()
-                            .find(|(body, _)| *body == observation.entity_id)
-                            .map(|(_, event_id)| *event_id);
-                        draft
-                    })
+                    Self::validate_quantized_positions(&value)
+                        .and_then(|()| {
+                            value.validate_encoding().map_err(|error| {
+                                RuntimeError::InvalidPayload {
+                                    event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                                    reason: error.to_string(),
+                                }
+                            })
+                        })
+                        .map(|()| {
+                            let payload = value.encode_validated();
+                            let mut draft = pos_core::event::EventDraft::new(
+                                observation.entity_id,
+                                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                                payload,
+                            );
+                            draft.causation_id = self
+                                .causation_by_body
+                                .iter()
+                                .rev()
+                                .find(|(body, _)| *body == observation.entity_id)
+                                .map(|(_, event_id)| *event_id);
+                            (draft, value)
+                        })
                 })
             })
             .collect()
@@ -1418,6 +1536,7 @@ impl Driver for WorldDriver {
             applied_action_seqs: Vec::new(),
             causation_by_body: Vec::new(),
         };
+        let mut cursor = WorldRecoveryCursor::default();
         for event in evidence.events() {
             let event_type = event.header().event_type().as_str();
             let Some(payload) = event.payload() else {
@@ -1439,7 +1558,6 @@ impl Driver for WorldDriver {
                     action.body_entity_id,
                     event.header().id(),
                 );
-                restored.tick = restored.tick.max(action.tick.saturating_add(1));
             } else if event_type == EVENT_TYPE_OBSERVATION_V1 {
                 let observation = WorldObservationV1::decode(payload).map_err(|error| {
                     RuntimeError::InvalidPayload {
@@ -1447,22 +1565,12 @@ impl Driver for WorldDriver {
                         reason: error.to_string(),
                     }
                 })?;
-                if let Some(body) = restored
-                    .entities
-                    .iter_mut()
-                    .find(|body| body.entity_id == observation.body_entity_id)
-                {
-                    body.x = f64::from(observation.pos_x);
-                    body.y = f64::from(observation.pos_y);
-                    body.z = f64::from(observation.pos_z);
-                    body.vx = f64::from(observation.vel_lin_x);
-                    body.vy = f64::from(observation.vel_lin_y);
-                    body.vz = f64::from(observation.vel_lin_z);
-                }
-                restored.tick = restored.tick.max(observation.tick.saturating_add(1));
-                restored.step_index = restored
-                    .step_index
-                    .max(observation.step_index.saturating_add(1));
+                Self::apply_recovered_observation(
+                    &mut restored,
+                    &mut cursor,
+                    event.header(),
+                    observation,
+                )?;
             } else if event_type == EVENT_TYPE_CONFIG_V1 {
                 let config = WorldConfigV1::decode(payload).map_err(|error| {
                     RuntimeError::InvalidPayload {
@@ -1480,6 +1588,16 @@ impl Driver for WorldDriver {
                 }
                 restored.config_emitted = true;
             }
+        }
+        if cursor.step.is_some() && cursor.observed_bodies != restored.entities.len() {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation step has an incomplete body set",
+            });
+        }
+        if restored.config_emitted && !restored.entities.is_empty() && cursor.step.is_none() {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World configuration has no committed body observations",
+            });
         }
         self.staged_restore = Some(restored);
         Ok(())
@@ -1544,16 +1662,18 @@ impl Driver for WorldDriver {
                     reason: "backend observation body set differs from staged bodies".to_owned(),
                 });
             }
-            for (body, obs) in self.entities.iter_mut().zip(&step_obs) {
-                body.x = obs.x;
-                body.y = obs.y;
-                body.z = obs.z;
-                body.vx = obs.vx;
-                body.vy = obs.vy;
-                body.vz = obs.vz;
+            let emitted = self.emit_observations(&step_obs)?;
+            for (body, (_, observation)) in self.entities.iter_mut().zip(&emitted) {
+                body.x = f64::from(observation.pos_x);
+                body.y = f64::from(observation.pos_y);
+                body.z = f64::from(observation.pos_z);
+                body.vx = f64::from(observation.vel_lin_x);
+                body.vy = f64::from(observation.vel_lin_y);
+                body.vz = f64::from(observation.vel_lin_z);
+                body.rotation = observation.rotation();
             }
 
-            drafts.extend(self.emit_observations(&step_obs)?);
+            drafts.extend(emitted.into_iter().map(|(draft, _)| draft));
             self.tick = self.tick.wrapping_add(1);
             self.step_index = self.step_index.wrapping_add(1);
             Ok(StepOutput::new(drafts))
@@ -1837,6 +1957,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: Default::default(),
                     x: f64::NAN,
                     y: body.y,
                     z: body.z,
@@ -1860,6 +1981,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: Default::default(),
                     x: body.x,
                     y: f64::NAN,
                     z: body.z,
@@ -1883,6 +2005,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: Default::default(),
                     x: f64::MAX,
                     y: body.y,
                     z: body.z,
@@ -1901,6 +2024,8 @@ mod tests {
         Vy,
         Vz,
         QuantizationOverflowX,
+        NonUnitOrientation,
+        NonFiniteAngularVelocity,
     }
 
     struct InvalidObservationComponentBackend {
@@ -1922,6 +2047,7 @@ mod tests {
                 .map(|body| {
                     let mut observed = WorldObservation {
                         entity_id: body.entity_id,
+                        rotation: Default::default(),
                         x: body.x,
                         y: body.y,
                         z: body.z,
@@ -1937,6 +2063,12 @@ mod tests {
                             InvalidObservationComponent::Vz => observed.vz = f64::MAX,
                             InvalidObservationComponent::QuantizationOverflowX => {
                                 observed.x = f64::from(f32::MAX);
+                            }
+                            InvalidObservationComponent::NonUnitOrientation => {
+                                observed.rotation.orient_w = 0.5;
+                            }
+                            InvalidObservationComponent::NonFiniteAngularVelocity => {
+                                observed.rotation.vel_ang_x = f32::NAN;
                             }
                         }
                     }
@@ -1968,6 +2100,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -1992,6 +2125,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -2016,6 +2150,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -2061,9 +2196,18 @@ mod tests {
                 InvalidObservationComponent::QuantizationOverflowX,
                 "sensor quantization produced a non-finite position",
             ),
+            (
+                InvalidObservationComponent::NonUnitOrientation,
+                "unit quaternion",
+            ),
+            (
+                InvalidObservationComponent::NonFiniteAngularVelocity,
+                "non-finite float value",
+            ),
         ] {
             let initial = Body {
                 entity_id: EntityId::new(),
+                rotation: Default::default(),
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,
@@ -2980,7 +3124,7 @@ mod tests {
             sensor_kind: 0,
             sensor_value: vec![],
         };
-        let events = vec![
+        let mut events = vec![
             make_versioned_event(
                 1,
                 config_entity,
@@ -3001,6 +3145,8 @@ mod tests {
                 CanonicalBytes::from_static(b"other"),
             ),
         ];
+        let action_id = events[1].id;
+        events[2].causation_id = Some(action_id);
         let plugin = WorldPlugin::new().with_bodies([body]);
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
@@ -3012,6 +3158,7 @@ mod tests {
                     WorldDriver::new(
                         vec![Body {
                             entity_id: body,
+                            rotation: Default::default(),
                             x: 0.0,
                             y: 0.0,
                             z: 0.0,
@@ -3032,9 +3179,10 @@ mod tests {
                 &events,
             )
             .test_ok();
-        registry
+        let resumed_drafts = registry
             .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
             .test_ok();
+        assert_eq!(resumed_drafts[0].causation_id, Some(events[1].id));
         registry.abort_step();
         registry
             .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
@@ -3043,6 +3191,241 @@ mod tests {
         WorldReducer.apply(&mut reduced, &events[2]);
         assert_eq!(reduced.get("pos_x"), Some(&serde_json::json!(1.0)));
         registry.commit_step_at(Seq::ZERO, 0).test_ok();
+    }
+
+    #[test]
+    fn live_resume_uses_full_canonical_body_state_for_the_next_step() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let initial = Body {
+            entity_id: body_id,
+            rotation: BodyRotationV1 {
+                orient_w: 0.0,
+                orient_x: 1.0,
+                orient_y: 0.0,
+                orient_z: 0.0,
+                vel_ang_x: 0.25,
+                vel_ang_y: -0.5,
+                vel_ang_z: 0.75,
+            },
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            vx: 0.16,
+            vy: 0.0,
+            vz: 0.0,
+        };
+        let mut uninterrupted = WorldDriver::new(
+            vec![initial.clone()],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+        let first = uninterrupted
+            .step(timeline, ObservationView::empty())
+            .test_ok();
+        uninterrupted.commit_step();
+        let next = uninterrupted
+            .step(timeline, ObservationView::empty())
+            .test_ok();
+        let expected = WorldObservationV1::decode(&next.drafts[0].payload).test_ok();
+        assert!((expected.pos_x - 0.4).abs() < 0.001);
+        assert_eq!(expected.orient_x, 1.0);
+        assert_eq!(expected.vel_ang_x, 0.25);
+        assert_eq!(expected.vel_ang_y, -0.5);
+        assert_eq!(expected.vel_ang_z, 0.75);
+
+        let events: Vec<Event> = first
+            .drafts
+            .iter()
+            .enumerate()
+            .map(|(index, draft)| {
+                let mut event = make_versioned_event(
+                    u64::try_from(index).test_ok() + 1,
+                    draft.entity,
+                    draft.event_type.as_str(),
+                    draft.payload.clone(),
+                );
+                event.causation_id = draft.causation_id;
+                event
+            })
+            .collect();
+        let plugin = WorldPlugin::new().with_bodies([body_id]);
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        registry
+            .register(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::new(
+                    vec![initial],
+                    Box::new(SimpleKinematicBackend::new()),
+                    sample_config(),
+                ))),
+            )
+            .test_ok();
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        let resumed_drafts = registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(resumed_drafts.len(), 1);
+        let resumed = WorldObservationV1::decode(&resumed_drafts[0].payload).test_ok();
+        assert_eq!(resumed, expected);
+    }
+
+    fn recovery_registry(ids: [EntityId; 2]) -> PluginRegistry {
+        let plugin = WorldPlugin::new().with_bodies(ids);
+        let initial = ids
+            .into_iter()
+            .map(|entity_id| Body {
+                entity_id,
+                rotation: Default::default(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
+            })
+            .collect();
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        registry
+            .register(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::new(
+                    initial,
+                    Box::new(SimpleKinematicBackend::new()),
+                    sample_config(),
+                ))),
+            )
+            .test_ok();
+        registry
+    }
+
+    fn recovery_observation(seq: u64, body_id: EntityId, tick: u64, step_index: u64) -> Event {
+        let mut value = sample_observation();
+        value.body_entity_id = body_id;
+        value.tick = tick;
+        value.step_index = step_index;
+        make_versioned_event(
+            seq,
+            body_id,
+            EVENT_TYPE_OBSERVATION_V1,
+            value.encode().test_ok(),
+        )
+    }
+
+    fn assert_rejected_body_history(
+        ids: [EntityId; 2],
+        timeline: TimelineId,
+        events: Vec<Event>,
+        reason: &str,
+    ) {
+        let mut registry = recovery_registry(ids);
+        let head = Seq::from_u64(u64::try_from(events.len()).test_ok());
+        let error = registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, head)], &events)
+            .test_err();
+        assert!(error.to_string().contains(reason), "{error:?}");
+        let after_rejection = registry
+            .step_all_anchored_with_events(timeline, Seq::ZERO, &[])
+            .test_ok();
+        let mut fresh = recovery_registry(ids);
+        let expected = fresh
+            .step_all_anchored_with_events(timeline, Seq::ZERO, &[])
+            .test_ok();
+        assert_eq!(
+            after_rejection
+                .iter()
+                .map(|draft| draft.payload.as_slice())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|draft| draft.payload.as_slice())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn live_resume_rejects_incomplete_or_poisoned_body_history() {
+        let mut ids = [EntityId::new(), EntityId::new()];
+        ids.sort_unstable();
+        let timeline = TimelineId::new();
+        let config = make_versioned_event(
+            1,
+            EntityId::new(),
+            EVENT_TYPE_CONFIG_V1,
+            sample_config().encode().test_ok(),
+        );
+        let reject = |events, reason| assert_rejected_body_history(ids, timeline, events, reason);
+        let observation = recovery_observation;
+
+        reject(vec![config.clone()], "no committed body observations");
+        reject(
+            vec![config.clone(), observation(2, ids[0], 0, 0)],
+            "incomplete body set",
+        );
+        reject(
+            vec![
+                config.clone(),
+                observation(2, ids[0], 0, 0),
+                observation(3, ids[0], 1, 1),
+            ],
+            "incomplete body set",
+        );
+        reject(
+            vec![config.clone(), observation(2, ids[0], 1, 1)],
+            "not the next committed step",
+        );
+        reject(
+            vec![config.clone(), observation(2, ids[0], 0, 1)],
+            "not the next committed step",
+        );
+        reject(
+            vec![config.clone(), observation(2, ids[1], 0, 0)],
+            "missing, repeated or out of order",
+        );
+        let mut mismatched_event_entity = observation(2, ids[0], 0, 0);
+        mismatched_event_entity.entity = ids[1];
+        reject(
+            vec![config.clone(), mismatched_event_entity],
+            "missing, repeated or out of order",
+        );
+        let mut forged_causation = observation(2, ids[0], 0, 0);
+        forged_causation.causation_id = Some(EventId::new());
+        reject(
+            vec![config.clone(), forged_causation],
+            "causation differs from accepted action order",
+        );
+        reject(
+            vec![
+                config.clone(),
+                observation(2, ids[0], 0, 0),
+                observation(3, ids[0], 0, 0),
+            ],
+            "missing, repeated or out of order",
+        );
+
+        let mut registry = recovery_registry(ids);
+        let complete = vec![
+            config,
+            observation(2, ids[0], 0, 0),
+            observation(3, ids[1], 0, 0),
+            observation(4, ids[0], 1, 1),
+            observation(5, ids[1], 1, 1),
+        ];
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(5))],
+                &complete,
+            )
+            .test_ok();
     }
 
     fn assert_malformed_recovery_events(
@@ -3121,7 +3504,7 @@ mod tests {
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
                 &[unknown_target_observation],
             )
-            .is_ok());
+            .is_err());
     }
 
     fn assert_recovery_sequence(
@@ -3201,6 +3584,7 @@ mod tests {
                 Some(Box::new(WorldDriver::new(
                     vec![Body {
                         entity_id: body,
+                        rotation: Default::default(),
                         x: 0.0,
                         y: 0.0,
                         z: 0.0,
@@ -3386,6 +3770,7 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -3410,6 +3795,7 @@ mod tests {
         let bodies = vec![
             Body {
                 entity_id: entity1,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -3419,6 +3805,7 @@ mod tests {
             },
             Body {
                 entity_id: entity2,
+                rotation: Default::default(),
                 x: 10.0,
                 y: 10.0,
                 z: 0.0,
@@ -3527,6 +3914,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -3559,6 +3947,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 5.0,
             y: 10.0,
             z: 0.0,
@@ -3589,6 +3978,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -3619,6 +4009,7 @@ mod tests {
         fn step(&self, _bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             vec![WorldObservation {
                 entity_id: EntityId::new(),
+                rotation: Default::default(),
                 x: 9.0,
                 y: 9.0,
                 z: 9.0,
@@ -3644,6 +4035,7 @@ mod tests {
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: Default::default(),
                     x: body.x + body.vx,
                     y: body.y + body.vy,
                     z: body.z + body.vz,
@@ -3654,6 +4046,7 @@ mod tests {
                 .collect();
             out.push(WorldObservation {
                 entity_id: self.extra,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -3687,6 +4080,7 @@ mod tests {
         let known = EntityId::new();
         let body = Body {
             entity_id: known,
+            rotation: Default::default(),
             x: 1.0,
             y: 2.0,
             z: 0.0,
@@ -3712,6 +4106,7 @@ mod tests {
         let unknown = EntityId::new();
         let body = Body {
             entity_id: known,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -3735,6 +4130,7 @@ mod tests {
     fn driver_rejects_duplicate_staged_bodies() {
         let body = Body {
             entity_id: EntityId::new(),
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -3761,6 +4157,7 @@ mod tests {
         ids.sort_unstable();
         let first = Body {
             entity_id: ids[0],
+            rotation: Default::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -3770,6 +4167,7 @@ mod tests {
         };
         let second = Body {
             entity_id: ids[1],
+            rotation: Default::default(),
             ..first
         };
         let mut driver = WorldDriver::new(
@@ -3947,6 +4345,7 @@ mod tests {
         let entity = EntityId::new();
         let b1 = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 1.0,
             y: 2.0,
             z: 0.0,
@@ -3956,6 +4355,7 @@ mod tests {
         };
         let b2 = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 1.0,
             y: 2.0,
             z: 0.0,
@@ -3965,6 +4365,7 @@ mod tests {
         };
         let b3 = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 3.0,
             y: 4.0,
             z: 0.0,
@@ -3982,6 +4383,7 @@ mod tests {
         let entity = EntityId::new();
         let o1 = WorldObservation {
             entity_id: entity,
+            rotation: Default::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -3991,6 +4393,7 @@ mod tests {
         };
         let o2 = WorldObservation {
             entity_id: entity,
+            rotation: Default::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -4000,6 +4403,7 @@ mod tests {
         };
         let o3 = WorldObservation {
             entity_id: entity,
+            rotation: Default::default(),
             x: 3.0,
             y: 4.0,
             z: 5.0,
@@ -4035,6 +4439,7 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 5.0,
             y: 7.0,
             z: 0.0,
@@ -4056,6 +4461,7 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 10.0,
             y: 10.0,
             z: 0.0,
@@ -4078,6 +4484,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4108,6 +4515,7 @@ mod tests {
             let entity = EntityId::new();
             let body = Body {
                 entity_id: entity,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4163,6 +4571,7 @@ mod tests {
             let entity = EntityId::new();
             let body = Body {
                 entity_id: entity,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4238,6 +4647,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4309,6 +4719,7 @@ mod tests {
         // High initial velocity; TargetVelocity must override it entirely.
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4358,6 +4769,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: body_id,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 3.0,
                 z: 0.0,
@@ -4433,6 +4845,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: body_id,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4463,6 +4876,7 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: Default::default(),
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
@@ -4506,6 +4920,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,
@@ -4552,6 +4967,7 @@ mod tests {
         let body_id = EntityId::new();
         let initial = Body {
             entity_id: body_id,
+            rotation: Default::default(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -4609,6 +5025,7 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: Default::default(),
             x: 0.0,
             y: 0.0,
             z: 0.0,

@@ -535,6 +535,7 @@ fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityI
     WorldDriver::new(
         vec![Body {
             entity_id: body,
+            rotation: Default::default(),
             x: input.initial_position[0],
             y: 0.0,
             z: input.initial_position[1],

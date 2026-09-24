@@ -333,6 +333,7 @@ mod tests {
             vec![
                 Body {
                     entity_id: bodies[1],
+                    rotation: Default::default(),
                     x: 10.0,
                     y: 0.0,
                     z: 0.0,
@@ -342,6 +343,7 @@ mod tests {
                 },
                 Body {
                     entity_id: bodies[0],
+                    rotation: Default::default(),
                     x: 0.0,
                     y: 0.0,
                     z: 0.0,
