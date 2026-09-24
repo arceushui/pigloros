@@ -821,7 +821,8 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn take(&mut self, length: usize) -> Result<&[u8], LocalCutSealErrorV2> {
-        // The input is capped at 16 KiB and every read is at most 32 bytes.
+        // Seal input is capped at 16 KiB, node input at 64 KiB, and each read
+        // requests at most 32 bytes on supported targets.
         let end = self.offset + length;
         let slice = self
             .bytes
