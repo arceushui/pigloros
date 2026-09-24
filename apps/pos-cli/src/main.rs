@@ -880,54 +880,8 @@ fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::erro
 fn reproduce_manifest(
     reproduction: ReproductionManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let recipe = reproduce_cli_recipe(reproduction.recipe)?;
-    run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
-        .and_then(|reproduced| {
-            let head_matches = reproduced.manifest.head_hash == reproduction.manifest.head_hash;
-            let replay_identities_match = reproduced.manifest.replay_policy_identities
-                == reproduction.manifest.replay_policy_identities;
-            let replay_closure_identities_match = reproduced
-                .manifest
-                .replay_policy_closure_identities
-                == reproduction.manifest.replay_policy_closure_identities;
-            let replay_closure_keys_match = reproduced
-                .manifest
-                .replay_policy_closures
-                .keys()
-                .collect::<std::collections::BTreeSet<_>>()
-                == reproduction
-                    .manifest
-                    .replay_policy_closures
-                    .keys()
-                    .collect::<std::collections::BTreeSet<_>>();
-            let policy_keys_match = reproduced
-                .manifest
-                .output_policy_digests
-                .keys()
-                .collect::<std::collections::BTreeSet<_>>()
-                == reproduction
-                    .manifest
-                    .output_policy_digests
-                    .keys()
-                    .collect::<std::collections::BTreeSet<_>>();
-            if head_matches
-                && replay_identities_match
-                && replay_closure_identities_match
-                && replay_closure_keys_match
-                && policy_keys_match
-            {
-                output_stdout!("OK");
-                Ok(())
-            } else {
-                output_stderr!(
-                    "reproduction mismatch: head={head_matches}, replay_identities={replay_identities_match}, replay_closure_identities={replay_closure_identities_match}, replay_closure_keys={replay_closure_keys_match}, policy_keys={policy_keys_match}; reproduced identities={:?}, expected identities={:?}",
-                    reproduced.manifest.replay_policy_identities,
-                    reproduction.manifest.replay_policy_identities
-                );
-                output_stdout!("MISMATCH");
-                Err("reproduced chain_head does not match manifest".into())
-            }
-        })
+    let _ = reproduce_cli_recipe(reproduction.recipe)?;
+    Err("reproduction requires an owner-verified policy closure".into())
 }
 
 fn reproduce_cli_recipe(
@@ -1369,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_matches_builtin_recipe() {
+    fn cmd_experiment_reproduce_requires_owner_verified_policy() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir
             .path()
@@ -1379,35 +1333,24 @@ mod tests {
             .to_owned();
         cmd_experiment_run(&path, 3).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        cmd_experiment_reproduce(&manifest_path).test_ok();
-    }
-
-    #[test]
-    fn cmd_experiment_reproduce_rejects_tampered_replay_identity() {
-        let dir = tempfile::tempdir().test_ok();
-        let path = dir
-            .path()
-            .join("tampered-policy.db")
-            .to_str()
-            .test_ok()
-            .to_owned();
-        cmd_experiment_run(&path, 3).test_ok();
-        let manifest_path = path.replace(".db", "-manifest.json");
+        let error = cmd_experiment_reproduce(&manifest_path).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
         let mut reproduction: ReproductionManifest =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).test_ok()).test_ok();
-        let identity = reproduction
+        let policy_digest = reproduction
             .manifest
-            .replay_policy_identities
+            .output_policy_digests
             .values_mut()
             .next()
             .test_ok();
-        *identity = pos_core::Hash::zero();
+        *policy_digest = pos_core::Hash::zero();
         std::fs::write(
             &manifest_path,
             serde_json::to_string(&reproduction).test_ok(),
         )
         .test_ok();
-        assert!(cmd_experiment_reproduce(&manifest_path).is_err());
+        let error = cmd_experiment_reproduce(&manifest_path).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1430,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_reports_chain_head_mismatch() {
+    fn cmd_experiment_reproduce_rejects_unverified_chain_head() {
         let manifest = ReproductionManifest {
             manifest: pos_core::ReproManifest::new(
                 TimelineId::new(),
@@ -1441,7 +1384,8 @@ mod tests {
         };
         let file = tempfile::NamedTempFile::new().test_ok();
         std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
-        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
+        let error = cmd_experiment_reproduce(file.path().to_str().test_ok()).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
