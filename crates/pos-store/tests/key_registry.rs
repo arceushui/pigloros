@@ -221,7 +221,7 @@ struct RotatedImportFixture {
 }
 
 impl RotatedImportFixture {
-    fn anchors(&self) -> [(KeyIdentityV1, pos_core::PublicKey); 2] {
+    const fn anchors(&self) -> [(KeyIdentityV1, pos_core::PublicKey); 2] {
         [
             (self.first_identity, self.first_key),
             (self.second_identity, self.second_key),
