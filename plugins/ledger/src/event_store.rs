@@ -1255,7 +1255,7 @@ mod tests {
         };
         store
             .store
-            .append_committed(store.timeline_id, &[event.clone()])?;
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
         let err = fold_ledger_events(&[event], "2026-07-25")
             .err()
             .ok_or("expected error")?;
@@ -1286,7 +1286,7 @@ mod tests {
         };
         store
             .store
-            .append_committed(store.timeline_id, &[event.clone()])?;
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
         let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Store(_)));
         let ledger = fold_ledger_events(&[event], "2026-07-25")?;
@@ -1415,7 +1415,7 @@ mod tests {
         };
         store
             .store
-            .append_committed(store.timeline_id, &[event.clone()])?;
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
         let err = fold_ledger_events(&[event], "2026-07-25")
             .err()
             .ok_or("expected error")?;
@@ -1446,7 +1446,7 @@ mod tests {
         };
         store
             .store
-            .append_committed(store.timeline_id, &[event.clone()])?;
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
         let err = fold_ledger_events(&[event], "2026-07-25")
             .err()
             .ok_or("expected error")?;
