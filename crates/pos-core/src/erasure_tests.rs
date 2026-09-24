@@ -1002,33 +1002,13 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     );
     assert_eq!(requirements[0].extension(), &second_extension);
 
-    // A later request can include this historical child directly and then
-    // admit another Fork whose child-scope reference matches the old Fork.
-    // That later extension is not part of the old operation's proof.
-    let directly_included_state = verified_state_for_containment(
-        ErasureLifecycleV1::AccessFrozen,
-        Some(scope),
-        vec![first_extension, second_extension],
-    )?;
-    let directly_included = ErasureVerifiedInventoryV1::from_verified_recovery(
-        vec![(
-            directly_included_state,
-            ErasureVerifiedTopologyProofV1::from_verified_recovery(
-                reference(5),
-                vec![(parent, reference(7)), (child, reference(7))],
-                Vec::new(),
-            ),
-        )],
-        vec![parent, child],
-        4,
-    )?;
-    assert!(collect_fork_retry_scope_requirements_for_scope(
-        &directly_included,
+    assert_directly_included_child_does_not_add_retry_requirement(
+        scope,
+        first_extension,
+        second_extension,
         parent,
         child,
-        second_extension.fork(),
-    )?
-    .is_empty());
+    )?;
 
     let excluded_state =
         verified_state_for_containment(ErasureLifecycleV1::Submitted, None, Vec::new())?;
@@ -1054,6 +1034,43 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     assert_fork_retry_rejects_included_excluded_child(excluded, parent, child)?;
 
     assert_empty_fork_batch_proof_round_trip(parent)?;
+    Ok(())
+}
+
+fn assert_directly_included_child_does_not_add_retry_requirement(
+    scope: ErasureScopeCommitmentV1,
+    first_extension: ErasureScopeExtensionV1,
+    second_extension: ErasureScopeExtensionV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    // A later request can include this historical child directly and then
+    // admit another Fork whose child-scope reference matches the old Fork.
+    // That later extension is not part of the old operation's proof.
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope),
+        vec![first_extension, second_extension],
+    )?;
+    let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+        vec![(
+            state,
+            ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                reference(5),
+                vec![(parent, reference(7)), (child, reference(7))],
+                Vec::new(),
+            ),
+        )],
+        vec![parent, child],
+        4,
+    )?;
+    assert!(collect_fork_retry_scope_requirements_for_scope(
+        &inventory,
+        parent,
+        child,
+        second_extension.fork(),
+    )?
+    .is_empty());
     Ok(())
 }
 
