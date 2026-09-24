@@ -262,6 +262,19 @@ fn fact_aware_replay_rejects_missing_dependencies_and_conflicting_facts() {
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+}
+
+#[test]
+fn fact_aware_replay_preserves_available_artifacts_and_weakens_missing_ones() {
+    let (identity, material_digest, fact) = destroyed_registry(KeyRoleV1::SubjectDataEncryption);
+    let bare = input(
+        ErasureArtifactClassV1::TimelineReplay,
+        1,
+        ArtifactOptionalityV1::Required,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let bound = with_dependency(bare, identity, material_digest, true);
     let absent = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
         ErasureReplayClaimV1::Exact,
         &[bound],
