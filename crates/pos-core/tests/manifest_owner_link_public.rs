@@ -1,9 +1,13 @@
 use ciborium::value::Value;
+use pos_core::output_policy::{
+    OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1, OutputPolicyV1,
+};
 use pos_core::{
     Hash, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
     ManifestAdmissionCatalogV1, ManifestOwnerLinkErrorV1, ManifestSlotAdmissionReceiptInputV1,
     ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
-    ManifestSlotBindingV1, PluginId, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1,
+    ManifestSlotBindingV1, PluginId, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldProducerV1, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1,
     MAX_MANIFEST_OWNER_PLUGINS_V1, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1,
     MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
 };
@@ -166,6 +170,81 @@ fn literal_empty_catalog_and_binding_pin_exact_bytes_and_digest() -> TestResult 
 }
 
 #[test]
+fn literal_nonempty_catalog_and_binding_pin_each_row_field() -> TestResult {
+    let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+        owner_id: [9; 32],
+        configuration_generation: 7,
+        rows: vec![ManifestAdmissionCatalogRowV1 {
+            stable_slot: "a".to_owned(),
+            plugin_id: plugin(1),
+            plugin_name: "n".to_owned(),
+            plugin_version: "v".to_owned(),
+            implementation_hash: hash(10),
+            eop1_native_digest: hash(11),
+            closure_hash: hash(12),
+        }],
+    })?;
+    let mut catalog_bytes = vec![0x85, 0x44, b'M', b'C', b'A', b'1', 1, 0x58, 0x20];
+    catalog_bytes.extend_from_slice(&[9; 32]);
+    catalog_bytes.extend_from_slice(&[7, 0x81, 0x87, 0x61, b'a', 0x50]);
+    catalog_bytes.extend_from_slice(&[1; 16]);
+    catalog_bytes.extend_from_slice(&[0x61, b'n', 0x61, b'v']);
+    for byte in [10, 11, 12] {
+        catalog_bytes.extend_from_slice(&[0x58, 0x20]);
+        catalog_bytes.extend_from_slice(&[byte; 32]);
+    }
+    assert_eq!(catalog.to_canonical_cbor(), catalog_bytes);
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&catalog_bytes)?,
+        catalog
+    );
+    // Independently computed by b3sum over domain/NUL and these literal bytes.
+    assert_eq!(
+        catalog.digest().as_bytes(),
+        &[
+            0x38, 0x08, 0x03, 0x4f, 0x2b, 0xc1, 0x64, 0x99, 0x18, 0x57, 0xf6, 0xb4, 0x61, 0xee,
+            0x7c, 0x71, 0x87, 0x6c, 0xfd, 0xae, 0xe9, 0xfb, 0x3b, 0x50, 0x68, 0x5d, 0x31, 0x1e,
+            0x1d, 0xf0, 0xc7, 0x59,
+        ]
+    );
+
+    let binding = ManifestSlotBindingV1::new(ManifestSlotBindingInputV1 {
+        scope: hash(2),
+        wcs1_hash: hash(3),
+        rows: vec![ManifestSlotBindingRowV1 {
+            stable_slot: "a".to_owned(),
+            plugin_id: plugin(1),
+            eop1_wal1_hash: hash(13),
+            closure_hash: hash(12),
+        }],
+    })?;
+    let mut binding_bytes = vec![0x85, 0x44, b'M', b'S', b'B', b'1', 1, 0x58, 0x20];
+    binding_bytes.extend_from_slice(&[2; 32]);
+    binding_bytes.extend_from_slice(&[0x58, 0x20]);
+    binding_bytes.extend_from_slice(&[3; 32]);
+    binding_bytes.extend_from_slice(&[0x81, 0x84, 0x61, b'a', 0x50]);
+    binding_bytes.extend_from_slice(&[1; 16]);
+    for byte in [13, 12] {
+        binding_bytes.extend_from_slice(&[0x58, 0x20]);
+        binding_bytes.extend_from_slice(&[byte; 32]);
+    }
+    assert_eq!(binding.to_canonical_cbor(), binding_bytes);
+    assert_eq!(
+        ManifestSlotBindingV1::from_canonical_cbor(&binding_bytes)?,
+        binding
+    );
+    assert_eq!(
+        binding.digest().as_bytes(),
+        &[
+            0x47, 0xcc, 0xcf, 0xb4, 0xc0, 0xda, 0xf1, 0xe4, 0x8c, 0xef, 0xb4, 0xb3, 0x79, 0x0f,
+            0xeb, 0x39, 0xe0, 0x4b, 0x17, 0x22, 0xf2, 0x08, 0xf5, 0x70, 0xe9, 0x45, 0xf5, 0xeb,
+            0x9b, 0xa2, 0x07, 0x52,
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn complete_same_name_rows_roundtrip_without_key_collapse() -> TestResult {
     let catalog = ManifestAdmissionCatalogV1::new(catalog_input())?;
     let binding = ManifestSlotBindingV1::new(binding_input())?;
@@ -184,6 +263,84 @@ fn complete_same_name_rows_roundtrip_without_key_collapse() -> TestResult {
         binding
     );
     assert_eq!(binding.as_input().rows.len(), catalog.as_input().rows.len());
+    Ok(())
+}
+
+#[test]
+fn same_name_zero_output_plugin_stays_in_catalog_and_binding_not_wcs1() -> TestResult {
+    let producer_policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+        plugin_id: plugin(1),
+        plugin_version: "1.0".to_owned(),
+        implementation_hash: hash(10),
+        base_configuration_digest: hash(20),
+        executable_profile_hash: hash(21),
+        retention_policy_hash: hash(22),
+        policy_revision: 1,
+        output_declarations: vec![OutputDeclarationV1::new(
+            "event".to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            32,
+            None,
+            None,
+        )?],
+    })?;
+    let mut zero_output_input = producer_policy.fields().clone();
+    zero_output_input.plugin_id = plugin(2);
+    zero_output_input.output_declarations.clear();
+    let zero_output_policy = OutputPolicyV1::new(zero_output_input)?;
+    assert!(zero_output_policy.fields().output_declarations.is_empty());
+
+    let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope: hash(2),
+        consumers: vec![WorldConsumerV1::new(
+            "consumer".to_owned(),
+            hash(23),
+            hash(24),
+            hash(25),
+        )?],
+        producers: vec![WorldProducerV1::new(plugin(1), hash(30))?],
+        optional_view_roots: Vec::new(),
+    })?;
+    let mut catalog_fields = catalog_input();
+    catalog_fields.rows[0].eop1_native_digest = producer_policy.digest();
+    catalog_fields.rows[1].eop1_native_digest = zero_output_policy.digest();
+    let catalog = ManifestAdmissionCatalogV1::new(catalog_fields)?;
+    let mut binding_fields = binding_input();
+    binding_fields.wcs1_hash = wcs1.digest();
+    binding_fields.rows[0].eop1_wal1_hash = hash(30);
+    binding_fields.rows[1].eop1_wal1_hash = hash(31);
+    let binding = ManifestSlotBindingV1::new(binding_fields)?;
+
+    assert_eq!(catalog.as_input().rows[0].plugin_name, "same-name");
+    assert_eq!(catalog.as_input().rows[1].plugin_name, "same-name");
+    assert_ne!(
+        catalog.as_input().rows[0].plugin_id,
+        catalog.as_input().rows[1].plugin_id
+    );
+    assert_eq!(wcs1.producers().len(), 1);
+    assert_eq!(wcs1.producers()[0].plugin_id(), plugin(1));
+    assert_eq!(
+        wcs1.producers()[0].output_policy_hash(),
+        binding.as_input().rows[0].eop1_wal1_hash
+    );
+    assert_eq!(catalog.as_input().rows.len(), 2);
+    assert_eq!(binding.as_input().rows.len(), 2);
+    assert_eq!(catalog.as_input().rows[1].plugin_id, plugin(2));
+    assert_eq!(binding.as_input().rows[1].plugin_id, plugin(2));
+    assert_eq!(
+        catalog.as_input().rows[1].eop1_native_digest,
+        zero_output_policy.digest()
+    );
+    assert_eq!(
+        ManifestAdmissionCatalogV1::from_canonical_cbor(&catalog.to_canonical_cbor())?,
+        catalog
+    );
+    assert_eq!(
+        ManifestSlotBindingV1::from_canonical_cbor(&binding.to_canonical_cbor())?,
+        binding
+    );
+    // These structural objects do not authenticate the registration or copies.
     Ok(())
 }
 
