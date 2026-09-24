@@ -186,6 +186,31 @@ mod host_store_tests {
     }
 
     #[test]
+    fn backtest_accepts_the_gate_owned_by_its_hosted_store() {
+        let store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let gate = store
+            .host
+            .lock()
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("host lock poisoned: {error}")))
+            })
+            .containment_gate();
+        let runner = crate::BacktestRunner::new(
+            crate::BacktestConfig {
+                experiment_name: "host-gate-backtest".to_owned(),
+                train_ticks: 0,
+                eval_ticks: 0,
+                store_config: pos_store::StoreConfig::Memory,
+            },
+            crate::PluginRegistry::new,
+        )
+        .with_erasure_gate(gate);
+
+        assert!(runner.run_with_hosted_store(store).is_ok());
+    }
+
+    #[test]
     fn poisoned_host_and_host_errors_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
         drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(

@@ -1969,6 +1969,50 @@ fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_retry_rejects_an_appended_child_with_a_corrupt_payload_hash(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, child, batch) =
+        prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.corrupt-payload"),
+            pos_core::CanonicalBytes::from_vec(vec![2]),
+        )],
+    )?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE events SET payload=X'03' WHERE timeline_id=?1 AND seq=1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+
+    let mut reopened = SqliteStore::open(path)?;
+    let reopened_gate = bind_test_gate(&mut reopened)?;
+    assert_eq!(
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &batch),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_recovery_rejects_a_missing_events_table() -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
