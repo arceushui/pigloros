@@ -1773,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_admission_accepts_each_declared_fidelity() {
+    fn fixture_verified_admission_accepts_each_declared_fidelity() {
         let plugin_id = PluginId::new();
         let closure = closure_for(plugin_id, WorkloadProfileV1::Interactive);
         let owner = FixturePlugin {

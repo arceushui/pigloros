@@ -749,11 +749,18 @@ fn gateway_action_registry_builder_with_inputs(
     profile_id: &str,
     event_type: &str,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    let max_bodies = pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 / 16;
+    let mut bodies = bodies.into_iter().take(max_bodies + 1).collect::<Vec<_>>();
+    if bodies.len() > max_bodies {
+        return Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration",
+        }
+        .into());
+    }
     let mut registry = PluginRegistry::new().without_erasure_gate();
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    let mut bodies = bodies.into_iter().collect::<Vec<_>>();
     bodies.sort_unstable();
     bodies.dedup();
     let configuration_details = gateway_configuration_details(&bodies);
@@ -3359,6 +3366,21 @@ mod tests {
 
     #[test]
     fn gateway_action_registry_builder_propagates_binding_errors() {
+        let too_many_bodies = gateway_action_registry_builder_with_inputs(
+            std::iter::repeat(EntityId::new()),
+            None,
+            "deterministic-local-v1",
+            EVENT_TYPE_ACTION,
+        );
+        assert!(matches!(
+            too_many_bodies,
+            Err(pos_runtime::RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid {
+                    kind: "configuration"
+                }
+            ))
+        ));
+
         let invalid_profile = gateway_action_registry_builder_with_inputs(
             std::iter::empty(),
             None,
