@@ -7,9 +7,8 @@ use pos_core::{
     ManifestAdmissionCatalogV1, ManifestOwnerLinkErrorV1, ManifestSlotAdmissionReceiptInputV1,
     ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
     ManifestSlotBindingV1, PluginId, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
-    WorldProducerV1, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1,
-    MAX_MANIFEST_OWNER_PLUGINS_V1, MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1,
-    MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+    WorldProducerV1, MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
+    MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
