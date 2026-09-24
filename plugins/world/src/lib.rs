@@ -3861,17 +3861,17 @@ mod tests {
             Err(RuntimeError::InvalidRecoveryEvidence { .. })
         ));
         assert_eq!(store.list_timelines().test_ok().len(), 1);
+        let child = registry
+            .fork_restored_timeline(store.as_mut(), parent.id(), Seq::from_u64(2), "child")
+            .test_ok();
+        assert_eq!(child.meta.fork_point, Some((parent.id(), Seq::from_u64(2))));
+
         let unrelated = store.create_timeline("unrelated").test_ok();
         assert!(matches!(
             registry.step_all_anchored_with_events(unrelated.id(), Seq::from_u64(2), &events),
             Err(RuntimeError::SnapshotTimelineMismatch { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-        let child = registry
-            .fork_restored_timeline(store.as_mut(), parent.id(), Seq::from_u64(2), "child")
-            .test_ok();
-        assert_eq!(child.meta.fork_point, Some((parent.id(), Seq::from_u64(2))));
         registry
             .step_all_anchored_with_events(child.id(), Seq::from_u64(2), &events)
             .test_ok();
