@@ -528,7 +528,7 @@ pub struct WorldObservationV1 {
 }
 
 impl WorldObservationV1 {
-    fn rotation(&self) -> BodyRotationV1 {
+    const fn rotation(&self) -> BodyRotationV1 {
         BodyRotationV1 {
             orient_w: self.orient_w,
             orient_x: self.orient_x,
@@ -1214,7 +1214,7 @@ impl WorldDriver {
         restored: &mut WorldDriverState,
         cursor: &mut WorldRecoveryCursor,
         header: &RecoveryEventHeader,
-        observation: WorldObservationV1,
+        observation: &WorldObservationV1,
     ) -> Result<(), RuntimeError> {
         if !restored.config_emitted {
             return Err(RuntimeError::InvalidRecoveryEvidence {
@@ -1569,7 +1569,7 @@ impl Driver for WorldDriver {
                     &mut restored,
                     &mut cursor,
                     event.header(),
-                    observation,
+                    &observation,
                 )?;
             } else if event_type == EVENT_TYPE_CONFIG_V1 {
                 let config = WorldConfigV1::decode(payload).map_err(|error| {
