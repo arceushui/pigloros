@@ -45,7 +45,9 @@ impl AttemptLimitEventSource {
         }
     }
 
-    const fn file_name(self) -> &'static str {
+    /// Return the exact kernel filename associated with this raw evidence source.
+    #[must_use]
+    pub const fn file_name(self) -> &'static str {
         match self {
             Self::MemoryEventsLocal => "memory.events.local",
             Self::MemorySwapEvents => "memory.swap.events",
