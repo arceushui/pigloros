@@ -1,5 +1,5 @@
 //! The exact ADR-065 Timeline integrity message. This module does not authorize
-//! signing, resolve trust anchors, or make a ReplayClaim.
+//! signing, resolve trust anchors, or make a `ReplayClaim`.
 
 use ciborium::Value;
 use thiserror::Error;
@@ -48,7 +48,7 @@ pub struct TimelineEventEnvelopeInputV1 {
     pub correlation_id: Option<CorrelationId>,
 }
 
-/// Immutable 14-field signed representation for TimelineIntegritySigning.
+/// Immutable 14-field signed representation for `TimelineIntegritySigning`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineEventEnvelopeV1 {
     input: TimelineEventEnvelopeInputV1,
