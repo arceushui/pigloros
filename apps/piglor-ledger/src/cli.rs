@@ -173,6 +173,10 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
     }
 }
 
+fn bad_source(error: impl std::fmt::Display) -> CliError {
+    CliError::BadSource(error.to_string())
+}
+
 fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStore>, CliError> {
     let key_path =
         key.ok_or_else(|| CliError::BadSource("store: source requires --key <path>".to_owned()))?;
@@ -201,7 +205,7 @@ fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStor
     }
     event_store
         .initialize_timeline_with_key_registry("ledger", &registry_state)
-        .map_err(|error| CliError::BadSource(error.to_string()))
+        .map_err(bad_source)
         .and_then(|timeline| {
             let registry = Arc::new(Mutex::new(registry_state));
             EventLedgerStore::new(
@@ -213,7 +217,7 @@ fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStor
                 identity,
                 Box::new(Blake3Hasher),
             )
-            .map_err(|error| CliError::BadSource(error.to_string()))
+            .map_err(bad_source)
             .map(|store| Box::new(store) as Box<dyn LedgerStore>)
         })
 }
