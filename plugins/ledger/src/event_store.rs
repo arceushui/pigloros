@@ -2,10 +2,10 @@ use ed25519_dalek::SigningKey;
 use std::sync::{Arc, Mutex};
 
 use pos_core::{
-    clock::{Seq, WallTime},
-    event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    clock::Seq,
+    event::{CanonicalBytes, EventDraft, Kind},
     hasher::Hasher,
-    ids::{EntityId, EventId},
+    ids::EntityId,
     store::{EventStore, SeqRange},
     CoreError, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
@@ -323,7 +323,9 @@ mod tests {
     use super::*;
     use crate::contract;
     use pos_core::{
-        event::EventDraft,
+        clock::WallTime,
+        event::{Event, EventDraft, SchemaVersion},
+        ids::EventId,
         timeline::{Timeline, TimelineMeta},
         ErasureContainmentGateV1, KeyRegistrationV1, KeyRoleV1, SeqRange, TimelineEventEnvelopeV1,
     };

@@ -2303,7 +2303,7 @@ impl ErasureCommandSenderV1<'_> {
         &mut self,
         timeline: TimelineId,
         expected_registry: &KeyRegistryStateV1,
-        draft: EventDraft,
+        draft: &EventDraft,
         identity: pos_core::KeyIdentityV1,
         material_digest: pos_core::Hash,
         public_verification_key: pos_core::PublicKey,
