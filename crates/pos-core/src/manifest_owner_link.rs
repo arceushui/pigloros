@@ -594,7 +594,8 @@ impl<'a> WirePreflight<'a> {
         if count > MAX_MANIFEST_OWNER_PLUGINS_V1 as u64 {
             Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
         } else {
-            usize::try_from(count).map_err(|_| ManifestOwnerLinkErrorV1::FieldOutOfBounds)
+            // The bound above makes this cast safe on every supported target.
+            Ok(count as usize)
         }
     }
 
