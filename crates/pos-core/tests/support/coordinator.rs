@@ -63,7 +63,7 @@ pub const SCOPE_NODE_EXTENSION_FIELD: usize = 4;
 pub const OBLIGATION_SET_REFERENCES_FIELD: usize = 3;
 
 /// Field positions in the immutable object arrays used by recovery fixtures.
-pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 4;
+pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 5;
 pub const FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD: usize = 3;
 pub const OBLIGATION_SET_POLICY_FIELD: usize = 4;
 pub const OBLIGATION_SET_TRUST_FIELD: usize = 5;
@@ -1660,9 +1660,21 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
             policy: self.config.policy,
             trust: self.config.trust,
         })?;
+        let mut scope_timeline_ids = self
+            .topology_observation
+            .borrow()
+            .as_ref()
+            .into_iter()
+            .flat_map(|(bindings, _)| bindings.iter())
+            .filter_map(|(timeline, member)| {
+                (*member == self.config.scope_member).then_some(*timeline)
+            })
+            .collect::<Vec<_>>();
+        scope_timeline_ids.sort_unstable();
         let scope = ErasureScopeCommitmentInputV1 {
             request,
             scope_members: vec![self.config.scope_member],
+            scope_timeline_ids,
             target_closure: target_closure_digest(&self.config.targets),
             lineage_rule: self.config.lineage_rule,
         };

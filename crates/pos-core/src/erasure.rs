@@ -776,6 +776,8 @@ impl ErasureContainmentGateV1 {
         {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
+        validate_committed_scope_timeline_bindings(state, bindings)
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
         let expected_scopes: BTreeSet<_> = state
             .scope
             .as_ref()
@@ -2056,6 +2058,38 @@ impl ErasureVerifiedStateV1 {
     }
 }
 
+fn validate_committed_scope_timeline_bindings(
+    state: &ErasureVerifiedStateV1,
+    bindings: &[(TimelineId, ErasureReferenceV1)],
+) -> Result<(), ErasureErrorV1> {
+    let mut observed = BTreeMap::new();
+    for (timeline, scope) in bindings {
+        if observed.insert(*timeline, *scope).is_some() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    let mut committed = BTreeSet::new();
+    if let Some(scope) = state.scope() {
+        for timeline in scope.scope_timeline_ids() {
+            if !committed.insert(*timeline)
+                || !observed
+                    .get(timeline)
+                    .is_some_and(|bound_scope| scope.scope_members().contains(bound_scope))
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+    }
+    for extension in state.scope_extensions() {
+        if !committed.insert(extension.child_timeline())
+            || observed.get(&extension.child_timeline()) != Some(&extension.fork())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    Ok(())
+}
+
 /// Opaque host-issued proof of the complete Timeline/Fork topology at one
 /// verified recovery revision.
 ///
@@ -2554,6 +2588,7 @@ impl ErasureVerifiedInventoryV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        validate_committed_scope_timeline_bindings(state, &proof.bindings)?;
         let mut observed = Vec::new();
         observed
             .try_reserve(topology.len())
@@ -2638,12 +2673,11 @@ impl ErasureVerifiedInventoryV1 {
             if classification.request != request {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            if classification.membership.included_scope().is_some()
-                && state
-                    .scope()
-                    .is_none_or(|scope| scope.lineage_rule().is_none())
-            {
-                return Err(ErasureErrorV1::PolicyConflict);
+            if classification.membership.included_scope().is_some() {
+                let scope = state.scope().ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                if scope.lineage_rule().is_none() {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
             }
         }
         Ok(())
@@ -2798,7 +2832,10 @@ impl ErasureVerifiedInventoryV1 {
                     let extension = state
                         .scope_extensions()
                         .iter()
-                        .find(|extension| extension.fork() == expected_child_scope)
+                        .find(|extension| {
+                            extension.fork() == expected_child_scope
+                                && extension.child_timeline() == child
+                        })
                         .copied();
                     let Some(extension) = extension else {
                         return Err(ErasureErrorV1::ProvenanceMissing);
@@ -2990,6 +3027,7 @@ impl ErasureVerifiedInventoryV1 {
             .any(|pair| pair[0].mutation.request() == pair[1].mutation.request())
             || admissions.iter().any(|admission| {
                 admission.input != *input
+                    || admission.extension.child_timeline() != input.child.id
                     || !self
                         .request_heads
                         .iter()
@@ -5827,6 +5865,7 @@ mod coverage_paths {
         let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: reference(1),
             scope_members: vec![reference(7)],
+            scope_timeline_ids: Vec::new(),
             target_closure: reference(8),
             lineage_rule: Some(reference(9)),
         })?;
@@ -5878,6 +5917,7 @@ mod coverage_paths {
         let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: request_reference,
             scope_members: vec![scope_reference],
+            scope_timeline_ids: Vec::new(),
             target_closure: reference(27),
             lineage_rule: Some(reference(28)),
         })?;
@@ -6828,6 +6868,7 @@ mod coverage_paths {
             request: reference(86),
             scope_commitment: reference(87),
             fork: input.child_scope,
+            child_timeline: input.child.id,
             lineage_rule: reference(88),
             predecessor_extension: None,
             admission_provenance: reference(89),
@@ -6868,6 +6909,7 @@ mod coverage_paths {
     fn fork_batch_rejects_child_scope_already_in_an_unaffected_extension(
     ) -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
+        let existing_child = TimelineId::new();
         let child_scope = reference(97);
         let affected = inventory_state(
             reference(91),
@@ -6896,6 +6938,7 @@ mod coverage_paths {
                     request: unaffected.request().reference(),
                     scope_commitment: unaffected_scope,
                     fork: child_scope,
+                    child_timeline: existing_child,
                     lineage_rule: reference(28),
                     predecessor_extension: None,
                     admission_provenance: reference(98),
@@ -6908,27 +6951,28 @@ mod coverage_paths {
                     ErasureVerifiedTopologyProofV1::from_verified_recovery(
                         affected.manifest_digest(),
                         vec![(parent, reference(93))],
-                        Vec::new(),
+                        vec![existing_child],
                     ),
                 ),
                 (
                     unaffected,
                     ErasureVerifiedTopologyProofV1::from_verified_recovery(
                         reference(95),
-                        Vec::new(),
+                        vec![(existing_child, child_scope)],
                         vec![parent],
                     ),
                 ),
             ],
-            vec![parent],
+            vec![parent, existing_child],
             4,
         )?;
+        let child = TimelineId::new();
         let input = ErasureForkAdmissionInputV1 {
             operation: reference(99),
             expected_inventory_generation: inventory.generation(),
             child_scope,
             child: crate::TimelineMeta {
-                id: TimelineId::new(),
+                id: child,
                 mode: crate::TimelineMode::Historical,
                 name: Some("extension-collision-child".to_owned()),
                 owner: None,
@@ -6939,6 +6983,7 @@ mod coverage_paths {
             request: affected.request().reference(),
             scope_commitment: affected_scope_commitment,
             fork: child_scope,
+            child_timeline: child,
             lineage_rule: reference(28),
             predecessor_extension: None,
             admission_provenance: reference(100),
@@ -7629,6 +7674,7 @@ mod coverage_paths {
             request: reference(183),
             scope_commitment: reference(184),
             fork: input.child_scope,
+            child_timeline: input.child.id,
             lineage_rule: reference(185),
             predecessor_extension: None,
             admission_provenance: reference(186),
@@ -7773,6 +7819,7 @@ mod coverage_paths {
             request,
             scope_commitment: scope.reference(),
             fork: child_scope,
+            child_timeline: child,
             lineage_rule: scope
                 .lineage_rule()
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?,

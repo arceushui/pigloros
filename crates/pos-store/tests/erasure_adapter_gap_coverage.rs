@@ -60,6 +60,7 @@ fn scope(
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request,
         scope_members: vec![reference(15)],
+        scope_timeline_ids: Vec::new(),
         target_closure: target_closure_digest(targets),
         lineage_rule: Some(lineage_rule),
     })
@@ -74,6 +75,7 @@ fn extension(
         request,
         scope_commitment: scope.reference(),
         fork: reference(16),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule,
         predecessor_extension: None,
         admission_provenance: reference(17),
@@ -362,6 +364,7 @@ where
         let scope_input = ErasureScopeCommitmentInputV1 {
             request,
             scope_members: vec![reference(15)],
+            scope_timeline_ids: Vec::new(),
             target_closure: target_closure_digest(&self.targets),
             lineage_rule: Some(self.lineage_rule),
         };

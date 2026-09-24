@@ -176,6 +176,7 @@ fn scope_with_members(
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members,
+        scope_timeline_ids: Vec::new(),
         target_closure: reference(8),
         lineage_rule: Some(reference(9)),
     })
@@ -326,6 +327,59 @@ roundtrip!(
     }
 );
 roundtrip!(scope_codec_roundtrips, ErasureScopeCommitmentV1, scope());
+
+#[test]
+fn scope_commitment_binds_canonical_initial_timeline_ids() -> Result<(), ErasureErrorV1> {
+    let first = TimelineId::from_ulid(ulid::Ulid::from(1_u128));
+    let second = TimelineId::from_ulid(ulid::Ulid::from(2_u128));
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: reference(1),
+        scope_members: vec![reference(7)],
+        scope_timeline_ids: vec![first, second],
+        target_closure: reference(8),
+        lineage_rule: Some(reference(9)),
+    })?;
+    assert_eq!(scope.scope_timeline_ids(), &[first, second]);
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&scope.to_canonical_cbor()?)?,
+        scope
+    );
+
+    let mut malformed = decode_value(&scope.to_canonical_cbor()?)?;
+    let Value::Array(fields) = &mut malformed else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[4] = Value::Array(vec![Value::Bytes(vec![1])]);
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&encode_value(&malformed)?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    for scope_timeline_ids in [vec![second, first], vec![first, first]] {
+        assert_eq!(
+            ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+                request: reference(1),
+                scope_members: vec![reference(7)],
+                scope_timeline_ids,
+                target_closure: reference(8),
+                lineage_rule: Some(reference(9)),
+            }),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    assert_eq!(
+        ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: reference(1),
+            scope_members: vec![reference(7)],
+            scope_timeline_ids: vec![first; ERASURE_MAX_INVENTORY_TIMELINES + 1],
+            target_closure: reference(8),
+            lineage_rule: Some(reference(9)),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
 roundtrip!(
     freeze_provenance_codec_roundtrips,
     ErasureFreezeProvenanceV1,
@@ -379,6 +433,7 @@ roundtrip!(scope_extension_codec_roundtrips, ErasureScopeExtensionV1, {
         request: reference(1),
         scope_commitment: reference(2),
         fork: reference(3),
+        child_timeline: TimelineId::new(),
         lineage_rule: reference(4),
         predecessor_extension: None,
         admission_provenance: reference(5),
@@ -568,6 +623,7 @@ fn freeze_and_scope_codecs_reject_header_and_length_mutations() -> Result<(), Er
         request: reference(1),
         scope_commitment: reference(2),
         fork: reference(3),
+        child_timeline: TimelineId::new(),
         lineage_rule: reference(4),
         predecessor_extension: None,
         admission_provenance: reference(5),
@@ -867,6 +923,7 @@ fn containment_includes_admitted_future_fork_extensions() -> Result<(), ErasureE
         request: reference(1),
         scope_commitment: scope()?.reference(),
         fork: reference(33),
+        child_timeline: TimelineId::new(),
         lineage_rule: reference(9),
         predecessor_extension: None,
         admission_provenance: reference(34),
@@ -888,11 +945,13 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
 ) -> Result<(), ErasureErrorV1> {
     let parent = TimelineId::new();
     let child = TimelineId::new();
+    let first_child = TimelineId::new();
     let scope = scope()?;
     let first_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: reference(1),
         scope_commitment: scope.reference(),
         fork: reference(33),
+        child_timeline: first_child,
         lineage_rule: reference(9),
         predecessor_extension: None,
         admission_provenance: reference(34),
@@ -901,10 +960,13 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
         request: reference(1),
         scope_commitment: scope.reference(),
         fork: reference(35),
+        child_timeline: child,
         lineage_rule: reference(9),
         predecessor_extension: Some(first_extension.reference()),
         admission_provenance: reference(36),
     })?;
+    let first_fork = first_extension.fork();
+    let second_fork = second_extension.fork();
     let state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
         Some(scope.clone()),
@@ -915,11 +977,15 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
             state,
             ErasureVerifiedTopologyProofV1::from_verified_recovery(
                 reference(5),
-                vec![(parent, reference(7)), (child, second_extension.fork())],
+                vec![
+                    (parent, reference(7)),
+                    (first_child, first_fork),
+                    (child, second_fork),
+                ],
                 Vec::new(),
             ),
         )],
-        vec![parent, child],
+        vec![parent, first_child, child],
         4,
     )?;
 
@@ -1051,6 +1117,7 @@ fn assert_fork_retry_rejects_no_lineage(
     let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members: vec![reference(7)],
+        scope_timeline_ids: Vec::new(),
         target_closure: reference(8),
         lineage_rule: None,
     })?;

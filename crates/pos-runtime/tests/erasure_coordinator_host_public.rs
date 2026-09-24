@@ -360,9 +360,27 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             policy: reference(6),
             trust: reference(8),
         })?;
+        let scope_members = vec![reference(9)];
+        let unaffected_timelines = self
+            .unaffected_timelines
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .clone();
+        let mut scope_timeline_ids = self
+            .timelines
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .iter()
+            .filter_map(|(timeline, scope)| {
+                (scope_members.contains(scope) && !unaffected_timelines.contains(timeline))
+                    .then_some(*timeline)
+            })
+            .collect::<Vec<_>>();
+        scope_timeline_ids.sort_unstable();
         let scope = ErasureScopeCommitmentInputV1 {
             request,
-            scope_members: vec![reference(9)],
+            scope_members,
+            scope_timeline_ids,
             target_closure: target_closure_digest(&targets),
             lineage_rule: (!self.omit_fork_lineage_rule.load(Ordering::Acquire))
                 .then_some(reference(100)),
@@ -446,6 +464,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             request: requirement.request(),
             scope_commitment: requirement.scope_commitment(),
             fork: input.child_scope,
+            child_timeline: input.child.id,
             lineage_rule: requirement.lineage_rule(),
             predecessor_extension: requirement.predecessor_extension(),
             admission_provenance: reference(self.fork_extension_provenance.load(Ordering::Acquire)),
@@ -523,6 +542,7 @@ fn frozen_scope_reference(
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request,
         scope_members: vec![reference(9)],
+        scope_timeline_ids: Vec::new(),
         target_closure: target_closure_digest(&[target]),
         lineage_rule: Some(reference(100)),
     })
@@ -2187,6 +2207,7 @@ fn closed_authority_rejects_freeze_and_scope_operations() -> Result<(), Box<dyn 
             request: request_reference,
             scope_commitment: reference(204),
             fork: reference(205),
+            child_timeline: pos_core::TimelineId::new(),
             lineage_rule: reference(206),
             predecessor_extension: None,
             admission_provenance: reference(207),
@@ -2636,6 +2657,16 @@ fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
         )?;
     }
     {
+        let mut reads = test_stage(
+            "open stale host reader before refresh",
+            stale_host.read_sender(),
+        )?;
+        assert_eq!(
+            reads.timeline(parent),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+    {
         let mut commands = test_stage("open stale host retry sender", stale_host.command_sender())?;
         assert_eq!(
             commands.fork_timeline_identified(
@@ -2667,6 +2698,93 @@ fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
             std::fs::remove_file(candidate)?;
         }
     }
+    Ok(())
+}
+
+#[test]
+fn sqlite_recovery_preserves_each_initially_frozen_timeline_binding(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-frozen-membership-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open frozen-membership host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let initially_frozen = {
+        let mut commands = test_stage("open frozen-membership sender", host.command_sender())?;
+        let initially_frozen = test_stage(
+            "create first frozen Timeline",
+            commands.create_timeline("frozen-membership-first"),
+        )?;
+        let also_frozen = test_stage(
+            "create second frozen Timeline",
+            commands.create_timeline("frozen-membership-second"),
+        )?;
+        test_stage(
+            "bind first frozen Timeline",
+            authority.set_timeline(initially_frozen.id()),
+        )?;
+        test_stage(
+            "bind second frozen Timeline",
+            authority.set_timeline(also_frozen.id()),
+        )?;
+        let request = test_stage("construct frozen-membership request", persistence_request())?;
+        let request_reference = request.reference();
+        let provenance = request.provenance();
+        test_stage(
+            "submit frozen-membership request",
+            commands.submit_erasure_request(request, provenance),
+        )?;
+        test_stage(
+            "authorize frozen-membership request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze both Timeline members",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+        initially_frozen.id()
+    };
+    drop(host);
+
+    test_stage(
+        "reclassify one frozen Timeline as unaffected",
+        authority.set_timeline_unaffected(initially_frozen),
+    )?;
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+    let reopening_was_rejected = matches!(
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+    assert!(reopening_was_rejected);
     Ok(())
 }
 
