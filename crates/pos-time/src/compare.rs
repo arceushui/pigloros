@@ -496,9 +496,9 @@ mod tests {
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
         registry_b.register("count", Box::new(CountReducer));
+        let closure_a = crate::test_support::closure_for_host(&host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&host, fork_b);
         let mut reads = host.read_sender().test_ok();
-        let closure_a = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
-        let closure_b = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
         let result = super::compare(
             &mut reads,
             [fork_a, fork_b],
@@ -623,10 +623,11 @@ mod tests {
 
     #[test]
     fn public_compare_rolls_back_when_final_read_bounds_change() {
+        let verifier = Arc::new(ChangeBoundsOnThirdVerification {
+            calls: AtomicUsize::new(0),
+        });
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
-            .with_world_replay_verifier(Arc::new(ChangeBoundsOnThirdVerification {
-                calls: AtomicUsize::new(0),
-            }));
+            .with_world_replay_verifier(verifier.clone());
         let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Memory,
             &composition,
@@ -669,6 +670,7 @@ mod tests {
         ));
         assert_eq!(registry_a.state_for_reducer("count", &entity), None);
         assert_eq!(registry_b.state_for_reducer("count", &entity), None);
+        assert_eq!(verifier.calls.load(Ordering::SeqCst), 4);
     }
 
     #[test]

@@ -48,9 +48,14 @@ fn snapshot_verification_requires_installed_world_verifier() {
         .test_ok()
         .create_timeline("artifact-snapshot")
         .test_ok();
-    let mut reads = host.read_sender().test_ok();
     let mut capture_registry = registry(&gate);
-    let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
+    let generation = gate.inventory_generation().test_ok();
+    let closure = pos_core::WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+        timeline.id(),
+        pos_core::Hash::from_bytes(generation.digest()),
+    )
+    .test_ok();
+    let mut reads = host.read_sender().test_ok();
     let result = snapshot(&mut reads, timeline.id(), &mut capture_registry, &closure);
     assert!(matches!(
         result,
