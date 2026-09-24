@@ -76,7 +76,7 @@ fn standalone_timeline_signing_binds_every_context_field() -> Result<(), Box<dyn
     let mut altered = fields.clone();
     altered.causation_id = Some(EventId::new());
     variants.push(altered);
-    let mut altered = fields.clone();
+    let mut altered = fields;
     altered.correlation_id = Some(pos_core::CorrelationId::new());
     variants.push(altered);
     for changed in variants {
