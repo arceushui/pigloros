@@ -189,7 +189,7 @@ mod coverage_tests {
     }
 
     #[test]
-    fn output_binding_rejects_wrong_profile_kind_and_owner() {
+    fn output_binding_retains_delegated_world_source() {
         let plugin = GatewayActionPlugin {
             id: PluginId::new(),
         };
@@ -199,7 +199,7 @@ mod coverage_tests {
             "deterministic-local-v1",
             "world.action.v1",
         )
-        .expect("installed Gateway output binding");
+        .test_ok();
         assert!(binding
             .implementation_artifact()
             .ends_with(include_bytes!("../../../plugins/world/src/lib.rs")));
@@ -207,6 +207,13 @@ mod coverage_tests {
             binding.policy().fields().implementation_hash,
             pos_runtime::implementation_artifact_hash_v1(binding.implementation_artifact()),
         );
+    }
+
+    #[test]
+    fn output_binding_rejects_wrong_profile_kind_and_owner() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
         assert!(gateway_output_binding_with_inputs(
             &plugin,
             &[],
