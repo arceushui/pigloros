@@ -7,14 +7,14 @@ use std::sync::{
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
-    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
-    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
-    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
-    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
-    ErasureAuthorizationDecisionV1, ErasureCorrectionProvenanceInputV1,
-    ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
-    ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
+    CanonicalBytes, EntityId, ErasureAcknowledgementOutcomeV1,
+    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1,
+    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureCorrectionProvenanceInputV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureForkAdmissionInputV1, ErasureForkScopeRequirementV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1, ErasureHostErrorV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
@@ -23,7 +23,8 @@ use pos_core::{
     ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateTransitionV1,
-    ErasureVerifiedTopologyObservationV1, TimelineId, TimelineMeta, ERASURE_MAX_INVENTORY_REQUESTS,
+    ErasureVerifiedTopologyObservationV1, EventDraft, EventReadBounds, Kind, SeqRange, TimelineId,
+    TimelineMeta, ERASURE_MAX_INVENTORY_REQUESTS,
 };
 use pos_runtime::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCoordinatorAuthorityV1,
@@ -1261,18 +1262,11 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
 }
 
 fn remove_sqlite_store_files(
-    path: std::path::PathBuf,
+    path: impl Into<std::path::PathBuf>,
     path_text: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for candidate in [
-        path,
-        std::path::PathBuf::from(format!("{path_text}-wal")),
-        std::path::PathBuf::from(format!("{path_text}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    let path = path.into();
+    remove_sqlite_store_files(path, &path_text)?;
     Ok(())
 }
 
@@ -1897,15 +1891,7 @@ fn sqlite_public_active_root_failure_rolls_back_before_poisoning(
         timelines[0].meta.name.as_deref(),
         Some("active-root-parent")
     );
-    for candidate in [
-        std::path::PathBuf::from(&path),
-        std::path::PathBuf::from(format!("{path}-wal")),
-        std::path::PathBuf::from(format!("{path}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    remove_sqlite_store_files(std::path::PathBuf::from(&path), &path)?;
     Ok(())
 }
 
@@ -2023,15 +2009,7 @@ fn sqlite_host_recovers_nonempty_frozen_inventory_and_fork_scope(
         denied_recovery.is_err(),
         "topology denial must keep recovery closed"
     );
-    for candidate in [
-        path,
-        std::path::PathBuf::from(format!("{path_text}-wal")),
-        std::path::PathBuf::from(format!("{path_text}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    remove_sqlite_store_files(path, &path_text)?;
     Ok(())
 }
 
@@ -2126,15 +2104,7 @@ fn closed_composition_proves_empty_but_rejects_non_empty_authority(
         closed_recovery.err(),
         Some(ErasureHostErrorV1::RecoveryUnavailable)
     );
-    for candidate in [
-        path,
-        std::path::PathBuf::from(format!("{path_text}-wal")),
-        std::path::PathBuf::from(format!("{path_text}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    remove_sqlite_store_files(path, &path_text)?;
 
     let authority = ClosedErasureCoordinatorAuthorityV1;
     assert_eq!(
@@ -2433,24 +2403,57 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
         return Err(format!("recovery fixture already exists: {}", path.display()).into());
     }
     let path_text = path.to_string_lossy().into_owned();
-    drop(test_stage(
-        "create compatibility read-only database",
+    let mut writable_host = test_stage(
+        "open writable host for read-only consumer test",
         ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Sqlite {
                 path: path_text.clone(),
             },
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
-    )?);
-    let legacy_read_only_host = test_stage(
-        "open legacy verified-empty read-only host",
+    )?;
+    let timeline = {
+        let mut commands = test_stage(
+            "open command sender to prepare read-only consumer Timeline",
+            writable_host.command_sender(),
+        )?;
+        test_stage(
+            "create read-only consumer Timeline",
+            commands.create_timeline("read-only-consumer"),
+        )?
+    };
+    drop(writable_host);
+    let mut read_only_host = test_stage(
+        "open verified-empty read-only host",
         ErasureExecutionHostV1::open_read_only_verified_empty(
             &path_text,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
-    assert_eq!(legacy_read_only_host.status(), ErasureHostStatusV1::Ready);
-    let read_only_host = test_stage(
+    assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
+    let mut read_succeeded = false;
+    {
+        let mut reads = test_stage("open read-only host sender", read_only_host.read_sender())?;
+        let mut effect = |sender: &mut pos_runtime::ErasureReadSenderV1<'_>| {
+            read_succeeded = sender
+                .read_bounded(
+                    timeline.id(),
+                    SeqRange::all(),
+                    EventReadBounds::new(8, 32, 4, 4),
+                )
+                .is_ok();
+        };
+        test_stage(
+            "run protected read through read-only host",
+            reads.with_protected_effect_fence(
+                timeline.id(),
+                pos_core::ErasureProtectedOperationV1::Read,
+                &mut effect,
+            ),
+        )?;
+    }
+    assert!(read_succeeded);
+    let composed_read_only_host = test_stage(
         "open explicit composed read-only host",
         ErasureExecutionHostV1::open_read_only_with_authority(
             &path_text,
@@ -2458,8 +2461,10 @@ fn explicit_recovery_constructors_keep_empty_and_composed_paths_distinct(
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         ),
     )?;
-    assert_eq!(read_only_host.status(), ErasureHostStatusV1::Ready);
-    std::fs::remove_file(path)?;
+    assert_eq!(composed_read_only_host.status(), ErasureHostStatusV1::Ready);
+    drop(composed_read_only_host);
+    drop(read_only_host);
+    remove_sqlite_store_files(path, &path_text)?;
     Ok(())
 }
 
@@ -2709,15 +2714,7 @@ fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
     }
     drop(current_host);
     drop(stale_host);
-    for candidate in [
-        path,
-        std::path::PathBuf::from(format!("{path_text}-wal")),
-        std::path::PathBuf::from(format!("{path_text}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    remove_sqlite_store_files(path, &path_text)?;
     Ok(())
 }
 
@@ -2787,15 +2784,7 @@ fn sqlite_stale_root_rejects_a_changed_empty_inventory_generation(
     }
     drop(current_host);
     drop(stale_host);
-    for candidate in [
-        path,
-        std::path::PathBuf::from(format!("{path_text}-wal")),
-        std::path::PathBuf::from(format!("{path_text}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    remove_sqlite_store_files(path, &path_text)?;
     Ok(())
 }
 
@@ -2805,6 +2794,7 @@ struct StaleSqliteHostScenario {
     stale_host: ErasureExecutionHostV1,
     current_host: ErasureExecutionHostV1,
     unaffected_parent: TimelineId,
+    request_reference: ErasureReferenceV1,
 }
 
 impl StaleSqliteHostScenario {
@@ -2818,20 +2808,17 @@ impl StaleSqliteHostScenario {
         } = self;
         drop(current_host);
         drop(stale_host);
-        for candidate in [
-            path,
-            std::path::PathBuf::from(format!("{path_text}-wal")),
-            std::path::PathBuf::from(format!("{path_text}-shm")),
-        ] {
-            if candidate.exists() {
-                std::fs::remove_file(candidate)?;
-            }
-        }
-        Ok(())
+        remove_sqlite_store_files(path, &path_text)
     }
 }
 
 fn stale_sqlite_host_scenario() -> Result<StaleSqliteHostScenario, Box<dyn std::error::Error>> {
+    stale_sqlite_host_scenario_with_freeze(true)
+}
+
+fn stale_sqlite_host_scenario_with_freeze(
+    freeze_current: bool,
+) -> Result<StaleSqliteHostScenario, Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(
         "pigloros-erasure-stale-unaffected-fork-{}.sqlite",
         TimelineId::new()
@@ -2899,7 +2886,7 @@ fn stale_sqlite_host_scenario() -> Result<StaleSqliteHostScenario, Box<dyn std::
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
     )?;
-    {
+    if freeze_current {
         let mut commands = test_stage(
             "open current unaffected-fork command sender",
             current_host.command_sender(),
@@ -2915,7 +2902,109 @@ fn stale_sqlite_host_scenario() -> Result<StaleSqliteHostScenario, Box<dyn std::
         stale_host,
         current_host,
         unaffected_parent,
+        request_reference,
     })
+}
+
+#[test]
+fn sqlite_read_effect_serializes_with_a_concurrent_access_freeze(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = stale_sqlite_host_scenario_with_freeze(false)?;
+    let StaleSqliteHostScenario {
+        path,
+        path_text,
+        stale_host,
+        current_host,
+        unaffected_parent,
+        request_reference,
+    } = scenario;
+    let (effect_started_tx, effect_started_rx) = std::sync::mpsc::channel();
+    let (release_effect_tx, release_effect_rx) = std::sync::mpsc::channel();
+    let (freeze_started_tx, freeze_started_rx) = std::sync::mpsc::channel();
+    let (freeze_finished_tx, freeze_finished_rx) = std::sync::mpsc::channel();
+    let read_thread = std::thread::spawn(move || {
+        let mut host = stale_host;
+        let mut read_succeeded = false;
+        let mut effect = |sender: &mut pos_runtime::ErasureReadSenderV1<'_>| {
+            read_succeeded = sender
+                .read_bounded(
+                    unaffected_parent,
+                    SeqRange::all(),
+                    EventReadBounds::new(8, 32, 4, 4),
+                )
+                .is_ok();
+            assert!(effect_started_tx.send(()).is_ok());
+            let _release_result = release_effect_rx.recv();
+        };
+        let result = host.read_sender().and_then(|mut sender| {
+            sender.with_protected_effect_fence(
+                unaffected_parent,
+                pos_core::ErasureProtectedOperationV1::Read,
+                &mut effect,
+            )
+        });
+        (host, result, read_succeeded)
+    });
+    if let Err(error) = effect_started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        drop(release_effect_tx.send(()));
+        drop(read_thread.join());
+        remove_sqlite_store_files(path, &path_text)?;
+        return Err(error.into());
+    }
+
+    let freeze_thread = std::thread::spawn(move || {
+        let mut host = current_host;
+        assert!(freeze_started_tx.send(()).is_ok());
+        let result = host.command_sender().and_then(|mut commands| {
+            commands.freeze_access(request_reference, &freeze_transition())
+        });
+        let _finished_result = freeze_finished_tx.send(());
+        (host, result)
+    });
+    if let Err(error) = freeze_started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        drop(release_effect_tx.send(()));
+        drop(read_thread.join());
+        drop(freeze_thread.join());
+        remove_sqlite_store_files(path, &path_text)?;
+        return Err(error.into());
+    }
+    let freeze_was_blocked = matches!(
+        freeze_finished_rx.recv_timeout(std::time::Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    );
+    assert!(release_effect_tx.send(()).is_ok());
+    let (mut stale_host, read_result, read_succeeded) = read_thread
+        .join()
+        .map_err(|_| "read effect thread panicked")?;
+    let (current_host, freeze_result) =
+        freeze_thread.join().map_err(|_| "freeze thread panicked")?;
+    assert!(freeze_was_blocked);
+    assert!(read_result.is_ok());
+    assert!(read_succeeded);
+    assert!(freeze_result.is_ok());
+    assert_eq!(current_host.status(), ErasureHostStatusV1::Ready);
+
+    let mut callback_entered = false;
+    let stale_read_result = stale_host.read_sender().and_then(|mut sender| {
+        sender.with_protected_effect_fence(
+            unaffected_parent,
+            pos_core::ErasureProtectedOperationV1::Read,
+            &mut |_| callback_entered = true,
+        )
+    });
+    assert_eq!(stale_read_result, Err(ErasureHostErrorV1::StaleGeneration));
+    assert!(!callback_entered);
+    assert_eq!(stale_host.status(), ErasureHostStatusV1::Poisoned);
+
+    StaleSqliteHostScenario {
+        path,
+        path_text,
+        stale_host,
+        current_host,
+        unaffected_parent,
+        request_reference,
+    }
+    .cleanup()
 }
 
 #[test]
@@ -3117,15 +3206,7 @@ fn sqlite_recovery_preserves_each_initially_frozen_timeline_binding(
         ),
         Err(ErasureHostErrorV1::RecoveryUnavailable)
     );
-    for candidate in [
-        path,
-        std::path::PathBuf::from(format!("{path_text}-wal")),
-        std::path::PathBuf::from(format!("{path_text}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    remove_sqlite_store_files(path, &path_text)?;
     assert!(reopening_was_rejected);
     Ok(())
 }
@@ -3204,15 +3285,7 @@ fn sqlite_recovery_rejects_an_extra_timeline_binding_outside_the_committed_scope
         ),
         Err(ErasureHostErrorV1::RecoveryUnavailable)
     );
-    for candidate in [
-        path,
-        std::path::PathBuf::from(format!("{path_text}-wal")),
-        std::path::PathBuf::from(format!("{path_text}-shm")),
-    ] {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-        }
-    }
+    remove_sqlite_store_files(path, &path_text)?;
     assert!(reopening_was_rejected);
     Ok(())
 }
