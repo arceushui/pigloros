@@ -33,6 +33,20 @@ pub enum TimelineEventEnvelopeErrorV1 {
     InvalidSignature,
 }
 
+/// Cryptographic result for one committed Timeline Event.
+///
+/// This does not make an ADR-060 `ReplayClaim`. Missing retained artifacts
+/// cannot establish an invalid signature or a verified one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineEventVerificationV1 {
+    /// The exact retained Event and identity-bound public key verify.
+    Verified,
+    /// Present context or signature fails the exact V1 contract.
+    Invalid,
+    /// A required signature, field, registry key, or trust anchor is absent.
+    MissingRequiredContext,
+}
+
 /// Finalized first-commit context, without a private key or signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineEventEnvelopeInputV1 {
