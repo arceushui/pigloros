@@ -1356,12 +1356,16 @@ impl ErasureExecutionHostV1 {
         }
         self.state = HostStateV1::Closed;
         self.inventory = None;
-        let Ok(inventory) = query
+        let inventory = match query
             .verified_inventory_with_limits(limits)
             .and_then(|inventory| self.verify_current_inventory(inventory, limits))
-        else {
-            self.poison();
-            return Err(ErasureHostErrorV1::RecoveryUnavailable);
+        {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                eprintln!("[DEBUG-139-refresh] verified inventory install: {error:?}");
+                self.poison();
+                return Err(ErasureHostErrorV1::RecoveryUnavailable);
+            }
         };
         self.publish_inventory_with_limits(inventory, limits)
     }
@@ -1394,9 +1398,13 @@ impl ErasureExecutionHostV1 {
         let inventory = {
             let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
             let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
-            state_machine
-                .verified_inventory_with_limits(limits)
-                .map_err(map_erasure_error)?
+            match state_machine.verified_inventory_with_limits(limits) {
+                Ok(inventory) => inventory,
+                Err(error) => {
+                    eprintln!("[DEBUG-139-refresh] authority inventory query: {error:?}");
+                    return Err(map_erasure_error(error));
+                }
+            }
         };
         let mut query = SingleUseVerifiedInventoryQueryV1(Some(inventory));
         self.install_inventory_with_limits(&mut query, limits)
@@ -1556,6 +1564,7 @@ impl ErasureExecutionHostV1 {
         let generation = match publication {
             Ok(generation) => generation,
             Err(error) => {
+                eprintln!("[DEBUG-139-refresh] gate inventory publication: {error:?}");
                 self.poison();
                 return Err(error);
             }
@@ -1633,6 +1642,7 @@ impl ErasureExecutionHostV1 {
 
     fn prepare_unaffected_topology_transition<F>(
         &mut self,
+        current_inventory: &ErasureVerifiedInventoryV1,
         preflight: &mut impl FnMut(
             &ErasureTopologyTransitionPermitV1,
             &mut dyn ErasureHostStore,
@@ -1662,6 +1672,9 @@ impl ErasureExecutionHostV1 {
             Ok(candidate) => candidate,
             Err(error) => return Err(UnaffectedTopologyTransitionError::Erasure(error)),
         };
+        current_inventory
+            .validate_frozen_membership_successor(&candidate)
+            .map_err(UnaffectedTopologyTransitionError::Erasure)?;
         if request_count != 0 {
             match candidate.require_unaffected_topology(candidate_timeline.id()) {
                 Ok(()) => {}
@@ -1736,6 +1749,7 @@ impl ErasureExecutionHostV1 {
         let publication = {
             let mut fenced_transition = |permit: &ErasureTopologyTransitionPermitV1| match self
                 .prepare_unaffected_topology_transition(
+                    &inventory,
                     &mut fenced_preflight,
                     &mut change,
                     permit,
