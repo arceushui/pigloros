@@ -180,7 +180,7 @@ pub fn verify_signed_timeline_range_v1(
     if !events
         .iter()
         .all(|event| origin_matches_lineage(event, &lineage))
-        || store.read(timeline, range)? != events
+        || store.read(timeline, range)?.as_slice() != events
     {
         return Ok(report);
     }
