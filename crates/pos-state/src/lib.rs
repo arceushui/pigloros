@@ -654,12 +654,12 @@ impl ProjectionRegistry {
         }
     }
 
-    /// Apply a state mutation transactionally, restoring every reducer state
-    /// when the operation fails.
+    /// Run an operation, restoring accumulated state maps when it fails.
     ///
-    /// This keeps protected Replay and Snapshot candidates private until their
-    /// final authorization check succeeds. Reducer registrations and policies
-    /// remain installed; only accumulated state is rolled back.
+    /// This does not isolate protected Replay or Snapshot candidates. Reducer
+    /// registrations, reducer internals, policies, and external effects are not
+    /// rolled back; an owner-controlled private candidate is still required
+    /// before releasing protected results.
     ///
     /// # Errors
     ///
