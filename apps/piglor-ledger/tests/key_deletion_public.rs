@@ -302,6 +302,27 @@ fn destroy_key_rejects_unbound_absent_path_and_matching_copy(
 }
 
 #[test]
+fn destroy_key_rejects_replacement_at_the_bound_path() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let database = directory.path().join("ledger.db");
+    let key = directory.path().join("secret.key");
+    let moved = directory.path().join("moved.key");
+    make_key(&key)?;
+    drop(open_store(&Source::Store(database.clone()), Some(&key))?);
+
+    std::fs::rename(&key, &moved)?;
+    owned_file(&key, &std::fs::read(&moved)?)?;
+    assert!(run(&destroy_args(&database, &key)).is_err());
+    assert!(moved.exists());
+    assert!(key.exists());
+    let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1);
+    let state = registry(&database)?;
+    assert!(state.tombstone(identity).is_none());
+    assert_eq!(state.pending_destruction_requests().count(), 1);
+    Ok(())
+}
+
+#[test]
 fn destroy_key_requires_durable_owner_path_binding() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::TempDir::new()?;
     let database = directory.path().join("ledger.db");
