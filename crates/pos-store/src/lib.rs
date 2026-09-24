@@ -680,6 +680,57 @@ pub fn resolve_timeline_import_public_keys_v1(
     Ok(public_keys)
 }
 
+/// Verify every exact V1 Timeline envelope before identity-preserving import.
+///
+/// The destination registry and caller-supplied trust set must agree on each
+/// Event's owner/role/epoch public key. An Event's retained first-commit origin
+/// must describe its own exported segment, including the Fork's inherited
+/// Timeline Order prefix. The store's `import_committed` operation then applies
+/// the validated batch atomically or rolls it back. This makes no signed-range
+/// completeness claim or ADR-060 `ReplayClaim`.
+///
+/// # Errors
+/// Rejects missing or mismatched trust context, invalid envelopes or
+/// signatures, origin transplants, and any atomic import failure.
+pub fn import_timeline_verified_v1(
+    store: &mut dyn EventStore,
+    export: TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<pos_core::Timeline, CoreError> {
+    let public_keys = resolve_timeline_import_public_keys_v1(store, &export, trust_anchors)?;
+    let registry = load_import_registry(store, &export)?;
+    let inherited_prefix = export
+        .timeline
+        .meta
+        .fork_point
+        .map_or(0, |(_, at)| at.as_u64());
+    for (event, public_key) in export.events.iter().zip(public_keys) {
+        let origin_logical_seq = inherited_prefix
+            .checked_add(event.seq.as_u64())
+            .ok_or(CoreError::SignatureVerificationFailed)?;
+        if event.origin
+            != Some(pos_core::EventOriginV1 {
+                origin_timeline_id: export.timeline.id(),
+                origin_logical_seq: pos_core::Seq::from_u64(origin_logical_seq),
+            })
+        {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        let trust_anchor = event
+            .signature_identity
+            .map(|identity| (identity, public_key));
+        if pos_crypto::key_roles::verify_committed_timeline_event_v1(
+            event,
+            registry.as_ref(),
+            trust_anchor,
+        ) != pos_core::TimelineEventVerificationV1::Verified
+        {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+    }
+    pos_core::store::import_timeline_with_id(store, export)
+}
+
 fn load_import_registry(
     store: &dyn EventStore,
     export: &TimelineExport,
