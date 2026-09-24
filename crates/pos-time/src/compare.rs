@@ -274,12 +274,37 @@ mod tests {
     use pos_store::{open_store, StoreConfig};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
     struct CountReducer;
+
+    struct RecordGenerationVerifier {
+        observations: Mutex<Vec<(TimelineId, pos_core::ErasureReferenceV1)>>,
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for RecordGenerationVerifier {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            self.observations
+                .lock()
+                .map_err(|_| pos_runtime::WorldReplayVerificationErrorV1::EvidenceUnavailable)?
+                .push((requested_use.timeline_id(), inventory_generation));
+            Ok(pos_runtime::world_replay::test_verified_world_replay(
+                closure,
+                requested_use,
+                inventory_generation,
+                pos_core::ErasureReplayClaimV1::Exact,
+            ))
+        }
+    }
 
     struct RejectThirdVerification {
         calls: AtomicUsize,
@@ -473,8 +498,14 @@ mod tests {
 
     #[test]
     fn public_compare_holds_one_host_generation_across_both_forks() {
-        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+        let verifier = Arc::new(RecordGenerationVerifier {
+            observations: Mutex::new(Vec::new()),
+        });
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(verifier.clone());
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Memory,
+            &composition,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
@@ -494,6 +525,7 @@ mod tests {
             commands.append(fork_a.id(), &[draft(entity)]).test_ok();
             (fork_a.id(), fork_b.id(), fork_seq)
         };
+        let generation = gate.inventory_generation().test_ok();
         let mut registry_a = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
@@ -501,14 +533,25 @@ mod tests {
         let closure_a = crate::test_support::closure_for_host(&host, fork_a);
         let closure_b = crate::test_support::closure_for_host(&host, fork_b);
         let mut reads = host.read_sender().test_ok();
-        let result = super::compare(
+        let diff = super::compare(
             &mut reads,
             [fork_a, fork_b],
             fork_seq,
             [&mut registry_a, &mut registry_b],
             [&closure_a, &closure_b],
+        )
+        .test_ok();
+        assert_eq!(diff.only_in_a.len(), 1);
+        assert!(diff.only_in_b.is_empty());
+        assert_eq!(
+            verifier.observations.lock().test_ok().as_slice(),
+            &[
+                (fork_a, generation),
+                (fork_b, generation),
+                (fork_a, generation),
+                (fork_b, generation),
+            ]
         );
-        assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
     }
 
     #[test]

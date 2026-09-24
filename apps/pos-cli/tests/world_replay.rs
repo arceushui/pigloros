@@ -20,7 +20,7 @@ fn assert_timeline_operation_unavailable(
 }
 
 #[test]
-fn replay_unavailable_without_evidence() -> Result<(), Box<dyn std::error::Error>> {
+fn replay_command_reports_unavailable() -> Result<(), Box<dyn std::error::Error>> {
     assert_timeline_operation_unavailable(
         &["timeline", "replay", "unused", "unused"],
         "Error: timeline replay is unavailable: the CLI has no owner-verified evidence path for this operation\n",
@@ -28,7 +28,7 @@ fn replay_unavailable_without_evidence() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn snapshot_unavailable_without_evidence() -> Result<(), Box<dyn std::error::Error>> {
+fn snapshot_command_reports_unavailable() -> Result<(), Box<dyn std::error::Error>> {
     assert_timeline_operation_unavailable(
         &["timeline", "snapshot", "unused", "unused"],
         "Error: timeline snapshot is unavailable: the CLI has no owner-verified evidence path for this operation\n",
@@ -36,7 +36,7 @@ fn snapshot_unavailable_without_evidence() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn compare_unavailable_without_evidence() -> Result<(), Box<dyn std::error::Error>> {
+fn compare_command_reports_unavailable() -> Result<(), Box<dyn std::error::Error>> {
     assert_timeline_operation_unavailable(
         &[
             "timeline", "compare", "unused", "unused", "unused", "unused",

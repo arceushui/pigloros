@@ -620,8 +620,8 @@ mod tests {
         };
         let mut projected = ProjectionRegistry::new().with_erasure_gate(gate);
         projected.register("count", Box::new(CountReducer));
+        let closure = crate::test_support::closure_for_host(&host, timeline);
         let mut reads = host.read_sender().test_ok();
-        let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
         let result = super::snapshot(&mut reads, timeline, &mut projected, &closure);
         assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
     }

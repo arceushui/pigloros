@@ -6,7 +6,8 @@
 //!
 //! Subcommands:
 //!   pos store init|info `<path>`
-//!   pos timeline list|fork|replay|snapshot|compare|merge …
+//!   pos timeline list|fork|merge …
+//!   pos timeline replay|snapshot|compare … (currently unavailable)
 //!   pos events log …
 //!   pos experiment run|verify|reproduce …
 //!   pos version
@@ -371,13 +372,13 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if args.len() < 3 {
                 return Err("Usage: pos timeline replay <path> <timeline-id>".into());
             }
-            cmd_timeline_replay(&args[1], &args[2])
+            Err(timeline_operation_unavailable("replay"))
         }
         Some("snapshot") => {
             if args.len() < 3 {
                 return Err("Usage: pos timeline snapshot <path> <timeline-id>".into());
             }
-            cmd_timeline_snapshot(&args[1], &args[2])
+            Err(timeline_operation_unavailable("snapshot"))
         }
         Some("compare") => {
             if args.len() < 5 {
@@ -385,7 +386,7 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     "Usage: pos timeline compare <path> <tl-a-id> <tl-b-id> <fork-seq>".into(),
                 );
             }
-            cmd_timeline_compare(&args[1], &args[2], &args[3], &args[4])
+            Err(timeline_operation_unavailable("compare"))
         }
         Some("merge") => {
             if args.len() < 6 {
@@ -399,6 +400,9 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             output_stderr!("Usage: pos timeline <list|fork|replay|snapshot|compare|merge> ...");
+            output_stderr!(
+                "replay, snapshot, and compare require a CLI owner-verified evidence path"
+            );
             Ok(())
         }
     }
@@ -433,23 +437,6 @@ fn cmd_timeline_fork(
     let forked = store.fork(tl_id, at_seq, name)?;
     output_stdout!("Forked timeline: {}", forked.id());
     Ok(())
-}
-
-fn cmd_timeline_replay(_path: &str, _tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    Err(timeline_operation_unavailable("replay"))
-}
-
-fn cmd_timeline_snapshot(_path: &str, _tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    Err(timeline_operation_unavailable("snapshot"))
-}
-
-fn cmd_timeline_compare(
-    _path: &str,
-    _first_timeline_str: &str,
-    _second_timeline_str: &str,
-    _fork_seq_str: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Err(timeline_operation_unavailable("compare"))
 }
 
 fn timeline_operation_unavailable(operation: &str) -> Box<dyn std::error::Error> {
