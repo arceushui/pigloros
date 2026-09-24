@@ -2,7 +2,6 @@ use ed25519_dalek::SigningKey;
 use std::sync::{Arc, Mutex};
 
 use pos_core::{
-    clock::Seq,
     event::{CanonicalBytes, EventDraft, Kind},
     hasher::Hasher,
     ids::EntityId,
@@ -323,7 +322,7 @@ mod tests {
     use super::*;
     use crate::contract;
     use pos_core::{
-        clock::WallTime,
+        clock::{Seq, WallTime},
         event::{Event, EventDraft, SchemaVersion},
         ids::EventId,
         timeline::{Timeline, TimelineMeta},
