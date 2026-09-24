@@ -404,18 +404,13 @@ mod coverage_tests {
     fn installed_gateway_binding(
         plugin: &GatewayActionPlugin,
     ) -> pos_runtime::OutputPolicyBindingV1 {
-        gateway_output_binding_with_inputs(
-            plugin,
-            &[],
-            "deterministic-local-v1",
-            "world.action.v1",
-        )
-        .test_ok()
-        .with_installed_action_approver(
-            super::GatewayWorldActionApprover(super::WorldPlugin::new()),
-            [Kind::new("world.action.v1")],
-        )
-        .test_ok()
+        gateway_output_binding_with_inputs(plugin, &[], "deterministic-local-v1", "world.action.v1")
+            .test_ok()
+            .with_installed_action_approver(
+                super::GatewayWorldActionApprover(super::WorldPlugin::new()),
+                [Kind::new("world.action.v1")],
+            )
+            .test_ok()
     }
 
     #[test]
