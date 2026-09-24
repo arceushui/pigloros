@@ -244,7 +244,7 @@ fn committed_verifier_distinguishes_missing_context_and_retained_epochs(
     Ok(())
 }
 
-fn erasure_artifact(
+const fn erasure_artifact(
     digest: u8,
     data_class: ArtifactDataClassV1,
     transition_rule: ArtifactTransitionRuleV1,
@@ -265,7 +265,7 @@ fn erasure_artifact(
     }
 }
 
-fn erasure_input<'a>(
+const fn erasure_input<'a>(
     event: Option<&'a Event>,
     registry: Option<&'a KeyRegistryStateV1>,
     trust_anchor: Option<(KeyIdentityV1, PublicKey)>,
