@@ -275,6 +275,13 @@ impl WorldReplayClosureV1 {
         }) {
             return Err(WorldReplayClosureErrorV1::UnownedArtifact);
         }
+        if artifacts.iter().any(|leaf| {
+            let input = leaf.as_input();
+            input.kind != WorldArtifactKindV1::OptionalView
+                && input.optionality != crate::ArtifactOptionalityV1::Required
+        }) {
+            return Err(WorldReplayClosureErrorV1::MissingRequiredArtifact);
+        }
         if REQUIRED_KINDS
             .iter()
             .any(|kind| !artifacts.iter().any(|leaf| leaf.as_input().kind == *kind))
@@ -317,7 +324,8 @@ impl WorldReplayClosureV1 {
         self.operation_identity
     }
 
-    /// Return the exact source/head identity covered by this closure.
+    /// Return the provisional source/head label carried by this flat closure.
+    /// This is not a WCB1 cut coordinate or stitched Timeline head.
     #[must_use]
     pub const fn source_head(&self) -> Hash {
         self.source_head
@@ -345,7 +353,8 @@ impl WorldReplayClosureV1 {
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
-    /// Return the canonical closure identity used in Replay receipts.
+    /// Return this flat closure's provisional digest.
+    /// This is not the canonical WCB1 binding or an owner-authenticated receipt.
     #[must_use]
     pub fn digest(&self) -> Hash {
         let mut hasher = blake3::Hasher::new();
@@ -652,7 +661,6 @@ fn validate_consumer_set_references(
             input.kind == WorldArtifactKindV1::OptionalView
                 && leaf.digest() == *root
                 && input.optionality == crate::ArtifactOptionalityV1::Optional
-                && input.transition == crate::ArtifactTransitionRuleV1::RedactViews
         })
     }) {
         return Err(WorldReplayClosureErrorV1::MissingConsumerArtifact);
