@@ -124,6 +124,42 @@ fn ledger_signing_registry(
     Ok((registry, identity))
 }
 
+fn recover_pending_ledger_key(
+    event_store: &mut dyn pos_core::store::EventStore,
+    db: &Path,
+    key_path: &Path,
+    persisted_registry: Option<KeyRegistryStateV1>,
+) -> Result<Option<KeyRegistryStateV1>, CliError> {
+    let Some(registry) = persisted_registry.as_ref() else {
+        return Ok(None);
+    };
+    if registry
+        .active_key(&ledger_owner_id(), KeyRoleV1::TimelineIntegritySigning)
+        .is_some()
+    {
+        return Ok(persisted_registry);
+    }
+    let pending: Vec<_> = registry
+        .pending_destruction_requests()
+        .filter(|request| {
+            request.identity.owner_id == ledger_owner_id()
+                && request.identity.role == KeyRoleV1::TimelineIntegritySigning
+        })
+        .collect();
+    if pending.len() > 1 {
+        return Err(CliError::BadSource(
+            "multiple pending ledger keys require explicit recovery".to_owned(),
+        ));
+    }
+    if let Some(request) = pending.first().copied() {
+        let (_, recovered_registry) =
+            crate::key_output::destroy_owned_secret_key(event_store, db, key_path, request)
+                .map_err(|error| CliError::BadSource(error.to_string()))?;
+        return Ok(Some(recovered_registry));
+    }
+    Ok(persisted_registry)
+}
+
 /// Open the source as a `Box<dyn LedgerStore>`. Store tier requires
 /// `--key` pointing at a hex-encoded Ed25519 secret key (ADR-017 Decision 5b).
 ///
@@ -143,38 +179,11 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 })
                 .map_err(|error| CliError::BadSource(error.to_string()))?,
             );
-            let mut persisted_registry = event_store
+            let persisted_registry = event_store
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
-            if let Some(registry) = &persisted_registry {
-                if registry
-                    .active_key(&ledger_owner_id(), KeyRoleV1::TimelineIntegritySigning)
-                    .is_none()
-                {
-                    let pending: Vec<_> = registry
-                        .pending_destruction_requests()
-                        .filter(|request| {
-                            request.identity.owner_id == ledger_owner_id()
-                                && request.identity.role == KeyRoleV1::TimelineIntegritySigning
-                        })
-                        .collect();
-                    if pending.len() > 1 {
-                        return Err(CliError::BadSource(
-                            "multiple pending ledger keys require explicit recovery".to_owned(),
-                        ));
-                    }
-                    if let Some(request) = pending.first().copied() {
-                        let (_, recovered_registry) = crate::key_output::destroy_owned_secret_key(
-                            event_store.as_mut(),
-                            db,
-                            key_path,
-                            request,
-                        )
-                        .map_err(|error| CliError::BadSource(error.to_string()))?;
-                        persisted_registry = Some(recovered_registry);
-                    }
-                }
-            }
+            let persisted_registry =
+                recover_pending_ledger_key(event_store.as_mut(), db, key_path, persisted_registry)?;
             let signing_key = load_signing_key(key_path)?;
             let (registry_state, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
