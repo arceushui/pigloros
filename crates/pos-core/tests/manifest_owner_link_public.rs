@@ -537,7 +537,10 @@ fn catalog_preflights_lengths_counts_and_utf8_before_decoding() -> TestResult {
     }
 
     let mut excessive_rows = bytes.clone();
-    excessive_rows.splice(42..43, [0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    excessive_rows.splice(
+        42..43,
+        [0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    );
     assert_eq!(
         ManifestAdmissionCatalogV1::from_canonical_cbor(&excessive_rows),
         Err(ManifestOwnerLinkErrorV1::FieldOutOfBounds)
