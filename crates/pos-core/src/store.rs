@@ -304,6 +304,7 @@ impl SeqRange {
 }
 
 /// A portable snapshot of a timeline and all its events.
+///
 /// Used for export/import across different `EventStore` backends.
 /// Identity-preserving exports retain each Event's first-commit origin;
 /// flattened Fork exports assign new origin context to reminted Events.
@@ -2142,6 +2143,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature,
                 signature_identity,
+                origin: None,
                 payload_hash: Hash::from_bytes([0u8; 32]),
             };
             let export = TimelineExport {
