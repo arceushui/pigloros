@@ -770,9 +770,21 @@ mod tests {
             .ok_or("expected durable destruction error")?;
         assert!(store_error.to_string().contains("registry destroy failed"));
 
+        let (authorization_registry, authorization_identity) = registry_for(&signing_key)?;
+        let mut authorization_memory = gated_memory_store();
+        let authorization_timeline = authorization_memory.create_timeline("ledger")?;
+        let mut authorization_store = EventLedgerStore::new(
+            Box::new(authorization_memory),
+            authorization_timeline.id(),
+            EntityId::new(),
+            signing_key.clone(),
+            authorization_registry,
+            authorization_identity,
+            Box::new(Blake3Hasher),
+        )?;
         let (other_signing_key, _) = pos_crypto::signing::generate_keypair();
-        store.signing_key = SigningKeyMaterial::new(other_signing_key);
-        let authorization_error = store
+        authorization_store.signing_key = SigningKeyMaterial::new(other_signing_key);
+        let authorization_error = authorization_store
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
             .ok_or("expected signing authorization error")?;

@@ -857,34 +857,22 @@ pub trait EventStore: Send {
     /// Atomically recheck a registry snapshot, create, and append one
     /// authorized event.
     ///
-    /// Durable stores must hold their database-wide serialization boundary across
-    /// both the registry recheck and the event append.  The default is a closed
-    /// snapshot check for small in-memory adapters; `SQLite` overrides it with one
-    /// transaction so another connection cannot destroy the owner-scoped key between the
-    /// authorization callback and append.
+    /// Adapters must hold one serialization boundary from registry recheck
+    /// through Event insertion and commit or rollback. Unsupported adapters
+    /// fail closed instead of composing separate lookup and append calls.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the persisted registry differs from
     /// `expected_registry`, the registry is unavailable, or the append fails.
     fn append_signed_authorized(
         &mut self,
-        timeline: TimelineId,
-        expected_registry: &crate::KeyRegistryStateV1,
-        create_event: &mut dyn FnMut(&crate::KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+        _timeline: TimelineId,
+        _expected_registry: &crate::KeyRegistryStateV1,
+        _create_event: &mut dyn FnMut(&crate::KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
     ) -> Result<(), CoreError> {
-        let persisted = self
-            .load_key_registry()?
-            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
-        if persisted != *expected_registry {
-            return Err(CoreError::Storage(
-                "durable key registry changed during signing".to_owned(),
-            ));
-        }
-        let head = self
-            .get_timeline(timeline)?
-            .ok_or(CoreError::TimelineNotFound(timeline))?;
-        let event = create_event(&persisted, head.head.next())?;
-        self.append_committed(timeline, &[event])
+        Err(CoreError::Storage(
+            "transactional key registry signing is unavailable for this EventStore".to_owned(),
+        ))
     }
 
     /// Persist the `DestructionPending` state and return the resulting snapshot.
@@ -900,7 +888,7 @@ pub trait EventStore: Send {
     /// request is invalid, or persistence fails.
     fn begin_key_registry_destruction(
         &mut self,
-        request: crate::KeyDestructionRequestV1,
+        _request: crate::KeyDestructionRequestV1,
     ) -> Result<
         (
             crate::KeyDestructionBeginOutcomeV1,
@@ -908,14 +896,9 @@ pub trait EventStore: Send {
         ),
         CoreError,
     > {
-        let mut registry = self
-            .load_key_registry()?
-            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
-        let outcome = registry
-            .begin_key_destruction(request)
-            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
-        self.save_key_registry(&registry)?;
-        Ok((outcome, registry))
+        Err(CoreError::Storage(
+            "transactional key registry destruction is unavailable for this EventStore".to_owned(),
+        ))
     }
 
     /// Persist the final `Destroyed` tombstone after private-material deletion
@@ -926,17 +909,12 @@ pub trait EventStore: Send {
     /// request/receipt is invalid, or persistence fails.
     fn complete_key_registry_destruction(
         &mut self,
-        request: crate::KeyDestructionRequestV1,
-        deletion_receipt: crate::Hash,
+        _request: crate::KeyDestructionRequestV1,
+        _deletion_receipt: crate::Hash,
     ) -> Result<(crate::KeyDestructionOutcomeV1, crate::KeyRegistryStateV1), CoreError> {
-        let mut registry = self
-            .load_key_registry()?
-            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
-        let outcome = registry
-            .complete_key_destruction(request, deletion_receipt)
-            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
-        self.save_key_registry(&registry)?;
-        Ok((outcome, registry))
+        Err(CoreError::Storage(
+            "transactional key registry destruction is unavailable for this EventStore".to_owned(),
+        ))
     }
 }
 
@@ -1810,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn default_key_registry_methods_cover_authorized_paths(
+    fn registry_snapshot_does_not_grant_transactional_authorization(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let identity =
             crate::KeyIdentityV1::new("test-owner", crate::KeyRoleV1::TimelineIntegritySigning, 1);
@@ -1824,79 +1802,35 @@ mod tests {
 
         let mut store = RegistryStore::new(registry.clone());
         let timeline = store.timeline.as_ref().map(Timeline::id).test_ok()?;
-        let mut create_event = |_registry: &crate::KeyRegistryStateV1, seq: Seq| {
-            Ok(Event {
-                id: EventId::new(),
-                entity: EntityId::new(),
-                event_type: Kind::new("registry.test"),
-                payload: CanonicalBytes::from_static(b"payload"),
-                wall_time: WallTime::from_micros(1),
-                seq,
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: None,
-                signature_identity: None,
-                payload_hash: Hash::from_bytes([0; 32]),
-            })
-        };
-        store.append_signed_authorized(timeline, &registry, &mut create_event)?;
-        assert!(store.appended);
-
-        let mut mismatch_callback = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+        let mut callback_called = false;
+        let mut create_event = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            callback_called = true;
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
-        };
-        let mismatch = store.append_signed_authorized(
-            timeline,
-            &crate::KeyRegistryStateV1::new(),
-            &mut mismatch_callback,
-        );
-        assert!(mismatch
-            .test_err()?
-            .to_string()
-            .contains("changed during signing"));
-
-        let mut missing_timeline = RegistryStore::new(registry.clone());
-        missing_timeline.timeline = None;
-        let mut missing_callback = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
-            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
-        };
-        assert!(matches!(
-            missing_timeline
-                .append_signed_authorized(timeline, &registry, &mut missing_callback)
-                .test_err()?,
-            CoreError::TimelineNotFound(found) if found == timeline
-        ));
-
-        let mut callback_error = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
-            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
         };
         assert!(store
-            .append_signed_authorized(timeline, &registry, &mut callback_error)
+            .append_signed_authorized(timeline, &registry, &mut create_event)
             .test_err()?
             .to_string()
-            .contains("callback failed"));
+            .contains("transactional key registry signing is unavailable"));
+        assert!(!callback_called);
+        assert!(!store.appended);
 
         let request = crate::KeyDestructionRequestV1::new(
             identity,
             material_digest,
             crate::Hash::from_bytes([3; 32]),
         );
-        let (begin, _pending) = store.begin_key_registry_destruction(request)?;
-        assert_eq!(begin, crate::KeyDestructionBeginOutcomeV1::Started);
-        let (outcome, destroyed) =
-            store.complete_key_registry_destruction(request, crate::deletion_receipt(&request))?;
-        assert!(matches!(
-            outcome,
-            crate::KeyDestructionOutcomeV1::Destroyed(_)
-        ));
-        assert_eq!(
-            destroyed
-                .key_record(identity)
-                .and_then(|record| record.private_material_digest),
-            None
-        );
-        assert!(store.registry.is_some());
+        assert!(store
+            .begin_key_registry_destruction(request)
+            .test_err()?
+            .to_string()
+            .contains("transactional key registry destruction is unavailable"));
+        assert!(store
+            .complete_key_registry_destruction(request, crate::deletion_receipt(&request))
+            .test_err()?
+            .to_string()
+            .contains("transactional key registry destruction is unavailable"));
+        assert_eq!(store.registry, Some(registry));
         Ok(())
     }
 
@@ -4100,6 +4034,56 @@ mod key_registry_coverage {
             self.committed = true;
             Ok(())
         }
+
+        fn append_signed_authorized(
+            &mut self,
+            timeline: TimelineId,
+            expected_registry: &KeyRegistryStateV1,
+            create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+        ) -> Result<(), CoreError> {
+            let persisted = self
+                .load_key_registry()?
+                .ok_or_else(|| CoreError::Storage("registry unavailable".to_owned()))?;
+            if persisted != *expected_registry {
+                return Err(CoreError::Storage(
+                    "durable key registry changed during signing".to_owned(),
+                ));
+            }
+            let head = self
+                .get_timeline(timeline)?
+                .ok_or(CoreError::TimelineNotFound(timeline))?;
+            let event = create_event(&persisted, head.head.next())?;
+            self.append_committed(timeline, &[event])
+        }
+
+        fn begin_key_registry_destruction(
+            &mut self,
+            request: crate::KeyDestructionRequestV1,
+        ) -> Result<(crate::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
+            let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                CoreError::Storage("durable key registry is unavailable".to_owned())
+            })?;
+            let outcome = registry
+                .begin_key_destruction(request)
+                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+            self.save_key_registry(&registry)?;
+            Ok((outcome, registry))
+        }
+
+        fn complete_key_registry_destruction(
+            &mut self,
+            request: crate::KeyDestructionRequestV1,
+            deletion_receipt: Hash,
+        ) -> Result<(crate::KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+            let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                CoreError::Storage("durable key registry is unavailable".to_owned())
+            })?;
+            let outcome = registry
+                .complete_key_destruction(request, deletion_receipt)
+                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+            self.save_key_registry(&registry)?;
+            Ok((outcome, registry))
+        }
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -4255,7 +4239,7 @@ mod key_registry_coverage {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authorized_key_registry_trait_contracts() -> Result<(), Box<dyn std::error::Error>> {
+    fn explicit_key_registry_trait_contracts() -> Result<(), Box<dyn std::error::Error>> {
         let (registry, identity, material_digest) = registered_state()?;
         let mut store = PersistedStore::new(registry.clone());
         let timeline = store
