@@ -2721,6 +2721,84 @@ fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
     Ok(())
 }
 
+#[test]
+fn sqlite_stale_root_rejects_a_changed_empty_inventory_generation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-stale-empty-root-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut stale_host = test_stage(
+        "open stale empty-inventory host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+    let mut current_host = test_stage(
+        "open current empty-inventory host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let current_root = {
+        let mut commands = test_stage(
+            "open current empty-inventory command sender",
+            current_host.command_sender(),
+        )?;
+        test_stage(
+            "publish current root from empty inventory",
+            commands.create_timeline("current-empty-inventory-root"),
+        )?
+    };
+    {
+        let mut commands = test_stage(
+            "open stale empty-inventory command sender",
+            stale_host.command_sender(),
+        )?;
+        assert_eq!(
+            commands.create_timeline("stale-empty-inventory-root"),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+    assert_eq!(stale_host.status(), ErasureHostStatusV1::Poisoned);
+    assert_eq!(current_host.status(), ErasureHostStatusV1::Ready);
+    {
+        let mut reads = test_stage(
+            "read current topology after stale root rejection",
+            current_host.read_sender(),
+        )?;
+        let timelines = test_stage("list current empty-inventory topology", reads.timelines())?;
+        assert_eq!(timelines.len(), 1);
+        assert_eq!(timelines[0].id(), current_root.id());
+    }
+    drop(current_host);
+    drop(stale_host);
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+    Ok(())
+}
+
 struct StaleSqliteHostScenario {
     path: std::path::PathBuf,
     path_text: String,
