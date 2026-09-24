@@ -63,13 +63,23 @@ impl HostedCliStore {
         self.gate.clone()
     }
 
-    fn committed_key_destruction_facts(
+    fn with_read_sender_and_destruction_facts<T>(
         &self,
-    ) -> Result<Vec<pos_core::KeyTombstoneV1>, pos_core::CoreError> {
-        self.with_host(|host| host.key_registry()).map(|registry| {
-            registry.map_or_else(Vec::new, |registry| {
-                registry.committed_destruction_facts().collect()
-            })
+        operation: impl FnOnce(
+            &mut pos_runtime::ErasureReadSenderV1<'_>,
+            &[pos_core::KeyTombstoneV1],
+        ) -> Result<T, pos_core::CoreError>,
+    ) -> Result<T, pos_core::CoreError> {
+        self.with_read_sender(|sender| {
+            sender
+                .key_registry()
+                .map_err(hosted_cli_store_error)
+                .map(|registry| {
+                    registry.map_or_else(Vec::new, |registry| {
+                        registry.committed_destruction_facts().collect()
+                    })
+                })
+                .and_then(|facts| operation(sender, &facts))
         })
     }
 }

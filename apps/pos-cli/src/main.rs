@@ -468,14 +468,14 @@ fn replay_retained_timeline(
         pos_core::ErasureArtifactClassV1::TimelineReplay,
         b"pos-cli/timeline-replay",
     );
-    let facts = store.committed_key_destruction_facts()?;
-    let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
-        pos_core::ErasureReplayClaimV1::Exact,
-        &[input],
-        &facts,
-    )?;
     store
-        .with_read_sender(|sender| {
+        .with_read_sender_and_destruction_facts(|sender, facts| {
+            let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+                pos_core::ErasureReplayClaimV1::Exact,
+                &[input],
+                facts,
+            )
+            .map_err(|_| pos_core::CoreError::ArtifactUnavailable)?;
             pos_time::replay(sender, timeline, registry, artifact_digest, &evaluation)
         })
         .map_err(Into::into)
