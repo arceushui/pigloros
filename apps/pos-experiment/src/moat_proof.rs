@@ -644,6 +644,14 @@ struct EvidenceContext<'a> {
 }
 
 fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatProofError> {
+    let closure_digest = artifact_closure_digest(context.topology, context.factual_events)?;
+    evidence_with_closure_digest(context, closure_digest)
+}
+
+fn evidence_with_closure_digest(
+    context: &EvidenceContext<'_>,
+    artifact_closure_digest: [u8; 32],
+) -> Result<MoatProofEvidenceV1, MoatProofError> {
     let input = context.input;
     let mode = context.mode;
     let fork_cut_seq = context.fork_cut_seq;
@@ -677,7 +685,6 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
     let causal_trace = causal_trace(events, &ids);
     let uncertainty = uncertainty_from_events(events);
     let participant_views = participant_views(events);
-    let artifact_closure_digest = artifact_closure_digest(topology, factual_events)?;
     build_wave8_contract(
         context,
         &event_summaries,
@@ -835,6 +842,28 @@ fn artifact_closure_digest(
     topology: &ProofTopology,
     factual_events: &[Event],
 ) -> Result<[u8; 32], MoatProofError> {
+    retained_world_backend_hash(factual_events).map(|backend_content_hash| {
+        let mut bytes = Vec::new();
+        for (name, version) in [
+            ("world", "1.0.0"),
+            ("proof-agent", "1.0.0"),
+            ("society", "1.0.0"),
+        ] {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(version.as_bytes());
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&topology.input_digest);
+        bytes.extend_from_slice(&backend_content_hash);
+        bytes.extend_from_slice(blake3::hash(EXECUTION_PROFILE_CONTENT).as_bytes());
+        bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
+        bytes.extend_from_slice(blake3::hash(EVALUATOR_CONTENT).as_bytes());
+        digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes)
+    })
+}
+
+fn retained_world_backend_hash(factual_events: &[Event]) -> Result<[u8; 32], MoatProofError> {
     let config_event = factual_events
         .iter()
         .find(|event| event.event_type.as_str() == EVENT_TYPE_CONFIG_V1)
@@ -842,23 +871,7 @@ fn artifact_closure_digest(
             WorldInstallationErrorV1::RetainedConfigMissing,
         ))?;
     let world_config = WorldConfigV1::decode(&config_event.payload)?;
-    let mut bytes = Vec::new();
-    for (name, version) in [
-        ("world", "1.0.0"),
-        ("proof-agent", "1.0.0"),
-        ("society", "1.0.0"),
-    ] {
-        bytes.extend_from_slice(name.as_bytes());
-        bytes.push(0);
-        bytes.extend_from_slice(version.as_bytes());
-        bytes.push(0);
-    }
-    bytes.extend_from_slice(&topology.input_digest);
-    bytes.extend_from_slice(&world_config.backend_content_hash);
-    bytes.extend_from_slice(blake3::hash(EXECUTION_PROFILE_CONTENT).as_bytes());
-    bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
-    bytes.extend_from_slice(blake3::hash(EVALUATOR_CONTENT).as_bytes());
-    Ok(digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes))
+    Ok(world_config.backend_content_hash)
 }
 
 fn scheduler_digest() -> [u8; 32] {

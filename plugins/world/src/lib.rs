@@ -1732,6 +1732,94 @@ impl WorldDriver {
             })
             .collect()
     }
+
+    fn preflight_live_step(
+        &mut self,
+        timeline: TimelineId,
+        observations: &ObservationView<'_>,
+    ) -> Result<(), RuntimeError> {
+        if matches!(&self.backend, WorldDriverBackend::Installed(_)) {
+            let anchor =
+                observations
+                    .anchor()
+                    .ok_or_else(|| RuntimeError::MissingSnapshotAnchor {
+                        driver: self.name().to_owned(),
+                    })?;
+            if anchor.timeline_id() != timeline {
+                return Err(RuntimeError::SnapshotTimelineMismatch {
+                    expected: timeline,
+                    actual: anchor.timeline_id(),
+                });
+            }
+            if let Some(installed_timeline) = self.installed_timeline {
+                if installed_timeline != timeline {
+                    return Err(RuntimeError::SnapshotTimelineMismatch {
+                        expected: installed_timeline,
+                        actual: timeline,
+                    });
+                }
+            }
+            let complete = observations
+                .verified_prefix_events()
+                .ok_or(WorldInstallationErrorV1::RetainedConfigMissing)?;
+            self.preflight_installed_step(complete)?;
+            self.staged_step_timeline = Some(timeline);
+        }
+        Ok(())
+    }
+
+    fn simulate_staged_step(
+        &mut self,
+        observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let mut drafts = Vec::new();
+        if let Some(config) = self.config_draft()? {
+            drafts.push(config);
+        }
+        self.apply_observed_actions(observations.events())?;
+
+        if self
+            .entities
+            .windows(2)
+            .any(|pair| pair[0].entity_id == pair[1].entity_id)
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "duplicate staged body identifiers".to_owned(),
+            });
+        }
+
+        let mut step_obs = self
+            .backend
+            .step(&self.entities, self.config.timestep_micros);
+        step_obs.sort_unstable_by_key(|observation| observation.entity_id);
+        if step_obs.len() != self.entities.len()
+            || step_obs
+                .iter()
+                .zip(&self.entities)
+                .any(|(observation, body)| observation.entity_id != body.entity_id)
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "backend observation body set differs from staged bodies".to_owned(),
+            });
+        }
+        let emitted = self.emit_observations(&step_obs)?;
+        for (body, (_, observation)) in self.entities.iter_mut().zip(&emitted) {
+            body.x = f64::from(observation.pos_x);
+            body.y = f64::from(observation.pos_y);
+            body.z = f64::from(observation.pos_z);
+            body.vx = f64::from(observation.vel_lin_x);
+            body.vy = f64::from(observation.vel_lin_y);
+            body.vz = f64::from(observation.vel_lin_z);
+            body.rotation = observation.rotation();
+        }
+
+        drafts.extend(emitted.into_iter().map(|(draft, _)| draft));
+        self.tick = self.tick.wrapping_add(1);
+        self.step_index = self.step_index.wrapping_add(1);
+        Ok(StepOutput::new(drafts))
+    }
 }
 
 #[cfg(test)]
@@ -1843,11 +1931,11 @@ impl Driver for WorldDriver {
     }
 
     fn commit_step(&mut self) {
-        if self.staged_step.take().is_some() {
-            if let Some(timeline) = self.staged_step_timeline.take() {
-                self.installed_timeline = Some(timeline);
-            }
-        }
+        self.installed_timeline = self
+            .staged_step
+            .take()
+            .and(self.staged_step_timeline.take())
+            .or(self.installed_timeline);
     }
 
     fn abort_step(&mut self) {
@@ -1862,83 +1950,9 @@ impl Driver for WorldDriver {
         timeline: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
-        if matches!(&self.backend, WorldDriverBackend::Installed(_)) {
-            let anchor =
-                observations
-                    .anchor()
-                    .ok_or_else(|| RuntimeError::MissingSnapshotAnchor {
-                        driver: self.name().to_owned(),
-                    })?;
-            if anchor.timeline_id() != timeline {
-                return Err(RuntimeError::SnapshotTimelineMismatch {
-                    expected: timeline,
-                    actual: anchor.timeline_id(),
-                });
-            }
-            if let Some(installed_timeline) = self.installed_timeline {
-                if installed_timeline != timeline {
-                    return Err(RuntimeError::SnapshotTimelineMismatch {
-                        expected: installed_timeline,
-                        actual: timeline,
-                    });
-                }
-            }
-            let complete = observations
-                .verified_prefix_events()
-                .ok_or(WorldInstallationErrorV1::RetainedConfigMissing)?;
-            self.preflight_installed_step(complete)?;
-            self.staged_step_timeline = Some(timeline);
-        }
+        self.preflight_live_step(timeline, &observations)?;
         self.staged_step = Some(self.state());
-        let result = (|| {
-            let mut drafts = Vec::new();
-            if let Some(config) = self.config_draft()? {
-                drafts.push(config);
-            }
-            self.apply_observed_actions(observations.events())?;
-
-            if self
-                .entities
-                .windows(2)
-                .any(|pair| pair[0].entity_id == pair[1].entity_id)
-            {
-                return Err(RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                    reason: "duplicate staged body identifiers".to_owned(),
-                });
-            }
-
-            let mut step_obs = self
-                .backend
-                .step(&self.entities, self.config.timestep_micros);
-            step_obs.sort_unstable_by_key(|observation| observation.entity_id);
-            if step_obs.len() != self.entities.len()
-                || step_obs
-                    .iter()
-                    .zip(&self.entities)
-                    .any(|(observation, body)| observation.entity_id != body.entity_id)
-            {
-                return Err(RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                    reason: "backend observation body set differs from staged bodies".to_owned(),
-                });
-            }
-            let emitted = self.emit_observations(&step_obs)?;
-            for (body, (_, observation)) in self.entities.iter_mut().zip(&emitted) {
-                body.x = f64::from(observation.pos_x);
-                body.y = f64::from(observation.pos_y);
-                body.z = f64::from(observation.pos_z);
-                body.vx = f64::from(observation.vel_lin_x);
-                body.vy = f64::from(observation.vel_lin_y);
-                body.vz = f64::from(observation.vel_lin_z);
-                body.rotation = observation.rotation();
-            }
-
-            drafts.extend(emitted.into_iter().map(|(draft, _)| draft));
-            self.tick = self.tick.wrapping_add(1);
-            self.step_index = self.step_index.wrapping_add(1);
-            Ok(StepOutput::new(drafts))
-        })();
+        let result = self.simulate_staged_step(observations);
         if result.is_err() {
             self.abort_step();
         }

@@ -1350,6 +1350,15 @@ impl PluginRegistry {
                 name: id.to_string(),
             });
         };
+        Self::invoke_entry_driver(entry, timeline, snapshot, committed_events)
+    }
+
+    fn invoke_entry_driver(
+        entry: &mut PluginEntry,
+        timeline: pos_core::ids::TimelineId,
+        snapshot: &ObservationSnapshot,
+        committed_events: &[Event],
+    ) -> Result<StepOutput, RuntimeError> {
         let Some(driver) = entry.driver.as_mut() else {
             return Err(RuntimeError::NoDriver {
                 name: entry.name.clone(),

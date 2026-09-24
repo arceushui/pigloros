@@ -829,18 +829,7 @@ fn append_driver_drafts(
     registry: &mut PluginRegistry,
     observed_through: pos_core::clock::Seq,
 ) -> Result<u64, ExperimentError> {
-    let committed_events = read_completed_prefix(store, timeline_id, observed_through)?;
-    let drafts = match registry.step_all_anchored_with_events(
-        timeline_id,
-        observed_through,
-        &committed_events,
-    ) {
-        Ok(drafts) => drafts,
-        Err(error) => {
-            registry.abort_step();
-            return Err(error.into());
-        }
-    };
+    let drafts = step_driver_with_completed_prefix(store, timeline_id, registry, observed_through)?;
     if let Err(error) = registry.schemas.validate_batch(&drafts) {
         registry.abort_step();
         return Err(error.into());
@@ -861,6 +850,21 @@ fn append_driver_drafts(
                     .map_err(map_runtime_error)
             })
     }
+}
+
+fn step_driver_with_completed_prefix(
+    store: &dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    registry: &mut PluginRegistry,
+    observed_through: pos_core::clock::Seq,
+) -> Result<Vec<EventDraft>, ExperimentError> {
+    let committed_events = read_completed_prefix(store, timeline_id, observed_through)?;
+    registry
+        .step_all_anchored_with_events(timeline_id, observed_through, &committed_events)
+        .map_err(|error| {
+            registry.abort_step();
+            error.into()
+        })
 }
 
 /// Advance exactly one complete tick through the experiment pipeline.

@@ -441,8 +441,11 @@ impl ObservationView<'_> {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
-            && self.events.is_empty()
+        self.len == 0 && self.has_no_events()
+    }
+
+    fn has_no_events(&self) -> bool {
+        self.events.is_empty()
             && self
                 .verified_prefix_events
                 .as_ref()
