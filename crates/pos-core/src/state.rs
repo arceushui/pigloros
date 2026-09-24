@@ -35,7 +35,7 @@ pub trait Reducer: Send + Sync {
 }
 
 /// Registry of per-entity state, produced by folding events through a Reducer.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateRegistry {
     states: HashMap<EntityId, State>,
 }

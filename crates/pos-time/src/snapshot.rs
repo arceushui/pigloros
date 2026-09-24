@@ -1,11 +1,10 @@
 //! Timeline snapshots: capture state at the current head and verify consistency.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use pos_core::store::SeqRange;
 use pos_core::{
-    CoreError, EntityId, ErasureProtectedOperationV1, Seq, StateRegistry, TimelineId,
-    WorldReplayClosureV1,
+    CoreError, ErasureProtectedOperationV1, Seq, StateRegistry, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
 use pos_state::ProjectionRegistry;
@@ -99,9 +98,9 @@ pub enum SnapshotError {
     /// A non-artifact host, containment, or store error occurred.
     #[error("store error: {0}")]
     Store(CoreError),
-    /// The snapshot and full-replay state disagree for an entity.
-    #[error("snapshot inconsistent: entity {entity:?} differs")]
-    Inconsistent { entity: EntityId },
+    /// The snapshot and full Replay disagree on their complete projection state.
+    #[error("snapshot inconsistent with full Replay projection")]
+    Inconsistent,
 }
 
 impl From<CoreError> for SnapshotError {
@@ -122,7 +121,8 @@ impl From<CoreError> for SnapshotError {
 ///    the incremental projection.
 /// 3. Reset `registry` to empty and fold all events to build the full-replay
 ///    reference projection.
-/// 4. Compare both state maps; return `Err(Inconsistent)` on any mismatch.
+/// 4. Compare both complete state maps, including reducers and entities that
+///    occur only in the snapshot; return `Err(Inconsistent)` on any mismatch.
 ///
 /// `registry` must be pre-populated with the same reducers used when the
 /// snapshot was originally taken. Its accumulated state is managed internally
@@ -237,12 +237,14 @@ fn verify_snapshot_event_sets(
     tail_events: &[pos_core::Event],
     all_events: &[pos_core::Event],
 ) -> Result<(), SnapshotError> {
-    let all_entities: Vec<EntityId> = all_events
-        .iter()
-        .map(|event| event.entity)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let reducer_names_match = {
+        let names = registry.reducer_names();
+        snap.registry.len() == names.len()
+            && names.iter().all(|name| snap.registry.contains_key(*name))
+    };
+    if !reducer_names_match {
+        return Err(SnapshotError::Inconsistent);
+    }
     registry.restore_from_snapshot(&snap.registry);
     registry.fold_events(tail_events);
     let incremental_state = registry
@@ -253,16 +255,11 @@ fn verify_snapshot_event_sets(
     let full_state = registry
         .state_snapshot(snap.timeline)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-    for entity in &all_entities {
-        for name in full_state.keys() {
-            let incremental_registry = incremental_state.get(name).cloned().unwrap_or_default();
-            let full_registry = full_state.get(name).cloned().unwrap_or_default();
-            if incremental_registry.get_or_default(entity) != full_registry.get_or_default(entity) {
-                return Err(SnapshotError::Inconsistent { entity: *entity });
-            }
-        }
+    if incremental_state == full_state {
+        Ok(())
+    } else {
+        Err(SnapshotError::Inconsistent)
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -353,12 +350,13 @@ mod tests {
     }
     use super::*;
     use pos_core::{
-        event::{CanonicalBytes, EventDraft, Kind},
-        ids::EntityId,
+        clock::WallTime,
+        event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
+        ids::{EntityId, EventId},
         store::EventStore,
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
         ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureContainmentGateV1,
-        ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, Reducer,
+        ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, Reducer,
         RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, State,
     };
     use pos_state::{EntityStateProjection, ProjectionRegistry};
@@ -479,6 +477,23 @@ mod tests {
             Kind::new("test.tick"),
             CanonicalBytes::from_vec(vec![]),
         )
+    }
+
+    fn synthetic_event(entity: EntityId) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("snapshot-only"),
+            payload: CanonicalBytes::from_vec(vec![]),
+            wall_time: WallTime::from_micros(0),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
     }
 
     fn count_in_snapshot(snap: &Snapshot, entity: &EntityId) -> u64 {
@@ -766,8 +781,78 @@ mod tests {
         verified.register("count", Box::new(CountReducer));
         assert!(matches!(
             super::verify_snapshot_consistency(&mut reads, &captured, &mut verified, &closure),
-            Err(SnapshotError::Inconsistent { entity: actual }) if actual == entity
+            Err(SnapshotError::Inconsistent)
         ));
+    }
+
+    #[test]
+    fn public_snapshot_verification_rejects_snapshot_only_entity_with_or_without_history() {
+        for has_history in [false, true] {
+            let mut host = crate::test_support::open_exact_host();
+            let gate = host.containment_gate();
+            let timeline = {
+                let mut commands = host.command_sender().test_ok();
+                let timeline = commands.create_timeline("snapshot-only-entity").test_ok();
+                if has_history {
+                    commands
+                        .append(timeline.id(), &[draft(EntityId::new())])
+                        .test_ok();
+                }
+                timeline.id()
+            };
+            let closure = crate::test_support::closure_for_host(&host, timeline);
+            let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+            projected.register("count", Box::new(CountReducer));
+            let mut reads = host.read_sender().test_ok();
+            let mut captured =
+                super::snapshot(&mut reads, timeline, &mut projected, &closure).test_ok();
+            let extra = EntityId::new();
+            captured
+                .registry
+                .get_mut("count")
+                .test_ok()
+                .apply(&CountReducer, &synthetic_event(extra));
+            let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
+            verified.register("count", Box::new(CountReducer));
+            assert!(matches!(
+                super::verify_snapshot_consistency(&mut reads, &captured, &mut verified, &closure),
+                Err(SnapshotError::Inconsistent)
+            ));
+            assert_eq!(verified.state_for_reducer("count", &extra), None);
+        }
+    }
+
+    #[test]
+    fn public_snapshot_verification_rejects_missing_or_unknown_reducer_on_empty_history() {
+        for add_unknown_reducer in [false, true] {
+            let mut host = crate::test_support::open_exact_host();
+            let gate = host.containment_gate();
+            let timeline = {
+                let mut commands = host.command_sender().test_ok();
+                commands
+                    .create_timeline("snapshot-missing-reducer")
+                    .test_ok()
+                    .id()
+            };
+            let closure = crate::test_support::closure_for_host(&host, timeline);
+            let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+            projected.register("count", Box::new(CountReducer));
+            let mut reads = host.read_sender().test_ok();
+            let mut captured =
+                super::snapshot(&mut reads, timeline, &mut projected, &closure).test_ok();
+            captured.registry.remove("count");
+            if add_unknown_reducer {
+                captured
+                    .registry
+                    .insert("unknown".to_owned(), StateRegistry::new());
+            }
+            let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
+            verified.register("count", Box::new(CountReducer));
+            assert!(matches!(
+                super::verify_snapshot_consistency(&mut reads, &captured, &mut verified, &closure),
+                Err(SnapshotError::Inconsistent)
+            ));
+        }
     }
 
     #[test]
