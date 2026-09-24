@@ -2256,6 +2256,110 @@ fn sqlite_exact_durable_fork_retry_preserves_current_inventory(
     assert_exact_durable_fork_retry_preserves_current_inventory(StoreConfig::SqliteInMemory)
 }
 
+#[test]
+fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-stale-host-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut stale_host = test_stage(
+        "open stale SQLite host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let (parent, request_reference) = {
+        let mut commands = test_stage(
+            "open stale host command sender",
+            stale_host.command_sender(),
+        )?;
+        let parent = test_stage(
+            "create stale host parent",
+            commands.create_timeline("stale-host-parent"),
+        )?;
+        test_stage(
+            "publish stale host topology",
+            authority.set_timeline(parent.id()),
+        )?;
+        let request = test_stage("construct stale host request", persistence_request())?;
+        let request_reference = request.reference();
+        let request_provenance = request.provenance();
+        test_stage(
+            "submit stale host request",
+            commands.submit_erasure_request(request, request_provenance),
+        )?;
+        test_stage(
+            "authorize stale host request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        (parent.id(), request_reference)
+    };
+
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut current_host = test_stage(
+        "open current SQLite host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    {
+        let mut commands = test_stage(
+            "open current host command sender",
+            current_host.command_sender(),
+        )?;
+        test_stage(
+            "freeze request through current host",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+    }
+    {
+        let mut commands = test_stage("open stale host retry sender", stale_host.command_sender())?;
+        assert_eq!(
+            commands.fork_timeline_identified(
+                reference(46),
+                parent,
+                pos_core::Seq::ZERO,
+                "stale-host-fork",
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+
+    assert_eq!(stale_host.status(), ErasureHostStatusV1::Ready);
+    let mut reads = test_stage("open refreshed stale host reader", stale_host.read_sender())?;
+    assert_eq!(
+        reads.timeline(parent),
+        Err(ErasureHostErrorV1::AccessFrozen)
+    );
+    drop(reads);
+    drop(current_host);
+    drop(stale_host);
+    for candidate in [
+        path.clone(),
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+    Ok(())
+}
+
 fn assert_exact_affected_fork_retry_after_later_scope_extension(
     config: StoreConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
