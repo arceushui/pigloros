@@ -42,8 +42,8 @@ pub use composition::{
     ResolvedPluginCompositionV1, ResolvedPluginV1, MAX_REQUIRED_PLUGINS_V1,
 };
 pub use driver::{
-    Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey, RecoveryEvent,
-    RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
+    CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey,
+    RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,

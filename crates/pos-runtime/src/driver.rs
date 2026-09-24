@@ -45,6 +45,31 @@ impl TimelineHistorySegment {
     }
 }
 
+/// Proof that the host store has committed a child Fork from a restored parent.
+///
+/// Only the runtime's store-backed Fork path can create this value. A Driver
+/// may use it to transfer Timeline-bound recovered state to that child.
+pub struct CommittedForkHandoff {
+    parent: TimelineId,
+    child: TimelineId,
+}
+
+impl CommittedForkHandoff {
+    pub(crate) const fn new(parent: TimelineId, child: TimelineId) -> Self {
+        Self { parent, child }
+    }
+
+    #[must_use]
+    pub const fn parent(&self) -> TimelineId {
+        self.parent
+    }
+
+    #[must_use]
+    pub const fn child(&self) -> TimelineId {
+        self.child
+    }
+}
+
 /// Header-only view of one immutable Event supplied while constructing recovery evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryEventHeader {
@@ -582,7 +607,7 @@ pub trait Driver: Send + Sync {
     /// The host must first validate and restore the parent's complete prefix,
     /// then create the child in the same store. Drivers that bind recovered
     /// state to a Timeline can update that binding without replaying history.
-    fn commit_fork_timeline(&mut self, _parent: TimelineId, _child: TimelineId) {}
+    fn commit_fork_timeline(&mut self, _handoff: &CommittedForkHandoff) {}
 
     /// Commit state staged by the preceding successful anchored step.
     fn commit_step(&mut self) {}

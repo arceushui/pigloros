@@ -2081,12 +2081,18 @@ impl ExperimentSession {
         &self,
         name: &str,
         fork_head: pos_core::clock::Seq,
+        registry: &mut PluginRegistry,
     ) -> Result<Timeline, ExperimentError> {
         lock_store(&self.store).and_then(|mut store| {
             let durable_head = store.logical_head(self.timeline.id())?;
             let mut fork_result = None;
             let mut append = || {
-                fork_result = Some(store.fork(self.timeline.id(), fork_head, name));
+                fork_result = Some(registry.fork_restored_timeline(
+                    store.as_mut(),
+                    self.timeline.id(),
+                    fork_head,
+                    name,
+                ));
             };
             if let Some(token) = self.operation_token.as_ref() {
                 let gate = self
@@ -2181,8 +2187,7 @@ impl ExperimentSession {
             store_config: self.config.store_config.clone(),
         };
 
-        let timeline = self.fork_timeline_at(name, fork_head)?;
-        registry.commit_fork_timeline(self.timeline.id(), timeline.id());
+        let timeline = self.fork_timeline_at(name, fork_head, &mut registry)?;
         Ok(Self {
             config,
             registry,
@@ -8911,8 +8916,9 @@ mod fault_injection_tests {
             Box::new(failing_store),
         )
         .test_ok();
+        let mut registry = PluginRegistry::new();
         assert!(session
-            .fork_timeline_at("child", pos_core::clock::Seq::ZERO)
+            .fork_timeline_at("child", pos_core::clock::Seq::ZERO, &mut registry)
             .is_err());
 
         let failing_store = FailLogicalHeadStore {

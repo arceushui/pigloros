@@ -10,11 +10,11 @@ use indexmap::IndexMap;
 use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
-    ids::PluginId,
+    ids::{PluginId, TimelineId},
     ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentGateV1, ErasureGate,
     ErasureProtectedOperationV1, KnowledgeSnapshotV1, PersistedAuthorityV1, Plugin, ProposedAction,
-    Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    Reducer, Timeline, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
@@ -26,8 +26,8 @@ use crate::{
         ResolvedPluginV1,
     },
     driver::{
-        Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey, SnapshotAnchor,
-        StepOutput, TimelineHistorySegment,
+        CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
+        SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
@@ -1996,16 +1996,28 @@ impl PluginRegistry {
         self.restore_driver_state_live(timeline_segments, events)
     }
 
-    /// Transfer restored Driver state to a child after the host commits a Fork.
+    /// Fork the restored parent in the host store and transfer Driver bindings
+    /// to the child returned by that same committed operation.
     ///
-    /// The host owns the parent/child relationship and invokes this only after
-    /// its store has created the child from the restored parent prefix.
-    pub fn commit_fork_timeline(&mut self, parent: TimelineId, child: TimelineId) {
+    /// # Errors
+    /// Returns a mode, pending-step, or store error without transferring state.
+    pub fn fork_restored_timeline(
+        &mut self,
+        store: &mut dyn pos_core::EventStore,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, RuntimeError> {
+        self.ensure_live_execution()?;
+        self.ensure_no_pending_step()?;
+        let child = store.fork(parent, at_seq, name)?;
+        let handoff = CommittedForkHandoff::new(parent, child.id());
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
-                driver.commit_fork_timeline(parent, child);
+                driver.commit_fork_timeline(&handoff);
             }
         }
+        Ok(child)
     }
 
     fn restore_driver_state_live(

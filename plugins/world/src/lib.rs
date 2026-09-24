@@ -19,8 +19,9 @@ use pos_core::{
 #[cfg(test)]
 use pos_core::{WorldCoordinateV1, WorldTransformError};
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, HostWorldProfileV1, MeasuredProcessImageV1, ObservationView,
-    RecoveryEvent, RecoveryEventHeader, RuntimeError, StepOutput, WorldInstallationErrorV1,
+    CommittedForkHandoff, Driver, DriverRecoveryEvidence, HostWorldProfileV1,
+    MeasuredProcessImageV1, ObservationView, RecoveryEvent, RecoveryEventHeader, RuntimeError,
+    StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1835,9 +1836,9 @@ impl Driver for WorldDriver {
         self.staged_restore_timeline = None;
     }
 
-    fn commit_fork_timeline(&mut self, parent: TimelineId, child: TimelineId) {
-        if self.installed_timeline == Some(parent) {
-            self.installed_timeline = Some(child);
+    fn commit_fork_timeline(&mut self, handoff: &CommittedForkHandoff) {
+        if self.installed_timeline == Some(handoff.parent()) {
+            self.installed_timeline = Some(handoff.child());
         }
     }
 
@@ -3816,27 +3817,44 @@ mod tests {
     #[test]
     fn installed_fork_handoff_requires_the_restored_parent() {
         let body_id = EntityId::new();
-        let parent = TimelineId::new();
-        let child = TimelineId::new();
-        let events = installed_history(body_id, parent);
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let parent = store.create_timeline("parent").test_ok();
+        let (mut initial, _) = installed_registry(body_id);
+        let drafts = initial
+            .step_all_anchored_with_events(parent.id(), Seq::ZERO, &[])
+            .test_ok();
+        let events = store.append(parent.id(), &drafts).test_ok();
+        assert_eq!(events.len(), 2);
         let (mut registry, calls) = installed_registry(body_id);
         registry
             .restore_driver_state(
-                &[TimelineHistorySegment::new(parent, Seq::from_u64(2))],
+                &[TimelineHistorySegment::new(parent.id(), Seq::from_u64(2))],
                 &events,
             )
             .test_ok();
 
-        registry.commit_fork_timeline(TimelineId::new(), child);
         assert!(matches!(
-            registry.step_all_anchored_with_events(child, Seq::from_u64(2), &events),
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                TimelineId::new(),
+                Seq::from_u64(2),
+                "wrong-parent"
+            ),
+            Err(RuntimeError::Store(_))
+        ));
+        let unrelated = store.create_timeline("unrelated").test_ok();
+        assert!(matches!(
+            registry.step_all_anchored_with_events(unrelated.id(), Seq::from_u64(2), &events),
             Err(RuntimeError::SnapshotTimelineMismatch { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-        registry.commit_fork_timeline(parent, child);
+        let child = registry
+            .fork_restored_timeline(store.as_mut(), parent.id(), Seq::from_u64(2), "child")
+            .test_ok();
+        assert_eq!(child.meta.fork_point, Some((parent.id(), Seq::from_u64(2))));
         registry
-            .step_all_anchored_with_events(child, Seq::from_u64(2), &events)
+            .step_all_anchored_with_events(child.id(), Seq::from_u64(2), &events)
             .test_ok();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
