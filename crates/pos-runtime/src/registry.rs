@@ -1353,6 +1353,21 @@ impl PluginRegistry {
                 name: entry.name.clone(),
             });
         };
+        let complete_prefix_required = driver.requires_complete_event_prefix();
+        if complete_prefix_required {
+            let anchor = snapshot.view_for(driver.subscriptions()).anchor().ok_or(
+                RuntimeError::MissingSnapshotAnchor {
+                    driver: driver.name().to_owned(),
+                },
+            )?;
+            validate_recovery_evidence(
+                &[TimelineHistorySegment::new(
+                    timeline,
+                    anchor.observed_through(),
+                )],
+                committed_events,
+            )?;
+        }
         let visible_events: Vec<Event> = committed_events
             .iter()
             .filter(|event| driver_visible_event(event))
@@ -1364,6 +1379,17 @@ impl PluginRegistry {
             driver.event_subscriptions(),
             entry.event_cursor,
         );
+        let observations = if complete_prefix_required {
+            observations.with_complete_events(
+                visible_events
+                    .iter()
+                    .filter(|event| driver.event_subscriptions().contains(&event.event_type))
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            observations
+        };
         invoke_driver(driver.as_mut(), timeline, observations)
             .and_then(|output| reject_host_owned_drafts(&output).map(|()| output))
     }

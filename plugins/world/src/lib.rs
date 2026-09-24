@@ -9,16 +9,15 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use num_traits::ToPrimitive;
-#[cfg(test)]
-use pos_core::WorldTransformError;
 use pos_core::{
     event::{CanonicalBytes, Event, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1,
-    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ActionApprover, ActionRejected, ProposedAction, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
+#[cfg(test)]
+use pos_core::{WorldCoordinateV1, WorldTransformError};
 use pos_runtime::{
     Driver, DriverRecoveryEvidence, HostWorldProfileV1, MeasuredProcessImageV1, ObservationView,
     RecoveryEvent, RecoveryEventHeader, RuntimeError, StepOutput, WorldInstallationErrorV1,
@@ -853,8 +852,9 @@ pub struct WorldObservation {
 }
 
 /// A world body represented by a core-owned named ENU coordinate.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq)]
-pub struct WorldCoordinateBody {
+struct WorldCoordinateBody {
     entity_id: EntityId,
     position: WorldCoordinateV1,
     east_velocity_metres_per_step: f64,
@@ -862,10 +862,11 @@ pub struct WorldCoordinateBody {
     up_velocity_metres_per_step: f64,
 }
 
+#[cfg(test)]
 impl WorldCoordinateBody {
     /// Construct a body with one-step East/North/Up velocity components.
     #[must_use]
-    pub const fn new(
+    const fn new(
         entity_id: EntityId,
         position: WorldCoordinateV1,
         east_velocity_metres_per_step: f64,
@@ -883,34 +884,36 @@ impl WorldCoordinateBody {
 
     /// Return the entity identifier.
     #[must_use]
-    pub const fn entity_id(self) -> EntityId {
+    const fn entity_id(self) -> EntityId {
         self.entity_id
     }
 
     /// Return the current named world coordinate.
     #[must_use]
-    pub const fn position(self) -> WorldCoordinateV1 {
+    const fn position(self) -> WorldCoordinateV1 {
         self.position
     }
 }
 
 /// A world-body observation represented by a named ENU coordinate.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq)]
-pub struct WorldCoordinateObservation {
+struct WorldCoordinateObservation {
     entity_id: EntityId,
     position: WorldCoordinateV1,
 }
 
+#[cfg(test)]
 impl WorldCoordinateObservation {
     /// Return the observed entity identifier.
     #[must_use]
-    pub const fn entity_id(self) -> EntityId {
+    const fn entity_id(self) -> EntityId {
         self.entity_id
     }
 
     /// Return the observed named world coordinate.
     #[must_use]
-    pub const fn position(self) -> WorldCoordinateV1 {
+    const fn position(self) -> WorldCoordinateV1 {
         self.position
     }
 }
@@ -1146,7 +1149,9 @@ pub struct WorldDriver {
     config_entity: EntityId,
     staged_step: Option<WorldDriverState>,
     staged_restore: Option<WorldDriverState>,
-    installed_prefix_verified: bool,
+    installed_timeline: Option<TimelineId>,
+    staged_step_timeline: Option<TimelineId>,
+    staged_restore_timeline: Option<TimelineId>,
 }
 
 struct InstalledWorldBackendV1 {
@@ -1264,7 +1269,9 @@ impl WorldDriver {
             config_entity: EntityId::new(),
             staged_step: None,
             staged_restore: None,
-            installed_prefix_verified: false,
+            installed_timeline: None,
+            staged_step_timeline: None,
+            staged_restore_timeline: None,
         }
     }
 
@@ -1295,6 +1302,56 @@ impl WorldDriver {
         self.causation_by_body = state.causation_by_body;
     }
 
+    fn scan_retained_config<'a>(
+        events: impl Iterator<Item = (&'a str, Option<&'a CanonicalBytes>)>,
+    ) -> Result<Option<&'a CanonicalBytes>, WorldInstallationErrorV1> {
+        let mut retained = None;
+        let mut saw_observation = false;
+        for (event_type, payload) in events {
+            match event_type {
+                EVENT_TYPE_CONFIG_V1 => {
+                    if saw_observation {
+                        return Err(WorldInstallationErrorV1::RetainedConfigOutOfOrder);
+                    }
+                    if retained.is_some() {
+                        return Err(WorldInstallationErrorV1::RetainedConfigAmbiguous);
+                    }
+                    retained =
+                        Some(payload.ok_or(WorldInstallationErrorV1::RetainedConfigMalformed)?);
+                }
+                EVENT_TYPE_OBSERVATION_V1 => saw_observation = true,
+                _ => {}
+            }
+        }
+        if retained.is_none() && saw_observation {
+            return Err(WorldInstallationErrorV1::RetainedConfigMissing);
+        }
+        Ok(retained)
+    }
+
+    fn verify_retained_config(
+        &self,
+        installed: &InstalledWorldBackendV1,
+        retained: &CanonicalBytes,
+        digest: [u8; 32],
+    ) -> Result<(), RuntimeError> {
+        let decoded = WorldConfigV1::decode(retained)
+            .map_err(|_| WorldInstallationErrorV1::RetainedConfigMalformed)?;
+        if decoded.backend_id != self.config.backend_id {
+            return Err(WorldInstallationErrorV1::BackendIdMismatch.into());
+        }
+        if decoded.backend_version != self.config.backend_version {
+            return Err(WorldInstallationErrorV1::BackendVersionMismatch.into());
+        }
+        if decoded.backend_content_hash != digest {
+            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
+        }
+        if retained != &installed.sealed_config {
+            return Err(WorldInstallationErrorV1::ProfileMismatch.into());
+        }
+        Ok(())
+    }
+
     fn preflight_installed_recovery(
         &self,
         evidence: &DriverRecoveryEvidence,
@@ -1310,51 +1367,39 @@ impl WorldDriver {
         if fresh.digest() != installed.image.digest() {
             return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
         }
-        let mut retained = None;
-        let mut saw_observation = false;
-        for event in evidence.events() {
-            match event.header().event_type().as_str() {
-                EVENT_TYPE_CONFIG_V1 => {
-                    if saw_observation {
-                        return Err(WorldInstallationErrorV1::RetainedConfigOutOfOrder.into());
-                    }
-                    if retained.is_some() {
-                        return Err(WorldInstallationErrorV1::RetainedConfigAmbiguous.into());
-                    }
-                    retained = Some(
-                        event
-                            .payload()
-                            .ok_or(WorldInstallationErrorV1::RetainedConfigMalformed)?,
-                    );
-                }
-                EVENT_TYPE_OBSERVATION_V1 => {
-                    saw_observation = true;
-                }
-                _ => {}
-            }
-        }
+        let retained = Self::scan_retained_config(
+            evidence
+                .events()
+                .iter()
+                .map(|event| (event.header().event_type().as_str(), event.payload())),
+        )?;
         let Some(retained) = retained else {
-            return if saw_observation {
-                Err(WorldInstallationErrorV1::RetainedConfigMissing.into())
-            } else {
-                Ok(())
-            };
+            return Ok(());
         };
-        let decoded = WorldConfigV1::decode(retained)
-            .map_err(|_| WorldInstallationErrorV1::RetainedConfigMalformed)?;
-        if decoded.backend_id != self.config.backend_id {
-            return Err(WorldInstallationErrorV1::BackendIdMismatch.into());
+        self.verify_retained_config(installed, retained, fresh.digest())
+    }
+
+    fn preflight_installed_step(&self, complete_events: &[Event]) -> Result<(), RuntimeError> {
+        #[cfg(not(test))]
+        let WorldDriverBackend::Installed(installed) = &self.backend;
+        #[cfg(test)]
+        let installed = match &self.backend {
+            WorldDriverBackend::Installed(installed) => installed,
+            WorldDriverBackend::Fixture(_) => return Ok(()),
+        };
+        let retained = Self::scan_retained_config(
+            complete_events
+                .iter()
+                .map(|event| (event.event_type.as_str(), Some(&event.payload))),
+        )?;
+        match (self.config_emitted, retained) {
+            (false, Some(_)) => Err(WorldInstallationErrorV1::RetainedConfigAmbiguous.into()),
+            (true, None) => Err(WorldInstallationErrorV1::RetainedConfigMissing.into()),
+            (_, Some(payload)) => {
+                self.verify_retained_config(installed, payload, installed.image.digest())
+            }
+            (false, None) => Ok(()),
         }
-        if decoded.backend_version != self.config.backend_version {
-            return Err(WorldInstallationErrorV1::BackendVersionMismatch.into());
-        }
-        if decoded.backend_content_hash != fresh.digest() {
-            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
-        }
-        if retained != &installed.sealed_config {
-            return Err(WorldInstallationErrorV1::ProfileMismatch.into());
-        }
-        Ok(())
     }
 
     fn apply_recovery_event(
@@ -1722,9 +1767,19 @@ impl Driver for WorldDriver {
         matches!(&self.backend, WorldDriverBackend::Installed(_))
     }
 
+    fn requires_complete_event_prefix(&self) -> bool {
+        matches!(&self.backend, WorldDriverBackend::Installed(_))
+    }
+
     fn event_subscriptions(&self) -> &[Kind] {
         static SUBSCRIPTIONS: std::sync::OnceLock<Vec<Kind>> = std::sync::OnceLock::new();
-        SUBSCRIPTIONS.get_or_init(|| vec![Kind::new(EVENT_TYPE_ACTION_V1)])
+        SUBSCRIPTIONS.get_or_init(|| {
+            vec![
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                Kind::new(EVENT_TYPE_CONFIG_V1),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+            ]
+        })
     }
 
     fn needs_recovery_payload(&self, header: &RecoveryEventHeader) -> bool {
@@ -1762,29 +1817,35 @@ impl Driver for WorldDriver {
             });
         }
         self.staged_restore = Some(restored);
+        self.staged_restore_timeline = evidence
+            .timeline_segments()
+            .last()
+            .map(|segment| segment.timeline_id());
         Ok(())
     }
 
     fn commit_restore_from_history(&mut self) {
         if let Some(restored) = self.staged_restore.take() {
             self.restore_state(restored);
-            self.installed_prefix_verified = true;
+            self.installed_timeline = self.staged_restore_timeline.take();
         }
     }
 
     fn abort_restore_from_history(&mut self) {
         self.staged_restore = None;
+        self.staged_restore_timeline = None;
     }
 
     fn commit_step(&mut self) {
-        if self.staged_step.take().is_some()
-            && matches!(&self.backend, WorldDriverBackend::Installed(_))
-        {
-            self.installed_prefix_verified = true;
+        if self.staged_step.take().is_some() {
+            if let Some(timeline) = self.staged_step_timeline.take() {
+                self.installed_timeline = Some(timeline);
+            }
         }
     }
 
     fn abort_step(&mut self) {
+        self.staged_step_timeline = None;
         if let Some(previous) = self.staged_step.take() {
             self.restore_state(previous);
         }
@@ -1807,9 +1868,21 @@ impl Driver for WorldDriver {
                     actual: anchor.timeline_id(),
                 });
             }
-            if anchor.observed_through().as_u64() != 0 && !self.installed_prefix_verified {
-                return Err(WorldInstallationErrorV1::RetainedConfigMissing.into());
+            if let Some(installed_timeline) = self.installed_timeline {
+                if installed_timeline != timeline {
+                    return Err(RuntimeError::SnapshotTimelineMismatch {
+                        expected: installed_timeline,
+                        actual: timeline,
+                    });
+                }
             }
+            let complete = match observations.complete_events() {
+                Some(events) => events,
+                None if anchor.observed_through().as_u64() == 0 => &[],
+                None => return Err(WorldInstallationErrorV1::RetainedConfigMissing.into()),
+            };
+            self.preflight_installed_step(complete)?;
+            self.staged_step_timeline = Some(timeline);
         }
         self.staged_step = Some(self.state());
         let result = (|| {
@@ -3777,7 +3850,53 @@ mod tests {
             .test_err();
         assert!(matches!(
             error,
-            RuntimeError::WorldInstallation(WorldInstallationErrorV1::RetainedConfigMissing)
+            RuntimeError::WorldInstallation(WorldInstallationErrorV1::RetainedConfigAmbiguous)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_step_rechecks_actual_timeline_and_retained_config() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let other_timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+
+        let (mut empty_restored, empty_calls) = installed_registry(body_id);
+        empty_restored
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
+            .test_ok();
+        assert!(matches!(
+            empty_restored
+                .step_all_anchored_with_events(other_timeline, Seq::from_u64(2), &events,),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert_eq!(empty_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            empty_restored.step_all_anchored_with_events(timeline, Seq::from_u64(2), &events,),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigAmbiguous
+            ))
+        ));
+        assert_eq!(empty_calls.load(Ordering::SeqCst), 0);
+
+        let (mut restored, calls) = installed_registry(body_id);
+        restored
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        let mut changed = events.clone();
+        let mut config = WorldConfigV1::decode(&changed[0].payload).test_ok();
+        config.backend_content_hash = [7; 32];
+        changed[0].payload = config.encode().test_ok();
+        assert!(matches!(
+            restored.step_all_anchored_with_events(timeline, Seq::from_u64(2), &changed),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::BackendDigestMismatch
+            ))
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }

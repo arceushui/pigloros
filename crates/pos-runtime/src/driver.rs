@@ -297,6 +297,7 @@ impl ObservationSnapshot {
                         .collect(),
                 )
             },
+            complete_events: None,
         }
     }
 }
@@ -348,6 +349,7 @@ pub struct ObservationView<'a> {
     direct_anchor: Option<SnapshotAnchor>,
     len: usize,
     events: Cow<'a, [Event]>,
+    complete_events: Option<Vec<Event>>,
 }
 
 impl ObservationView<'_> {
@@ -360,6 +362,7 @@ impl ObservationView<'_> {
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(&[]),
+            complete_events: None,
         }
     }
 
@@ -376,6 +379,7 @@ impl ObservationView<'_> {
             direct_anchor: Some(anchor),
             len: 0,
             events: Cow::Borrowed(&[]),
+            complete_events: None,
         }
     }
 
@@ -421,6 +425,17 @@ impl ObservationView<'_> {
     pub fn events(&self) -> &[Event] {
         self.events.as_ref()
     }
+
+    /// Host-validated complete prefix, filtered to this Driver's Event subscriptions.
+    #[must_use]
+    pub fn complete_events(&self) -> Option<&[Event]> {
+        self.complete_events.as_deref()
+    }
+
+    pub(crate) fn with_complete_events(mut self, events: Vec<Event>) -> Self {
+        self.complete_events = Some(events);
+        self
+    }
 }
 
 impl<'a> ObservationView<'a> {
@@ -436,6 +451,7 @@ impl<'a> ObservationView<'a> {
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(events),
+            complete_events: None,
         }
     }
     #[must_use]
@@ -453,6 +469,7 @@ impl<'a> ObservationView<'a> {
             )),
             len: snapshot.records().len(),
             events: Cow::Borrowed(&[]),
+            complete_events: None,
         }
     }
 }
@@ -515,6 +532,11 @@ pub trait Driver: Send + Sync {
 
     /// Whether this Driver requires a host-owned immutable-prefix anchor.
     fn requires_snapshot_anchor(&self) -> bool {
+        false
+    }
+
+    /// Whether the host must supply a complete contiguous Event prefix for each anchored step.
+    fn requires_complete_event_prefix(&self) -> bool {
         false
     }
 
