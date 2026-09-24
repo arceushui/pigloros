@@ -169,52 +169,53 @@ fn recover_pending_ledger_key(
 pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerStore>, CliError> {
     match source {
         Source::Toml(dir) => Ok(Box::new(TomlLedgerStore::new(dir))),
-        Source::Store(db) => {
-            let key_path = key.ok_or_else(|| {
-                CliError::BadSource("store: source requires --key <path>".to_owned())
-            })?;
-            let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
-                crate::HostedLedgerStore::open(StoreConfig::Sqlite {
-                    path: db.to_string_lossy().into_owned(),
-                })
-                .map_err(|error| CliError::BadSource(error.to_string()))?,
-            );
-            let persisted_registry = event_store
-                .load_key_registry()
-                .map_err(|e| CliError::BadSource(e.to_string()))?;
-            let persisted_registry =
-                recover_pending_ledger_key(event_store.as_mut(), db, key_path, persisted_registry)?;
-            let signing_key = load_signing_key(key_path)?;
-            let (registry_state, identity) =
-                ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
-            if persisted_registry.is_none() {
-                crate::key_output::bind_owned_secret_key(
-                    db,
-                    key_path,
-                    identity,
-                    key_material_digest(signing_key.as_bytes()),
-                )
-                .map_err(|error| CliError::BadSource(error.to_string()))?;
-            }
-            let timeline_id = event_store
-                .initialize_timeline_with_key_registry("ledger", &registry_state)
-                .map_err(|error| CliError::BadSource(error.to_string()))?
-                .id();
-            let registry = Arc::new(Mutex::new(registry_state));
-            Ok(Box::new(
-                EventLedgerStore::new(
-                    event_store,
-                    timeline_id,
-                    crate::well_known_entity(),
-                    signing_key,
-                    registry,
-                    identity,
-                    Box::new(Blake3Hasher),
-                )
-                .map_err(|error| CliError::BadSource(error.to_string()))?,
-            ))
-        }
+        Source::Store(db) => open_sqlite_store(db, key),
     }
+}
+
+fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStore>, CliError> {
+    let key_path =
+        key.ok_or_else(|| CliError::BadSource("store: source requires --key <path>".to_owned()))?;
+    let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
+        crate::HostedLedgerStore::open(StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .map_err(|error| CliError::BadSource(error.to_string()))?,
+    );
+    let persisted_registry = event_store
+        .load_key_registry()
+        .map_err(|e| CliError::BadSource(e.to_string()))?;
+    let persisted_registry =
+        recover_pending_ledger_key(event_store.as_mut(), db, key_path, persisted_registry)?;
+    let signing_key = load_signing_key(key_path)?;
+    let (registry_state, identity) =
+        ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
+    if persisted_registry.is_none() {
+        crate::key_output::bind_owned_secret_key(
+            db,
+            key_path,
+            identity,
+            key_material_digest(signing_key.as_bytes()),
+        )
+        .map_err(|error| CliError::BadSource(error.to_string()))?;
+    }
+    let timeline_id = event_store
+        .initialize_timeline_with_key_registry("ledger", &registry_state)
+        .map_err(|error| CliError::BadSource(error.to_string()))?
+        .id();
+    let registry = Arc::new(Mutex::new(registry_state));
+    Ok(Box::new(
+        EventLedgerStore::new(
+            event_store,
+            timeline_id,
+            crate::well_known_entity(),
+            signing_key,
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )
+        .map_err(|error| CliError::BadSource(error.to_string()))?,
+    ))
 }
 
 /// Return today's date as `YYYY-MM-DD` (UTC) without pulling in a date crate.
