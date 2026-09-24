@@ -1102,9 +1102,13 @@ pub fn import_timeline(
 /// failed final timeline fetch. If rollback delete also fails, the combined error is
 /// returned (the id may remain occupied).
 ///
-/// Signatures are persisted as opaque blobs; cryptographic verification is the caller's
-/// responsibility. For owner-scoped role-bound Event signatures, resolve the persisted
-/// identity and use `pos_crypto::key_roles::verify_for_role` with that identity.
+/// Signatures are persisted as opaque blobs. This is a trusted replication
+/// primitive and makes no cryptographic integrity claim about signed Events.
+/// A caller must not treat an Event imported here as verified merely because
+/// its signature bytes were preserved. `TimelineIntegritySigning` requires
+/// verification of the complete `TimelineEventEnvelopeV1`; payload-only
+/// `verify_for_role` is insufficient. Untrusted signed input belongs at a
+/// verified import boundary with the normative Timeline envelope verifier.
 ///
 /// # Errors
 /// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists,

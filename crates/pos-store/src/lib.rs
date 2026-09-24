@@ -535,7 +535,10 @@ pub fn open_store_with_hasher(
 ///
 /// `verify_event` is the trusted host's Timeline envelope verifier. It must
 /// verify the complete original Event context and signature using the supplied
-/// public key. The generic payload-only role verifier is not valid here.
+/// public key. This function resolves trust anchors and invokes that verifier;
+/// it does not implement cryptographic verification itself. A callback that
+/// returns success without checking `TimelineEventEnvelopeV1` voids the
+/// integrity claim. The generic payload-only role verifier is not valid here.
 /// Mixed owner and epoch histories are accepted when each Event has one exact
 /// anchor matching the destination registry, including retained public keys
 /// for destroyed identities. Duplicate or mismatched anchors fail closed.

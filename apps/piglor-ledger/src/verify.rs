@@ -57,7 +57,7 @@ impl std::fmt::Display for VerifyReport {
 ///
 /// If `manifest_path` is provided (TOML tier), the recomputed hashes are
 /// compared against that manifest. For the store tier, the persisted registry
-/// resolves each event identity. Store verification requires `pubkey_hex` as
+/// resolves each event identity. Store verification requires `--pubkey` as
 /// an external trust anchor. Each anchor must use the explicit
 /// V1 `base64url_nopad(owner)/role-code/epoch=hex` format.
 ///
@@ -67,12 +67,12 @@ impl std::fmt::Display for VerifyReport {
 /// readable report — only infrastructure errors propagate as `Err`.
 pub fn run(
     source: &Source,
-    pubkey_hex: Option<&str>,
+    trust_anchor_arg: Option<&str>,
     manifest_path: Option<&Path>,
 ) -> Result<VerifyReport, CliError> {
     match source {
         Source::Toml(dir) => verify_toml(dir, manifest_path),
-        Source::Store(db) => verify_store(db, pubkey_hex),
+        Source::Store(db) => verify_store(db, trust_anchor_arg),
     }
 }
 
@@ -165,8 +165,8 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
     Ok(out)
 }
 
-fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
-    let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
+fn verify_store(db: &Path, trust_anchor_arg: Option<&str>) -> Result<VerifyReport, CliError> {
+    let supplied_public_keys = parse_supplied_public_keys(trust_anchor_arg)?;
 
     let store: Box<dyn pos_core::store::EventStore> = Box::new(
         crate::HostedLedgerStore::open_read_only(&db.to_string_lossy())
@@ -293,9 +293,9 @@ fn decode_anchor_owner(value: &str) -> Result<OwnerIdV1, CliError> {
 }
 
 fn parse_supplied_public_keys(
-    pubkey_hex: Option<&str>,
+    trust_anchor_arg: Option<&str>,
 ) -> Result<Option<Vec<TrustedPublicKey>>, CliError> {
-    pubkey_hex.map(parse_anchor_list).transpose()
+    trust_anchor_arg.map(parse_anchor_list).transpose()
 }
 
 fn parse_anchor_list(value: &str) -> Result<Vec<TrustedPublicKey>, CliError> {
