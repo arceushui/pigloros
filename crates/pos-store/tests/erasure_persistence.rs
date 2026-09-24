@@ -3746,6 +3746,35 @@ fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_exact_retry_preserves_proof_storage_errors() -> Result<(), Box<dyn std::error::Error>>
+{
+    for table in ["erasure_fork_recovery_proofs", "erasure_evidence"] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or(ErasureErrorV1::InvalidEncoding)?;
+        let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+        assert_eq!(
+            commit_fork_admission(&store, &gate, &prepared)?,
+            pos_core::ErasureCasOutcomeV1::Applied
+        );
+
+        let connection = rusqlite::Connection::open(path)?;
+        connection.execute_batch(&format!("DROP TABLE {table}"))?;
+        drop(connection);
+
+        assert_eq!(
+            commit_fork_admission(&store, &gate, &prepared),
+            Err(ErasureErrorV1::ReceiptCommitFailed),
+            "exact retry must preserve the storage error for {table}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (store, gate, request, child, prepared) = prepared_fork(SqliteStore::open_in_memory()?)?;
