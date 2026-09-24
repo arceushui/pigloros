@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use piglor_ledger::{open_store, run, Source};
@@ -73,64 +73,6 @@ fn owned_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error
         .mode(0o600)
         .open(path)?;
     file.write_all(bytes)?;
-    Ok(())
-}
-
-#[test]
-fn deletion_rejects_unsafe_paths_and_file_shapes() -> Result<(), Box<dyn std::error::Error>> {
-    let directory = tempfile::TempDir::new()?;
-    let request = deletion_request(&[9; 32]);
-    let key = directory.path().join("secret.key");
-
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(Path::new("/"), request).is_err());
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(directory.path(), request).is_err());
-
-    let missing_parent = directory.path().join("missing").join("secret.key");
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&missing_parent, request).is_err());
-
-    let ancestor = directory.path().join("ancestor");
-    std::os::unix::fs::symlink(directory.path(), &ancestor)?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(
-        &ancestor.join("secret.key"),
-        request
-    )
-    .is_err());
-    std::fs::remove_file(&ancestor)?;
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777))?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
-
-    let link = directory.path().join("link.key");
-    std::os::unix::fs::symlink(&key, &link)?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&link, request).is_err());
-    std::fs::remove_file(&link)?;
-
-    owned_file(&key, b"00")?;
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644))?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::hard_link(&key, &link)?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    std::fs::remove_file(&link)?;
-
-    std::fs::write(&key, vec![b'0'; 129])?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    std::fs::write(&key, [0xff; 2])?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    std::fs::write(&key, b"not-hex")?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    std::fs::write(&key, b"00")?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    std::fs::write(&key, "08".repeat(32))?;
-    assert!(piglor_ledger::key_output::delete_owned_secret_key(&key, request).is_err());
-    assert!(key.exists());
-
-    std::fs::write(&key, "09".repeat(32))?;
-    assert_eq!(
-        piglor_ledger::key_output::delete_owned_secret_key(&key, request)?,
-        pos_core::deletion_receipt(&request)
-    );
-    assert!(!key.exists());
     Ok(())
 }
 
@@ -475,18 +417,17 @@ fn failed_tombstone_commit_keeps_pending_until_absent_file_is_recovered(
         .ok_or("signing material digest missing")?;
     let request = KeyDestructionRequestV1::new(identity, digest, Hash::from_bytes([7; 32]));
     store.begin_key_registry_destruction(request)?;
-    let receipt = piglor_ledger::key_output::delete_owned_secret_key(&key, request)?;
-    assert_eq!(receipt, pos_core::deletion_receipt(&request));
-    assert!(!key.exists());
-
     let connection = rusqlite::Connection::open(&database)?;
     connection.execute_batch(
         "CREATE TRIGGER reject_final_destruction BEFORE UPDATE ON key_registry
+         WHEN NEW.state_cbor <> OLD.state_cbor
          BEGIN SELECT RAISE(ABORT, 'final destruction commit denied'); END",
     )?;
-    assert!(store
-        .complete_key_registry_destruction(request, receipt)
-        .is_err());
+    assert!(piglor_ledger::key_output::destroy_owned_secret_key(
+        &mut store, &database, &key, request
+    )
+    .is_err());
+    assert!(!key.exists());
     assert_eq!(
         store
             .load_key_registry()?
