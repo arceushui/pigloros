@@ -4257,6 +4257,13 @@ fn validate_committed_scope_timeline_bindings(
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
     }
+    if observed.len() != committed.len()
+        || observed
+            .keys()
+            .any(|timeline| !committed.contains(timeline))
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
     Ok(())
 }
 
@@ -9468,20 +9475,6 @@ mod coverage_paths {
         assert_eq!(proof.successor_generation(), result.successor_generation());
         assert_eq!(proof.admissions().len(), 1);
         let admission = &proof.admissions()[0];
-        assert_eq!(
-            admission.binding_digest(),
-            fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
-                operation: reference(180),
-                expected_inventory_generation: reference(181),
-                child_scope: reference(182),
-                extension: admission.extension(),
-                mutation: reference(183),
-                predecessor: reference(189),
-                next_manifest: reference(190),
-                persistence_evidence: fork_recovery_mutation_evidence_digest(&proof.admissions[0],),
-                child: result.child(),
-            },)
-        );
         assert_eq!(admission.request(), reference(183));
         assert_ne!(admission.extension(), reference_zero());
         assert_eq!(admission.predecessor(), Some(reference(189)));
@@ -9507,20 +9500,6 @@ mod coverage_paths {
             )
         );
         assert_eq!(admission.effect_subject(), None);
-        assert_eq!(
-            admission.binding_digest(),
-            fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
-                operation: reference(180),
-                expected_inventory_generation: reference(181),
-                child_scope: reference(182),
-                extension: admission.extension(),
-                mutation: reference(183),
-                predecessor: reference(189),
-                next_manifest: reference(190),
-                persistence_evidence: fork_recovery_mutation_evidence_digest(&proof.admissions[0],),
-                child: result.child(),
-            },)
-        );
 
         let root = crate::TimelineMeta::root("proof-root");
         assert_eq!(

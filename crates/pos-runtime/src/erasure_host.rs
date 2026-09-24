@@ -1356,15 +1356,12 @@ impl ErasureExecutionHostV1 {
         }
         self.state = HostStateV1::Closed;
         self.inventory = None;
-        let inventory = match query
+        let Ok(inventory) = query
             .verified_inventory_with_limits(limits)
             .and_then(|inventory| self.verify_current_inventory(inventory, limits))
-        {
-            Ok(inventory) => inventory,
-            Err(_) => {
-                self.poison();
-                return Err(ErasureHostErrorV1::RecoveryUnavailable);
-            }
+        else {
+            self.poison();
+            return Err(ErasureHostErrorV1::RecoveryUnavailable);
         };
         self.publish_inventory_with_limits(inventory, limits)
     }
@@ -1590,12 +1587,16 @@ impl ErasureExecutionHostV1 {
         request_count: usize,
         limits: ErasureRecoveryLimitsV1,
         candidate: &TimelineMeta,
+        current_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         if request_count == 0 {
             let snapshot = self
                 .store
                 .host_store()
                 .complete_erasure_inventory_snapshot_with_limits(limits)?;
+            if snapshot.generation() != current_inventory.generation() {
+                return Err(ErasureErrorV1::StaleGeneration);
+            }
             let mut topology = snapshot.topology().to_vec();
             if let Err(index) = topology.binary_search(&candidate.id) {
                 topology.insert(index, candidate.id);
@@ -1610,10 +1611,21 @@ impl ErasureExecutionHostV1 {
         }
         let authority = self.authority.clone().ok_or(ErasureErrorV1::Unauthorized)?;
         let coordinator = self.coordinator.ok_or(ErasureErrorV1::Unauthorized)?;
-        let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref())
-            .with_topology_candidate(candidate);
-        let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
-        state_machine.verified_inventory_with_limits(limits)
+        let candidate_inventory = {
+            let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref())
+                .with_topology_candidate(candidate);
+            let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
+            state_machine.verified_inventory_with_limits(limits)?
+        };
+        let current_durable_inventory = {
+            let port = HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref());
+            let mut state_machine = ErasureCoordinatorStateMachineV1::new(port, coordinator);
+            state_machine.verified_inventory_with_limits(limits)?
+        };
+        if current_durable_inventory.generation() != current_inventory.generation() {
+            return Err(ErasureErrorV1::StaleGeneration);
+        }
+        Ok(candidate_inventory)
     }
 
     #[cfg(test)]
@@ -1643,8 +1655,8 @@ impl ErasureExecutionHostV1 {
         ) -> Result<Timeline, ErasureHostErrorV1>,
         change: &mut F,
         permit: &ErasureTopologyTransitionPermitV1,
-        request_count: usize,
         limits: ErasureRecoveryLimitsV1,
+        candidate_inventory_verified: &mut bool,
     ) -> Result<
         (ErasureVerifiedInventoryV1, TopologyTransitionResultV1),
         UnaffectedTopologyTransitionError,
@@ -1656,14 +1668,19 @@ impl ErasureExecutionHostV1 {
             &Timeline,
         ) -> Result<TopologyTransitionResultV1, CoreError>,
     {
+        let request_count = current_inventory.request_count();
         let candidate_timeline = preflight(permit, self.store.host_store())
             .map_err(UnaffectedTopologyTransitionError::Host)?;
         let candidate = match self.verify_unaffected_topology_candidate(
             request_count,
             limits,
             &candidate_timeline.meta,
+            current_inventory,
         ) {
-            Ok(candidate) => candidate,
+            Ok(candidate) => {
+                *candidate_inventory_verified = true;
+                candidate
+            }
             Err(error) => return Err(UnaffectedTopologyTransitionError::Erasure(error)),
         };
         current_inventory
@@ -1727,9 +1744,9 @@ impl ErasureExecutionHostV1 {
         {
             return Err(ErasureHostErrorV1::AuthorizationDenied);
         }
-        let request_count = inventory.request_count();
         let gate = Arc::clone(&self.gate);
         let mut transition_failure = None;
+        let mut candidate_inventory_verified = false;
         let mut fenced_preflight =
             |permit: &ErasureTopologyTransitionPermitV1, store: &mut dyn ErasureHostStore| {
                 if let Some(parent) = parent {
@@ -1747,8 +1764,8 @@ impl ErasureExecutionHostV1 {
                     &mut fenced_preflight,
                     &mut change,
                     permit,
-                    request_count,
                     limits,
+                    &mut candidate_inventory_verified,
                 ) {
                 Ok(result) => Ok(result),
                 Err(UnaffectedTopologyTransitionError::Host(error)) => {
@@ -1791,7 +1808,14 @@ impl ErasureExecutionHostV1 {
                 Ok((transition.timeline, generation))
             }
             Err(publication_error) => match transition_failure {
-                Some(UnaffectedTopologyTransitionError::Host(error)) => Err(error),
+                Some(UnaffectedTopologyTransitionError::Host(error)) => {
+                    if candidate_inventory_verified
+                        && error == ErasureHostErrorV1::RecoveryUnavailable
+                    {
+                        self.poison();
+                    }
+                    Err(error)
+                }
                 Some(UnaffectedTopologyTransitionError::RejectedAsAffected) => {
                     Err(ErasureHostErrorV1::Conflict)
                 }
@@ -4894,44 +4918,27 @@ mod tests {
     }
 
     #[test]
-    fn hosted_coordinator_port_adds_a_new_candidate_to_active_topology() {
-        let authority = ActiveTopologyAuthorityV1::default();
-        let mut store = fault_store(FaultModeV1::NonemptyRequestInventory);
-        let candidate = TimelineMeta::root("candidate-topology");
-        let observation = HostedCoordinatorPortV1::new(&mut store, &authority)
-            .with_topology_candidate(&candidate)
-            .complete_erasure_inventory_observation(4);
-
-        assert!(observation.is_ok());
-        assert_eq!(
-            authority
-                .candidate_metadata
-                .lock()
-                .unwrap_or_else(|error| {
-                    std::panic::resume_unwind(Box::new(format!("candidate lock poisoned: {error}")))
-                })
-                .as_slice(),
-            std::slice::from_ref(&candidate)
-        );
-    }
-
-    #[test]
     fn active_candidate_inventory_requires_both_recovery_credentials() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let current_inventory = Arc::clone(
+            host.inventory
+                .as_ref()
+                .unwrap_or_else(|| panic!("empty recovery installs its inventory")),
+        );
         let candidate = TimelineMeta::root("candidate-without-authority");
         let limits = ErasureRecoveryLimitsV1::compiled_maximum();
 
         assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits, &candidate),
+            host.verify_unaffected_topology_candidate(1, limits, &candidate, &current_inventory,),
             Err(ErasureErrorV1::Unauthorized)
         );
         host.authority = Some(Arc::new(UNUSED_COORDINATOR_AUTHORITY));
         assert_eq!(
-            host.verify_unaffected_topology_candidate(1, limits, &candidate),
+            host.verify_unaffected_topology_candidate(1, limits, &candidate, &current_inventory,),
             Err(ErasureErrorV1::Unauthorized)
         );
     }

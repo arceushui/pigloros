@@ -2417,11 +2417,23 @@ impl SqliteStore {
     }
 
     fn validate_erasure_inventory_data_version(&self) -> Result<(), CoreError> {
-        if !self.erasure_gate_bound {
+        Self::validate_erasure_inventory_data_version_on(
+            &self.conn,
+            self.erasure_gate_bound,
+            self.erasure_inventory_data_version,
+        )
+    }
+
+    fn validate_erasure_inventory_data_version_on(
+        connection: &Connection,
+        gate_bound: bool,
+        expected_version: i64,
+    ) -> Result<(), CoreError> {
+        if !gate_bound {
             return Ok(());
         }
-        match sqlite_data_version(&self.conn) {
-            Ok(observed) if observed == self.erasure_inventory_data_version => Ok(()),
+        match sqlite_data_version(connection) {
+            Ok(observed) if observed == expected_version => Ok(()),
             Ok(_) | Err(_) => Err(CoreError::ErasureContainmentUnavailable),
         }
     }
@@ -3770,51 +3782,74 @@ impl SqliteStore {
         &mut self,
         meta: &TimelineMeta,
     ) -> Result<Timeline, CoreError> {
+        if self.conn.is_autocommit() {
+            let gate_bound = self.erasure_gate_bound;
+            let expected_version = self.erasure_inventory_data_version;
+            let hasher = Arc::clone(&self.hasher);
+            let transaction = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            Self::validate_erasure_inventory_data_version_on(
+                &transaction,
+                gate_bound,
+                expected_version,
+            )?;
+            let timeline = Self::create_timeline_with_meta_in_transaction(
+                &transaction,
+                hasher.as_ref(),
+                meta,
+            )?;
+            transaction.commit().map_err(|error| {
+                CoreError::StorageOutcomeUnknown(format!(
+                    "transaction commit outcome uncertain: {error}"
+                ))
+            })?;
+            return Ok(timeline);
+        }
+        self.validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                Self::create_timeline_with_meta_in_transaction(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    meta,
+                )
+            })
+    }
+
+    fn create_timeline_with_meta_in_transaction(
+        connection: &Connection,
+        hasher: &dyn Hasher,
+        meta: &TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
         let chain_head = match meta.fork_point {
             Some((parent, at_seq)) => {
-                let parent_head = Self::logical_head_unchecked_on(&self.conn, parent)?;
+                let parent_head = Self::logical_head_unchecked_on(connection, parent)?;
                 if at_seq > parent_head {
                     return Err(CoreError::ForkBeyondHead {
                         fork_seq: at_seq.as_u64(),
                         head: parent_head.as_u64(),
                     });
                 }
-                Self::compute_chain_hash_at_unchecked_on(
-                    &self.conn,
-                    self.hasher.as_ref(),
-                    parent,
-                    at_seq,
-                )?
+                Self::compute_chain_hash_at_unchecked_on(connection, hasher, parent, at_seq)?
             }
-            None => self.hasher.genesis_hash(),
+            None => hasher.genesis_hash(),
         };
-        if self
-            .get_timeline_for_host_transition_unchecked(meta.id)?
-            .is_some()
-        {
+        let already_exists = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM timelines WHERE id = ?1)",
+                params![meta.id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if already_exists {
             return Err(CoreError::Storage(format!(
                 "timeline already exists: {}",
                 meta.id
             )));
         }
         let timeline = Timeline::new(meta.clone());
-        let insert = |connection: &Connection| {
-            Self::insert_timeline_with_meta_on(connection, meta, chain_head)
-        };
-        if self.conn.is_autocommit() {
-            let transaction = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            insert(&transaction)?;
-            transaction.commit().map_err(|error| {
-                CoreError::StorageOutcomeUnknown(format!(
-                    "transaction commit outcome uncertain: {error}"
-                ))
-            })?;
-        } else {
-            insert(&self.conn)?;
-        }
+        Self::insert_timeline_with_meta_on(connection, meta, chain_head)?;
         Ok(timeline)
     }
 
@@ -4035,7 +4070,9 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = self.save_key_registry_in_transaction(registry);
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| self.save_key_registry_in_transaction(registry));
         finish_immediate_transaction(&self.conn, result)
     }
 
@@ -4062,11 +4099,15 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = self.initialize_timeline_with_key_registry_in_transaction_with_meta(
-            meta,
-            expected_registry,
-            true,
-        );
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                self.initialize_timeline_with_key_registry_in_transaction_with_meta(
+                    meta,
+                    expected_registry,
+                    true,
+                )
+            });
         finish_immediate_transaction(&self.conn, result)
     }
 
@@ -4079,21 +4120,25 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = (|| {
-            let persisted = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
-            })?;
-            if persisted != *expected_registry {
-                return Err(CoreError::Storage(
-                    "durable key registry changed during signing".to_owned(),
-                ));
-            }
-            let head = self
-                .get_timeline(timeline)?
-                .ok_or(CoreError::TimelineNotFound(timeline))?;
-            let event = create_event(&persisted, head.head.next())?;
-            self.append_committed(timeline, &[event])
-        })();
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                (|| {
+                    let persisted = self.load_key_registry()?.ok_or_else(|| {
+                        CoreError::Storage("durable key registry is unavailable".to_owned())
+                    })?;
+                    if persisted != *expected_registry {
+                        return Err(CoreError::Storage(
+                            "durable key registry changed during signing".to_owned(),
+                        ));
+                    }
+                    let head = self
+                        .get_timeline(timeline)?
+                        .ok_or(CoreError::TimelineNotFound(timeline))?;
+                    let event = create_event(&persisted, head.head.next())?;
+                    self.append_committed(timeline, &[event])
+                })()
+            });
         finish_immediate_transaction(&self.conn, result)
     }
 
@@ -4104,21 +4149,26 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let version_check = self.validate_erasure_inventory_data_version();
         #[cfg(test)]
-        if let Some((started, release)) = self.destruction_transaction_hook.take() {
-            assert!(started.send(()).is_ok());
-            assert!(release.recv().is_ok());
+        if version_check.is_ok() {
+            if let Some((started, release)) = self.destruction_transaction_hook.take() {
+                assert!(started.send(()).is_ok());
+                assert!(release.recv().is_ok());
+            }
         }
-        let result = (|| {
-            let mut registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
-            })?;
-            let outcome = registry
-                .begin_key_destruction(request)
-                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
-            self.save_key_registry_in_transaction(&registry)?;
-            Ok((outcome, registry))
-        })();
+        let result = version_check.and_then(|()| {
+            (|| {
+                let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                    CoreError::Storage("durable key registry is unavailable".to_owned())
+                })?;
+                let outcome = registry.begin_key_destruction(request).map_err(|error| {
+                    CoreError::Storage(format!("ledger key destruction: {error}"))
+                })?;
+                self.save_key_registry_in_transaction(&registry)?;
+                Ok((outcome, registry))
+            })()
+        });
         finish_immediate_transaction(&self.conn, result)
     }
 
@@ -4130,16 +4180,22 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = (|| {
-            let mut registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
-            })?;
-            let outcome = registry
-                .complete_key_destruction(request, deletion_receipt)
-                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
-            self.save_key_registry_in_transaction(&registry)?;
-            Ok((outcome, registry))
-        })();
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                (|| {
+                    let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                        CoreError::Storage("durable key registry is unavailable".to_owned())
+                    })?;
+                    let outcome = registry
+                        .complete_key_destruction(request, deletion_receipt)
+                        .map_err(|error| {
+                            CoreError::Storage(format!("ledger key destruction: {error}"))
+                        })?;
+                    self.save_key_registry_in_transaction(&registry)?;
+                    Ok((outcome, registry))
+                })()
+            });
         finish_immediate_transaction(&self.conn, result)
     }
 

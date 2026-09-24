@@ -201,6 +201,15 @@ impl TestAuthority {
         Ok(())
     }
 
+    fn set_timeline_affected(&self, timeline: TimelineId) -> Result<(), ErasureErrorV1> {
+        self.set_timeline(timeline)?;
+        self.unaffected_timelines
+            .lock()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+            .retain(|candidate| *candidate != timeline);
+        Ok(())
+    }
+
     fn allow_post_freeze(&self) {
         self.allow_attempt.store(true, Ordering::Release);
         self.allow_dispatch.store(true, Ordering::Release);
@@ -221,7 +230,7 @@ impl TestAuthority {
         &self,
         _request: ErasureReferenceV1,
         manifest: ErasureReferenceV1,
-        candidate: Option<TimelineId>,
+        candidate: Option<&TimelineMeta>,
     ) -> Result<ErasureVerifiedTopologyObservationV1, ErasureErrorV1> {
         if self.deny_topology.load(Ordering::Acquire) {
             return Err(ErasureErrorV1::TrustSnapshotInvalid);
@@ -232,16 +241,27 @@ impl TestAuthority {
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .clone();
         if let Some(candidate) = candidate {
-            if !timelines.iter().any(|(timeline, _)| *timeline == candidate) {
-                timelines.push((candidate, reference(9)));
+            if !timelines
+                .iter()
+                .any(|(timeline, _)| *timeline == candidate.id)
+            {
+                timelines.push((candidate.id, reference(9)));
             }
         }
         if self.frozen.load(Ordering::Acquire) {
-            let unaffected = self
+            let mut unaffected = self
                 .unaffected_timelines
                 .lock()
                 .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
                 .clone();
+            if let Some(candidate) = candidate {
+                if let Some((parent, _)) = candidate.fork_point {
+                    if unaffected.contains(&parent) && !unaffected.contains(&candidate.id) {
+                        unaffected.push(candidate.id);
+                        unaffected.sort_unstable();
+                    }
+                }
+            }
             let bindings = timelines
                 .into_iter()
                 .filter(|(timeline, _)| !unaffected.contains(timeline))
@@ -309,7 +329,7 @@ impl ErasureCoordinatorAuthorityV1 for TestAuthority {
             .lock()
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
             .push(candidate.clone());
-        self.topology(request, manifest_digest, Some(candidate.id))
+        self.topology(request, manifest_digest, Some(candidate))
             .map(Some)
     }
 
@@ -2701,6 +2721,194 @@ fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
     Ok(())
 }
 
+struct StaleSqliteHostScenario {
+    path: std::path::PathBuf,
+    path_text: String,
+    stale_host: ErasureExecutionHostV1,
+    current_host: ErasureExecutionHostV1,
+    unaffected_parent: TimelineId,
+}
+
+impl StaleSqliteHostScenario {
+    fn cleanup(self) -> Result<(), Box<dyn std::error::Error>> {
+        let Self {
+            path,
+            path_text,
+            stale_host,
+            current_host,
+            ..
+        } = self;
+        drop(current_host);
+        drop(stale_host);
+        for candidate in [
+            path,
+            std::path::PathBuf::from(format!("{path_text}-wal")),
+            std::path::PathBuf::from(format!("{path_text}-shm")),
+        ] {
+            if candidate.exists() {
+                std::fs::remove_file(candidate)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn stale_sqlite_host_scenario() -> Result<StaleSqliteHostScenario, Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-stale-unaffected-fork-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut stale_host = test_stage(
+        "open stale unaffected-fork host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let (unaffected_parent, request_reference) = {
+        let mut commands = test_stage(
+            "open stale unaffected-fork command sender",
+            stale_host.command_sender(),
+        )?;
+        let unaffected_parent = test_stage(
+            "create unaffected Fork parent",
+            commands.create_timeline("stale-unaffected-parent"),
+        )?;
+        let affected_timeline = test_stage(
+            "create affected Timeline",
+            commands.create_timeline("stale-affected-timeline"),
+        )?;
+        test_stage(
+            "classify Fork parent as unaffected",
+            authority.set_timeline_unaffected(unaffected_parent.id()),
+        )?;
+        test_stage(
+            "classify target as affected",
+            authority.set_timeline(affected_timeline.id()),
+        )?;
+        let request = test_stage(
+            "construct stale unaffected-fork request",
+            persistence_request(),
+        )?;
+        let request_reference = request.reference();
+        let provenance = request.provenance();
+        test_stage(
+            "submit stale unaffected-fork request",
+            commands.submit_erasure_request(request, provenance),
+        )?;
+        test_stage(
+            "authorize stale unaffected-fork request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        (unaffected_parent.id(), request_reference)
+    };
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+    let mut current_host = test_stage(
+        "open current unaffected-fork host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    {
+        let mut commands = test_stage(
+            "open current unaffected-fork command sender",
+            current_host.command_sender(),
+        )?;
+        test_stage(
+            "freeze request in current host",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+    }
+    Ok(StaleSqliteHostScenario {
+        path,
+        path_text,
+        stale_host,
+        current_host,
+        unaffected_parent,
+    })
+}
+
+#[test]
+fn sqlite_failed_unaffected_fork_cannot_revalidate_a_stale_host_gate(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut scenario = stale_sqlite_host_scenario()?;
+    {
+        let mut commands = test_stage(
+            "open stale host for failed ordinary Fork",
+            scenario.stale_host.command_sender(),
+        )?;
+        assert_eq!(
+            commands.fork_timeline(
+                scenario.unaffected_parent,
+                pos_core::Seq::from_u64(1),
+                "stale-unaffected-beyond-head",
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+    assert_eq!(scenario.stale_host.status(), ErasureHostStatusV1::Poisoned);
+    assert_eq!(
+        scenario.stale_host.read_sender().err(),
+        Some(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(scenario.current_host.status(), ErasureHostStatusV1::Ready);
+    scenario.cleanup()
+}
+
+#[test]
+fn sqlite_stale_host_cannot_write_key_registry_or_destruction_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut scenario = stale_sqlite_host_scenario()?;
+    let request = pos_core::KeyDestructionRequestV1::new(
+        pos_core::KeyIdentityV1::new(
+            "stale-host-owner",
+            pos_core::KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ),
+        pos_core::Hash::from_bytes([51; 32]),
+        pos_core::Hash::from_bytes([52; 32]),
+    );
+    {
+        let mut commands = test_stage(
+            "open stale host for protected writes",
+            scenario.stale_host.command_sender(),
+        )?;
+        assert_eq!(
+            commands.save_key_registry(
+                scenario.unaffected_parent,
+                &pos_core::KeyRegistryStateV1::new(),
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            commands.begin_key_registry_destruction(scenario.unaffected_parent, request),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(
+            commands.complete_key_registry_destruction(
+                scenario.unaffected_parent,
+                request,
+                pos_core::deletion_receipt(&request),
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+    }
+    assert_eq!(scenario.stale_host.status(), ErasureHostStatusV1::Ready);
+    scenario.cleanup()
+}
+
 #[test]
 fn sqlite_recovery_preserves_each_initially_frozen_timeline_binding(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2762,6 +2970,93 @@ fn sqlite_recovery_preserves_each_initially_frozen_timeline_binding(
     test_stage(
         "reclassify one frozen Timeline as unaffected",
         authority.set_timeline_unaffected(initially_frozen),
+    )?;
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+    let reopening_was_rejected = matches!(
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+        Err(ErasureHostErrorV1::RecoveryUnavailable)
+    );
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
+    assert!(reopening_was_rejected);
+    Ok(())
+}
+
+#[test]
+fn sqlite_recovery_rejects_an_extra_timeline_binding_outside_the_committed_scope(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-extra-frozen-binding-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority = Arc::new(TestAuthority::default());
+    let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open extra-binding host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority_plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let previously_unaffected = {
+        let mut commands = test_stage("open extra-binding sender", host.command_sender())?;
+        let initially_frozen = test_stage(
+            "create committed affected Timeline",
+            commands.create_timeline("committed-affected-timeline"),
+        )?;
+        let initially_unaffected = test_stage(
+            "create initially unaffected Timeline",
+            commands.create_timeline("initially-unaffected-timeline"),
+        )?;
+        test_stage(
+            "bind committed affected Timeline",
+            authority.set_timeline(initially_frozen.id()),
+        )?;
+        test_stage(
+            "exclude initially unaffected Timeline from scope",
+            authority.set_timeline_unaffected(initially_unaffected.id()),
+        )?;
+        let request = test_stage("construct extra-binding request", persistence_request())?;
+        let request_reference = request.reference();
+        let provenance = request.provenance();
+        test_stage(
+            "submit extra-binding request",
+            commands.submit_erasure_request(request, provenance),
+        )?;
+        test_stage(
+            "authorize extra-binding request",
+            commands.authorize_erasure_request(request_reference, reference(32)),
+        )?;
+        test_stage(
+            "freeze committed scope",
+            commands.freeze_access(request_reference, &freeze_transition()),
+        )?;
+        initially_unaffected.id()
+    };
+    drop(host);
+
+    test_stage(
+        "return excluded Timeline as an affected binding",
+        authority.set_timeline_affected(previously_unaffected),
     )?;
     let authority_plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
     let reopening_was_rejected = matches!(
