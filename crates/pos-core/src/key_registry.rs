@@ -497,14 +497,39 @@ pub trait KeyDestructionPortV1 {
     ) -> Result<KeyDestructionOutcomeV1, KeyRegistryErrorV1>;
 }
 
+/// Exact wire marker for the direct-replacement registry snapshot format.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct KeyRegistryFormatVersionV1;
+
+impl Serialize for KeyRegistryFormatVersionV1 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(1)
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyRegistryFormatVersionV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match u8::deserialize(deserializer)? {
+            1 => Ok(Self),
+            _ => Err(serde::de::Error::custom(
+                "only key registry format version 1 is supported",
+            )),
+        }
+    }
+}
+
 /// Reference state machine for adapters and public-interface tests.
+/// Serialized snapshots require an explicit V1 marker; earlier shapes are
+/// rejected at decode without migration or an upcaster.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeyRegistryStateV1 {
     records: BTreeMap<KeyIdentityV1, KeyRecordV1>,
     active: BTreeMap<(OwnerIdV1, KeyRoleV1), KeyIdentityV1>,
     tombstones: BTreeMap<KeyIdentityV1, KeyTombstoneV1>,
     highest_epoch: BTreeMap<(OwnerIdV1, KeyRoleV1), u64>,
     pending_destructions: BTreeMap<KeyIdentityV1, KeyDestructionRequestV1>,
+    version: KeyRegistryFormatVersionV1,
 }
 
 impl KeyRegistryStateV1 {
@@ -517,6 +542,7 @@ impl KeyRegistryStateV1 {
             tombstones: BTreeMap::new(),
             highest_epoch: BTreeMap::new(),
             pending_destructions: BTreeMap::new(),
+            version: KeyRegistryFormatVersionV1,
         }
     }
 
