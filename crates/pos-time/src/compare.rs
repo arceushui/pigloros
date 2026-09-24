@@ -306,6 +306,37 @@ mod tests {
         }
     }
 
+    struct ChangeBoundsOnThirdVerification {
+        calls: AtomicUsize,
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for ChangeBoundsOnThirdVerification {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            let max_events = if self.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                65_536
+            } else {
+                65_535
+            };
+            Ok(pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                closure.digest(),
+                closure.timeline_id(),
+                closure.source_head(),
+                requested_use.clone(),
+                inventory_generation,
+                pos_core::ErasureReplayClaimV1::Exact,
+                EventReadBounds::new_with_total_bytes_and_elapsed(
+                    65_536, 128, 8, max_events, 67_108_864, 30_000_000,
+                ),
+            ))
+        }
+    }
+
     impl Reducer for CountReducer {
         fn initial(&self) -> State {
             let mut s = State::new();
@@ -564,6 +595,56 @@ mod tests {
                 .test_ok();
             let fork_b = commands
                 .fork_timeline(parent.id(), fork_seq, "rollback-b")
+                .test_ok();
+            commands.append(fork_a.id(), &[draft(entity)]).test_ok();
+            commands.append(fork_b.id(), &[draft(entity)]).test_ok();
+            (fork_a.id(), fork_b.id(), fork_seq, entity)
+        };
+        let closure_a = crate::test_support::closure_for_host(&host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&host, fork_b);
+        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        registry_a.register("count", Box::new(CountReducer));
+        let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry_b.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::compare(
+                &mut reads,
+                [fork_a, fork_b],
+                fork_seq,
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(registry_a.state_for_reducer("count", &entity), None);
+        assert_eq!(registry_b.state_for_reducer("count", &entity), None);
+    }
+
+    #[test]
+    fn public_compare_rolls_back_when_final_read_bounds_change() {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(ChangeBoundsOnThirdVerification {
+                calls: AtomicUsize::new(0),
+            }));
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (fork_a, fork_b, fork_seq, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let parent = commands.create_timeline("bounds-parent").test_ok();
+            let entity = EntityId::new();
+            let shared = commands.append(parent.id(), &[draft(entity)]).test_ok();
+            let fork_seq = shared[0].seq;
+            let fork_a = commands
+                .fork_timeline(parent.id(), fork_seq, "bounds-a")
+                .test_ok();
+            let fork_b = commands
+                .fork_timeline(parent.id(), fork_seq, "bounds-b")
                 .test_ok();
             commands.append(fork_a.id(), &[draft(entity)]).test_ok();
             commands.append(fork_b.id(), &[draft(entity)]).test_ok();
