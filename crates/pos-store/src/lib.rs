@@ -20,11 +20,11 @@
 //! |--------|--------|--------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
-//! | Verified identity | [`export_timeline_own`] | [`import_timeline_with_verified_signatures`] |
+//! | Verified identity | [`export_timeline_own`] | Pending `TimelineEventEnvelopeV1` verifier (#202) |
 //!
-//! Signatures cover the owner/role/epoch domain and **payload bytes only** (not
-//! event metadata). See
-//! [`import_timeline_with_verified_signatures`].
+//! [`resolve_timeline_import_public_keys_v1`] checks exact owner/role/epoch
+//! trust anchors without importing Events. Verified identity import remains
+//! unavailable until #202 adds the normative Timeline envelope verifier.
 //!
 //! # Backend features
 //!
@@ -531,63 +531,91 @@ pub fn open_store_with_hasher(
     }
 }
 
-/// Cryptographically verify signed events in `export`, then identity-import.
+/// Resolve each signed Event's exact trusted owner/role/epoch public key.
 ///
-/// Every event must carry a signature and a `TimelineIntegritySigning`
-/// owner/role/epoch identity that is present in the destination registry and whose
-/// retained public key matches `public_key`. Verification uses the owner/role/epoch
-/// domain and **payload bytes only** (event metadata is not covered). An empty
-/// event list is allowed.
+/// The result has one public key per Event, in export order. Mixed owner and
+/// epoch histories are accepted when every Event has one exact anchor matching
+/// the destination registry, including retained public keys for destroyed
+/// identities. Duplicate or mismatched anchors fail closed. An empty Event
+/// list returns an empty result.
 ///
-/// Use this when the export is uniformly signed by one key. For mixed unsigned events
-/// or multiple signers, apply the appropriate role-bound verifier per event (or filter)
-/// yourself, then call [`import_timeline_with_id`].
+/// This checks identity and trust resolution only. It does not verify any
+/// signature or import any Event. A host must not treat the result as Timeline
+/// integrity evidence. Verified identity import remains unavailable until
+/// #202 adds the normative `TimelineEventEnvelopeV1` verifier; payload-only
+/// `verify_for_role` is not valid for Timeline Events.
 ///
 /// # Errors
-/// Returns [`CoreError::SignatureVerificationFailed`] if any event is unsigned or fails
-/// verify, or any error from [`import_timeline_with_id`].
-pub fn import_timeline_with_verified_signatures(
-    store: &mut dyn EventStore,
-    export: TimelineExport,
-    public_key: &pos_core::PublicKey,
-) -> Result<pos_core::Timeline, CoreError> {
-    let vk = pos_crypto::signing::verifying_key_from_public_key(public_key)?;
-    let registry = if export.events.is_empty() {
-        None
-    } else {
-        Some(store.load_key_registry()?.ok_or_else(|| {
-            CoreError::Storage(
-                "verified Timeline import requires a persisted key registry".to_owned(),
-            )
-        })?)
-    };
-    let mut verified_identity = None;
-    for event in &export.events {
-        let Some(signature) = &event.signature else {
-            return Err(CoreError::SignatureVerificationFailed);
-        };
-        let Some(identity) = event.signature_identity else {
-            return Err(CoreError::SignatureVerificationFailed);
-        };
-        if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning {
+/// Returns [`CoreError::SignatureVerificationFailed`] if any Event is unsigned,
+/// lacks an exact trust anchor, or has a mismatched retained registry key.
+pub fn resolve_timeline_import_public_keys_v1(
+    store: &dyn EventStore,
+    export: &TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<Vec<pos_core::PublicKey>, CoreError> {
+    let mut anchors = std::collections::BTreeMap::new();
+    for (identity, public_key) in trust_anchors {
+        if identity.epoch == 0
+            || !identity.role.is_signing()
+            || pos_crypto::signing::verifying_key_from_public_key(public_key).is_err()
+            || anchors.insert(*identity, *public_key).is_some()
+        {
             return Err(CoreError::SignatureVerificationFailed);
         }
-        if verified_identity.is_some_and(|expected| expected != identity) {
-            return Err(CoreError::SignatureVerificationFailed);
-        }
-        let Some(record) = registry
-            .as_ref()
-            .and_then(|value| value.key_record(identity))
-        else {
-            return Err(CoreError::SignatureVerificationFailed);
-        };
-        if record.public_verification_key != Some(*public_key) {
-            return Err(CoreError::SignatureVerificationFailed);
-        }
-        verified_identity = Some(identity);
-        pos_crypto::key_roles::verify_for_role(&vk, identity, &event.payload, signature)?;
     }
-    import_timeline_with_id(store, export)
+    let registry = load_import_registry(store, export)?;
+    let mut public_keys = Vec::with_capacity(export.events.len());
+    for event in &export.events {
+        public_keys.push(resolve_import_event_key(
+            event,
+            &anchors,
+            registry.as_ref(),
+        )?);
+    }
+    Ok(public_keys)
+}
+
+fn load_import_registry(
+    store: &dyn EventStore,
+    export: &TimelineExport,
+) -> Result<Option<pos_core::KeyRegistryStateV1>, CoreError> {
+    if export.events.is_empty() {
+        return Ok(None);
+    }
+    store
+        .load_key_registry()?
+        .ok_or_else(|| {
+            CoreError::Storage(
+                "Timeline import trust resolution requires a persisted key registry".to_owned(),
+            )
+        })
+        .map(Some)
+}
+
+fn resolve_import_event_key(
+    event: &pos_core::Event,
+    anchors: &std::collections::BTreeMap<pos_core::KeyIdentityV1, pos_core::PublicKey>,
+    registry: Option<&pos_core::KeyRegistryStateV1>,
+) -> Result<pos_core::PublicKey, CoreError> {
+    if event.signature.is_none() {
+        return Err(CoreError::SignatureVerificationFailed);
+    }
+    let Some(identity) = event.signature_identity else {
+        return Err(CoreError::SignatureVerificationFailed);
+    };
+    if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning || identity.epoch == 0 {
+        return Err(CoreError::SignatureVerificationFailed);
+    }
+    let Some(public_key) = anchors.get(&identity) else {
+        return Err(CoreError::SignatureVerificationFailed);
+    };
+    let Some(record) = registry.and_then(|value| value.key_record(identity)) else {
+        return Err(CoreError::SignatureVerificationFailed);
+    };
+    if record.public_verification_key != Some(*public_key) {
+        return Err(CoreError::SignatureVerificationFailed);
+    }
+    Ok(*public_key)
 }
 
 #[cfg(test)]
@@ -640,6 +668,19 @@ mod tests {
             ))
             .test_ok();
         store
+    }
+
+    fn fixture_anchors(
+        public_key: pos_core::PublicKey,
+    ) -> [(pos_core::KeyIdentityV1, pos_core::PublicKey); 1] {
+        [(
+            pos_core::KeyIdentityV1::new(
+                "test-owner",
+                pos_core::KeyRoleV1::TimelineIntegritySigning,
+                1,
+            ),
+            public_key,
+        )]
     }
 
     #[test]
@@ -1233,7 +1274,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_with_verified_signatures_accepts_valid_and_rejects_bad() {
+    fn import_anchor_resolution_checks_exact_registry_keys() {
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, SchemaVersion},
@@ -1243,12 +1284,11 @@ mod tests {
             KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
         };
         use pos_crypto::{
-            key_roles::{key_material_digest, sign_for_registered_role, SigningKeyMaterial},
+            key_roles::key_material_digest,
             signing::{generate_keypair, public_key_from_verifying_key},
         };
 
         let (sk, vk) = generate_keypair();
-        let signing_material = SigningKeyMaterial::new(sk.clone());
         let pk = public_key_from_verifying_key(&vk);
         let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let mut registry = KeyRegistryStateV1::new();
@@ -1260,8 +1300,6 @@ mod tests {
             ))
             .test_ok();
         let payload = CanonicalBytes::from_vec(b"signed".to_vec());
-        let sig = sign_for_registered_role(&mut registry, &signing_material, identity, &payload)
-            .test_ok();
         let entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1273,19 +1311,17 @@ mod tests {
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
-            signature: Some(sig),
+            // Anchor resolution treats signature bytes as opaque. #202 owns
+            // TimelineEventEnvelopeV1 signature verification.
+            signature: Some(pos_core::Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let second_payload = CanonicalBytes::from_vec(b"signed-second".to_vec());
-        let second_sig =
-            sign_for_registered_role(&mut registry, &signing_material, identity, &second_payload)
-                .test_ok();
         let mut second_event = event.clone();
         second_event.id = EventId::new();
         second_event.payload = second_payload.clone();
         second_event.seq = Seq::from_u64(2);
-        second_event.signature = Some(second_sig);
         second_event.payload_hash = pos_crypto::chain::hash_payload(&second_payload);
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("signed")),
@@ -1295,30 +1331,44 @@ mod tests {
 
         let mut ok_store = open_fixture_store(StoreConfig::Memory);
         ok_store.save_key_registry(&registry).test_ok();
-        import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).test_ok();
-        assert_verified_import_rejections(&export, &registry, &pk);
+        assert_eq!(
+            resolve_timeline_import_public_keys_v1(
+                ok_store.as_ref(),
+                &export,
+                &fixture_anchors(pk),
+            )
+            .test_ok(),
+            vec![pk, pk]
+        );
+        assert!(ok_store.list_timelines().test_ok().is_empty());
+        assert_anchor_resolution_rejections(&export, &registry, &pk);
 
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
         let mut bad_store = open_fixture_store(StoreConfig::Memory);
         bad_store.save_key_registry(&registry).test_ok();
-        let err = import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
-            .test_err();
+        let err = resolve_timeline_import_public_keys_v1(
+            bad_store.as_ref(),
+            &export,
+            &fixture_anchors(reject_key),
+        )
+        .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
-    fn assert_verified_import_rejections(
+    fn assert_anchor_resolution_rejections(
         export: &pos_core::store::TimelineExport,
         registry: &pos_core::KeyRegistryStateV1,
         public_key: &pos_core::PublicKey,
     ) {
         use pos_core::{KeyIdentityV1, KeyRoleV1};
+        let anchors = fixture_anchors(*public_key);
 
-        let mut missing_registry_store = open_fixture_store(StoreConfig::Memory);
-        let missing_registry = import_timeline_with_verified_signatures(
-            missing_registry_store.as_mut(),
-            export.clone(),
-            public_key,
+        let missing_registry_store = open_fixture_store(StoreConfig::Memory);
+        let missing_registry = resolve_timeline_import_public_keys_v1(
+            missing_registry_store.as_ref(),
+            export,
+            &anchors,
         )
         .test_err();
         assert!(missing_registry
@@ -1330,10 +1380,10 @@ mod tests {
         let mut missing_identity_store = open_fixture_store(StoreConfig::Memory);
         missing_identity_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
-                missing_identity_store.as_mut(),
-                missing_identity,
-                public_key,
+            resolve_timeline_import_public_keys_v1(
+                missing_identity_store.as_ref(),
+                &missing_identity,
+                &anchors,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1348,10 +1398,10 @@ mod tests {
         let mut wrong_role_store = open_fixture_store(StoreConfig::Memory);
         wrong_role_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
-                wrong_role_store.as_mut(),
-                wrong_role,
-                public_key
+            resolve_timeline_import_public_keys_v1(
+                wrong_role_store.as_ref(),
+                &wrong_role,
+                &anchors,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1368,10 +1418,10 @@ mod tests {
             .save_key_registry(registry)
             .test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
-                mismatched_identity_store.as_mut(),
-                mismatched_identity,
-                public_key,
+            resolve_timeline_import_public_keys_v1(
+                mismatched_identity_store.as_ref(),
+                &mismatched_identity,
+                &anchors,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1387,26 +1437,10 @@ mod tests {
         let mut missing_record_store = open_fixture_store(StoreConfig::Memory);
         missing_record_store.save_key_registry(registry).test_ok();
         assert!(matches!(
-            import_timeline_with_verified_signatures(
-                missing_record_store.as_mut(),
-                missing_record,
-                public_key,
-            )
-            .test_err(),
-            CoreError::SignatureVerificationFailed
-        ));
-
-        let mut invalid_signature = export.clone();
-        invalid_signature.events[0].signature = Some(pos_core::Signature::from_bytes([0; 64]));
-        let mut invalid_signature_store = open_fixture_store(StoreConfig::Memory);
-        invalid_signature_store
-            .save_key_registry(registry)
-            .test_ok();
-        assert!(matches!(
-            import_timeline_with_verified_signatures(
-                invalid_signature_store.as_mut(),
-                invalid_signature,
-                public_key,
+            resolve_timeline_import_public_keys_v1(
+                missing_record_store.as_ref(),
+                &missing_record,
+                &anchors,
             )
             .test_err(),
             CoreError::SignatureVerificationFailed
@@ -1415,7 +1449,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_with_verified_signatures_rejects_invalid_public_key() {
+    fn fixture_anchor_resolution_rejects_invalid_public_key() {
         use pos_core::{
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
@@ -1428,20 +1462,28 @@ mod tests {
             events: vec![],
             parent_fork_hash: None,
         };
-        let mut store = open_fixture_store(StoreConfig::Memory);
+        let store = open_fixture_store(StoreConfig::Memory);
         let (_, verifying_key) = generate_keypair();
         let valid = public_key_from_verifying_key(&verifying_key);
-        import_timeline_with_verified_signatures(store.as_mut(), export.clone(), &valid).test_ok();
+        assert!(resolve_timeline_import_public_keys_v1(
+            store.as_ref(),
+            &export,
+            &fixture_anchors(valid)
+        )
+        .test_ok()
+        .is_empty());
         let mut bytes = [0u8; 32];
         bytes[31] = 0xff;
         let bad = PublicKey::from_bytes(bytes);
-        let err = import_timeline_with_verified_signatures(store.as_mut(), export, &bad).test_err();
+        let err =
+            resolve_timeline_import_public_keys_v1(store.as_ref(), &export, &fixture_anchors(bad))
+                .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn import_with_verified_signatures_rejects_unsigned_event() {
+    fn fixture_anchor_resolution_rejects_unsigned_event() {
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, SchemaVersion},
@@ -1477,7 +1519,9 @@ mod tests {
         store
             .save_key_registry(&KeyRegistryStateV1::new())
             .test_ok();
-        let err = import_timeline_with_verified_signatures(store.as_mut(), export, &pk).test_err();
+        let err =
+            resolve_timeline_import_public_keys_v1(store.as_ref(), &export, &fixture_anchors(pk))
+                .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
 
@@ -1773,9 +1817,7 @@ mod coverage_entrypoints {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verified_import_requires_a_registry_snapshot() {
-        let (_, verifying_key) = pos_crypto::signing::generate_keypair();
-        let public_key = pos_crypto::signing::public_key_from_verifying_key(&verifying_key);
+    fn import_anchor_resolution_requires_a_registry_snapshot() {
         let export = TimelineExport {
             timeline: pos_core::Timeline::new(pos_core::TimelineMeta::root("missing-registry")),
             events: vec![pos_core::Event {
@@ -1794,22 +1836,16 @@ mod coverage_entrypoints {
             }],
             parent_fork_hash: None,
         };
-        let mut missing_registry = ok(open_store(StoreConfig::Memory));
+        let missing_registry = ok(open_store(StoreConfig::Memory));
         assert!(matches!(
-            import_timeline_with_verified_signatures(
-                missing_registry.as_mut(),
-                export,
-                &public_key,
-            ),
+            resolve_timeline_import_public_keys_v1(missing_registry.as_ref(), &export, &[]),
             Err(CoreError::Storage(_))
         ));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verified_import_propagates_registry_load_failure() {
-        let (_, verifying_key) = pos_crypto::signing::generate_keypair();
-        let public_key = pos_crypto::signing::public_key_from_verifying_key(&verifying_key);
+    fn import_anchor_resolution_propagates_registry_load_failure() {
         let export = TimelineExport {
             timeline: pos_core::Timeline::new(pos_core::TimelineMeta::root("registry-load-error")),
             events: vec![pos_core::Event {
@@ -1828,9 +1864,9 @@ mod coverage_entrypoints {
             }],
             parent_fork_hash: None,
         };
-        let mut store = RegistryLoadErrorStore;
+        let store = RegistryLoadErrorStore;
         assert!(matches!(
-            import_timeline_with_verified_signatures(&mut store, export, &public_key),
+            resolve_timeline_import_public_keys_v1(&store, &export, &[]),
             Err(CoreError::Storage(message)) if message == "registry load failed"
         ));
     }
