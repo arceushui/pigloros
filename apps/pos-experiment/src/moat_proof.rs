@@ -1751,12 +1751,12 @@ fn failure_probe(
         ).map_err(MoatProofError::from) => |failure_closure|;
         sibling_closure.with_installed_driver(SiblingProbeDriver {
             steps: Arc::clone(&sibling_steps),
-        }).map_err(|error| MoatProofError::from(RuntimeError::from(error)))
+        }).map_err(RuntimeError::from).map_err(MoatProofError::from)
             => |sibling_closure|;
         failure_closure.with_installed_driver(FailureProbeDriver {
             class,
             resource_limit,
-        }).map_err(|error| MoatProofError::from(RuntimeError::from(error)))
+        }).map_err(RuntimeError::from).map_err(MoatProofError::from)
             => |failure_closure|;
         reviewed_output_registration(&sibling_plugin, &sibling_closure)
             .map_err(MoatProofError::from) => |sibling_registration|;
@@ -2415,6 +2415,33 @@ mod tests {
                     kind: "implementation"
                 }
             )
+        ));
+    }
+
+    #[test]
+    fn experiment_binding_retains_delegated_world_codec_source() {
+        let plugin = ProofAgentPlugin::new();
+        let binding = proof_agent_output_binding(&plugin, 0.5, "deterministic-local-v1")
+            .test_ok();
+        let world_source = include_bytes!("../../../plugins/world/src/lib.rs");
+        let mut changed_world_source = binding.implementation_artifact().to_vec();
+        let world_offset = changed_world_source
+            .windows(world_source.len())
+            .position(|bytes| bytes == world_source)
+            .test_ok();
+        changed_world_source[world_offset] ^= 1;
+        assert!(matches!(
+            pos_runtime::validate_output_policy_artifacts_v1(
+                &binding.policy().to_canonical_cbor(),
+                &binding.budget().to_canonical_cbor(),
+                &changed_world_source,
+                binding.configuration_artifact(),
+                binding.execution_profile_artifact(),
+                binding.retention_policy_artifact(),
+            ),
+            Err(pos_runtime::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                kind: "implementation"
+            })
         ));
     }
 

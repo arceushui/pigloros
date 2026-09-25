@@ -318,6 +318,10 @@ impl InstalledOutputPolicySourceV1 {
                     include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs"),
                 ),
                 (
+                    "plugins/world/src/lib.rs",
+                    include_bytes!("../../../plugins/world/src/lib.rs"),
+                ),
+                (
                     "plugins/society/src/lib.rs",
                     include_bytes!("../../../plugins/society/src/lib.rs"),
                 ),

@@ -1150,11 +1150,15 @@ fn gateway_action_registry_builder_with_inputs(
         &configuration_details,
         profile_id,
         event_type,
-    )?
-    .with_installed_action_approver(
-        GatewayWorldActionApprover(world_plugin),
-        [Kind::new(event_type)],
-    )?;
+    )
+    .and_then(|binding| {
+        binding
+            .with_installed_action_approver(
+                GatewayWorldActionApprover(world_plugin),
+                [Kind::new(event_type)],
+            )
+            .map_err(pos_runtime::RuntimeError::from)
+    })?;
     let pin = PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,
