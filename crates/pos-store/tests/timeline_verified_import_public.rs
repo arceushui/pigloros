@@ -164,7 +164,7 @@ struct RangeFaultStore {
 }
 
 impl RangeFaultStore {
-    fn new(inner: MemoryStore) -> Self {
+    const fn new(inner: MemoryStore) -> Self {
         Self {
             inner,
             lineage_fault: LineageFault::None,
