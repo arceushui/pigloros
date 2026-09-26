@@ -33,7 +33,7 @@ pub trait Reducer: Send + Sync {
     fn initial(&self) -> State;
     /// Whether this event can contribute to this reducer's State.
     /// A rejected event is not materialized as an entity in the registry.
-    fn accepts_event(&self, _event: &Event) -> bool {
+    fn projects_event(&self, _event: &Event) -> bool {
         true
     }
     fn apply(&self, state: &mut State, event: &Event);
@@ -75,7 +75,7 @@ impl StateRegistry {
     }
 
     fn apply_reducer_event(&mut self, reducer: &dyn Reducer, event: &Event) {
-        if !reducer.accepts_event(event) {
+        if !reducer.projects_event(event) {
             return;
         }
         let state = self
@@ -118,7 +118,7 @@ mod tests {
             state
         }
 
-        fn accepts_event(&self, _event: &Event) -> bool {
+        fn projects_event(&self, _event: &Event) -> bool {
             false
         }
 

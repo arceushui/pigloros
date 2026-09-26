@@ -1587,7 +1587,7 @@ impl Reducer for WorldReducer {
         State::new()
     }
 
-    fn accepts_event(&self, event: &Event) -> bool {
+    fn projects_event(&self, event: &Event) -> bool {
         Self::accepted_observation(event).is_some()
     }
 
