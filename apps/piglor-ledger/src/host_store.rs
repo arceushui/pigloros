@@ -333,6 +333,26 @@ mod tests {
         let registry = KeyRegistryStateV1::new();
         let mut missing_timeline = HostedLedgerStore::open(pos_store::StoreConfig::Memory)?;
         assert!(missing_timeline.save_key_registry(&registry).is_err());
+        let mut sign = |_: &mut KeyRegistryStateV1,
+                        _: &pos_core::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            Err::<pos_core::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(missing_timeline
+            .append_timeline_signed_authorized(
+                TimelineId::new(),
+                &registry,
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("ledger.adapter.denied"),
+                    CanonicalBytes::from_static(b"closed"),
+                ),
+                identity,
+                Hash::from_bytes([1; 32]),
+                pos_core::PublicKey::from_bytes([2; 32]),
+                &mut sign,
+            )
+            .is_err());
         assert!(missing_timeline
             .begin_key_registry_destruction(request)
             .is_err());

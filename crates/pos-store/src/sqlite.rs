@@ -15113,6 +15113,38 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[test]
+    fn atomic_timeline_signing_rejects_a_failed_transaction_begin(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = open_store()?;
+        let timeline = store.create_timeline("failed-atomic-begin")?;
+        store.save_key_registry(&registry)?;
+        let mut sign = |_: &mut KeyRegistryStateV1,
+                        _: &pos_core::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            Err::<pos_core::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let result = store.append_timeline_signed_authorized(
+            timeline.id(),
+            &registry,
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("timeline.failed-begin"),
+                CanonicalBytes::from_static(b"uncommitted"),
+            ),
+            identity,
+            material_digest,
+            pos_core::PublicKey::from_bytes([4; 32]),
+            &mut sign,
+        );
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
+        Ok(())
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn sqlite_key_registry_transaction_boundaries_fail_closed(

@@ -365,6 +365,27 @@ mod tests {
         )?)
     }
 
+    struct ZeroPayloadHasher;
+
+    impl Hasher for ZeroPayloadHasher {
+        fn genesis_hash(&self) -> Hash {
+            Blake3Hasher.genesis_hash()
+        }
+
+        fn hash_payload(&self, _: &CanonicalBytes) -> Hash {
+            Hash::zero()
+        }
+
+        fn hash_event(
+            &self,
+            previous_hash: &Hash,
+            event_id_bytes: &[u8],
+            payload: &CanonicalBytes,
+        ) -> Hash {
+            Blake3Hasher.hash_event(previous_hash, event_id_bytes, payload)
+        }
+    }
+
     type SigningRegistry = (Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1);
 
     fn registry_for(
@@ -1067,6 +1088,34 @@ mod tests {
             &events[0].payload,
             signature,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_rejects_a_payload_hasher_that_disagrees_with_the_atomic_envelope(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let mut backing = gated_memory_store();
+        let timeline = backing.create_timeline("ledger-hash-mismatch")?;
+        let mut ledger = EventLedgerStore::new(
+            Box::new(backing),
+            timeline.id(),
+            EntityId::new(),
+            signing_key,
+            registry,
+            identity,
+            Box::new(ZeroPayloadHasher),
+        )?;
+        let error = ledger
+            .register(contract::sample_new_prediction("2026-08-01"))
+            .err()
+            .ok_or("expected payload hash mismatch")?;
+        assert!(error.to_string().contains("payload hash differs"));
+        assert!(ledger
+            .store
+            .read_own(timeline.id(), SeqRange::all())?
+            .is_empty());
         Ok(())
     }
 
