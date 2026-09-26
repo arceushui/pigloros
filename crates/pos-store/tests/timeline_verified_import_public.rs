@@ -144,6 +144,111 @@ impl EventStore for SingleRegistryReadStore {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LineageFault {
+    None,
+    Missing,
+    Mismatched,
+    Cycle,
+    ParentAhead,
+    ReadError,
+}
+
+struct RangeFaultStore {
+    inner: MemoryStore,
+    lineage_fault: LineageFault,
+    registry_error: bool,
+    read_error: bool,
+    head_error: bool,
+    head_override: Option<Seq>,
+}
+
+impl RangeFaultStore {
+    fn new(inner: MemoryStore) -> Self {
+        Self {
+            inner,
+            lineage_fault: LineageFault::None,
+            registry_error: false,
+            read_error: false,
+            head_error: false,
+            head_override: None,
+        }
+    }
+}
+
+impl EventStore for RangeFaultStore {
+    fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.inner.create_timeline(name)
+    }
+
+    fn append(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        self.inner.append(timeline, drafts)
+    }
+
+    fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        if self.read_error {
+            Err(CoreError::Storage("injected range read failure".to_owned()))
+        } else {
+            self.inner.read(timeline, range)
+        }
+    }
+
+    fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
+        self.inner.fork(parent, at_seq, name)
+    }
+
+    fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+        self.inner.list_timelines()
+    }
+
+    fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+        if matches!(self.lineage_fault, LineageFault::ReadError) {
+            return Err(CoreError::Storage(
+                "injected lineage read failure".to_owned(),
+            ));
+        }
+        if matches!(self.lineage_fault, LineageFault::Missing) {
+            return Ok(None);
+        }
+        let mut found = self.inner.get_timeline(id)?;
+        if let Some(timeline) = found.as_mut() {
+            match self.lineage_fault {
+                LineageFault::Mismatched => timeline.meta.id = TimelineId::new(),
+                LineageFault::Cycle => timeline.meta.fork_point = Some((id, Seq::from_u64(1))),
+                LineageFault::ParentAhead => {
+                    timeline.meta.fork_point = Some((id, Seq::from_u64(3)));
+                }
+                LineageFault::None | LineageFault::Missing | LineageFault::ReadError => {}
+            }
+        }
+        Ok(found)
+    }
+
+    fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+        if self.registry_error {
+            Err(CoreError::Storage(
+                "injected registry read failure".to_owned(),
+            ))
+        } else {
+            self.inner.load_key_registry()
+        }
+    }
+
+    fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        if self.head_error {
+            Err(CoreError::Storage("injected head read failure".to_owned()))
+        } else if let Some(head) = self.head_override {
+            Ok(head)
+        } else {
+            self.inner.logical_head(id)
+        }
+    }
+}
+
 fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
     let (first_key, _) = generate_keypair();
     let first_material = SigningKeyMaterial::new(first_key);
@@ -490,6 +595,137 @@ fn signed_range_rejects_reordering_duplicates_gaps_and_untrusted_head(
         .per_event()
         .iter()
         .all(|result| *result == TimelineEventVerificationV1::Invalid));
+    Ok(())
+}
+
+#[test]
+fn signed_range_rejects_empty_input_invalid_anchors_and_missing_lineage(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let events = fixture.source.read(fixture.root, SeqRange::all())?;
+    let head = fixture.source.logical_head(fixture.root)?;
+    let empty = verify_signed_timeline_range_v1(
+        &fixture.source,
+        fixture.root,
+        SeqRange::all(),
+        &[],
+        &fixture.anchors,
+        Some(head),
+    )?;
+    assert_eq!(empty.range_claim(), TimelineSignedRangeClaimV1::Rejected);
+    assert!(empty.per_event().is_empty());
+
+    let (identity, key) = fixture.anchors[0];
+    for invalid in [
+        vec![(
+            KeyIdentityV1::new("import-owner", KeyRoleV1::SubjectAttributionSigning, 1),
+            key,
+        )],
+        vec![(
+            KeyIdentityV1::new("import-owner", KeyRoleV1::TimelineIntegritySigning, 0),
+            key,
+        )],
+        vec![(identity, key), (identity, key)],
+    ] {
+        assert!(verify_signed_timeline_range_v1(
+            &fixture.source,
+            fixture.root,
+            SeqRange::all(),
+            &events,
+            &invalid,
+            Some(head),
+        )
+        .is_err());
+    }
+
+    let mut missing_lineage = MemoryStore::new();
+    gated(&mut missing_lineage)?;
+    seed_destination_registry(&mut missing_lineage, &fixture)?;
+    let report = verify_signed_timeline_range_v1(
+        &missing_lineage,
+        fixture.root,
+        SeqRange::all(),
+        &events,
+        &fixture.anchors,
+        Some(head),
+    )?;
+    assert_eq!(report.range_claim(), TimelineSignedRangeClaimV1::Rejected);
+    assert!(report
+        .per_event()
+        .iter()
+        .all(|result| *result == TimelineEventVerificationV1::Verified));
+    Ok(())
+}
+
+#[test]
+fn signed_range_rejects_inconsistent_trusted_lineage() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let root = fixture.root;
+    let events = fixture.source.read(root, SeqRange::all())?;
+    let head = fixture.source.logical_head(root)?;
+    let mut store = RangeFaultStore::new(fixture.source);
+    for fault in [
+        LineageFault::Missing,
+        LineageFault::Mismatched,
+        LineageFault::Cycle,
+        LineageFault::ParentAhead,
+    ] {
+        store.lineage_fault = fault;
+        let report = verify_signed_timeline_range_v1(
+            &store,
+            root,
+            SeqRange::all(),
+            &events,
+            &fixture.anchors,
+            Some(head),
+        )?;
+        assert_eq!(report.range_claim(), TimelineSignedRangeClaimV1::Rejected);
+        assert!(report
+            .per_event()
+            .iter()
+            .all(|result| *result == TimelineEventVerificationV1::Verified));
+    }
+    Ok(())
+}
+
+#[test]
+fn signed_range_propagates_trusted_read_errors_and_rejects_a_moving_head(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let root = fixture.root;
+    let events = fixture.source.read(root, SeqRange::all())?;
+    let head = fixture.source.logical_head(root)?;
+    let mut store = RangeFaultStore::new(fixture.source);
+    let verify = |store: &RangeFaultStore, trusted_head| {
+        verify_signed_timeline_range_v1(
+            store,
+            root,
+            SeqRange::all(),
+            &events,
+            &fixture.anchors,
+            trusted_head,
+        )
+    };
+
+    store.registry_error = true;
+    assert!(verify(&store, Some(head)).is_err());
+    store.registry_error = false;
+    store.lineage_fault = LineageFault::ReadError;
+    assert!(verify(&store, Some(head)).is_err());
+    store.lineage_fault = LineageFault::Cycle;
+    store.head_error = true;
+    assert!(verify(&store, Some(head)).is_err());
+    store.lineage_fault = LineageFault::None;
+    store.head_error = false;
+    store.read_error = true;
+    assert!(verify(&store, Some(head)).is_err());
+    store.read_error = false;
+    store.head_error = true;
+    assert!(verify(&store, Some(head)).is_err());
+    store.head_error = false;
+    store.head_override = Some(head.next());
+    let report = verify(&store, Some(head.next()))?;
+    assert_eq!(report.range_claim(), TimelineSignedRangeClaimV1::Rejected);
     Ok(())
 }
 

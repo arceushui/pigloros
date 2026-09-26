@@ -201,3 +201,49 @@ pub fn verify_signed_timeline_range_v1(
     };
     Ok(report)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::sync::Arc;
+
+    use pos_core::{CanonicalBytes, EntityId, ErasureContainmentGateV1, EventDraft, EventId, Kind};
+
+    use super::*;
+    use crate::memory::MemoryStore;
+
+    #[test]
+    fn lineage_and_sequence_helpers_reject_missing_inconsistent_and_overflowed_context(
+    ) -> Result<(), CoreError> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let timeline = store.create_timeline("range-helper-context")?;
+        let mut event = store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.range"),
+                    CanonicalBytes::from_static(b"range"),
+                )],
+            )?
+            .remove(0);
+        let lineage = [timeline.meta.clone()];
+        event.origin = None;
+        assert!(!origin_matches_lineage(&event, &lineage));
+        event.origin = Some(EventOriginV1 {
+            origin_timeline_id: timeline.id(),
+            origin_logical_seq: Seq::from_u64(2),
+        });
+        assert!(!origin_matches_lineage(&event, &lineage));
+
+        event.seq = Seq::from_u64(u64::MAX);
+        let mut second = event.clone();
+        second.id = EventId::new();
+        assert!(!records_are_contiguous(
+            &[event, second],
+            SeqRange::bounded(Seq::from_u64(u64::MAX), Seq::from_u64(u64::MAX)),
+        ));
+        Ok(())
+    }
+}
