@@ -2380,6 +2380,9 @@ impl GeographicAdmissionStore for MemoryStore {
             snapshot_hash,
             snapshot_cbor,
         };
+        if self.hasher.hash_payload(&event.payload) != event.payload_hash {
+            return Err(CoreError::GeographicAdmissionValidationFailed);
+        }
         let dedup = GeographicCellDedupRecord {
             timeline,
             entity,
