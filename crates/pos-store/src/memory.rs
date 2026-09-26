@@ -2744,17 +2744,17 @@ impl EventStore for MemoryStore {
             &pos_core::CanonicalBytes,
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
-        let mut persisted = self
-            .load_key_registry()?
-            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
+        let mut persisted = self.load_key_registry().and_then(|registry| {
+            registry.ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))
+        })?;
         if persisted != *expected_registry {
             return Err(CoreError::Storage(
                 "key registry changed during signing".to_owned(),
             ));
         }
         let owning_timeline = self
-            .get_timeline(timeline)?
-            .ok_or(CoreError::TimelineNotFound(timeline))?;
+            .get_timeline(timeline)
+            .and_then(|head| head.ok_or(CoreError::TimelineNotFound(timeline)))?;
         let inherited_prefix = owning_timeline
             .meta
             .fork_point
@@ -2780,8 +2780,8 @@ impl EventStore for MemoryStore {
                 )?;
                 event.signature = Some(signature);
                 event.signature_identity = Some(identity);
-                self.append_committed(timeline, std::slice::from_ref(&event))?;
-                Ok(event)
+                self.append_committed(timeline, std::slice::from_ref(&event))
+                    .map(|()| event)
             })
             .map_err(|error| {
                 CoreError::Storage(format!("Timeline signing authorization: {error}"))
