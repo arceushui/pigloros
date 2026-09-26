@@ -5151,12 +5151,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cover_validate_recovery_evidence_empty_segments_and_zero_bound_paths() {
-        // Empty ancestry → InvalidRecoveryEvidence (first else branch)
-        drop(validate_recovery_evidence(&[], &[]));
-        // Empty events with through=ZERO → early Ok() return
+    fn restore_driver_state_rejects_empty_ancestry_and_accepts_zero_bound() {
+        let mut registry = PluginRegistry::new();
+        assert!(matches!(
+            registry.restore_driver_state(&[], &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Timeline ancestry is empty"
+            })
+        ));
+
         let zero_segment = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
-        drop(validate_recovery_evidence(&[zero_segment], &[]));
+        registry
+            .restore_driver_state(&[zero_segment], &[])
+            .test_ok();
     }
 
     #[test]
