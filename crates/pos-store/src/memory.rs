@@ -2333,8 +2333,12 @@ impl GeographicAdmissionStore for MemoryStore {
         let mut staged_state = existing_state.clone();
         let event_id = EventId::new();
         let event_seq = staged_state.timeline.head.next();
-        let origin_logical_seq =
-            crate::checked_logical_head(self.logical_prefix(timeline)?, event_seq.as_u64())?;
+        let inherited_prefix = existing_state
+            .timeline
+            .meta
+            .fork_point
+            .map_or(0, |(_, fork)| fork.as_u64());
+        let origin_logical_seq = crate::checked_logical_head(inherited_prefix, event_seq.as_u64())?;
         let snapshot_id = AdmissionSnapshotId::new();
         let snapshot =
             AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);
@@ -3287,6 +3291,90 @@ mod tests {
         assert_eq!(state.timeline.head, Seq::ZERO);
         assert!(state.events.is_empty());
         assert!(store.append_identities.is_empty());
+    }
+
+    #[test]
+    fn origin_overflow_rejects_geographic_admission_without_sidecars() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("geo-origin-overflow").test_ok();
+        let entity = EntityId::new();
+        let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            timeline.id(),
+            entity,
+            CanonicalBytes::from_static(b"geo-origin-overflow"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 10),
+            ([4; 32], [5; 32]),
+        ));
+        pair_geographic_enrollment(
+            &mut store,
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .test_ok()
+            .timeline
+            .meta
+            .fork_point = Some((TimelineId::new(), Seq::from_u64(u64::MAX)));
+        assert!(store.admit_geo_location(request).is_err());
+        assert!(store.state(timeline.id()).events.is_empty());
+        assert!(store.geographic_admission_dedup.is_empty());
+        assert!(store.geographic_admission_snapshots.is_empty());
+        assert!(store.geographic_admission_links.is_empty());
+    }
+
+    #[test]
+    fn origin_overflow_rejects_geo_cell_admission_without_sidecars() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("geo-cell-origin-overflow").test_ok();
+        let entity = EntityId::new();
+        let draft = geo_cell_draft(
+            timeline.id(),
+            entity,
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").test_ok(),
+            12,
+            "origin-overflow",
+            vec![entity],
+            "private",
+            9,
+            1,
+            13,
+        );
+        let request = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
+                b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
+            ))
+            .test_ok(),
+            pos_core::SourceTimeBucket::new(123),
+            GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
+            pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .test_ok();
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                request.fence().draft().consent_record_id().clone(),
+                request.fence().draft().consent_revision(),
+            ))
+            .test_ok();
+        store
+            .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
+            .test_ok();
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .test_ok()
+            .timeline
+            .meta
+            .fork_point = Some((TimelineId::new(), Seq::from_u64(u64::MAX)));
+        assert!(store.admit(request).is_err());
+        assert!(store.state(timeline.id()).events.is_empty());
+        assert!(store.geographic_cell_dedup.is_empty());
+        assert!(store.geographic_cell_snapshots.is_empty());
+        assert!(store.geographic_cell_links.is_empty());
     }
 
     #[test]
