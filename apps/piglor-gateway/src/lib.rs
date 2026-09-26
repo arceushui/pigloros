@@ -42,7 +42,8 @@ use pos_core::{
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{
-    ActionKindV1, WorldActionV1, WorldPlugin, EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
+    encode_actuator_pair_v1, ActionKindV1, WorldActionV1, WorldPlugin,
+    EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
@@ -2719,7 +2720,7 @@ struct GatewayWorldActionPayload {
     actor_entity_id: EntityId,
     body_entity_id: EntityId,
     action_kind: String,
-    params: Vec<u8>,
+    params: [serde_json::Value; 2],
     action_scope: u8,
     catalogue_version: u32,
     tick: u64,
@@ -2727,33 +2728,59 @@ struct GatewayWorldActionPayload {
 
 impl GatewayWorldActionPayload {
     fn encode(self) -> Result<CanonicalBytes, ActionRejected> {
-        match self.action_kind.as_str() {
+        let Self {
+            actor_entity_id,
+            body_entity_id,
+            action_kind,
+            params,
+            action_scope,
+            catalogue_version,
+            tick,
+        } = self;
+        match action_kind.as_str() {
             "impulse" => Some(ActionKindV1::Impulse),
             "target_velocity" => Some(ActionKindV1::TargetVelocity),
             _ => None,
         }
         .ok_or_else(|| ActionRejected::DomainValidationFailed("unknown action kind".to_owned()))
         .and_then(|action_kind| {
-            encode_world_action(&WorldActionV1 {
-                actor_entity_id: self.actor_entity_id,
-                body_entity_id: self.body_entity_id,
-                action_kind,
-                params_cbor: self.params,
-                action_scope: self.action_scope,
-                catalogue_version: self.catalogue_version,
-                tick: self.tick,
+            encode_gateway_actuator_params(&params).and_then(|params_cbor| {
+                WorldActionV1 {
+                    actor_entity_id,
+                    body_entity_id,
+                    action_kind,
+                    params_cbor,
+                    action_scope,
+                    catalogue_version,
+                    tick,
+                }
+                .encode()
+                .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
             })
         })
     }
 }
 
-fn encode_world_action(action: &WorldActionV1) -> Result<CanonicalBytes, ActionRejected> {
-    action.encode().map_err(|error| match error {
-        pos_plugin_world::WorldCodecError::PayloadTooLarge { size, max } => {
-            ActionRejected::PayloadTooLarge { size, max }
-        }
-        error => ActionRejected::DomainValidationFailed(error.to_string()),
-    })
+fn encode_gateway_actuator_params(
+    params: &[serde_json::Value; 2],
+) -> Result<Vec<u8>, ActionRejected> {
+    let component = |value: &serde_json::Value| {
+        value
+            .as_number()
+            .filter(|number| number.is_f64())
+            .and_then(serde_json::Number::as_f64)
+            .ok_or_else(|| {
+                ActionRejected::DomainValidationFailed(
+                    "actuator parameters must be exactly two JSON floats".to_owned(),
+                )
+            })
+    };
+    component(&params[0])
+        .and_then(|x| component(&params[1]).map(|z| (x, z)))
+        .and_then(|(x, z)| {
+            encode_actuator_pair_v1(x, z)
+                .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
+        })
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
@@ -3432,7 +3459,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3516,7 +3543,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3599,7 +3626,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3641,7 +3668,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3690,7 +3717,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3923,7 +3950,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3979,7 +4006,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -6765,7 +6792,7 @@ mod tests {
             actor_entity_id: actor,
             body_entity_id: body,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![1],
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: 0,
             catalogue_version: 1,
             tick: 1,
@@ -6857,7 +6884,7 @@ mod tests {
             actor_entity_id: actor,
             body_entity_id: body,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![0x83, 1, 2, 3],
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: 0,
             catalogue_version: 1,
             tick: 1,

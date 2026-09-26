@@ -665,7 +665,7 @@ async fn run_tick_boundaries(
                 "actor_entity_id": scenario.human_entity.to_string(),
                 "body_entity_id": scenario.human_body.to_string(),
                 "action_kind": "impulse",
-                "params": [1],
+                "params": [1.0, 0.0],
                 "action_scope": 0,
                 "catalogue_version": 1,
                 "tick": 1
