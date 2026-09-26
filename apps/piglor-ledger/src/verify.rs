@@ -12,7 +12,9 @@ use std::path::Path;
 use pos_core::{
     event::Event, store::SeqRange, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
 };
-use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
+use pos_crypto::{
+    key_roles::verify_committed_timeline_event_v1, signing::verifying_key_from_public_key,
+};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
 
 use crate::{cli::Source, export::ExportManifest, hex::hex_decode, CliError};
@@ -382,9 +384,9 @@ fn verify_store_event(
             format!("unsupported event type {:?}", event.event_type.as_str()),
         )));
     }
-    let Some(signature) = &event.signature else {
+    if event.signature.is_none() {
         return Ok(Some((which, "event is unsigned".to_owned())));
-    };
+    }
     let Some(identity) = event.signature_identity else {
         return Ok(Some((
             which,
@@ -415,12 +417,26 @@ fn verify_store_event(
     let public_key = registry_public_key.ok_or_else(|| {
         CliError::BadSource("store verification has no public key for event identity".to_owned())
     })?;
-    let verifying_key = verifying_key_from_public_key(&public_key)
+    verifying_key_from_public_key(&public_key)
         .map_err(|error| CliError::BadKey(error.to_string()))?;
-    if let Err(error) = verify_for_role(&verifying_key, identity, &event.payload, signature) {
-        return Ok(Some((which, error.to_string())));
+    let result = verify_committed_timeline_event_v1(event, registry, Some((identity, public_key)));
+    Ok(timeline_verification_mismatch(which, result))
+}
+
+fn timeline_verification_mismatch(
+    which: String,
+    result: pos_core::TimelineEventVerificationV1,
+) -> Option<(String, String)> {
+    match result {
+        pos_core::TimelineEventVerificationV1::Verified => None,
+        pos_core::TimelineEventVerificationV1::Invalid => {
+            Some((which, "Timeline envelope is invalid".to_owned()))
+        }
+        pos_core::TimelineEventVerificationV1::MissingRequiredContext => Some((
+            which,
+            "Timeline envelope is missing required context".to_owned(),
+        )),
     }
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -796,8 +812,7 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn verify_store_rejects_envelope_signatures_until_full_verifier(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn verify_store_with_signed_events_passes() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         let key_path = tmp.path().join("sk");
@@ -837,10 +852,7 @@ mod tests {
         let trust_anchor = ledger_trust_anchor(&pubkey);
         let report = run(&Source::Store(db.clone()), Some(&trust_anchor), None).test_ok()?;
         assert_eq!(report.tier, "store");
-        // #409 replaces the payload-only CLI verifier with the exact envelope verifier.
-        let (which, reason) = expect_mismatch(report.outcome)?;
-        assert_eq!(which, "seq=1");
-        assert!(reason.contains("signature verification failed"), "{reason}");
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
         assert!(report.n >= 1);
 
         let error = run(&Source::Store(db), None, None).test_err()?;
@@ -1473,6 +1485,14 @@ mod tests {
                 Some(registered_key),
             ))
             .test_ok()?;
+
+        let mut missing_origin_event = signature_rejection_event();
+        missing_origin_event.signature = Some(Signature::from_bytes([0; 64]));
+        missing_origin_event.signature_identity = Some(identity);
+        let (_, missing_origin_reason) =
+            verify_store_event(&missing_origin_event, None, Some(&registry))?
+                .ok_or("expected missing Timeline origin rejection")?;
+        assert!(missing_origin_reason.contains("missing required context"));
 
         let supplied_mismatch = run_store_event(
             signature_rejection_event(),

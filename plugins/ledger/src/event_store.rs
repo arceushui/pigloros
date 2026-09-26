@@ -11,7 +11,8 @@ use pos_core::{
 };
 use pos_crypto::key_roles::{
     destroy_registered_signing_key, sign_timeline_event_for_registered_role,
-    KeyDestructionPersistence, KeyMaterialDestructionError, SigningKeyMaterial,
+    verify_committed_timeline_event_v1, KeyDestructionPersistence, KeyMaterialDestructionError,
+    SigningKeyMaterial,
 };
 
 use crate::{
@@ -229,27 +230,41 @@ impl EventLedgerStore {
     }
 }
 
-/// Load and fold a ledger view from an event store.
-///
-/// Read-only consumers must not construct a signing adapter or mutate the
-/// store's durable key registry just to inspect existing events.
-///
-/// # Errors
-///
-/// Returns [`LedgerError`] when the event store cannot be read, an event cannot
-/// be decoded, or an outcome has no matching prediction.
-pub fn load_ledger_from_store(
+fn read_verified_ledger_events(
     store: &dyn EventStore,
     timeline_id: pos_core::ids::TimelineId,
-    today: &str,
-) -> Result<Ledger, LedgerError> {
+) -> Result<Vec<pos_core::Event>, LedgerError> {
     let events = store
         .read(timeline_id, SeqRange::all())
         .map_err(LedgerError::from)?;
+    if events.is_empty() {
+        return Ok(events);
+    }
+    let registry = store
+        .load_key_registry()
+        .map_err(LedgerError::from)?
+        .ok_or_else(|| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
+    for event in &events {
+        let anchor = event.signature_identity.and_then(|identity| {
+            registry
+                .key_record(identity)
+                .and_then(|record| record.public_verification_key.map(|key| (identity, key)))
+        });
+        let result = verify_committed_timeline_event_v1(event, Some(&registry), anchor);
+        if result != pos_core::TimelineEventVerificationV1::Verified {
+            return Err(LedgerError::Store(format!(
+                "ledger Timeline Event at seq {}: {result:?}",
+                event.seq.as_u64()
+            )));
+        }
+    }
+    Ok(events)
+}
 
+fn fold_ledger_events(events: &[pos_core::Event], today: &str) -> Result<Ledger, LedgerError> {
     let mut pairs: Vec<(LedgerPrediction, Option<LedgerOutcome>)> = Vec::new();
 
-    for event in &events {
+    for event in events {
         match event.event_type.as_str() {
             EVENT_TYPE_PREDICTION => {
                 let pred = decode_prediction(event.payload.as_slice())?;
@@ -273,6 +288,41 @@ pub fn load_ledger_from_store(
     Ledger::from_pairs(pairs, today)
 }
 
+/// Load a ledger and the exact Events whose Timeline envelopes were verified.
+///
+/// The persisted local registry is the store reader's trust root. External
+/// verification must additionally check an independently supplied trust set.
+///
+/// # Errors
+/// Returns [`LedgerError`] when any Event lacks required context, has an
+/// invalid signature, cannot be decoded, or has an orphan outcome.
+pub fn load_ledger_with_verified_events(
+    store: &dyn EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    today: &str,
+) -> Result<(Ledger, Vec<pos_core::Event>), LedgerError> {
+    let events = read_verified_ledger_events(store, timeline_id)?;
+    let ledger = fold_ledger_events(&events, today)?;
+    Ok((ledger, events))
+}
+
+/// Load and fold a ledger view from an event store.
+///
+/// Read-only consumers must not construct a signing adapter or mutate the
+/// store's durable key registry just to inspect existing events.
+///
+/// # Errors
+///
+/// Returns [`LedgerError`] when the event store cannot be read, an event cannot
+/// be decoded, or an outcome has no matching prediction.
+pub fn load_ledger_from_store(
+    store: &dyn EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    today: &str,
+) -> Result<Ledger, LedgerError> {
+    load_ledger_with_verified_events(store, timeline_id, today).map(|(ledger, _)| ledger)
+}
+
 impl LedgerStore for EventLedgerStore {
     fn load(&self, today: &str) -> Result<Ledger, LedgerError> {
         load_ledger_from_store(self.store.as_ref(), self.timeline_id, today)
@@ -288,10 +338,7 @@ impl LedgerStore for EventLedgerStore {
     }
 
     fn find_resolve_status(&self, prediction_id: &str) -> Result<ResolveStatus, LedgerError> {
-        let events = self
-            .store
-            .read(self.timeline_id, SeqRange::all())
-            .map_err(LedgerError::from)?;
+        let events = read_verified_ledger_events(self.store.as_ref(), self.timeline_id)?;
 
         let found_prediction = events
             .iter()
@@ -341,6 +388,26 @@ mod tests {
             .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .is_ok());
         store
+    }
+
+    #[test]
+    fn nonempty_ledger_read_requires_a_persisted_registry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut store = gated_memory_store();
+        let timeline = store.create_timeline("unregistered-ledger")?;
+        store.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_PREDICTION),
+                CanonicalBytes::from_static(b"unregistered"),
+            )],
+        )?;
+        let error = read_verified_ledger_events(&store, timeline.id())
+            .err()
+            .ok_or("expected missing registry rejection")?;
+        assert!(error.to_string().contains("registry is unavailable"));
+        Ok(())
     }
 
     fn open_store(config: pos_store::StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
@@ -412,6 +479,7 @@ mod tests {
         registry: KeyRegistryStateV1,
         failure: RegistryFailure,
         save_calls: Option<Arc<Mutex<usize>>>,
+        events: Vec<Event>,
     }
 
     impl RegistryFailureStore {
@@ -421,7 +489,13 @@ mod tests {
                 registry,
                 failure,
                 save_calls: None,
+                events: Vec::new(),
             }
+        }
+
+        fn with_events(mut self, events: Vec<Event>) -> Self {
+            self.events = events;
+            self
         }
 
         fn with_save_counter(mut self, save_calls: Arc<Mutex<usize>>) -> Self {
@@ -448,7 +522,7 @@ mod tests {
             _timeline: pos_core::ids::TimelineId,
             _range: SeqRange,
         ) -> Result<Vec<Event>, CoreError> {
-            Ok(Vec::new())
+            Ok(self.events.clone())
         }
 
         fn fork(
@@ -521,6 +595,28 @@ mod tests {
         .join();
         assert!(poisoned.is_err());
         registry
+    }
+
+    #[test]
+    fn nonempty_ledger_read_propagates_registry_load_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut source = gated_memory_store();
+        let timeline = source.create_timeline("registry-read-failure")?;
+        let events = source.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_PREDICTION),
+                CanonicalBytes::from_static(b"registry-load-failure"),
+            )],
+        )?;
+        let store = RegistryFailureStore::new(KeyRegistryStateV1::new(), RegistryFailure::Load)
+            .with_events(events);
+        let error = read_verified_ledger_events(&store, store.timeline.id())
+            .err()
+            .ok_or("expected registry load failure")?;
+        assert!(error.to_string().contains("registry load failed"));
+        Ok(())
     }
 
     #[test]
@@ -1206,14 +1302,18 @@ mod tests {
             origin: None,
             payload_hash,
         };
-        store.store.append_committed(store.timeline_id, &[event])?;
-        let err = store.load("2026-07-25").err().ok_or("expected error")?;
+        store
+            .store
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
+        let err = fold_ledger_events(&[event], "2026-07-25")
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::OrphanResolution(_)));
         Ok(())
     }
 
     #[test]
-    fn load_skips_unknown_event_types() -> Result<(), Box<dyn std::error::Error>> {
+    fn load_rejects_unsigned_unknown_event_types() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = make_store()?;
         let head = store.head_seq()?;
         let payload = CanonicalBytes::from_vec(b"some_unrelated_data".to_vec());
@@ -1233,8 +1333,12 @@ mod tests {
             origin: None,
             payload_hash,
         };
-        store.store.append_committed(store.timeline_id, &[event])?;
-        let ledger = store.load("2026-07-25")?;
+        store
+            .store
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
+        let err = store.load("2026-07-25").err().ok_or("expected error")?;
+        assert!(matches!(err, LedgerError::Store(_)));
+        let ledger = fold_ledger_events(&[event], "2026-07-25")?;
         assert!(ledger.entries().is_empty());
         Ok(())
     }
@@ -1269,7 +1373,7 @@ mod tests {
             )?)
             .err()
             .ok_or("expected error")?;
-        assert!(matches!(err, LedgerError::UnknownPrediction(_)));
+        assert!(matches!(err, LedgerError::Store(_)));
         Ok(())
     }
 
@@ -1301,7 +1405,7 @@ mod tests {
             true,
             "2026-07-30T09:00:00Z".to_owned(),
         )?);
-        assert!(result.is_ok(), "resolve should succeed: {result:?}");
+        assert!(matches!(result, Err(LedgerError::Store(_))));
         Ok(())
     }
 
@@ -1328,11 +1432,12 @@ mod tests {
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
-        store.resolve(LedgerOutcome::try_new(
+        let result = store.resolve(LedgerOutcome::try_new(
             id,
             true,
             "2026-07-30T09:00:00Z".to_owned(),
-        )?)?;
+        )?);
+        assert!(matches!(result, Err(LedgerError::Store(_))));
         Ok(())
     }
 
@@ -1357,8 +1462,12 @@ mod tests {
             origin: None,
             payload_hash,
         };
-        store.store.append_committed(store.timeline_id, &[event])?;
-        let err = store.load("2026-07-25").err().ok_or("expected error")?;
+        store
+            .store
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
+        let err = fold_ledger_events(&[event], "2026-07-25")
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Decode(_)));
         Ok(())
     }
@@ -1384,8 +1493,12 @@ mod tests {
             origin: None,
             payload_hash,
         };
-        store.store.append_committed(store.timeline_id, &[event])?;
-        let err = store.load("2026-07-25").err().ok_or("expected error")?;
+        store
+            .store
+            .append_committed(store.timeline_id, std::slice::from_ref(&event))?;
+        let err = fold_ledger_events(&[event], "2026-07-25")
+            .err()
+            .ok_or("expected error")?;
         assert!(matches!(err, LedgerError::Decode(_)));
         Ok(())
     }

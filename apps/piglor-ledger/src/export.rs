@@ -6,7 +6,6 @@
 
 use std::path::Path;
 
-use pos_core::store::SeqRange;
 use pos_plugin_ledger::{LedgerStore, LedgerView};
 use serde::{Deserialize, Serialize};
 
@@ -141,8 +140,8 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
         .into_iter()
         .find(|t| t.meta.name.as_deref() == Some("ledger"))
         .ok_or_else(|| CliError::BadSource("no 'ledger' timeline in store".into()))?;
-    let events = store.read(timeline.id(), SeqRange::all())?;
-    let ledger = pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline.id(), today)?;
+    let (ledger, events) =
+        pos_plugin_ledger::load_ledger_with_verified_events(store.as_ref(), timeline.id(), today)?;
     let view = LedgerView::from(&ledger);
     let records: Vec<SignedEventRecord> = events
         .iter()
