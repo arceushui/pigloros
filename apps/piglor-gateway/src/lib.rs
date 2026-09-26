@@ -34,15 +34,16 @@ use pos_core::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError,
-    ErasureContainmentGateV1, Plugin, ProposedAction,
+    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1, Plugin,
+    ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{
-    ActionKindV1, WorldActionV1, WorldPlugin, EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
+    encode_actuator_pair_v1, ActionKindV1, WorldActionV1, WorldPlugin,
+    EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
@@ -680,24 +681,6 @@ struct GatewayActionPlugin {
     id: PluginId,
 }
 
-struct GatewayWorldActionApprover(WorldPlugin);
-
-impl ActionApprover for GatewayWorldActionApprover {
-    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
-        WorldActionV1::decode(&proposal.payload)
-            .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
-            .and_then(|action| encode_world_action(&action))
-            .and_then(|canonical| {
-                if canonical != proposal.payload {
-                    return Err(ActionRejected::DomainValidationFailed(
-                        "non-canonical world.action.v1 payload".to_owned(),
-                    ));
-                }
-                self.0.approve(proposal)
-            })
-    }
-}
-
 impl Plugin for GatewayActionPlugin {
     fn id(&self) -> PluginId {
         self.id
@@ -776,7 +759,7 @@ fn gateway_action_registry_builder_with_inputs(
         closure,
         None,
         None,
-        Some(Box::new(GatewayWorldActionApprover(world_plugin))),
+        Some(Box::new(world_plugin)),
         [Kind::new(event_type)],
     )?;
     if let Some(authority) = authority {
@@ -2899,7 +2882,7 @@ struct GatewayWorldActionPayload {
     actor_entity_id: EntityId,
     body_entity_id: EntityId,
     action_kind: String,
-    params: Vec<u8>,
+    params: [serde_json::Value; 2],
     action_scope: u8,
     catalogue_version: u32,
     tick: u64,
@@ -2907,69 +2890,59 @@ struct GatewayWorldActionPayload {
 
 impl GatewayWorldActionPayload {
     fn encode(self) -> Result<CanonicalBytes, ActionRejected> {
-        match self.action_kind.as_str() {
+        let Self {
+            actor_entity_id,
+            body_entity_id,
+            action_kind,
+            params,
+            action_scope,
+            catalogue_version,
+            tick,
+        } = self;
+        match action_kind.as_str() {
             "impulse" => Some(ActionKindV1::Impulse),
             "target_velocity" => Some(ActionKindV1::TargetVelocity),
             _ => None,
         }
         .ok_or_else(|| ActionRejected::DomainValidationFailed("unknown action kind".to_owned()))
         .and_then(|action_kind| {
-            encode_world_action(&WorldActionV1 {
-                actor_entity_id: self.actor_entity_id,
-                body_entity_id: self.body_entity_id,
-                action_kind,
-                params_cbor: self.params,
-                action_scope: self.action_scope,
-                catalogue_version: self.catalogue_version,
-                tick: self.tick,
-            })
-        })
-    }
-}
-
-fn encode_world_action(action: &WorldActionV1) -> Result<CanonicalBytes, ActionRejected> {
-    ciborium::from_reader::<ciborium::Value, _>(action.params_cbor.as_slice())
-        .map_err(|_| ActionRejected::DomainValidationFailed("invalid action parameters".to_owned()))
-        .and_then(|params| {
-            if !valid_action_params(&params) {
-                return Err(ActionRejected::DomainValidationFailed(
-                    "non-canonical or non-finite action parameters".to_owned(),
-                ));
-            }
-            action.encode().map_err(|error| match error {
-                pos_plugin_world::WorldCodecError::PayloadTooLarge { size, max } => {
-                    ActionRejected::PayloadTooLarge { size, max }
+            encode_gateway_actuator_params(&params).and_then(|params_cbor| {
+                WorldActionV1 {
+                    actor_entity_id,
+                    body_entity_id,
+                    action_kind,
+                    params_cbor,
+                    action_scope,
+                    catalogue_version,
+                    tick,
                 }
-                error => ActionRejected::DomainValidationFailed(error.to_string()),
+                .encode()
+                .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
             })
         })
-}
-
-fn valid_action_params(value: &ciborium::Value) -> bool {
-    match value {
-        ciborium::Value::Float(value) => value.is_finite(),
-        ciborium::Value::Array(values) => values.iter().all(valid_action_params),
-        ciborium::Value::Map(entries) => {
-            entries.iter().enumerate().all(|(index, (key, value))| {
-                valid_action_params(key)
-                    && valid_action_params(value)
-                    && !entries[..index].iter().any(|(previous, _)| previous == key)
-            }) && entries.windows(2).all(|pair| {
-                let left = action_param_key_bytes(&pair[0].0);
-                let right = action_param_key_bytes(&pair[1].0);
-                (left.len(), left) < (right.len(), right)
-            })
-        }
-        ciborium::Value::Tag(_, value) => valid_action_params(value),
-        _ => true,
     }
 }
 
-fn action_param_key_bytes(key: &ciborium::Value) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    // Parsed CBOR values serialize into this infallible byte sink.
-    drop(ciborium::into_writer(key, &mut bytes));
-    bytes
+fn encode_gateway_actuator_params(
+    params: &[serde_json::Value; 2],
+) -> Result<Vec<u8>, ActionRejected> {
+    let component = |value: &serde_json::Value| {
+        value
+            .as_number()
+            .filter(|number| number.is_f64())
+            .and_then(serde_json::Number::as_f64)
+            .ok_or_else(|| {
+                ActionRejected::DomainValidationFailed(
+                    "actuator parameters must be exactly two JSON floats".to_owned(),
+                )
+            })
+    };
+    component(&params[0])
+        .and_then(|x| component(&params[1]).map(|z| (x, z)))
+        .and_then(|(x, z)| {
+            encode_actuator_pair_v1(x, z)
+                .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))
+        })
 }
 
 fn parse_timeline_id(s: &str) -> Result<TimelineId, GatewayError> {
@@ -3721,7 +3694,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3805,7 +3778,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3888,7 +3861,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3930,7 +3903,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -3979,7 +3952,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -4212,7 +4185,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -4268,7 +4241,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [1],
+            "params": [1.0, 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": 1
@@ -7054,7 +7027,7 @@ mod tests {
             actor_entity_id: actor,
             body_entity_id: body,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![1],
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: 0,
             catalogue_version: 1,
             tick: 1,
@@ -7146,7 +7119,7 @@ mod tests {
             actor_entity_id: actor,
             body_entity_id: body,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![0x83, 1, 2, 3],
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: 0,
             catalogue_version: 1,
             tick: 1,

@@ -141,6 +141,12 @@ mod tests {
         store::{EventStore, SeqRange},
         CoreError, ErasureContainmentGateV1, Event, Reducer, State,
     };
+    use pos_plugin_world::{
+        encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldDriver,
+        WorldObservationV1, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
+        EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
+    };
+    use pos_runtime::{PluginRegistry, TimelineHistorySegment};
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
@@ -292,6 +298,277 @@ mod tests {
         .test_ok();
         assert_eq!(count_for(&complete, &entity), 3);
         assert_eq!(count_for(&partial, &entity), 3);
+    }
+
+    fn committed_world_step() -> (
+        pos_runtime::ErasureExecutionHostV1,
+        TimelineId,
+        [EntityId; 2],
+        Event,
+        Vec<Event>,
+    ) {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let mut bodies = [EntityId::new(), EntityId::new()];
+        bodies.sort_unstable();
+        let driver = WorldDriver::new_live(
+            vec![
+                Body {
+                    entity_id: bodies[1],
+                    rotation: BodyRotationV1::default(),
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    vz: 0.0,
+                },
+                Body {
+                    entity_id: bodies[0],
+                    rotation: BodyRotationV1::default(),
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    vz: 0.0,
+                },
+            ],
+            pos_runtime::HostWorldProfileV1::moat_proof(),
+        )
+        .test_ok();
+        let action = WorldActionV1 {
+            actor_entity_id: bodies[0],
+            body_entity_id: bodies[0],
+            action_kind: ActionKindV1::TargetVelocity,
+            params_cbor: encode_actuator_pair_v1(1.0, 2.0).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let gate = host.containment_gate();
+        let (timeline, action, committed) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("world-live-replay").test_ok().id();
+            let action = commands
+                .append(
+                    timeline,
+                    &[EventDraft::new(
+                        bodies[0],
+                        Kind::new(EVENT_TYPE_ACTION_V1),
+                        action.encode().test_ok(),
+                    )],
+                )
+                .test_ok()
+                .remove(0);
+            let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+            registry
+                .register(
+                    &WorldPlugin::new().with_bodies(bodies),
+                    Some(Box::new(WorldReducer)),
+                    Some(Box::new(driver)),
+                )
+                .test_ok();
+            registry
+                .restore_driver_state(
+                    &[TimelineHistorySegment::new(timeline, action.seq)],
+                    std::slice::from_ref(&action),
+                )
+                .test_ok();
+            let drafts = registry
+                .step_all_anchored_with_events(timeline, action.seq, std::slice::from_ref(&action))
+                .test_ok();
+            let committed = commands.append(timeline, &drafts).test_ok();
+            (timeline, action, committed)
+        };
+        (host, timeline, bodies, action, committed)
+    }
+
+    fn world_registry(gate: Arc<ErasureContainmentGateV1>) -> ProjectionRegistry {
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("world", Box::new(WorldReducer));
+        registry
+    }
+
+    #[test]
+    fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
+        let (mut host, timeline, bodies, action, committed) = committed_world_step();
+        let gate = host.containment_gate();
+
+        let observations: Vec<_> = committed
+            .iter()
+            .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .collect();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].entity, bodies[0]);
+        assert_eq!(observations[1].entity, bodies[1]);
+        assert!(observations[0].seq < observations[1].seq);
+        assert_eq!(observations[0].causation_id, Some(action.id));
+        let observed = WorldObservationV1::decode(&observations[0].payload).test_ok();
+        assert_eq!(
+            (observed.pos_x, observed.pos_y, observed.pos_z),
+            (1.0, 0.0, 2.0)
+        );
+        assert_eq!(
+            (observed.vel_lin_x, observed.vel_lin_y, observed.vel_lin_z),
+            (1.0, 0.0, 2.0)
+        );
+
+        let mut live = world_registry(gate.clone());
+        live.apply_event(&action);
+        live.fold_events(&committed);
+        let expected: Vec<_> = bodies
+            .iter()
+            .map(|body| live.state_for_reducer("world", body).test_ok().clone())
+            .collect();
+
+        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let mut before = world_registry(gate.clone());
+        let mut first = world_registry(gate.clone());
+        let mut complete = world_registry(gate.clone());
+        let mut reads = host.read_sender().test_ok();
+        super::replay_at(
+            &mut reads,
+            timeline,
+            action.seq,
+            &mut before,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        assert!(before.state_for_reducer("world", &bodies[0]).is_none());
+        assert!(before.state_for_reducer("world", &bodies[1]).is_none());
+        super::replay_at(
+            &mut reads,
+            timeline,
+            observations[0].seq,
+            &mut first,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        assert_eq!(
+            first.state_for_reducer("world", &bodies[0]),
+            Some(&expected[0])
+        );
+        assert!(first.state_for_reducer("world", &bodies[1]).is_none());
+        super::replay(
+            &mut reads,
+            timeline,
+            &mut complete,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        for (body, state) in bodies.iter().zip(&expected) {
+            assert_eq!(complete.state_for_reducer("world", body), Some(state));
+        }
+
+        let telemetry = EventDraft::new(
+            bodies[0],
+            Kind::new("world.telemetry.ephemeral"),
+            CanonicalBytes::from_static(b"discardable"),
+        );
+        host.command_sender()
+            .test_ok()
+            .append(timeline, &[telemetry])
+            .test_ok();
+        let mut with_telemetry = world_registry(gate);
+        super::replay(
+            &mut host.read_sender().test_ok(),
+            timeline,
+            &mut with_telemetry,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        for (body, state) in bodies.iter().zip(&expected) {
+            assert_eq!(with_telemetry.state_for_reducer("world", body), Some(state));
+        }
+    }
+
+    #[test]
+    fn world_replay_does_not_materialize_invalid_or_disposable_entities() {
+        let (mut host, timeline, bodies, action, committed) = committed_world_step();
+        let gate = host.containment_gate();
+        let canonical = committed
+            .iter()
+            .find(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .test_ok();
+        let last_observation_seq = committed.last().test_ok().seq;
+        let mut noncanonical_bytes = canonical.payload.as_slice().to_vec();
+        noncanonical_bytes.push(0);
+        let invalid = [
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                action.payload,
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                CanonicalBytes::from_static(b"malformed"),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                CanonicalBytes::from_vec(noncanonical_bytes),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("world.observation"),
+                canonical.payload.clone(),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                canonical.payload.clone(),
+            ),
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("world.telemetry.ephemeral"),
+                CanonicalBytes::from_static(b"discardable"),
+            ),
+        ];
+        let invalid_entities: Vec<_> = invalid.iter().map(|draft| draft.entity).collect();
+        host.command_sender()
+            .test_ok()
+            .append(timeline, &invalid)
+            .test_ok();
+
+        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let mut accepted = world_registry(gate.clone());
+        let mut after_invalid = world_registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        super::replay_at(
+            &mut reads,
+            timeline,
+            last_observation_seq,
+            &mut accepted,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        super::replay(
+            &mut reads,
+            timeline,
+            &mut after_invalid,
+            REPLAY_DIGEST,
+            &evaluation,
+        )
+        .test_ok();
+        for body in bodies {
+            assert_eq!(
+                after_invalid.state_for_reducer("world", &body),
+                accepted.state_for_reducer("world", &body)
+            );
+        }
+        for entity in invalid_entities {
+            assert!(after_invalid.state_for_reducer("world", &entity).is_none());
+        }
     }
 
     struct ReadFailStore;
@@ -448,8 +725,11 @@ mod tests {
         let store = ReadFailStore;
         let mut reg = ProjectionRegistry::new();
         reg.register("count", Box::new(CountReducer));
+        let entity = EntityId::new();
+        reg.apply_event(&make_event(entity, 1));
         let err = replay(&store, TimelineId::new(), &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
+        assert_eq!(count_for(&reg, &entity), 1);
     }
 
     #[test]

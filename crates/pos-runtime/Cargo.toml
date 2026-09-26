@@ -10,6 +10,7 @@ publish.workspace = true
 test-support = []
 
 [dependencies]
+blake3 = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-conformance = { path = "../pos-conformance" }
 pos-store = { path = "../pos-store" }

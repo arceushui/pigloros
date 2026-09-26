@@ -2,11 +2,10 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-world` — spatial + embodiment plugin (rapier-free stub for Wave 5).
+//! `pos-plugin-world` — spatial + embodiment plugin with an installed Live backend.
 //!
-//! Owns event types `"world.observation"`, `"world.action"` and entity kind `"world-body"`.
-//! For Wave 5 we build the interface and a simple 2D position model (no rapier dependency —
-//! rapier is deferred to Wave 6 when we need 3D physics).
+//! Owns versioned World action, observation and configuration Events and entity kind `"world-body"`.
+//! The built-in backend integrates a 3D pose without a Rapier dependency.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use num_traits::ToPrimitive;
@@ -15,23 +14,20 @@ use pos_core::{
     ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1, WorldTransformError,
-    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ActionApprover, ActionRejected, ProposedAction, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
+#[cfg(test)]
+use pos_core::{WorldCoordinateV1, WorldTransformError};
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
+    CommittedForkHandoff, Driver, DriverRecoveryEvidence, HostWorldProfileV1,
+    MeasuredProcessImageV1, ObservationView, RecoveryEvent, RecoveryEventHeader, RuntimeError,
+    StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// The entity kind string for world bodies.
 pub const ENTITY_KIND: &str = "world-body";
-
-/// The event type for world observations.
-pub const EVENT_TYPE_OBSERVATION: &str = "world.observation";
-
-/// The event type for world actions.
-pub const EVENT_TYPE_ACTION: &str = "world.action";
 
 /// Versioned event type for world actions (ADR-047 v1).
 pub const EVENT_TYPE_ACTION_V1: &str = "world.action.v1";
@@ -112,6 +108,10 @@ pub enum WorldCodecError {
     WrongFieldType,
     #[error("non-finite float value")]
     NonFiniteFloat,
+    #[error("world observation orientation must be a unit quaternion")]
+    NonUnitOrientation,
+    #[error("unknown v1 sensor kind")]
+    UnknownSensorKind,
     #[error("payload too large: {size} bytes (max {max})")]
     PayloadTooLarge { size: usize, max: usize },
     #[error("unknown action kind (not in v1 allow-list)")]
@@ -122,8 +122,10 @@ pub enum WorldCodecError {
     InvalidCoordConvention,
     #[error("sensor_min_resolution_mm must be >= {SENSOR_MIN_RESOLUTION_MM}")]
     SensorResolutionBelowMinimum,
-    #[error("params_cbor is not canonical CBOR")]
+    #[error("params_cbor must be a canonical normalized two-float actuator pair")]
     NonCanonicalParamsCbor,
+    #[error("World record is not canonical CBOR")]
+    NonCanonicalRecord,
     #[error("trailing bytes after CBOR item")]
     TrailingBytes,
     #[error("CBOR decode error")]
@@ -254,21 +256,90 @@ fn cbor_encode(value: &ciborium::Value) -> Vec<u8> {
     buf
 }
 
-fn cbor_decode_array(
-    bytes: &[u8],
-    expected_len: usize,
-) -> Result<Vec<ciborium::Value>, WorldCodecError> {
+fn decode_canonical_record(bytes: &[u8]) -> Result<ciborium::Value, WorldCodecError> {
     let mut cursor = std::io::Cursor::new(bytes);
     let value: ciborium::Value =
         ciborium::from_reader(&mut cursor).map_err(|_| WorldCodecError::CborError)?;
     if cursor.position() != bytes.len() as u64 {
         return Err(WorldCodecError::TrailingBytes);
     }
+    if cbor_encode(&value).as_slice() != bytes {
+        return Err(WorldCodecError::NonCanonicalRecord);
+    }
+    Ok(value)
+}
+
+fn cbor_decode_array(
+    bytes: &[u8],
+    expected_len: usize,
+) -> Result<Vec<ciborium::Value>, WorldCodecError> {
+    let value = decode_canonical_record(bytes)?;
     match value {
         ciborium::Value::Array(items) if items.len() == expected_len => Ok(items),
         ciborium::Value::Array(_) => Err(WorldCodecError::WrongArrayLength),
         _ => Err(WorldCodecError::CborError),
     }
+}
+
+/// Normalize an actuator's horizontal X/Z pair to finite f32 components and
+/// encode the shortest canonical CBOR float representation for each component.
+///
+/// # Errors
+/// Returns [`WorldCodecError::NonFiniteFloat`] if either source value or its
+/// f32 conversion is non-finite.
+pub fn encode_actuator_pair_v1(x: f64, z: f64) -> Result<Vec<u8>, WorldCodecError> {
+    if !x.is_finite() || !z.is_finite() {
+        return Err(WorldCodecError::NonFiniteFloat);
+    }
+    let normalized = [
+        x.to_f32().unwrap_or(f32::NAN),
+        z.to_f32().unwrap_or(f32::NAN),
+    ];
+    if !normalized.iter().all(|component| component.is_finite()) {
+        return Err(WorldCodecError::NonFiniteFloat);
+    }
+    Ok(cbor_encode(&ciborium::Value::Array(
+        normalized
+            .into_iter()
+            .map(|component| ciborium::Value::Float(f64::from(component)))
+            .collect(),
+    )))
+}
+
+fn decode_actuator_pair_v1(bytes: &[u8]) -> Result<(f32, f32), WorldCodecError> {
+    cbor_decode_array(bytes, 2)
+        .map_err(|_| WorldCodecError::NonCanonicalParamsCbor)
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let ciborium::Value::Float(value) = item else {
+                        return Err(WorldCodecError::NonCanonicalParamsCbor);
+                    };
+                    if !value.is_finite() {
+                        return Err(WorldCodecError::NonCanonicalParamsCbor);
+                    }
+                    let normalized = value.to_f32().unwrap_or(f32::NAN);
+                    if !normalized.is_finite() || f64::from(normalized).to_bits() != value.to_bits()
+                    {
+                        return Err(WorldCodecError::NonCanonicalParamsCbor);
+                    }
+                    Ok(normalized)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|components| (components[0], components[1]))
+        })
+}
+
+fn validate_actuator_pair_v1(bytes: &[u8]) -> Result<(), WorldCodecError> {
+    decode_actuator_pair_v1(bytes).map(|_| ())
+}
+
+fn decode_canonical_action_params_field(
+    value: &ciborium::Value,
+) -> Result<(Vec<u8>, (f32, f32)), WorldCodecError> {
+    let params = decode_bytes_max(value, MAX_ACTION_BYTES)?;
+    decode_actuator_pair_v1(&params).map(|velocity| (params, velocity))
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +368,23 @@ const fn decode_finite_f32(val: &ciborium::Value) -> Result<f32, WorldCodecError
     }
 }
 
+fn decode_exact_f32(val: &ciborium::Value) -> Result<f32, WorldCodecError> {
+    match val {
+        ciborium::Value::Float(source) if source.is_finite() => {
+            let normalized = source.to_f32().unwrap_or(f32::NAN);
+            if !normalized.is_finite() {
+                return Err(WorldCodecError::NonFiniteFloat);
+            }
+            if f64::from(normalized).to_bits() != source.to_bits() {
+                return Err(WorldCodecError::NonCanonicalRecord);
+            }
+            Ok(normalized)
+        }
+        ciborium::Value::Float(_) => Err(WorldCodecError::NonFiniteFloat),
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
 fn cbor_tstr(s: &str) -> ciborium::Value {
     ciborium::Value::Text(s.to_owned())
 }
@@ -309,10 +397,10 @@ fn decode_tstr(val: &ciborium::Value) -> Result<String, WorldCodecError> {
 }
 
 // ---------------------------------------------------------------------------
-// WorldActionV1 — CBOR definite array, magic WAC1 (ADR-047 v3)
+// WorldActionV1 — CBOR definite array, magic WAC1 (ADR-047)
 // ---------------------------------------------------------------------------
 
-/// A versioned world action command (ADR-047 v3, `world.action.v1`).
+/// A versioned world action command (ADR-047, `world.action.v1`).
 ///
 /// Array (9 elements):
 /// `[magic_bstr4, version_u8=1, actor_id_bstr16, body_id_bstr16,
@@ -324,7 +412,7 @@ pub struct WorldActionV1 {
     pub actor_entity_id: EntityId,
     pub body_entity_id: EntityId,
     pub action_kind: ActionKindV1,
-    /// Canonical CBOR bytes for action parameters. Must be valid canonical CBOR.
+    /// Canonical CBOR array of exactly two normalized finite f32 floats (X, Z).
     pub params_cbor: Vec<u8>,
     /// Must be `ACTION_SCOPE_SINGLE_BODY` (0) in v1.
     pub action_scope: u8,
@@ -337,25 +425,13 @@ impl WorldActionV1 {
     ///
     /// # Errors
     /// Returns [`WorldCodecError::InvalidActionScope`] if `action_scope != ACTION_SCOPE_SINGLE_BODY`.
-    /// Returns [`WorldCodecError::NonCanonicalParamsCbor`] if `params_cbor` is not valid canonical CBOR.
-    /// Returns [`WorldCodecError::PayloadTooLarge`] if the encoded payload exceeds 4,096 bytes.
+    /// Returns [`WorldCodecError::NonCanonicalParamsCbor`] unless `params_cbor`
+    /// is an exact normalized X/Z actuator pair.
     pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
         if self.action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
         }
-        // Validate params_cbor is canonical: parse and re-encode must match.
-        {
-            let mut cursor = std::io::Cursor::new(self.params_cbor.as_slice());
-            let parsed: ciborium::Value = ciborium::from_reader(&mut cursor)
-                .map_err(|_| WorldCodecError::NonCanonicalParamsCbor)?;
-            if cursor.position() != self.params_cbor.len() as u64 {
-                return Err(WorldCodecError::NonCanonicalParamsCbor);
-            }
-            let reencoded = cbor_encode(&parsed);
-            if reencoded != self.params_cbor {
-                return Err(WorldCodecError::NonCanonicalParamsCbor);
-            }
-        }
+        validate_actuator_pair_v1(&self.params_cbor)?;
         let arr = ciborium::Value::Array(vec![
             cbor_magic(*MAGIC_WAC1),
             cbor_u8(VERSION_V1),
@@ -367,14 +443,7 @@ impl WorldActionV1 {
             cbor_u32(self.catalogue_version),
             cbor_u64(self.tick),
         ]);
-        let encoded = cbor_encode(&arr);
-        if encoded.len() > MAX_ACTION_BYTES {
-            return Err(WorldCodecError::PayloadTooLarge {
-                size: encoded.len(),
-                max: MAX_ACTION_BYTES,
-            });
-        }
-        Ok(CanonicalBytes::from_vec(encoded))
+        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
     }
 
     /// Decode from canonical CBOR bytes.
@@ -382,6 +451,10 @@ impl WorldActionV1 {
     /// # Errors
     /// Returns a [`WorldCodecError`] on any malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldCodecError> {
+        Self::decode_with_params(bytes).map(|(action, _)| action)
+    }
+
+    fn decode_with_params(bytes: &CanonicalBytes) -> Result<(Self, (f32, f32)), WorldCodecError> {
         if bytes.len() > MAX_ACTION_BYTES {
             return Err(WorldCodecError::PayloadTooLarge {
                 size: bytes.len(),
@@ -396,22 +469,25 @@ impl WorldActionV1 {
         let kind_str = decode_tstr(&items[4])?;
         let action_kind =
             ActionKindV1::from_str(&kind_str).ok_or(WorldCodecError::UnknownActionKind)?;
-        let params_cbor = decode_bytes_max(&items[5], MAX_ACTION_BYTES)?;
+        let (params_cbor, velocity) = decode_canonical_action_params_field(&items[5])?;
         let action_scope = decode_u8(&items[6])?;
         if action_scope != ACTION_SCOPE_SINGLE_BODY {
             return Err(WorldCodecError::InvalidActionScope);
         }
         let catalogue_version = decode_u32(&items[7])?;
         let tick = decode_u64(&items[8])?;
-        Ok(Self {
-            actor_entity_id,
-            body_entity_id,
-            action_kind,
-            params_cbor,
-            action_scope,
-            catalogue_version,
-            tick,
-        })
+        Ok((
+            Self {
+                actor_entity_id,
+                body_entity_id,
+                action_kind,
+                params_cbor,
+                action_scope,
+                catalogue_version,
+                tick,
+            },
+            velocity,
+        ))
     }
 }
 
@@ -455,41 +531,101 @@ pub struct WorldObservationV1 {
 }
 
 impl WorldObservationV1 {
+    const fn rotation(&self) -> BodyRotationV1 {
+        BodyRotationV1 {
+            orient_w: self.orient_w,
+            orient_x: self.orient_x,
+            orient_y: self.orient_y,
+            orient_z: self.orient_z,
+            vel_ang_x: self.vel_ang_x,
+            vel_ang_y: self.vel_ang_y,
+            vel_ang_z: self.vel_ang_z,
+        }
+    }
+
     /// Encode to canonical CBOR bytes.
     ///
     /// # Errors
     /// Returns [`WorldCodecError::NonFiniteFloat`] if any float is non-finite.
     /// Returns [`WorldCodecError::PayloadTooLarge`] if `sensor_value` exceeds `MAX_SENSOR_VALUE_BYTES`.
+    /// Returns [`WorldCodecError::NonUnitOrientation`] for an invalid quaternion
+    /// and [`WorldCodecError::UnknownSensorKind`] for an unsupported sensor.
     pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
+        self.validate_encoding().map(|()| self.encode_validated())
+    }
+
+    fn validate_encoding(&self) -> Result<(), WorldCodecError> {
         if self.sensor_value.len() > MAX_SENSOR_VALUE_BYTES {
             return Err(WorldCodecError::PayloadTooLarge {
                 size: self.sensor_value.len(),
                 max: MAX_SENSOR_VALUE_BYTES,
             });
         }
+        if [
+            self.pos_x,
+            self.pos_y,
+            self.pos_z,
+            self.orient_w,
+            self.orient_x,
+            self.orient_y,
+            self.orient_z,
+            self.vel_lin_x,
+            self.vel_lin_y,
+            self.vel_lin_z,
+            self.vel_ang_x,
+            self.vel_ang_y,
+            self.vel_ang_z,
+        ]
+        .into_iter()
+        .any(|component| !component.is_finite())
+        {
+            return Err(WorldCodecError::NonFiniteFloat);
+        }
+        self.validate_shape()
+    }
+
+    fn validate_shape(&self) -> Result<(), WorldCodecError> {
+        if self.sensor_kind != SensorKindV1::Proximity.as_u8()
+            && self.sensor_kind != SensorKindV1::ContactCount.as_u8()
+        {
+            return Err(WorldCodecError::UnknownSensorKind);
+        }
+        let norm_squared = [self.orient_w, self.orient_x, self.orient_y, self.orient_z]
+            .into_iter()
+            .map(|component| f64::from(component).powi(2))
+            .sum::<f64>();
+        if (norm_squared - 1.0).abs() > 1.0e-5 {
+            return Err(WorldCodecError::NonUnitOrientation);
+        }
+        Ok(())
+    }
+
+    // Only call after the public validation above or after the Driver checked
+    // backend floats and supplied fixed finite orientation/sensor fields.
+    fn encode_validated(&self) -> CanonicalBytes {
         let arr = ciborium::Value::Array(vec![
             cbor_magic(*MAGIC_WOB1),
             cbor_u8(VERSION_V1),
             cbor_id(self.body_entity_id),
             cbor_u64(self.tick),
             cbor_u64(self.step_index),
-            cbor_f32(self.pos_x)?,
-            cbor_f32(self.pos_y)?,
-            cbor_f32(self.pos_z)?,
-            cbor_f32(self.orient_w)?,
-            cbor_f32(self.orient_x)?,
-            cbor_f32(self.orient_y)?,
-            cbor_f32(self.orient_z)?,
-            cbor_f32(self.vel_lin_x)?,
-            cbor_f32(self.vel_lin_y)?,
-            cbor_f32(self.vel_lin_z)?,
-            cbor_f32(self.vel_ang_x)?,
-            cbor_f32(self.vel_ang_y)?,
-            cbor_f32(self.vel_ang_z)?,
+            ciborium::Value::Float(f64::from(self.pos_x)),
+            ciborium::Value::Float(f64::from(self.pos_y)),
+            ciborium::Value::Float(f64::from(self.pos_z)),
+            ciborium::Value::Float(f64::from(self.orient_w)),
+            ciborium::Value::Float(f64::from(self.orient_x)),
+            ciborium::Value::Float(f64::from(self.orient_y)),
+            ciborium::Value::Float(f64::from(self.orient_z)),
+            ciborium::Value::Float(f64::from(self.vel_lin_x)),
+            ciborium::Value::Float(f64::from(self.vel_lin_y)),
+            ciborium::Value::Float(f64::from(self.vel_lin_z)),
+            ciborium::Value::Float(f64::from(self.vel_ang_x)),
+            ciborium::Value::Float(f64::from(self.vel_ang_y)),
+            ciborium::Value::Float(f64::from(self.vel_ang_z)),
             cbor_u8(self.sensor_kind),
             cbor_bytes(&self.sensor_value),
         ]);
-        Ok(CanonicalBytes::from_vec(cbor_encode(&arr)))
+        CanonicalBytes::from_vec(cbor_encode(&arr))
     }
 
     /// Decode from canonical CBOR bytes.
@@ -503,22 +639,22 @@ impl WorldObservationV1 {
         let body_entity_id = decode_id(&items[2])?;
         let tick = decode_u64(&items[3])?;
         let step_index = decode_u64(&items[4])?;
-        let pos_x = decode_finite_f32(&items[5])?;
-        let pos_y = decode_finite_f32(&items[6])?;
-        let pos_z = decode_finite_f32(&items[7])?;
-        let orient_w = decode_finite_f32(&items[8])?;
-        let orient_x = decode_finite_f32(&items[9])?;
-        let orient_y = decode_finite_f32(&items[10])?;
-        let orient_z = decode_finite_f32(&items[11])?;
-        let vel_lin_x = decode_finite_f32(&items[12])?;
-        let vel_lin_y = decode_finite_f32(&items[13])?;
-        let vel_lin_z = decode_finite_f32(&items[14])?;
-        let vel_ang_x = decode_finite_f32(&items[15])?;
-        let vel_ang_y = decode_finite_f32(&items[16])?;
-        let vel_ang_z = decode_finite_f32(&items[17])?;
+        let pos_x = decode_exact_f32(&items[5])?;
+        let pos_y = decode_exact_f32(&items[6])?;
+        let pos_z = decode_exact_f32(&items[7])?;
+        let orient_w = decode_exact_f32(&items[8])?;
+        let orient_x = decode_exact_f32(&items[9])?;
+        let orient_y = decode_exact_f32(&items[10])?;
+        let orient_z = decode_exact_f32(&items[11])?;
+        let vel_lin_x = decode_exact_f32(&items[12])?;
+        let vel_lin_y = decode_exact_f32(&items[13])?;
+        let vel_lin_z = decode_exact_f32(&items[14])?;
+        let vel_ang_x = decode_exact_f32(&items[15])?;
+        let vel_ang_y = decode_exact_f32(&items[16])?;
+        let vel_ang_z = decode_exact_f32(&items[17])?;
         let sensor_kind = decode_u8(&items[18])?;
         let sensor_value = decode_bytes_max(&items[19], MAX_SENSOR_VALUE_BYTES)?;
-        Ok(Self {
+        let observation = Self {
             body_entity_id,
             tick,
             step_index,
@@ -537,7 +673,8 @@ impl WorldObservationV1 {
             vel_ang_z,
             sensor_kind,
             sensor_value,
-        })
+        };
+        observation.validate_shape().map(|()| observation)
     }
 }
 
@@ -650,52 +787,75 @@ impl WorldConfigV1 {
 }
 
 // ---------------------------------------------------------------------------
-// Action folding helpers
-// ---------------------------------------------------------------------------
-
-fn decode_velocity_params(params: &[u8]) -> Option<(f32, f32)> {
-    let items = cbor_decode_array(params, 2).ok()?;
-    let vx = decode_finite_f32(&items[0]).ok()?;
-    let vy = decode_finite_f32(&items[1]).ok()?;
-    Some((vx, vy))
-}
-
-// ---------------------------------------------------------------------------
 // World backend trait (physics seam)
 // ---------------------------------------------------------------------------
 
-/// A swappable physics backend.
-///
-/// For Wave 5 we provide a simple kinematic backend. Wave 6 will add rapier-based 3D physics.
-pub trait WorldBackend: Send + Sync {
+/// Internal physics step seam used by the built-in backend and test fixtures.
+trait WorldBackend: Send + Sync {
     /// Human-readable name for this backend.
+    #[cfg(test)]
     fn name(&self) -> &'static str;
 
-    /// Simulate one step and return observations for all bodies.
-    fn step(&self, bodies: &[Body]) -> Vec<WorldObservation>;
+    /// Simulate one pinned-duration step and return body observations.
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation>;
+}
+
+/// Orientation and angular velocity carried between canonical World steps.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BodyRotationV1 {
+    pub orient_w: f32,
+    pub orient_x: f32,
+    pub orient_y: f32,
+    pub orient_z: f32,
+    pub vel_ang_x: f32,
+    pub vel_ang_y: f32,
+    pub vel_ang_z: f32,
+}
+
+impl Default for BodyRotationV1 {
+    fn default() -> Self {
+        Self {
+            orient_w: 1.0,
+            orient_x: 0.0,
+            orient_y: 0.0,
+            orient_z: 0.0,
+            vel_ang_x: 0.0,
+            vel_ang_y: 0.0,
+            vel_ang_z: 0.0,
+        }
+    }
 }
 
 /// A body in the world.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Body {
     pub entity_id: EntityId,
+    pub rotation: BodyRotationV1,
     pub x: f64,
     pub y: f64,
+    pub z: f64,
     pub vx: f64,
     pub vy: f64,
+    pub vz: f64,
 }
 
-/// An observation of a body's position.
+/// An observation of a body's pose and velocity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldObservation {
     pub entity_id: EntityId,
+    pub rotation: BodyRotationV1,
     pub x: f64,
     pub y: f64,
+    pub z: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub vz: f64,
 }
 
 /// A world body represented by a core-owned named ENU coordinate.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq)]
-pub struct WorldCoordinateBody {
+struct WorldCoordinateBody {
     entity_id: EntityId,
     position: WorldCoordinateV1,
     east_velocity_metres_per_step: f64,
@@ -703,10 +863,11 @@ pub struct WorldCoordinateBody {
     up_velocity_metres_per_step: f64,
 }
 
+#[cfg(test)]
 impl WorldCoordinateBody {
     /// Construct a body with one-step East/North/Up velocity components.
     #[must_use]
-    pub const fn new(
+    const fn new(
         entity_id: EntityId,
         position: WorldCoordinateV1,
         east_velocity_metres_per_step: f64,
@@ -724,34 +885,36 @@ impl WorldCoordinateBody {
 
     /// Return the entity identifier.
     #[must_use]
-    pub const fn entity_id(self) -> EntityId {
+    const fn entity_id(self) -> EntityId {
         self.entity_id
     }
 
     /// Return the current named world coordinate.
     #[must_use]
-    pub const fn position(self) -> WorldCoordinateV1 {
+    const fn position(self) -> WorldCoordinateV1 {
         self.position
     }
 }
 
 /// A world-body observation represented by a named ENU coordinate.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq)]
-pub struct WorldCoordinateObservation {
+struct WorldCoordinateObservation {
     entity_id: EntityId,
     position: WorldCoordinateV1,
 }
 
+#[cfg(test)]
 impl WorldCoordinateObservation {
     /// Return the observed entity identifier.
     #[must_use]
-    pub const fn entity_id(self) -> EntityId {
+    const fn entity_id(self) -> EntityId {
         self.entity_id
     }
 
     /// Return the observed named world coordinate.
     #[must_use]
-    pub const fn position(self) -> WorldCoordinateV1 {
+    const fn position(self) -> WorldCoordinateV1 {
         self.position
     }
 }
@@ -760,13 +923,13 @@ impl WorldCoordinateObservation {
 // Built-in backend: SimpleKinematicBackend
 // ---------------------------------------------------------------------------
 
-/// Simple Euler integration: x += vx, y += vy per step (no physics).
+/// Simple Euler integration of three-dimensional velocity over the pinned step.
 #[derive(Default)]
-pub struct SimpleKinematicBackend;
+struct SimpleKinematicBackend;
 
 impl SimpleKinematicBackend {
     #[must_use]
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self
     }
 
@@ -776,8 +939,8 @@ impl SimpleKinematicBackend {
     ///
     /// Returns [`WorldTransformError::NonFiniteCoordinate`] when a velocity
     /// component or translated coordinate is not finite.
-    pub fn step_coordinates(
-        &self,
+    #[cfg(test)]
+    fn step_coordinates(
         bodies: &[WorldCoordinateBody],
     ) -> Result<Vec<WorldCoordinateObservation>, WorldTransformError> {
         bodies
@@ -798,17 +961,24 @@ impl SimpleKinematicBackend {
 }
 
 impl WorldBackend for SimpleKinematicBackend {
+    #[cfg(test)]
     fn name(&self) -> &'static str {
         "simple-kinematic"
     }
 
-    fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        let seconds = f64::from(timestep_micros) / 1_000_000.0;
         bodies
             .iter()
             .map(|body| WorldObservation {
                 entity_id: body.entity_id,
-                x: body.x + body.vx,
-                y: body.y + body.vy,
+                rotation: body.rotation,
+                x: body.vx.mul_add(seconds, body.x),
+                y: body.vy.mul_add(seconds, body.y),
+                z: body.vz.mul_add(seconds, body.z),
+                vx: body.vx,
+                vy: body.vy,
+                vz: body.vz,
             })
             .collect()
     }
@@ -817,18 +987,6 @@ impl WorldBackend for SimpleKinematicBackend {
 // ---------------------------------------------------------------------------
 // Payload types
 // ---------------------------------------------------------------------------
-
-/// A structured world action payload (ADR-047 / ADR-057).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorldAction {
-    pub actor_entity_id: EntityId,
-    pub body_entity_id: EntityId,
-    pub action_kind: String,
-    pub params: Vec<u8>,
-    pub action_scope: u8,
-    pub catalogue_version: u32,
-    pub tick: u64,
-}
 
 // ---------------------------------------------------------------------------
 // Plugin descriptor
@@ -906,8 +1064,6 @@ impl Plugin for WorldPlugin {
     fn capability(&self) -> Capability {
         Capability {
             owned_event_types: vec![
-                Kind::new(EVENT_TYPE_OBSERVATION),
-                Kind::new(EVENT_TYPE_ACTION),
                 Kind::new(EVENT_TYPE_ACTION_V1),
                 Kind::new(EVENT_TYPE_OBSERVATION_V1),
                 Kind::new(EVENT_TYPE_CONFIG_V1),
@@ -924,50 +1080,10 @@ impl ActionApprover for WorldPlugin {
         &self,
         proposal: &ProposedAction,
     ) -> Result<pos_core::event::EventDraft, ActionRejected> {
-        if proposal.event_type.as_str() == EVENT_TYPE_ACTION_V1 {
-            if proposal.capability.as_str() != "world.action.v1.submit" {
-                return Err(ActionRejected::CapabilityNotGranted);
-            }
-            if proposal.payload.len() > MAX_PROPOSED_ACTION_PAYLOAD_BYTES {
-                return Err(ActionRejected::PayloadTooLarge {
-                    size: proposal.payload.len(),
-                    max: MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
-                });
-            }
-            let action = WorldActionV1::decode(&proposal.payload)
-                .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))?;
-            if action.actor_entity_id != proposal.actor_entity_id {
-                return Err(ActionRejected::InvalidActorEntityId);
-            }
-            if action.catalogue_version != self.catalogue_version {
-                return Err(ActionRejected::DomainValidationFailed(
-                    "catalogue version mismatch".to_owned(),
-                ));
-            }
-            if !self
-                .allowed_action_kinds
-                .iter()
-                .any(|kind| kind == action.action_kind.as_str())
-            {
-                return Err(ActionRejected::DomainValidationFailed(
-                    "action kind is not in the allow-list".to_owned(),
-                ));
-            }
-            if !self.known_bodies.contains(&action.body_entity_id) {
-                return Err(ActionRejected::DomainValidationFailed(
-                    "unknown body entity ID".to_owned(),
-                ));
-            }
-            return Ok(pos_core::event::EventDraft::new(
-                proposal.actor_entity_id,
-                proposal.event_type.clone(),
-                proposal.payload.clone(),
-            ));
-        }
-        if proposal.event_type.as_str() != EVENT_TYPE_ACTION {
+        if proposal.event_type.as_str() != EVENT_TYPE_ACTION_V1 {
             return Err(ActionRejected::UnknownEventType);
         }
-        if proposal.capability.as_str() != "world.action.submit" {
+        if proposal.capability.as_str() != "world.action.v1.submit" {
             return Err(ActionRejected::CapabilityNotGranted);
         }
         if proposal.payload.len() > MAX_PROPOSED_ACTION_PAYLOAD_BYTES {
@@ -977,38 +1093,27 @@ impl ActionApprover for WorldPlugin {
             });
         }
 
-        let action: WorldAction = match ciborium::from_reader(proposal.payload.as_slice()) {
-            Ok(action) => action,
-            Err(_) => {
-                return Err(ActionRejected::DomainValidationFailed(
-                    "malformed world.action payload".to_owned(),
-                ));
-            }
-        };
+        let action = WorldActionV1::decode(&proposal.payload)
+            .map_err(|error| ActionRejected::DomainValidationFailed(error.to_string()))?;
 
         if action.actor_entity_id != proposal.actor_entity_id {
             return Err(ActionRejected::InvalidActorEntityId);
         }
 
-        if action.action_scope != 0 {
-            return Err(ActionRejected::DomainValidationFailed(format!(
-                "invalid action scope: expected 0, got {}",
-                action.action_scope
-            )));
-        }
-
         if action.catalogue_version != self.catalogue_version {
-            return Err(ActionRejected::DomainValidationFailed(format!(
-                "catalogue version mismatch: expected {}, got {}",
-                self.catalogue_version, action.catalogue_version
-            )));
+            return Err(ActionRejected::DomainValidationFailed(
+                "catalogue version mismatch".to_owned(),
+            ));
         }
 
-        if !self.allowed_action_kinds.contains(&action.action_kind) {
-            return Err(ActionRejected::DomainValidationFailed(format!(
-                "action kind '{}' not in allow-list",
-                action.action_kind
-            )));
+        if !self
+            .allowed_action_kinds
+            .iter()
+            .any(|kind| kind == action.action_kind.as_str())
+        {
+            return Err(ActionRejected::DomainValidationFailed(
+                "action kind is not in the allow-list".to_owned(),
+            ));
         }
 
         if !self.known_bodies.contains(&action.body_entity_id) {
@@ -1033,7 +1138,7 @@ impl ActionApprover for WorldPlugin {
 pub struct WorldDriver {
     initial_entities: Vec<Body>,
     entities: Vec<Body>,
-    backend: Box<dyn WorldBackend>,
+    backend: WorldDriverBackend,
     tick: u64,
     /// Counts simulation steps independently of timeline ticks (same value in V1).
     step_index: u64,
@@ -1044,6 +1149,43 @@ pub struct WorldDriver {
     config_entity: EntityId,
     staged_step: Option<WorldDriverState>,
     staged_restore: Option<WorldDriverState>,
+    installed_timeline: Option<TimelineId>,
+    staged_step_timeline: Option<TimelineId>,
+    staged_restore_timeline: Option<TimelineId>,
+}
+
+struct InstalledWorldBackendV1 {
+    image: MeasuredProcessImageV1,
+    sealed_config: CanonicalBytes,
+    backend: SimpleKinematicBackend,
+    #[cfg(test)]
+    test_backend: Option<Box<dyn WorldBackend>>,
+}
+
+impl InstalledWorldBackendV1 {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.test_backend {
+            return fixture.step(bodies, timestep_micros);
+        }
+        self.backend.step(bodies, timestep_micros)
+    }
+}
+
+enum WorldDriverBackend {
+    Installed(InstalledWorldBackendV1),
+    #[cfg(test)]
+    Fixture(Box<dyn WorldBackend>),
+}
+
+impl WorldDriverBackend {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        match self {
+            Self::Installed(installed) => installed.step(bodies, timestep_micros),
+            #[cfg(test)]
+            Self::Fixture(backend) => backend.step(bodies, timestep_micros),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1056,10 +1198,64 @@ struct WorldDriverState {
     causation_by_body: Vec<(EntityId, EventId)>,
 }
 
+#[derive(Default)]
+struct WorldRecoveryCursor {
+    step: Option<(u64, u64)>,
+    observed_bodies: usize,
+}
+
 impl WorldDriver {
-    /// Create a new world driver with the given backend and session config.
-    #[must_use]
-    pub fn new(entities: Vec<Body>, backend: Box<dyn WorldBackend>, config: WorldConfigV1) -> Self {
+    /// Create Live World stepping with the measured built-in backend and a fixed host profile.
+    ///
+    /// # Errors
+    /// Fails closed when the running process cannot be measured or the profile cannot be sealed.
+    pub fn new_live(
+        entities: Vec<Body>,
+        profile: HostWorldProfileV1,
+    ) -> Result<Self, RuntimeError> {
+        let image = MeasuredProcessImageV1::capture()?;
+        let [gravity_x, gravity_y, gravity_z] = profile.gravity();
+        let config = WorldConfigV1 {
+            timestep_micros: profile.timestep_micros(),
+            coord_convention: profile.coord_convention(),
+            gravity_x,
+            gravity_y,
+            gravity_z,
+            backend_id: "simple-kinematic".to_owned(),
+            backend_version: "1.0.0".to_owned(),
+            backend_content_hash: image.digest(),
+            action_schema_version: profile.action_schema_version(),
+            observation_schema_version: profile.observation_schema_version(),
+            sensor_min_resolution_mm: profile.sensor_min_resolution_mm(),
+            actuator_catalogue_version: profile.actuator_catalogue_version(),
+        };
+        let sealed_config = config
+            .encode()
+            .map_err(|_| WorldInstallationErrorV1::UnsupportedProfile)?;
+        Ok(Self::with_backend(
+            entities,
+            WorldDriverBackend::Installed(InstalledWorldBackendV1 {
+                image,
+                sealed_config,
+                backend: SimpleKinematicBackend::new(),
+                #[cfg(test)]
+                test_backend: None,
+            }),
+            config,
+        ))
+    }
+
+    #[cfg(test)]
+    fn new(entities: Vec<Body>, backend: Box<dyn WorldBackend>, config: WorldConfigV1) -> Self {
+        Self::with_backend(entities, WorldDriverBackend::Fixture(backend), config)
+    }
+
+    fn with_backend(
+        mut entities: Vec<Body>,
+        backend: WorldDriverBackend,
+        config: WorldConfigV1,
+    ) -> Self {
+        entities.sort_unstable_by_key(|body| body.entity_id);
         Self {
             initial_entities: entities.clone(),
             entities,
@@ -1073,6 +1269,9 @@ impl WorldDriver {
             config_entity: EntityId::new(),
             staged_step: None,
             staged_restore: None,
+            installed_timeline: None,
+            staged_step_timeline: None,
+            staged_restore_timeline: None,
         }
     }
 
@@ -1103,24 +1302,245 @@ impl WorldDriver {
         self.causation_by_body = state.causation_by_body;
     }
 
-    fn apply_action_to_entities(entities: &mut [Body], action: &WorldActionV1) -> bool {
+    fn scan_retained_config<'a>(
+        events: impl Iterator<Item = (&'a str, Option<&'a CanonicalBytes>)>,
+    ) -> Result<Option<&'a CanonicalBytes>, WorldInstallationErrorV1> {
+        let mut retained = None;
+        let mut saw_observation = false;
+        for (event_type, payload) in events {
+            match event_type {
+                EVENT_TYPE_CONFIG_V1 => {
+                    if saw_observation {
+                        return Err(WorldInstallationErrorV1::RetainedConfigOutOfOrder);
+                    }
+                    if retained.is_some() {
+                        return Err(WorldInstallationErrorV1::RetainedConfigAmbiguous);
+                    }
+                    retained =
+                        Some(payload.ok_or(WorldInstallationErrorV1::RetainedConfigMalformed)?);
+                }
+                EVENT_TYPE_OBSERVATION_V1 => saw_observation = true,
+                _ => {}
+            }
+        }
+        if retained.is_none() && saw_observation {
+            return Err(WorldInstallationErrorV1::RetainedConfigMissing);
+        }
+        Ok(retained)
+    }
+
+    fn verify_retained_config(
+        &self,
+        installed: &InstalledWorldBackendV1,
+        retained: &CanonicalBytes,
+        digest: [u8; 32],
+    ) -> Result<(), RuntimeError> {
+        let decoded = WorldConfigV1::decode(retained)
+            .map_err(|_| WorldInstallationErrorV1::RetainedConfigMalformed)?;
+        if decoded.backend_id != self.config.backend_id {
+            return Err(WorldInstallationErrorV1::BackendIdMismatch.into());
+        }
+        if decoded.backend_version != self.config.backend_version {
+            return Err(WorldInstallationErrorV1::BackendVersionMismatch.into());
+        }
+        if decoded.backend_content_hash != digest {
+            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
+        }
+        if retained != &installed.sealed_config {
+            return Err(WorldInstallationErrorV1::ProfileMismatch.into());
+        }
+        Ok(())
+    }
+
+    fn preflight_installed_recovery(
+        &self,
+        evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        #[cfg(not(test))]
+        let WorldDriverBackend::Installed(installed) = &self.backend;
+        #[cfg(test)]
+        let installed = match &self.backend {
+            WorldDriverBackend::Installed(installed) => installed,
+            WorldDriverBackend::Fixture(_) => return Ok(()),
+        };
+        let fresh = MeasuredProcessImageV1::capture()?;
+        if fresh.digest() != installed.image.digest() {
+            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
+        }
+        let retained = Self::scan_retained_config(
+            evidence
+                .events()
+                .iter()
+                .map(|event| (event.header().event_type().as_str(), event.payload())),
+        )?;
+        let Some(retained) = retained else {
+            return Ok(());
+        };
+        self.verify_retained_config(installed, retained, fresh.digest())
+    }
+
+    fn preflight_installed_step(&self, complete_events: &[Event]) -> Result<(), RuntimeError> {
+        #[cfg(not(test))]
+        let WorldDriverBackend::Installed(installed) = &self.backend;
+        #[cfg(test)]
+        let installed = match &self.backend {
+            WorldDriverBackend::Installed(installed) => installed,
+            WorldDriverBackend::Fixture(_) => return Ok(()),
+        };
+        let retained = Self::scan_retained_config(
+            complete_events
+                .iter()
+                .map(|event| (event.event_type.as_str(), Some(&event.payload))),
+        )?;
+        match (self.config_emitted, retained) {
+            (false, Some(_)) => Err(WorldInstallationErrorV1::RetainedConfigAmbiguous.into()),
+            (true, None) => Err(WorldInstallationErrorV1::RetainedConfigMissing.into()),
+            (_, Some(payload)) => {
+                self.verify_retained_config(installed, payload, installed.image.digest())
+            }
+            (false, None) => Ok(()),
+        }
+    }
+
+    fn apply_recovery_event(
+        &self,
+        restored: &mut WorldDriverState,
+        cursor: &mut WorldRecoveryCursor,
+        event: &RecoveryEvent,
+    ) -> Result<(), RuntimeError> {
+        let Some(payload) = event.payload() else {
+            return Ok(());
+        };
+        match event.header().event_type().as_str() {
+            EVENT_TYPE_ACTION_V1 => {
+                let (action, velocity) = self.decode_configured_action(payload)?;
+                if !Self::apply_action_to_entities(&mut restored.entities, &action, velocity) {
+                    return Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: "action target is not a staged world body".to_owned(),
+                    });
+                }
+                restored
+                    .applied_action_seqs
+                    .push(event.header().seq().as_u64());
+                Self::record_causation(
+                    &mut restored.causation_by_body,
+                    action.body_entity_id,
+                    event.header().id(),
+                );
+            }
+            EVENT_TYPE_OBSERVATION_V1 => {
+                let observation = WorldObservationV1::decode(payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                Self::apply_recovered_observation(restored, cursor, event.header(), &observation)?;
+            }
+            EVENT_TYPE_CONFIG_V1 => {
+                let config = WorldConfigV1::decode(payload).map_err(|error| {
+                    RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                if config != self.config {
+                    return Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
+                        reason:
+                            "recovered world configuration differs from the pinned configuration"
+                                .to_owned(),
+                    });
+                }
+                restored.config_emitted = true;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn apply_recovered_observation(
+        restored: &mut WorldDriverState,
+        cursor: &mut WorldRecoveryCursor,
+        header: &RecoveryEventHeader,
+        observation: &WorldObservationV1,
+    ) -> Result<(), RuntimeError> {
+        if !restored.config_emitted {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation precedes the pinned configuration",
+            });
+        }
+        if cursor.step != Some((observation.tick, observation.step_index)) {
+            if cursor.step.is_some() && cursor.observed_bodies != restored.entities.len() {
+                return Err(RuntimeError::InvalidRecoveryEvidence {
+                    reason: "World observation step has an incomplete body set",
+                });
+            }
+            if observation.tick != restored.tick || observation.step_index != restored.step_index {
+                return Err(RuntimeError::InvalidRecoveryEvidence {
+                    reason: "World observation tick or step is not the next committed step",
+                });
+            }
+            cursor.step = Some((observation.tick, observation.step_index));
+            cursor.observed_bodies = 0;
+        }
+        if restored
+            .entities
+            .get(cursor.observed_bodies)
+            .map(|body| body.entity_id)
+            != Some(observation.body_entity_id)
+            || header.entity() != observation.body_entity_id
+        {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation body is missing, repeated or out of order",
+            });
+        }
+        let expected_causation = restored
+            .causation_by_body
+            .iter()
+            .find(|(body, _)| *body == observation.body_entity_id)
+            .map(|(_, event_id)| *event_id);
+        if header.causation_id() != expected_causation {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation causation differs from accepted action order",
+            });
+        }
+        let body = &mut restored.entities[cursor.observed_bodies];
+        body.x = f64::from(observation.pos_x);
+        body.y = f64::from(observation.pos_y);
+        body.z = f64::from(observation.pos_z);
+        body.vx = f64::from(observation.vel_lin_x);
+        body.vy = f64::from(observation.vel_lin_y);
+        body.vz = f64::from(observation.vel_lin_z);
+        body.rotation = observation.rotation();
+        cursor.observed_bodies += 1;
+        if cursor.observed_bodies == restored.entities.len() {
+            restored.tick = observation.tick.wrapping_add(1);
+            restored.step_index = observation.step_index.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    fn apply_action_to_entities(
+        entities: &mut [Body],
+        action: &WorldActionV1,
+        (vx, vz): (f32, f32),
+    ) -> bool {
         let Some(body) = entities
             .iter_mut()
             .find(|body| body.entity_id == action.body_entity_id)
         else {
             return false;
         };
-        let Some((vx, vy)) = decode_velocity_params(&action.params_cbor) else {
-            return false;
-        };
         match action.action_kind {
             ActionKindV1::Impulse => {
                 body.vx += f64::from(vx);
-                body.vy += f64::from(vy);
+                body.vz += f64::from(vz);
             }
             ActionKindV1::TargetVelocity => {
                 body.vx = f64::from(vx);
-                body.vy = f64::from(vy);
+                body.vz = f64::from(vz);
             }
         }
         true
@@ -1151,6 +1571,56 @@ impl WorldDriver {
         })
     }
 
+    fn validate_quantized_positions(value: &WorldObservationV1) -> Result<(), RuntimeError> {
+        if [value.pos_x, value.pos_y, value.pos_z]
+            .into_iter()
+            .any(|position| !position.is_finite())
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "sensor quantization produced a non-finite position".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn decode_configured_action(
+        &self,
+        payload: &CanonicalBytes,
+    ) -> Result<(WorldActionV1, (f32, f32)), RuntimeError> {
+        WorldActionV1::decode_with_params(payload)
+            .map_err(|error| RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                reason: error.to_string(),
+            })
+            .and_then(|(action, velocity)| {
+                if action.catalogue_version == self.config.actuator_catalogue_version {
+                    Ok((action, velocity))
+                } else {
+                    Err(RuntimeError::InvalidPayload {
+                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
+                        reason: "action catalogue version differs from pinned world configuration"
+                            .to_owned(),
+                    })
+                }
+            })
+    }
+
+    fn record_causation(
+        causation_by_body: &mut Vec<(EntityId, EventId)>,
+        body_entity_id: EntityId,
+        event_id: EventId,
+    ) {
+        if let Some((_, causation)) = causation_by_body
+            .iter_mut()
+            .find(|(body, _)| *body == body_entity_id)
+        {
+            *causation = event_id;
+        } else {
+            causation_by_body.push((body_entity_id, event_id));
+        }
+    }
+
     fn config_draft(&mut self) -> Result<Option<pos_core::event::EventDraft>, RuntimeError> {
         if self.config_emitted {
             return Ok(None);
@@ -1177,29 +1647,15 @@ impl WorldDriver {
             {
                 continue;
             }
-            let action = WorldActionV1::decode(&event.payload).map_err(|error| {
-                RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                    reason: error.to_string(),
-                }
-            })?;
-            if !Self::apply_action_to_entities(&mut self.entities, &action) {
+            let (action, velocity) = self.decode_configured_action(&event.payload)?;
+            if !Self::apply_action_to_entities(&mut self.entities, &action, velocity) {
                 return Err(RuntimeError::InvalidPayload {
                     event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                    reason: "action target or velocity parameters are invalid".to_owned(),
+                    reason: "action target is not a staged world body".to_owned(),
                 });
             }
             self.applied_action_seqs.push(event.seq.as_u64());
-            if let Some((_, causation)) = self
-                .causation_by_body
-                .iter_mut()
-                .find(|(body, _)| *body == action.body_entity_id)
-            {
-                *causation = event.id;
-            } else {
-                self.causation_by_body
-                    .push((action.body_entity_id, event.id));
-            }
+            Self::record_causation(&mut self.causation_by_body, action.body_entity_id, event.id);
         }
         Ok(())
     }
@@ -1207,59 +1663,166 @@ impl WorldDriver {
     fn emit_observations(
         &self,
         observations: &[WorldObservation],
-    ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
+    ) -> Result<Vec<(pos_core::event::EventDraft, WorldObservationV1)>, RuntimeError> {
         observations
             .iter()
             .map(|observation| {
-                let value = WorldObservationV1 {
-                    body_entity_id: observation.entity_id,
-                    tick: self.tick,
-                    step_index: self.step_index,
-                    pos_x: Self::quantize_sensor(
-                        Self::checked_f32(observation.x, "x")?,
-                        self.config.sensor_min_resolution_mm,
-                    ),
-                    pos_y: Self::quantize_sensor(
-                        Self::checked_f32(observation.y, "y")?,
-                        self.config.sensor_min_resolution_mm,
-                    ),
-                    pos_z: 0.0,
-                    orient_w: 1.0,
-                    orient_x: 0.0,
-                    orient_y: 0.0,
-                    orient_z: 0.0,
-                    vel_lin_x: 0.0,
-                    vel_lin_y: 0.0,
-                    vel_lin_z: 0.0,
-                    vel_ang_x: 0.0,
-                    vel_ang_y: 0.0,
-                    vel_ang_z: 0.0,
-                    sensor_kind: SensorKindV1::Proximity.as_u8(),
-                    sensor_value: vec![],
-                };
-                let payload = value
-                    .encode()
-                    .map_err(|error| RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                        reason: error.to_string(),
-                    })?;
-                let mut draft = pos_core::event::EventDraft::new(
-                    observation.entity_id,
-                    Kind::new(EVENT_TYPE_OBSERVATION_V1),
-                    payload,
-                );
-                draft.causation_id = self
-                    .causation_by_body
-                    .iter()
-                    .rev()
-                    .find(|(body, _)| *body == observation.entity_id)
-                    .map(|(_, event_id)| *event_id);
-                Ok(draft)
+                [
+                    ("x", observation.x),
+                    ("y", observation.y),
+                    ("z", observation.z),
+                    ("vx", observation.vx),
+                    ("vy", observation.vy),
+                    ("vz", observation.vz),
+                ]
+                .into_iter()
+                .enumerate()
+                .try_fold([0.0_f32; 6], |mut components, (index, (axis, value))| {
+                    Self::checked_f32(value, axis).map(|converted| {
+                        components[index] = converted;
+                        components
+                    })
+                })
+                .and_then(|[x, y, z, vx, vy, vz]| {
+                    let value = WorldObservationV1 {
+                        body_entity_id: observation.entity_id,
+                        tick: self.tick,
+                        step_index: self.step_index,
+                        pos_x: Self::quantize_sensor(x, self.config.sensor_min_resolution_mm),
+                        pos_y: Self::quantize_sensor(y, self.config.sensor_min_resolution_mm),
+                        pos_z: Self::quantize_sensor(z, self.config.sensor_min_resolution_mm),
+                        orient_w: observation.rotation.orient_w,
+                        orient_x: observation.rotation.orient_x,
+                        orient_y: observation.rotation.orient_y,
+                        orient_z: observation.rotation.orient_z,
+                        vel_lin_x: vx,
+                        vel_lin_y: vy,
+                        vel_lin_z: vz,
+                        vel_ang_x: observation.rotation.vel_ang_x,
+                        vel_ang_y: observation.rotation.vel_ang_y,
+                        vel_ang_z: observation.rotation.vel_ang_z,
+                        sensor_kind: SensorKindV1::Proximity.as_u8(),
+                        sensor_value: vec![],
+                    };
+                    Self::validate_quantized_positions(&value)
+                        .and_then(|()| {
+                            value.validate_encoding().map_err(|error| {
+                                RuntimeError::InvalidPayload {
+                                    event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                                    reason: error.to_string(),
+                                }
+                            })
+                        })
+                        .map(|()| {
+                            let payload = value.encode_validated();
+                            let mut draft = pos_core::event::EventDraft::new(
+                                observation.entity_id,
+                                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+                                payload,
+                            );
+                            draft.causation_id = self
+                                .causation_by_body
+                                .iter()
+                                .rev()
+                                .find(|(body, _)| *body == observation.entity_id)
+                                .map(|(_, event_id)| *event_id);
+                            (draft, value)
+                        })
+                })
             })
             .collect()
     }
+
+    fn preflight_live_step(
+        &mut self,
+        timeline: TimelineId,
+        observations: &ObservationView<'_>,
+    ) -> Result<(), RuntimeError> {
+        if matches!(&self.backend, WorldDriverBackend::Installed(_)) {
+            let anchor =
+                observations
+                    .anchor()
+                    .ok_or_else(|| RuntimeError::MissingSnapshotAnchor {
+                        driver: self.name().to_owned(),
+                    })?;
+            if anchor.timeline_id() != timeline {
+                return Err(RuntimeError::SnapshotTimelineMismatch {
+                    expected: timeline,
+                    actual: anchor.timeline_id(),
+                });
+            }
+            if let Some(installed_timeline) = self.installed_timeline {
+                if installed_timeline != timeline {
+                    return Err(RuntimeError::SnapshotTimelineMismatch {
+                        expected: installed_timeline,
+                        actual: timeline,
+                    });
+                }
+            }
+            let complete = observations
+                .verified_prefix_events()
+                .ok_or(WorldInstallationErrorV1::RetainedConfigMissing)?;
+            self.preflight_installed_step(complete)?;
+            self.staged_step_timeline = Some(timeline);
+        }
+        Ok(())
+    }
+
+    fn simulate_staged_step(
+        &mut self,
+        observations: &ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let mut drafts = Vec::new();
+        if let Some(config) = self.config_draft()? {
+            drafts.push(config);
+        }
+        self.apply_observed_actions(observations.events())?;
+
+        if self
+            .entities
+            .windows(2)
+            .any(|pair| pair[0].entity_id == pair[1].entity_id)
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "duplicate staged body identifiers".to_owned(),
+            });
+        }
+
+        let mut step_obs = self
+            .backend
+            .step(&self.entities, self.config.timestep_micros);
+        step_obs.sort_unstable_by_key(|observation| observation.entity_id);
+        if step_obs.len() != self.entities.len()
+            || step_obs
+                .iter()
+                .zip(&self.entities)
+                .any(|(observation, body)| observation.entity_id != body.entity_id)
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "backend observation body set differs from staged bodies".to_owned(),
+            });
+        }
+        let emitted = self.emit_observations(&step_obs)?;
+        for (body, (_, observation)) in self.entities.iter_mut().zip(&emitted) {
+            body.x = f64::from(observation.pos_x);
+            body.y = f64::from(observation.pos_y);
+            body.z = f64::from(observation.pos_z);
+            body.vx = f64::from(observation.vel_lin_x);
+            body.vy = f64::from(observation.vel_lin_y);
+            body.vz = f64::from(observation.vel_lin_z);
+            body.rotation = observation.rotation();
+        }
+
+        drafts.extend(emitted.into_iter().map(|(draft, _)| draft));
+        self.tick = self.tick.wrapping_add(1);
+        self.step_index = self.step_index.wrapping_add(1);
+        Ok(StepOutput::new(drafts))
+    }
 }
 
+#[cfg(test)]
 impl Default for WorldDriver {
     fn default() -> Self {
         Self::new(
@@ -1288,9 +1851,23 @@ impl Driver for WorldDriver {
         "world-driver"
     }
 
+    fn requires_snapshot_anchor(&self) -> bool {
+        matches!(&self.backend, WorldDriverBackend::Installed(_))
+    }
+
+    fn requires_verified_event_prefix(&self) -> bool {
+        matches!(&self.backend, WorldDriverBackend::Installed(_))
+    }
+
     fn event_subscriptions(&self) -> &[Kind] {
         static SUBSCRIPTIONS: std::sync::OnceLock<Vec<Kind>> = std::sync::OnceLock::new();
-        SUBSCRIPTIONS.get_or_init(|| vec![Kind::new(EVENT_TYPE_ACTION_V1)])
+        SUBSCRIPTIONS.get_or_init(|| {
+            vec![
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                Kind::new(EVENT_TYPE_CONFIG_V1),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+            ]
+        })
     }
 
     fn needs_recovery_payload(&self, header: &RecoveryEventHeader) -> bool {
@@ -1304,6 +1881,7 @@ impl Driver for WorldDriver {
         &mut self,
         evidence: &DriverRecoveryEvidence,
     ) -> Result<(), RuntimeError> {
+        self.preflight_installed_recovery(evidence)?;
         let mut restored = WorldDriverState {
             entities: self.initial_entities.clone(),
             tick: 0,
@@ -1312,95 +1890,56 @@ impl Driver for WorldDriver {
             applied_action_seqs: Vec::new(),
             causation_by_body: Vec::new(),
         };
+        let mut cursor = WorldRecoveryCursor::default();
         for event in evidence.events() {
-            let event_type = event.header().event_type().as_str();
-            let Some(payload) = event.payload() else {
-                continue;
-            };
-            if event_type == EVENT_TYPE_ACTION_V1 {
-                let action = WorldActionV1::decode(payload).map_err(|error| {
-                    RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                if !Self::apply_action_to_entities(&mut restored.entities, &action) {
-                    return Err(RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_ACTION_V1.to_owned(),
-                        reason: "action target or velocity parameters are invalid".to_owned(),
-                    });
-                }
-                restored
-                    .applied_action_seqs
-                    .push(event.header().seq().as_u64());
-                if let Some((_, causation)) = restored
-                    .causation_by_body
-                    .iter_mut()
-                    .find(|(body, _)| *body == action.body_entity_id)
-                {
-                    *causation = event.header().id();
-                } else {
-                    restored
-                        .causation_by_body
-                        .push((action.body_entity_id, event.header().id()));
-                }
-                restored.tick = restored.tick.max(action.tick.saturating_add(1));
-            } else if event_type == EVENT_TYPE_OBSERVATION_V1 {
-                let observation = WorldObservationV1::decode(payload).map_err(|error| {
-                    RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                if let Some(body) = restored
-                    .entities
-                    .iter_mut()
-                    .find(|body| body.entity_id == observation.body_entity_id)
-                {
-                    body.x = f64::from(observation.pos_x);
-                    body.y = f64::from(observation.pos_y);
-                }
-                restored.tick = restored.tick.max(observation.tick.saturating_add(1));
-                restored.step_index = restored
-                    .step_index
-                    .max(observation.step_index.saturating_add(1));
-            } else if event_type == EVENT_TYPE_CONFIG_V1 {
-                let config = WorldConfigV1::decode(payload).map_err(|error| {
-                    RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                if config != self.config {
-                    return Err(RuntimeError::InvalidPayload {
-                        event_type: EVENT_TYPE_CONFIG_V1.to_owned(),
-                        reason:
-                            "recovered world configuration differs from the pinned configuration"
-                                .to_owned(),
-                    });
-                }
-                restored.config_emitted = true;
-            }
+            self.apply_recovery_event(&mut restored, &mut cursor, event)?;
+        }
+        if cursor.step.is_some() && cursor.observed_bodies != restored.entities.len() {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World observation step has an incomplete body set",
+            });
+        }
+        if restored.config_emitted && !restored.entities.is_empty() && cursor.step.is_none() {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "World configuration has no committed body observations",
+            });
         }
         self.staged_restore = Some(restored);
+        self.staged_restore_timeline = evidence
+            .timeline_segments()
+            .last()
+            .map(|segment| segment.timeline_id());
         Ok(())
     }
 
     fn commit_restore_from_history(&mut self) {
         if let Some(restored) = self.staged_restore.take() {
             self.restore_state(restored);
+            self.installed_timeline = self.staged_restore_timeline.take();
         }
     }
 
     fn abort_restore_from_history(&mut self) {
         self.staged_restore = None;
+        self.staged_restore_timeline = None;
+    }
+
+    fn commit_fork_timeline(&mut self, handoff: &CommittedForkHandoff) {
+        if self.installed_timeline == Some(handoff.parent()) {
+            self.installed_timeline = Some(handoff.child());
+        }
     }
 
     fn commit_step(&mut self) {
-        self.staged_step = None;
+        self.installed_timeline = self
+            .staged_step
+            .take()
+            .and_then(|_| self.staged_step_timeline.take())
+            .or(self.installed_timeline);
     }
 
     fn abort_step(&mut self) {
+        self.staged_step_timeline = None;
         if let Some(previous) = self.staged_step.take() {
             self.restore_state(previous);
         }
@@ -1408,32 +1947,16 @@ impl Driver for WorldDriver {
 
     fn step(
         &mut self,
-        _timeline: TimelineId,
+        timeline: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
+        self.preflight_live_step(timeline, &observations)?;
         self.staged_step = Some(self.state());
-        let mut drafts = Vec::new();
-        if let Some(config) = self.config_draft()? {
-            drafts.push(config);
+        let result = self.simulate_staged_step(&observations);
+        if result.is_err() {
+            self.abort_step();
         }
-        self.apply_observed_actions(observations.events())?;
-
-        let step_obs = self.backend.step(&self.entities);
-        for obs in &step_obs {
-            if let Some(body) = self
-                .entities
-                .iter_mut()
-                .find(|b| b.entity_id == obs.entity_id)
-            {
-                body.x = obs.x;
-                body.y = obs.y;
-            }
-        }
-
-        drafts.extend(self.emit_observations(&step_obs)?);
-        self.tick = self.tick.wrapping_add(1);
-        self.step_index = self.step_index.wrapping_add(1);
-        Ok(StepOutput::new(drafts))
+        result
     }
 }
 
@@ -1441,37 +1964,61 @@ impl Driver for WorldDriver {
 // Reducer
 // ---------------------------------------------------------------------------
 
-/// Tracks `observation_count` and `body_count` in State.
+/// Projects the latest accepted WOB1 body observation without a physics backend.
 pub struct WorldReducer;
+
+impl WorldReducer {
+    fn accepted_observation(event: &Event) -> Option<WorldObservationV1> {
+        if event.event_type.as_str() != EVENT_TYPE_OBSERVATION_V1 {
+            return None;
+        }
+        let observation = WorldObservationV1::decode(&event.payload).ok()?;
+        (observation.body_entity_id == event.entity).then_some(observation)
+    }
+}
 
 impl Reducer for WorldReducer {
     fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("observation_count", serde_json::Value::Number(0.into()));
-        s.set("body_count", serde_json::Value::Number(0.into()));
-        s
+        State::new()
+    }
+
+    fn projects_event(&self, event: &Event) -> bool {
+        Self::accepted_observation(event).is_some()
     }
 
     fn apply(&self, state: &mut State, event: &Event) {
-        if matches!(
-            event.event_type.as_str(),
-            EVENT_TYPE_OBSERVATION | EVENT_TYPE_OBSERVATION_V1
-        ) {
-            let observation_count = state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            state.set(
-                "observation_count",
-                serde_json::Value::Number((observation_count + 1).into()),
-            );
-            if event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1 {
-                if let Ok(observation) = WorldObservationV1::decode(&event.payload) {
-                    state.set("last_x", serde_json::json!(observation.pos_x));
-                    state.set("last_y", serde_json::json!(observation.pos_y));
-                }
-            }
-        }
+        let Some(observation) = Self::accepted_observation(event) else {
+            return;
+        };
+        let mut projected = State::new();
+        projected.set(
+            "body_entity_id",
+            serde_json::json!(observation.body_entity_id.to_string()),
+        );
+        projected.set("tick", serde_json::json!(observation.tick));
+        projected.set("step_index", serde_json::json!(observation.step_index));
+        projected.set("pos_x", serde_json::json!(observation.pos_x));
+        projected.set("pos_y", serde_json::json!(observation.pos_y));
+        projected.set("pos_z", serde_json::json!(observation.pos_z));
+        projected.set("orient_w", serde_json::json!(observation.orient_w));
+        projected.set("orient_x", serde_json::json!(observation.orient_x));
+        projected.set("orient_y", serde_json::json!(observation.orient_y));
+        projected.set("orient_z", serde_json::json!(observation.orient_z));
+        projected.set("vel_lin_x", serde_json::json!(observation.vel_lin_x));
+        projected.set("vel_lin_y", serde_json::json!(observation.vel_lin_y));
+        projected.set("vel_lin_z", serde_json::json!(observation.vel_lin_z));
+        projected.set("vel_ang_x", serde_json::json!(observation.vel_ang_x));
+        projected.set("vel_ang_y", serde_json::json!(observation.vel_ang_y));
+        projected.set("vel_ang_z", serde_json::json!(observation.vel_ang_z));
+        projected.set("sensor_kind", serde_json::json!(observation.sensor_kind));
+        projected.set("sensor_value", serde_json::json!(observation.sensor_value));
+        projected.set("observation_id", serde_json::json!(event.id.to_string()));
+        projected.set("observation_seq", serde_json::json!(event.seq.as_u64()));
+        projected.set(
+            "causation_id",
+            serde_json::json!(event.causation_id.as_ref().map(ToString::to_string)),
+        );
+        *state = projected;
     }
 }
 
@@ -1526,8 +2073,10 @@ mod tests {
         ids::{EntityId, EventId},
         CoreError, ErasureContainmentGateV1,
     };
-    use pos_runtime::{PluginRegistry, TimelineHistorySegment};
+    use pos_runtime::{PluginRegistry, SnapshotAnchor, TimelineHistorySegment};
     use pos_store::{open_store as open_unbound_store, StoreConfig};
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn open_store(config: StoreConfig) -> Result<Box<dyn pos_core::EventStore>, CoreError> {
@@ -1536,27 +2085,15 @@ mod tests {
         Ok(store)
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct WorldObservationPayload {
-        entity_id: String,
-        x: f64,
-        y: f64,
-    }
-
     fn make_observation_event(entity: EntityId) -> Event {
-        let payload = WorldObservationPayload {
-            entity_id: entity.to_string(),
-            x: 1.0,
-            y: 2.0,
-        };
-        let mut buf = Vec::new();
-        ciborium::into_writer(&payload, &mut buf).test_ok();
+        let mut observation = sample_observation();
+        observation.body_entity_id = entity;
 
         Event {
             id: EventId::new(),
             entity,
-            event_type: Kind::new(EVENT_TYPE_OBSERVATION),
-            payload: CanonicalBytes::from_vec(buf),
+            event_type: Kind::new(EVENT_TYPE_OBSERVATION_V1),
+            payload: observation.encode().test_ok(),
             wall_time: WallTime::from_micros(0),
             seq: Seq::ZERO,
             causation_id: None,
@@ -1607,6 +2144,15 @@ mod tests {
         }
     }
 
+    fn overlong_version(bytes: &CanonicalBytes) -> CanonicalBytes {
+        let bytes = bytes.as_slice();
+        assert_eq!(bytes[6], VERSION_V1);
+        let mut noncanonical = bytes[..6].to_vec();
+        noncanonical.extend_from_slice(&[0x18, VERSION_V1]);
+        noncanonical.extend_from_slice(&bytes[7..]);
+        CanonicalBytes::from_vec(noncanonical)
+    }
+
     // ---------------------------------------------------------------------------
     // WorldActionV1 codec tests
     // ---------------------------------------------------------------------------
@@ -1616,7 +2162,7 @@ mod tests {
             actor_entity_id: EntityId::new(),
             body_entity_id: EntityId::new(),
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![0xf6], // CBOR null — minimal valid canonical CBOR
+            params_cbor: encode_actuator_pair_v1(0.0, 0.0).test_ok(),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 42,
             tick: 100,
@@ -1648,7 +2194,7 @@ mod tests {
 
     fn sample_config() -> WorldConfigV1 {
         WorldConfigV1 {
-            timestep_micros: 16_667,
+            timestep_micros: 1_000_000,
             coord_convention: 0,
             gravity_x: 0.0,
             gravity_y: -9.81,
@@ -1683,13 +2229,18 @@ mod tests {
             "non-finite-test-backend"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: BodyRotationV1::default(),
                     x: f64::NAN,
                     y: body.y,
+                    z: body.z,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
                 })
                 .collect()
         }
@@ -1702,13 +2253,18 @@ mod tests {
             "y-non-finite-test-backend"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: BodyRotationV1::default(),
                     x: body.x,
                     y: f64::NAN,
+                    z: body.z,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
                 })
                 .collect()
         }
@@ -1721,13 +2277,79 @@ mod tests {
             "out-of-range-test-backend"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: BodyRotationV1::default(),
                     x: f64::MAX,
                     y: body.y,
+                    z: body.z,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
+                })
+                .collect()
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum InvalidObservationComponent {
+        Z,
+        Vx,
+        Vy,
+        Vz,
+        QuantizationOverflowX,
+        NonUnitOrientation,
+        NonFiniteAngularVelocity,
+    }
+
+    struct InvalidObservationComponentBackend {
+        component: InvalidObservationComponent,
+        first_step_invalid: std::sync::atomic::AtomicBool,
+    }
+
+    impl WorldBackend for InvalidObservationComponentBackend {
+        fn name(&self) -> &'static str {
+            "invalid-observation-component-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
+            let inject_invalid = self
+                .first_step_invalid
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
+            bodies
+                .iter()
+                .map(|body| {
+                    let mut observed = WorldObservation {
+                        entity_id: body.entity_id,
+                        rotation: BodyRotationV1::default(),
+                        x: body.x,
+                        y: body.y,
+                        z: body.z,
+                        vx: body.vx,
+                        vy: body.vy,
+                        vz: body.vz,
+                    };
+                    if inject_invalid {
+                        match self.component {
+                            InvalidObservationComponent::Z => observed.z = f64::MAX,
+                            InvalidObservationComponent::Vx => observed.vx = f64::MAX,
+                            InvalidObservationComponent::Vy => observed.vy = f64::MAX,
+                            InvalidObservationComponent::Vz => observed.vz = f64::MAX,
+                            InvalidObservationComponent::QuantizationOverflowX => {
+                                observed.x = f64::from(f32::MAX);
+                            }
+                            InvalidObservationComponent::NonUnitOrientation => {
+                                observed.rotation.orient_w = 0.5;
+                            }
+                            InvalidObservationComponent::NonFiniteAngularVelocity => {
+                                observed.rotation.vel_ang_x = f32::NAN;
+                            }
+                        }
+                    }
+                    observed
                 })
                 .collect()
         }
@@ -1755,10 +2377,13 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(NonFiniteBackend),
             sample_config(),
@@ -1777,10 +2402,13 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(YNonFiniteBackend),
             sample_config(),
@@ -1799,10 +2427,13 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(OutOfRangeBackend),
             sample_config(),
@@ -1817,6 +2448,78 @@ mod tests {
             "unexpected coordinate error: {message}"
         );
         driver.abort_step();
+    }
+
+    #[test]
+    fn invalid_backend_observation_components_fail_closed_and_restore_step() {
+        for (component, reason) in [
+            (
+                InvalidObservationComponent::Z,
+                "non-representable z coordinate",
+            ),
+            (
+                InvalidObservationComponent::Vx,
+                "non-representable vx coordinate",
+            ),
+            (
+                InvalidObservationComponent::Vy,
+                "non-representable vy coordinate",
+            ),
+            (
+                InvalidObservationComponent::Vz,
+                "non-representable vz coordinate",
+            ),
+            (
+                InvalidObservationComponent::QuantizationOverflowX,
+                "sensor quantization produced a non-finite position",
+            ),
+            (
+                InvalidObservationComponent::NonUnitOrientation,
+                "unit quaternion",
+            ),
+            (
+                InvalidObservationComponent::NonFiniteAngularVelocity,
+                "non-finite float value",
+            ),
+        ] {
+            let initial = Body {
+                entity_id: EntityId::new(),
+                rotation: BodyRotationV1::default(),
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                vx: 4.0,
+                vy: 5.0,
+                vz: 6.0,
+            };
+            let mut driver = WorldDriver::new(
+                vec![initial],
+                Box::new(InvalidObservationComponentBackend {
+                    component,
+                    first_step_invalid: std::sync::atomic::AtomicBool::new(true),
+                }),
+                sample_config(),
+            );
+            let error = driver
+                .step(TimelineId::new(), ObservationView::empty())
+                .test_err();
+            assert!(error.to_string().contains(reason));
+
+            let output = driver
+                .step(TimelineId::new(), ObservationView::empty())
+                .test_ok();
+            assert_eq!(output.drafts.len(), 2);
+            assert_eq!(output.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
+            let observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+            assert_eq!(observation.tick, 0);
+            assert_eq!(observation.step_index, 0);
+            assert!((observation.pos_x - 1.0).abs() < 0.05);
+            assert!((observation.pos_y - 2.0).abs() < 0.05);
+            assert!((observation.pos_z - 3.0).abs() < 0.05);
+            assert_eq!(observation.vel_lin_x.to_bits(), 4.0_f32.to_bits());
+            assert_eq!(observation.vel_lin_y.to_bits(), 5.0_f32.to_bits());
+            assert_eq!(observation.vel_lin_z.to_bits(), 6.0_f32.to_bits());
+        }
     }
 
     #[test]
@@ -1854,7 +2557,7 @@ mod tests {
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Text("unknown_kind".to_owned()),
-            ciborium::Value::Bytes(vec![0xf6]),
+            ciborium::Value::Bytes(encode_actuator_pair_v1(0.0, 0.0).test_ok()),
             ciborium::Value::Integer(0.into()),
             ciborium::Value::Integer(1.into()),
             ciborium::Value::Integer(0.into()),
@@ -1887,7 +2590,7 @@ mod tests {
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Bytes(vec![0u8; 16]),
             ciborium::Value::Text("impulse".to_owned()),
-            ciborium::Value::Bytes(vec![0xf6]),
+            ciborium::Value::Bytes(encode_actuator_pair_v1(0.0, 0.0).test_ok()),
             ciborium::Value::Integer(1.into()), // invalid scope
             ciborium::Value::Integer(1.into()),
             ciborium::Value::Integer(0.into()),
@@ -1910,6 +2613,20 @@ mod tests {
             a.encode(),
             Err(WorldCodecError::NonCanonicalParamsCbor)
         ));
+        for params in [
+            vec![0xa2, 0x61, b'b', 1, 0x61, b'a', 2], // unsorted map keys
+            vec![0xa2, 0x61, b'a', 1, 0x61, b'a', 2], // duplicate map key
+            vec![0xa2, 0xf9, 0, 0, 1, 0xf9, 0x80, 0, 2], // equal signed-zero keys
+            vec![0x81, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2], // nested map
+            vec![0xc1, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2], // tagged map
+            vec![0xf9, 0x7c, 0x00],                   // non-finite float
+        ] {
+            a.params_cbor = params;
+            assert_eq!(a.encode(), Err(WorldCodecError::NonCanonicalParamsCbor));
+        }
+
+        a.params_cbor = encode_actuator_pair_v1(1.25, -2.5).test_ok();
+        assert!(a.encode().is_ok());
         a.params_cbor = vec![0xff];
         assert!(matches!(
             a.encode(),
@@ -1919,8 +2636,8 @@ mod tests {
 
     #[test]
     fn velocity_parameter_decoder_accepts_a_canonical_pair() {
-        let params = encode_vel_params(1.25, -2.5);
-        assert_eq!(decode_velocity_params(&params), Some((1.25, -2.5)));
+        let params = encode_horizontal_velocity_params(1.25, -2.5);
+        assert_eq!(decode_actuator_pair_v1(&params).ok(), Some((1.25, -2.5)));
     }
 
     #[test]
@@ -1929,13 +2646,78 @@ mod tests {
             ciborium::Value::Float(f64::NAN),
             ciborium::Value::Float(0.0),
         ]));
-        assert_eq!(decode_velocity_params(&invalid_first), None);
+        assert!(decode_actuator_pair_v1(&invalid_first).is_err());
 
         let invalid_second = cbor_encode(&ciborium::Value::Array(vec![
             ciborium::Value::Float(0.0),
             ciborium::Value::Float(f64::INFINITY),
         ]));
-        assert_eq!(decode_velocity_params(&invalid_second), None);
+        assert!(decode_actuator_pair_v1(&invalid_second).is_err());
+    }
+
+    #[test]
+    fn actuator_pair_normalizes_float_sources_and_preserves_signed_zero() {
+        let params = encode_actuator_pair_v1(1.0 / 3.0, -0.0).test_ok();
+        let (x, z) = decode_actuator_pair_v1(&params).test_ok();
+        assert_eq!(x.to_bits(), 0.333_333_34_f32.to_bits());
+        assert_eq!(z.to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(
+            encode_actuator_pair_v1(f64::MIN_POSITIVE, -f64::MIN_POSITIVE).test_ok(),
+            encode_actuator_pair_v1(0.0, -0.0).test_ok()
+        );
+        assert_eq!(
+            encode_actuator_pair_v1(f64::INFINITY, 0.0),
+            Err(WorldCodecError::NonFiniteFloat)
+        );
+        assert_eq!(
+            encode_actuator_pair_v1(0.0, f64::MAX),
+            Err(WorldCodecError::NonFiniteFloat)
+        );
+
+        let one = f32::from_bits(0x3f80_0000);
+        let next = f32::from_bits(0x3f80_0001);
+        let midpoint = f64::midpoint(f64::from(one), f64::from(next));
+        let tie = encode_actuator_pair_v1(midpoint, 0.0).test_ok();
+        assert_eq!(
+            decode_actuator_pair_v1(&tie).test_ok().0.to_bits(),
+            one.to_bits()
+        );
+
+        let least_subnormal = f32::from_bits(1);
+        assert_eq!(
+            encode_actuator_pair_v1(1.0, f64::from(least_subnormal)).test_ok(),
+            vec![0x82, 0xf9, 0x3c, 0x00, 0xfa, 0x00, 0x00, 0x00, 0x01]
+        );
+    }
+
+    #[test]
+    fn actuator_pair_rejects_unnormalized_and_wrong_shape_wire_inputs() {
+        let mut action = sample_action();
+        for params in [
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Float(1.0 / 3.0),
+                ciborium::Value::Float(0.0),
+            ])),
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Integer(1.into()),
+                ciborium::Value::Float(0.0),
+            ])),
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Float(1.0),
+                ciborium::Value::Float(0.0),
+                ciborium::Value::Float(0.0),
+            ])),
+            cbor_encode(&ciborium::Value::Array(vec![
+                ciborium::Value::Float(f64::MAX),
+                ciborium::Value::Float(0.0),
+            ])),
+        ] {
+            action.params_cbor = params;
+            assert_eq!(
+                action.encode(),
+                Err(WorldCodecError::NonCanonicalParamsCbor)
+            );
+        }
     }
 
     #[test]
@@ -1996,7 +2778,7 @@ mod tests {
         action.params_cbor = cbor_encode(&ciborium::Value::Bytes(vec![0; MAX_ACTION_BYTES]));
         assert!(matches!(
             action.encode(),
-            Err(WorldCodecError::PayloadTooLarge { .. })
+            Err(WorldCodecError::NonCanonicalParamsCbor)
         ));
         assert!(matches!(
             WorldActionV1::decode(&CanonicalBytes::from_vec(vec![0; MAX_ACTION_BYTES + 1])),
@@ -2031,12 +2813,10 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn world_action_v1_empty_params_allowed() {
+    fn world_action_v1_empty_params_rejected() {
         let mut a = sample_action();
         a.params_cbor = vec![0xf6]; // CBOR null
-        let bytes = a.encode().test_ok();
-        let decoded = WorldActionV1::decode(&bytes).test_ok();
-        assert_eq!(decoded.params_cbor, vec![0xf6]);
+        assert_eq!(a.encode(), Err(WorldCodecError::NonCanonicalParamsCbor));
     }
 
     // ---------------------------------------------------------------------------
@@ -2094,6 +2874,77 @@ mod tests {
             WorldObservationV1::decode(&bytes),
             Err(WorldCodecError::NonFiniteFloat)
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_requires_exact_binary32_wire_floats() {
+        let encoded = sample_observation().encode().test_ok();
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                5,
+                ciborium::Value::Float(0.1_f64),
+            )),
+            Err(WorldCodecError::NonCanonicalRecord)
+        );
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                5,
+                ciborium::Value::Float(f64::MAX),
+            )),
+            Err(WorldCodecError::NonFiniteFloat)
+        );
+
+        let mut signed_zero = sample_observation();
+        signed_zero.pos_x = -0.0;
+        let decoded = WorldObservationV1::decode(&signed_zero.encode().test_ok()).test_ok();
+        assert_eq!(decoded.pos_x.to_bits(), (-0.0_f32).to_bits());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_requires_unit_orientation_and_known_sensor() {
+        let mut observation = sample_observation();
+        let encoded = observation.encode().test_ok();
+        observation.orient_w = 2.0;
+        assert_eq!(
+            observation.encode(),
+            Err(WorldCodecError::NonUnitOrientation)
+        );
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                8,
+                ciborium::Value::Float(2.0),
+            )),
+            Err(WorldCodecError::NonUnitOrientation)
+        );
+
+        observation = sample_observation();
+        observation.sensor_kind = 2;
+        assert_eq!(
+            observation.encode(),
+            Err(WorldCodecError::UnknownSensorKind)
+        );
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                18,
+                ciborium::Value::Integer(2.into()),
+            )),
+            Err(WorldCodecError::UnknownSensorKind)
+        );
+
+        let mut rotated = sample_observation();
+        rotated.orient_w = std::f32::consts::FRAC_1_SQRT_2;
+        rotated.orient_x = std::f32::consts::FRAC_1_SQRT_2;
+        rotated.sensor_kind = SensorKindV1::ContactCount.as_u8();
+        assert_eq!(
+            WorldObservationV1::decode(&rotated.encode().test_ok()).test_ok(),
+            rotated
+        );
     }
 
     #[test]
@@ -2306,6 +3157,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_rejects_nonfinite_gravity_on_decode() {
+        let encoded = sample_config().encode().test_ok();
+        for gravity in [f64::NAN, f64::INFINITY, f64::MAX] {
+            let invalid = rewrite_array_field(&encoded, 4, ciborium::Value::Float(gravity));
+            assert!(matches!(
+                WorldConfigV1::decode(&invalid),
+                Err(WorldCodecError::NonFiniteFloat)
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_codecs_reject_non_array_cbor() {
         let scalar = CanonicalBytes::from_vec(cbor_encode(&ciborium::Value::Integer(1.into())));
         assert!(matches!(
@@ -2506,13 +3370,11 @@ mod tests {
         let body = EntityId::new();
         let config_entity = EntityId::new();
         let timeline = TimelineId::new();
-        let mut params = Vec::new();
-        ciborium::into_writer(&vec![1.0_f32, 0.0_f32], &mut params).test_ok();
         let action = WorldActionV1 {
             actor_entity_id: body,
             body_entity_id: body,
             action_kind: ActionKindV1::TargetVelocity,
-            params_cbor: params,
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -2537,7 +3399,7 @@ mod tests {
             sensor_kind: 0,
             sensor_value: vec![],
         };
-        let events = vec![
+        let mut events = vec![
             make_versioned_event(
                 1,
                 config_entity,
@@ -2558,6 +3420,8 @@ mod tests {
                 CanonicalBytes::from_static(b"other"),
             ),
         ];
+        let action_id = events[1].id;
+        events[2].causation_id = Some(action_id);
         let plugin = WorldPlugin::new().with_bodies([body]);
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
@@ -2569,10 +3433,13 @@ mod tests {
                     WorldDriver::new(
                         vec![Body {
                             entity_id: body,
+                            rotation: BodyRotationV1::default(),
                             x: 0.0,
                             y: 0.0,
+                            z: 0.0,
                             vx: 0.0,
                             vy: 0.0,
+                            vz: 0.0,
                         }],
                         Box::new(SimpleKinematicBackend::new()),
                         sample_config(),
@@ -2587,17 +3454,694 @@ mod tests {
                 &events,
             )
             .test_ok();
-        registry
+        let resumed_drafts = registry
             .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
             .test_ok();
+        assert_eq!(resumed_drafts[0].causation_id, Some(events[1].id));
         registry.abort_step();
         registry
             .step_all_anchored_with_events(timeline, Seq::from_u64(4), &events)
             .test_ok();
         let mut reduced = WorldReducer.initial();
         WorldReducer.apply(&mut reduced, &events[2]);
-        assert_eq!(reduced.get("last_x"), Some(&serde_json::json!(1.0)));
+        assert_eq!(reduced.get("pos_x"), Some(&serde_json::json!(1.0)));
         registry.commit_step_at(Seq::ZERO, 0).test_ok();
+    }
+
+    #[test]
+    fn live_resume_uses_full_canonical_body_state_for_the_next_step() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let initial = Body {
+            entity_id: body_id,
+            rotation: BodyRotationV1 {
+                orient_w: 0.0,
+                orient_x: 1.0,
+                orient_y: 0.0,
+                orient_z: 0.0,
+                vel_ang_x: 0.25,
+                vel_ang_y: -0.5,
+                vel_ang_z: 0.75,
+            },
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            vx: 0.16,
+            vy: 0.0,
+            vz: 0.0,
+        };
+        let mut uninterrupted = WorldDriver::new(
+            vec![initial.clone()],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+        let first = uninterrupted
+            .step(timeline, ObservationView::empty())
+            .test_ok();
+        uninterrupted.commit_step();
+        let next = uninterrupted
+            .step(timeline, ObservationView::empty())
+            .test_ok();
+        let expected = WorldObservationV1::decode(&next.drafts[0].payload).test_ok();
+        assert!((expected.pos_x - 0.4).abs() < 0.001);
+        assert_eq!(expected.orient_x.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(expected.vel_ang_x.to_bits(), 0.25_f32.to_bits());
+        assert_eq!(expected.vel_ang_y.to_bits(), (-0.5_f32).to_bits());
+        assert_eq!(expected.vel_ang_z.to_bits(), 0.75_f32.to_bits());
+
+        let events: Vec<Event> = first
+            .drafts
+            .iter()
+            .enumerate()
+            .map(|(index, draft)| {
+                let mut event = make_versioned_event(
+                    u64::try_from(index).test_ok() + 1,
+                    draft.entity,
+                    draft.event_type.as_str(),
+                    draft.payload.clone(),
+                );
+                event.causation_id = draft.causation_id;
+                event
+            })
+            .collect();
+        let plugin = WorldPlugin::new().with_bodies([body_id]);
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        registry
+            .register(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::new(
+                    vec![initial],
+                    Box::new(SimpleKinematicBackend::new()),
+                    sample_config(),
+                ))),
+            )
+            .test_ok();
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        let resumed_drafts = registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(resumed_drafts.len(), 1);
+        let resumed = WorldObservationV1::decode(&resumed_drafts[0].payload).test_ok();
+        assert_eq!(resumed, expected);
+    }
+
+    fn recovery_registry(ids: [EntityId; 2]) -> PluginRegistry {
+        let plugin = WorldPlugin::new().with_bodies(ids);
+        let initial = ids
+            .into_iter()
+            .map(|entity_id| Body {
+                entity_id,
+                rotation: BodyRotationV1::default(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
+            })
+            .collect();
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        registry
+            .register(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::new(
+                    initial,
+                    Box::new(SimpleKinematicBackend::new()),
+                    sample_config(),
+                ))),
+            )
+            .test_ok();
+        registry
+    }
+
+    fn recovery_observation(seq: u64, body_id: EntityId, tick: u64, step_index: u64) -> Event {
+        let mut value = sample_observation();
+        value.body_entity_id = body_id;
+        value.tick = tick;
+        value.step_index = step_index;
+        make_versioned_event(
+            seq,
+            body_id,
+            EVENT_TYPE_OBSERVATION_V1,
+            value.encode().test_ok(),
+        )
+    }
+
+    fn assert_rejected_body_history(
+        ids: [EntityId; 2],
+        timeline: TimelineId,
+        events: &[Event],
+        reason: &str,
+    ) {
+        let mut registry = recovery_registry(ids);
+        let head = Seq::from_u64(u64::try_from(events.len()).test_ok());
+        let error = registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, head)], events)
+            .test_err();
+        assert!(error.to_string().contains(reason), "{error:?}");
+        let after_rejection = registry
+            .step_all_anchored_with_events(timeline, Seq::ZERO, &[])
+            .test_ok();
+        let mut fresh = recovery_registry(ids);
+        let expected = fresh
+            .step_all_anchored_with_events(timeline, Seq::ZERO, &[])
+            .test_ok();
+        assert_eq!(
+            after_rejection
+                .iter()
+                .map(|draft| draft.payload.as_slice())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|draft| draft.payload.as_slice())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn live_resume_rejects_incomplete_or_poisoned_body_history() {
+        let mut ids = [EntityId::new(), EntityId::new()];
+        ids.sort_unstable();
+        let timeline = TimelineId::new();
+        let config = make_versioned_event(
+            1,
+            EntityId::new(),
+            EVENT_TYPE_CONFIG_V1,
+            sample_config().encode().test_ok(),
+        );
+        let reject = |events: Vec<Event>, reason| {
+            assert_rejected_body_history(ids, timeline, &events, reason);
+        };
+        let observation = recovery_observation;
+
+        reject(vec![config.clone()], "no committed body observations");
+        reject(
+            vec![config.clone(), observation(2, ids[0], 0, 0)],
+            "incomplete body set",
+        );
+        reject(
+            vec![
+                config.clone(),
+                observation(2, ids[0], 0, 0),
+                observation(3, ids[0], 1, 1),
+            ],
+            "incomplete body set",
+        );
+        reject(
+            vec![config.clone(), observation(2, ids[0], 1, 1)],
+            "not the next committed step",
+        );
+        reject(
+            vec![config.clone(), observation(2, ids[0], 0, 1)],
+            "not the next committed step",
+        );
+        reject(
+            vec![config.clone(), observation(2, ids[1], 0, 0)],
+            "missing, repeated or out of order",
+        );
+        let mut mismatched_event_entity = observation(2, ids[0], 0, 0);
+        mismatched_event_entity.entity = ids[1];
+        reject(
+            vec![config.clone(), mismatched_event_entity],
+            "missing, repeated or out of order",
+        );
+        let mut forged_causation = observation(2, ids[0], 0, 0);
+        forged_causation.causation_id = Some(EventId::new());
+        reject(
+            vec![config.clone(), forged_causation],
+            "causation differs from accepted action order",
+        );
+        reject(
+            vec![
+                config.clone(),
+                observation(2, ids[0], 0, 0),
+                observation(3, ids[0], 0, 0),
+            ],
+            "missing, repeated or out of order",
+        );
+
+        let mut registry = recovery_registry(ids);
+        let complete = vec![
+            config,
+            observation(2, ids[0], 0, 0),
+            observation(3, ids[1], 0, 0),
+            observation(4, ids[0], 1, 1),
+            observation(5, ids[1], 1, 1),
+        ];
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(5))],
+                &complete,
+            )
+            .test_ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    struct CountedInstalledBackend(Arc<AtomicUsize>);
+
+    #[cfg(target_os = "linux")]
+    impl WorldBackend for CountedInstalledBackend {
+        fn name(&self) -> &'static str {
+            "counted-installed-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            SimpleKinematicBackend::new().step(bodies, timestep_micros)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_body(body_id: EntityId) -> Body {
+        Body {
+            entity_id: body_id,
+            rotation: BodyRotationV1::default(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_history(body_id: EntityId, timeline: TimelineId) -> Vec<Event> {
+        let (mut registry, _) = installed_registry(body_id);
+        let drafts = registry
+            .step_all_anchored_with_events(timeline, Seq::ZERO, &[])
+            .test_ok();
+        drafts
+            .iter()
+            .enumerate()
+            .map(|(index, draft)| {
+                make_versioned_event(
+                    u64::try_from(index).test_ok() + 1,
+                    draft.entity,
+                    draft.event_type.as_str(),
+                    draft.payload.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_counted_driver(body_id: EntityId) -> (WorldDriver, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut driver = WorldDriver::new_live(
+            vec![installed_body(body_id)],
+            HostWorldProfileV1::standard(),
+        )
+        .test_ok();
+        if let WorldDriverBackend::Installed(installed) = &mut driver.backend {
+            installed.test_backend = Some(Box::new(CountedInstalledBackend(Arc::clone(&calls))));
+        }
+        (driver, calls)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_registry(body_id: EntityId) -> (PluginRegistry, Arc<AtomicUsize>) {
+        let (driver, calls) = installed_counted_driver(body_id);
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        registry
+            .register(
+                &WorldPlugin::new().with_bodies([body_id]),
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(driver)),
+            )
+            .test_ok();
+        (registry, calls)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_installed_recovery_rejected(
+        body_id: EntityId,
+        timeline: TimelineId,
+        events: &[Event],
+        expected: WorldInstallationErrorV1,
+    ) {
+        let (mut registry, calls) = installed_registry(body_id);
+        let head = Seq::from_u64(u64::try_from(events.len()).test_ok());
+        let error = registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, head)], events)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::WorldInstallation(actual) if actual == expected
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_resume_matches_retained_config_before_backend_step() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+        let config = WorldConfigV1::decode(&events[0].payload).test_ok();
+        assert_eq!(
+            config.backend_content_hash,
+            MeasuredProcessImageV1::capture().test_ok().digest()
+        );
+        let (mut registry, calls) = installed_registry(body_id);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_preflight_rejects_absent_or_payloadless_retained_config() {
+        let body_id = EntityId::new();
+        let (mut driver, _) = installed_counted_driver(body_id);
+        assert!(driver.requires_snapshot_anchor());
+        assert!(driver.requires_verified_event_prefix());
+        assert!(!WorldDriver::default().requires_snapshot_anchor());
+        assert!(!WorldDriver::default().requires_verified_event_prefix());
+        assert!(matches!(
+            WorldDriver::scan_retained_config(
+                [(EVENT_TYPE_CONFIG_V1, None::<&CanonicalBytes>)].into_iter()
+            ),
+            Err(WorldInstallationErrorV1::RetainedConfigMalformed)
+        ));
+        assert!(matches!(
+            WorldDriver::scan_retained_config(
+                [(EVENT_TYPE_ACTION_V1, None::<&CanonicalBytes>)].into_iter()
+            ),
+            Ok(None)
+        ));
+        driver.config_emitted = true;
+        assert!(matches!(
+            driver.preflight_installed_step(&[]),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+
+        let events = installed_history(body_id, TimelineId::new());
+        assert!(matches!(
+            driver.preflight_installed_step(&[events[0].clone(), events[0].clone()]),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigAmbiguous
+            ))
+        ));
+
+        let installed = WorldDriver::new_live(Vec::new(), HostWorldProfileV1::standard()).test_ok();
+        if let WorldDriverBackend::Installed(backend) = &installed.backend {
+            assert!(backend.step(&[], 16_667).is_empty());
+        }
+        assert!(WorldDriver::default().preflight_installed_step(&[]).is_ok());
+
+        let mut fixture_registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        fixture_registry
+            .register(
+                &WorldPlugin::new(),
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::default())),
+            )
+            .test_ok();
+        fixture_registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO)],
+                &[],
+            )
+            .test_ok();
+
+        let mut fixture = WorldDriver::default();
+        fixture
+            .step(TimelineId::new(), ObservationView::empty())
+            .test_ok();
+        fixture.commit_step();
+        fixture.commit_step();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_fork_handoff_requires_the_restored_parent() {
+        let body_id = EntityId::new();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let parent = store.create_timeline("parent").test_ok();
+        let (mut initial, _) = installed_registry(body_id);
+        let drafts = initial
+            .step_all_anchored_with_events(parent.id(), Seq::ZERO, &[])
+            .test_ok();
+        let events = store.append(parent.id(), &drafts).test_ok();
+        assert_eq!(events.len(), 2);
+        let (mut registry, calls) = installed_registry(body_id);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(parent.id(), Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                TimelineId::new(),
+                Seq::from_u64(2),
+                "wrong-parent"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                parent.id(),
+                Seq::from_u64(1),
+                "earlier-cut"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                parent.id(),
+                Seq::from_u64(3),
+                "later-cut"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
+        let child = registry
+            .fork_restored_timeline(store.as_mut(), parent.id(), Seq::from_u64(2), "child")
+            .test_ok();
+        assert_eq!(child.meta.fork_point, Some((parent.id(), Seq::from_u64(2))));
+
+        let unrelated = store.create_timeline("unrelated").test_ok();
+        assert!(matches!(
+            registry.step_all_anchored_with_events(unrelated.id(), Seq::from_u64(2), &events),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        registry
+            .step_all_anchored_with_events(child.id(), Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_step_requires_anchor_and_verified_retained_prefix() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let other_timeline = TimelineId::new();
+        let (mut driver, direct_calls) = installed_counted_driver(body_id);
+        assert!(matches!(
+            driver.step(timeline, ObservationView::empty()),
+            Err(RuntimeError::MissingSnapshotAnchor { .. })
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(other_timeline, Seq::ZERO)),
+            ),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::from_u64(1))),
+            ),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::ZERO)),
+            ),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+        assert_eq!(direct_calls.load(Ordering::SeqCst), 0);
+
+        let events = installed_history(body_id, timeline);
+        let (mut registry, calls) = installed_registry(body_id);
+        let error = registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::WorldInstallation(WorldInstallationErrorV1::RetainedConfigAmbiguous)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_step_rechecks_actual_timeline_and_retained_config() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let other_timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+
+        let (mut empty_restored, empty_calls) = installed_registry(body_id);
+        empty_restored
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
+            .test_ok();
+        assert!(matches!(
+            empty_restored
+                .step_all_anchored_with_events(other_timeline, Seq::from_u64(2), &events,),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert_eq!(empty_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            empty_restored.step_all_anchored_with_events(timeline, Seq::from_u64(2), &events,),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigAmbiguous
+            ))
+        ));
+        assert_eq!(empty_calls.load(Ordering::SeqCst), 0);
+
+        let (mut restored, calls) = installed_registry(body_id);
+        restored
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        let mut changed = events.clone();
+        let mut config = WorldConfigV1::decode(&changed[0].payload).test_ok();
+        config.backend_content_hash = [7; 32];
+        changed[0].payload = config.encode().test_ok();
+        assert!(matches!(
+            restored.step_all_anchored_with_events(timeline, Seq::from_u64(2), &changed),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::BackendDigestMismatch
+            ))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_resume_rejects_ambiguous_and_mismatched_config() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+        let original = WorldConfigV1::decode(&events[0].payload).test_ok();
+        for (config, expected) in [
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_id = "other".to_owned();
+                    value
+                },
+                WorldInstallationErrorV1::BackendIdMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_version = "other".to_owned();
+                    value
+                },
+                WorldInstallationErrorV1::BackendVersionMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_content_hash = [7; 32];
+                    value
+                },
+                WorldInstallationErrorV1::BackendDigestMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.timestep_micros += 1;
+                    value
+                },
+                WorldInstallationErrorV1::ProfileMismatch,
+            ),
+            (
+                {
+                    let mut value = original;
+                    value.gravity_x = -0.0;
+                    value
+                },
+                WorldInstallationErrorV1::ProfileMismatch,
+            ),
+        ] {
+            let mut modified = events.clone();
+            modified[0].payload = config.encode().test_ok();
+            assert_installed_recovery_rejected(body_id, timeline, &modified, expected);
+        }
+        let mut malformed = events.clone();
+        malformed[0].payload = CanonicalBytes::from_static(b"bad WCF1");
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &malformed,
+            WorldInstallationErrorV1::RetainedConfigMalformed,
+        );
+        let mut missing = vec![events[1].clone()];
+        missing[0].seq = Seq::from_u64(1);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &missing,
+            WorldInstallationErrorV1::RetainedConfigMissing,
+        );
+        let mut duplicate = vec![events[0].clone(), events[0].clone(), events[1].clone()];
+        duplicate[1].seq = Seq::from_u64(2);
+        duplicate[2].seq = Seq::from_u64(3);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &duplicate,
+            WorldInstallationErrorV1::RetainedConfigAmbiguous,
+        );
+        let mut late = vec![events[1].clone(), events[0].clone()];
+        late[0].seq = Seq::from_u64(1);
+        late[1].seq = Seq::from_u64(2);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &late,
+            WorldInstallationErrorV1::RetainedConfigOutOfOrder,
+        );
     }
 
     fn assert_malformed_recovery_events(
@@ -2624,7 +4168,7 @@ mod tests {
             actor_entity_id: body,
             body_entity_id: EntityId::new(),
             action_kind: ActionKindV1::Impulse,
-            params_cbor: encode_vel_params(1.0, 0.0),
+            params_cbor: encode_horizontal_velocity_params(1.0, 0.0),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -2642,6 +4186,27 @@ mod tests {
             )
             .is_err());
 
+        let mismatched_catalogue = WorldActionV1 {
+            body_entity_id: body,
+            catalogue_version: 2,
+            ..unknown_target_action
+        };
+        let mismatched_catalogue = make_versioned_event(
+            1,
+            body,
+            EVENT_TYPE_ACTION_V1,
+            mismatched_catalogue.encode().test_ok(),
+        );
+        let error = registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
+                &[mismatched_catalogue],
+            )
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("action catalogue version differs from pinned world configuration"));
+
         let mut unknown_observation = sample_observation();
         unknown_observation.body_entity_id = EntityId::new();
         let unknown_target_observation = make_versioned_event(
@@ -2655,7 +4220,7 @@ mod tests {
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
                 &[unknown_target_observation],
             )
-            .is_ok());
+            .is_err());
     }
 
     fn assert_recovery_sequence(
@@ -2667,7 +4232,7 @@ mod tests {
             actor_entity_id: body,
             body_entity_id: body,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: encode_vel_params(1.0, 0.0),
+            params_cbor: encode_horizontal_velocity_params(1.0, 0.0),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -2735,10 +4300,13 @@ mod tests {
                 Some(Box::new(WorldDriver::new(
                     vec![Body {
                         entity_id: body,
+                        rotation: BodyRotationV1::default(),
                         x: 0.0,
                         y: 0.0,
+                        z: 0.0,
                         vx: 0.0,
                         vy: 0.0,
+                        vz: 0.0,
                     }],
                     Box::new(SimpleKinematicBackend::new()),
                     sample_config(),
@@ -2887,12 +4455,10 @@ mod tests {
         let plugin = WorldPlugin::new();
         let cap = plugin.capability();
 
-        assert_eq!(cap.owned_event_types.len(), 5);
-        assert_eq!(cap.owned_event_types[0].as_str(), EVENT_TYPE_OBSERVATION);
-        assert_eq!(cap.owned_event_types[1].as_str(), EVENT_TYPE_ACTION);
-        assert_eq!(cap.owned_event_types[2].as_str(), EVENT_TYPE_ACTION_V1);
-        assert_eq!(cap.owned_event_types[3].as_str(), EVENT_TYPE_OBSERVATION_V1);
-        assert_eq!(cap.owned_event_types[4].as_str(), EVENT_TYPE_CONFIG_V1);
+        assert_eq!(cap.owned_event_types.len(), 3);
+        assert_eq!(cap.owned_event_types[0].as_str(), EVENT_TYPE_ACTION_V1);
+        assert_eq!(cap.owned_event_types[1].as_str(), EVENT_TYPE_OBSERVATION_V1);
+        assert_eq!(cap.owned_event_types[2].as_str(), EVENT_TYPE_CONFIG_V1);
         assert_eq!(cap.owned_entity_kinds.len(), 1);
         assert_eq!(cap.owned_entity_kinds[0], ENTITY_KIND);
         assert!(cap.has_driver);
@@ -2920,13 +4486,16 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 2.0,
+            vz: 0.0,
         }];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].entity_id, entity);
         assert!((observations[0].x - 1.0).abs() < f64::EPSILON);
@@ -2942,21 +4511,27 @@ mod tests {
         let bodies = vec![
             Body {
                 entity_id: entity1,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 1.0,
                 vy: 0.0,
+                vz: 0.0,
             },
             Body {
                 entity_id: entity2,
+                rotation: BodyRotationV1::default(),
                 x: 10.0,
                 y: 10.0,
+                z: 0.0,
                 vx: -1.0,
                 vy: -1.0,
+                vz: 0.0,
             },
         ];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 2);
         assert!((observations[0].x - 1.0).abs() < f64::EPSILON);
         assert!((observations[0].y - 0.0).abs() < f64::EPSILON);
@@ -2990,8 +4565,7 @@ mod tests {
         assert!((body.position().north_metres() - position.north_metres()).abs() < f64::EPSILON);
         assert!((body.position().up_metres() - position.up_metres()).abs() < f64::EPSILON);
 
-        let backend = SimpleKinematicBackend::new();
-        let observations = backend.step_coordinates(&[body]).test_ok();
+        let observations = SimpleKinematicBackend::step_coordinates(&[body]).test_ok();
 
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].entity_id(), body.entity_id());
@@ -3031,10 +4605,8 @@ mod tests {
             )
             .test_ok();
         let body = WorldCoordinateBody::new(EntityId::new(), position, f64::INFINITY, 0.0, 0.0);
-        let backend = SimpleKinematicBackend::new();
-
         assert!(matches!(
-            backend.step_coordinates(&[body]),
+            SimpleKinematicBackend::step_coordinates(&[body]),
             Err(WorldTransformError::NonFiniteCoordinate)
         ));
     }
@@ -3055,10 +4627,13 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3085,10 +4660,13 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 5.0,
             y: 10.0,
+            z: 0.0,
             vx: 2.0,
             vy: 3.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3113,10 +4691,13 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3138,11 +4719,16 @@ mod tests {
             "unknown-entity"
         }
 
-        fn step(&self, _bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, _bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             vec![WorldObservation {
                 entity_id: EntityId::new(),
+                rotation: BodyRotationV1::default(),
                 x: 9.0,
                 y: 9.0,
+                z: 9.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
             }]
         }
     }
@@ -3157,61 +4743,89 @@ mod tests {
             "mixed-entity"
         }
 
-        fn step(&self, bodies: &[Body]) -> Vec<WorldObservation> {
+        fn step(&self, bodies: &[Body], _timestep_micros: u32) -> Vec<WorldObservation> {
             let mut out: Vec<WorldObservation> = bodies
                 .iter()
                 .map(|body| WorldObservation {
                     entity_id: body.entity_id,
+                    rotation: BodyRotationV1::default(),
                     x: body.x + body.vx,
                     y: body.y + body.vy,
+                    z: body.z + body.vz,
+                    vx: body.vx,
+                    vy: body.vy,
+                    vz: body.vz,
                 })
                 .collect();
             out.push(WorldObservation {
                 entity_id: self.extra,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
             });
             out
         }
     }
 
+    struct ReversedObservationBackend;
+
+    impl WorldBackend for ReversedObservationBackend {
+        fn name(&self) -> &'static str {
+            "reversed-observation-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+            let mut observations = SimpleKinematicBackend::new().step(bodies, timestep_micros);
+            observations.reverse();
+            observations
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn driver_ignores_observations_for_unknown_entities() {
+    fn driver_rejects_observations_for_unknown_entities() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("test").test_ok();
         let known = EntityId::new();
         let body = Body {
             entity_id: known,
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let mut driver =
             WorldDriver::new(vec![body], Box::new(UnknownEntityBackend), sample_config());
         assert_eq!(UnknownEntityBackend.name(), "unknown-entity");
-        // First step: config + observation for the unknown entity (backend returns unknown id,
-        // so body state is unchanged, but an observation draft is still emitted for it).
-        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 2); // config + one observation from unknown backend
-        assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
-        assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
+        let error = driver.step(tl.id(), ObservationView::empty()).test_err();
+        assert!(error
+            .to_string()
+            .contains("backend observation body set differs from staged bodies"));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn driver_updates_known_and_skips_unknown_in_same_step() {
+    fn driver_rejects_mixed_known_and_unknown_backend_observations() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("test").test_ok();
         let known = EntityId::new();
         let unknown = EntityId::new();
         let body = Body {
             entity_id: known,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 2.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3219,63 +4833,223 @@ mod tests {
             sample_config(),
         );
         assert_eq!(MixedEntityBackend { extra: unknown }.name(), "mixed-entity");
-        driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert!((driver.entities[0].x - 1.0).abs() < f64::EPSILON);
-        assert!((driver.entities[0].y - 2.0).abs() < f64::EPSILON);
+        let error = driver.step(tl.id(), ObservationView::empty()).test_err();
+        assert!(error
+            .to_string()
+            .contains("backend observation body set differs from staged bodies"));
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reducer_initial_state_has_correct_fields() {
-        let reducer = WorldReducer;
-        let state = reducer.initial();
-        assert!(state.get("observation_count").is_some());
-        assert!(state.get("body_count").is_some());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reducer_tracks_observation_count() {
-        let reducer = WorldReducer;
-        let entity = EntityId::new();
-        let mut state = reducer.initial();
-
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(0)
+    fn driver_rejects_duplicate_staged_bodies() {
+        let body = Body {
+            entity_id: EntityId::new(),
+            rotation: BodyRotationV1::default(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+        };
+        let mut driver = WorldDriver::new(
+            vec![body.clone(), body],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
         );
+        let error = driver
+            .step(TimelineId::new(), ObservationView::empty())
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("duplicate staged body identifiers"));
+    }
 
-        for _ in 0..5 {
-            let event = make_observation_event(entity);
-            reducer.apply(&mut state, &event);
+    #[test]
+    fn driver_emits_observations_in_entity_id_order() {
+        let mut ids = [EntityId::new(), EntityId::new()];
+        ids.sort_unstable();
+        let first = Body {
+            entity_id: ids[0],
+            rotation: BodyRotationV1::default(),
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+        };
+        let second = Body {
+            entity_id: ids[1],
+            rotation: BodyRotationV1::default(),
+            ..first
+        };
+        let mut driver = WorldDriver::new(
+            vec![second, first],
+            Box::new(ReversedObservationBackend),
+            sample_config(),
+        );
+        let output = driver
+            .step(TimelineId::new(), ObservationView::empty())
+            .test_ok();
+        let observed_ids: Vec<_> = output
+            .drafts
+            .iter()
+            .filter(|draft| draft.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+            .map(|draft| {
+                WorldObservationV1::decode(&draft.payload)
+                    .test_ok()
+                    .body_entity_id
+            })
+            .collect();
+        assert_eq!(observed_ids, ids);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_initial_state_has_no_authoritative_body() {
+        assert!(WorldReducer.initial().fields.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_projects_complete_body_state_and_event_provenance() {
+        let mut observation = sample_observation();
+        observation.orient_w = std::f32::consts::FRAC_1_SQRT_2;
+        observation.orient_x = std::f32::consts::FRAC_1_SQRT_2;
+        observation.vel_ang_x = 0.25;
+        observation.vel_ang_y = -0.5;
+        observation.vel_ang_z = 0.75;
+        observation.sensor_kind = SensorKindV1::ContactCount.as_u8();
+        observation.sensor_value = vec![1, 255];
+        let mut event = make_versioned_event(
+            5,
+            observation.body_entity_id,
+            EVENT_TYPE_OBSERVATION_V1,
+            observation.encode().test_ok(),
+        );
+        event.causation_id = Some(EventId::new());
+
+        let mut state = WorldReducer.initial();
+        WorldReducer.apply(&mut state, &event);
+        let expected = serde_json::json!({
+            "body_entity_id": observation.body_entity_id.to_string(),
+            "tick": observation.tick,
+            "step_index": observation.step_index,
+            "pos_x": observation.pos_x,
+            "pos_y": observation.pos_y,
+            "pos_z": observation.pos_z,
+            "orient_w": observation.orient_w,
+            "orient_x": observation.orient_x,
+            "orient_y": observation.orient_y,
+            "orient_z": observation.orient_z,
+            "vel_lin_x": observation.vel_lin_x,
+            "vel_lin_y": observation.vel_lin_y,
+            "vel_lin_z": observation.vel_lin_z,
+            "vel_ang_x": observation.vel_ang_x,
+            "vel_ang_y": observation.vel_ang_y,
+            "vel_ang_z": observation.vel_ang_z,
+            "sensor_kind": observation.sensor_kind,
+            "sensor_value": observation.sensor_value,
+            "observation_id": event.id.to_string(),
+            "observation_seq": event.seq.as_u64(),
+            "causation_id": event.causation_id.as_ref().map(ToString::to_string),
+        });
+        let expected_fields = expected.as_object().test_ok();
+        assert_eq!(state.fields.len(), expected_fields.len());
+        for (key, value) in expected_fields {
+            assert_eq!(state.get(key), Some(value), "projection field {key}");
         }
-
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(5)
-        );
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reducer_ignores_other_event_types() {
+    fn reducer_replaces_body_at_later_timeline_observation() {
         let reducer = WorldReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
+        let first = make_observation_event(entity);
+        reducer.apply(&mut state, &first);
+        let mut next_observation = sample_observation();
+        next_observation.body_entity_id = entity;
+        next_observation.tick = 20;
+        next_observation.step_index = 8;
+        next_observation.pos_x = 4.5;
+        let next = make_versioned_event(
+            9,
+            entity,
+            EVENT_TYPE_OBSERVATION_V1,
+            next_observation.encode().test_ok(),
+        );
+        reducer.apply(&mut state, &next);
+
+        assert_eq!(state.get("tick"), Some(&serde_json::json!(20)));
+        assert_eq!(state.get("step_index"), Some(&serde_json::json!(8)));
+        assert_eq!(state.get("pos_x"), Some(&serde_json::json!(4.5)));
+        assert_eq!(state.get("observation_seq"), Some(&serde_json::json!(9)));
+        assert_eq!(
+            state.get("observation_id"),
+            Some(&serde_json::json!(next.id.to_string()))
+        );
+        assert_eq!(state.get("causation_id"), Some(&serde_json::Value::Null));
+        assert!(state.get("observation_count").is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_ignores_other_event_types_and_invalid_observations() {
+        let reducer = WorldReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        let canonical = make_observation_event(entity);
+        reducer.apply(&mut state, &canonical);
+        let accepted = state.clone();
 
         let other = make_other_event(entity);
         reducer.apply(&mut state, &other);
+        assert_eq!(state, accepted);
 
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(0)
+        let legacy =
+            make_versioned_event(1, entity, "world.observation", canonical.payload.clone());
+        reducer.apply(&mut state, &legacy);
+        assert_eq!(state, accepted);
+
+        let malformed = make_versioned_event(
+            2,
+            entity,
+            EVENT_TYPE_OBSERVATION_V1,
+            CanonicalBytes::from_vec(vec![0xff]),
         );
+        reducer.apply(&mut state, &malformed);
+        assert_eq!(state, accepted);
+
+        let mismatched_body = make_versioned_event(
+            3,
+            entity,
+            EVENT_TYPE_OBSERVATION_V1,
+            sample_observation().encode().test_ok(),
+        );
+        reducer.apply(&mut state, &mismatched_body);
+        assert_eq!(state, accepted);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_rejects_parseable_noncanonical_wob1() {
+        let reducer = WorldReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        let canonical = make_observation_event(entity);
+        let noncanonical = make_versioned_event(
+            1,
+            entity,
+            EVENT_TYPE_OBSERVATION_V1,
+            overlong_version(&canonical.payload),
+        );
+        reducer.apply(&mut state, &noncanonical);
+        assert!(state.fields.is_empty());
+
+        reducer.apply(&mut state, &canonical);
+        assert_eq!(state.get("pos_x"), Some(&serde_json::json!(1.0)));
     }
 
     #[test]
@@ -3284,24 +5058,33 @@ mod tests {
         let entity = EntityId::new();
         let b1 = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let b2 = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let b3 = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 3.0,
             y: 4.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         assert_eq!(b1, b2);
         assert_ne!(b1, b3);
@@ -3313,18 +5096,33 @@ mod tests {
         let entity = EntityId::new();
         let o1 = WorldObservation {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
+            z: 3.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
         };
         let o2 = WorldObservation {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 1.0,
             y: 2.0,
+            z: 3.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
         };
         let o3 = WorldObservation {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 3.0,
             y: 4.0,
+            z: 5.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
         };
         assert_eq!(o1, o2);
         assert_ne!(o1, o3);
@@ -3354,13 +5152,16 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 5.0,
             y: 7.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         }];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 1);
         assert!((observations[0].x - 5.0).abs() < f64::EPSILON);
         assert!((observations[0].y - 7.0).abs() < f64::EPSILON);
@@ -3373,13 +5174,16 @@ mod tests {
         let entity = EntityId::new();
         let bodies = vec![Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 10.0,
             y: 10.0,
+            z: 0.0,
             vx: -2.0,
             vy: -3.0,
+            vz: 0.0,
         }];
 
-        let observations = backend.step(&bodies);
+        let observations = backend.step(&bodies, 1_000_000);
         assert_eq!(observations.len(), 1);
         assert!((observations[0].x - 8.0).abs() < f64::EPSILON);
         assert!((observations[0].y - 7.0).abs() < f64::EPSILON);
@@ -3393,10 +5197,13 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let backend = Box::new(SimpleKinematicBackend::new());
         let mut driver = WorldDriver::new(vec![body], backend, sample_config());
@@ -3421,10 +5228,13 @@ mod tests {
             let entity = EntityId::new();
             let body = Body {
                 entity_id: entity,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 1.5,
                 vy: -0.5,
+                vz: 0.0,
             };
 
             // With resolution_mm=100 (0.1m), both 1.5 and -0.5 are exact multiples.
@@ -3474,10 +5284,13 @@ mod tests {
             let entity = EntityId::new();
             let body = Body {
                 entity_id: entity,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 1.0,
                 vy: 0.0,
+                vz: 0.0,
             };
             let mut driver = WorldDriver::new(
                 vec![body],
@@ -3513,10 +5326,10 @@ mod tests {
         }
     }
 
-    fn encode_vel_params(vx: f32, vy: f32) -> Vec<u8> {
+    fn encode_horizontal_velocity_params(x: f32, z: f32) -> Vec<u8> {
         cbor_encode(&ciborium::Value::Array(vec![
-            cbor_f32(vx).test_ok(),
-            cbor_f32(vy).test_ok(),
+            cbor_f32(x).test_ok(),
+            cbor_f32(z).test_ok(),
         ]))
     }
 
@@ -3547,10 +5360,13 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3558,12 +5374,12 @@ mod tests {
             sample_config(),
         );
 
-        // Impulse (+0.5, +2.0): resulting vx=1.5, vy=2.0 → backend step: x=1.5, y=2.0.
+        // Impulse changes X/Z velocity; vertical Y remains unchanged.
         let action = WorldActionV1 {
             actor_entity_id: EntityId::new(),
             body_entity_id: entity,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: encode_vel_params(0.5, 2.0),
+            params_cbor: encode_horizontal_velocity_params(0.5, 2.0),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -3581,9 +5397,13 @@ mod tests {
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
-        // 100 mm quantization; 1.5 m and 2.0 m are exact multiples of 0.1 m.
+        // Position floor does not apply to velocity.
         assert!((obs.pos_x - 1.5_f32).abs() < 0.15);
-        assert!((obs.pos_y - 2.0_f32).abs() < 0.15);
+        assert!((obs.pos_z - 2.0_f32).abs() < 0.15);
+        assert_eq!(obs.pos_y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_x.to_bits(), 1.5_f32.to_bits());
+        assert_eq!(obs.vel_lin_y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_z.to_bits(), 2.0_f32.to_bits());
 
         // The host supplies the complete committed prefix on every Tick. The
         // same impulse must not be applied a second time when that prefix is
@@ -3599,7 +5419,8 @@ mod tests {
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         assert!((obs.pos_x - 3.0_f32).abs() < 0.15);
-        assert!((obs.pos_y - 4.0_f32).abs() < 0.15);
+        assert!((obs.pos_z - 4.0_f32).abs() < 0.15);
+        assert_eq!(obs.pos_y.to_bits(), 0.0_f32.to_bits());
     }
 
     #[test]
@@ -3611,10 +5432,13 @@ mod tests {
         // High initial velocity; TargetVelocity must override it entirely.
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 10.0,
             vy: 10.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3622,12 +5446,12 @@ mod tests {
             sample_config(),
         );
 
-        // TargetVelocity (2.0, 0.5) → backend step: x=2.0, y=0.5.
+        // TargetVelocity overrides horizontal X/Z while retaining vertical Y.
         let action = WorldActionV1 {
             actor_entity_id: EntityId::new(),
             body_entity_id: entity,
             action_kind: ActionKindV1::TargetVelocity,
-            params_cbor: encode_vel_params(2.0, 0.5),
+            params_cbor: encode_horizontal_velocity_params(2.0, 0.5),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -3643,7 +5467,120 @@ mod tests {
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
         assert!((obs.pos_x - 2.0_f32).abs() < 0.15);
-        assert!((obs.pos_y - 0.5_f32).abs() < 0.15);
+        assert!((obs.pos_z - 0.5_f32).abs() < 0.15);
+        assert!((obs.pos_y - 10.0_f32).abs() < 0.15);
+        assert_eq!(obs.vel_lin_x.to_bits(), 2.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_y.to_bits(), 10.0_f32.to_bits());
+        assert_eq!(obs.vel_lin_z.to_bits(), 0.5_f32.to_bits());
+    }
+
+    #[test]
+    fn horizontal_actuators_use_pinned_timestep_without_velocity_quantization() {
+        let body_id = EntityId::new();
+        let mut config = sample_config();
+        config.timestep_micros = 250_000;
+        let mut driver = WorldDriver::new(
+            vec![Body {
+                entity_id: body_id,
+                rotation: BodyRotationV1::default(),
+                x: 0.0,
+                y: 3.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 1.0,
+                vz: 0.0,
+            }],
+            Box::new(SimpleKinematicBackend::new()),
+            config,
+        );
+        let action = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: body_id,
+            action_kind: ActionKindV1::TargetVelocity,
+            params_cbor: encode_actuator_pair_v1(0.0625, -0.125).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let output = driver
+            .step(
+                TimelineId::new(),
+                ObservationView::from_events(&[make_action_event_from(body_id, &action)]),
+            )
+            .test_ok();
+        let mut observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+        assert!(observation.pos_x.abs() < f32::EPSILON);
+        assert!(observation.pos_z.abs() < f32::EPSILON);
+        assert_eq!(observation.vel_lin_x.to_bits(), 0.0625_f32.to_bits());
+        assert_eq!(observation.vel_lin_y.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(observation.vel_lin_z.to_bits(), (-0.125_f32).to_bits());
+
+        // Each committed step advances from its canonical WOB1 position. The
+        // actuator velocity remains precise, but sub-resolution displacement
+        // does not accumulate as hidden Live-only state.
+        for _ in 0..3 {
+            driver.commit_step();
+            let output = driver
+                .step(TimelineId::new(), ObservationView::empty())
+                .test_ok();
+            observation = WorldObservationV1::decode(&output.drafts[0].payload).test_ok();
+        }
+        assert_eq!(observation.tick, 3);
+        assert_eq!(observation.step_index, 3);
+        assert!(observation.pos_x.abs() < f32::EPSILON);
+        assert!((observation.pos_y - 4.2).abs() < 0.11);
+        assert!(observation.pos_z.abs() < f32::EPSILON);
+        assert_eq!(observation.vel_lin_x.to_bits(), 0.0625_f32.to_bits());
+        assert_eq!(observation.vel_lin_z.to_bits(), (-0.125_f32).to_bits());
+    }
+
+    #[test]
+    fn driver_rejects_action_catalogue_outside_pinned_configuration() {
+        let body_id = EntityId::new();
+        let actor_id = EntityId::new();
+        let plugin = WorldPlugin::new()
+            .with_bodies([body_id])
+            .with_catalogue_version(2);
+        let action = WorldActionV1 {
+            actor_entity_id: actor_id,
+            body_entity_id: body_id,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 2,
+            tick: 0,
+        };
+        let proposal = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor_id,
+            action.encode().test_ok(),
+            Kind::new("world.action.v1.submit"),
+        );
+        plugin.approve(&proposal).test_ok();
+
+        let mut driver = WorldDriver::new(
+            vec![Body {
+                entity_id: body_id,
+                rotation: BodyRotationV1::default(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
+            }],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+        let error = driver
+            .step(
+                TimelineId::new(),
+                ObservationView::from_events(&[make_action_event_from(body_id, &action)]),
+            )
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("action catalogue version differs from pinned world configuration"));
     }
 
     #[test]
@@ -3655,10 +5592,13 @@ mod tests {
         let mut driver = WorldDriver::new(
             vec![Body {
                 entity_id: entity,
+                rotation: BodyRotationV1::default(),
                 x: 0.0,
                 y: 0.0,
+                z: 0.0,
                 vx: 0.0,
                 vy: 0.0,
+                vz: 0.0,
             }],
             Box::new(SimpleKinematicBackend::new()),
             sample_config(),
@@ -3667,7 +5607,7 @@ mod tests {
             actor_entity_id: EntityId::new(),
             body_entity_id: entity,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: encode_vel_params(1.0, 0.0),
+            params_cbor: encode_horizontal_velocity_params(1.0, 0.0),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -3696,10 +5636,13 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 1.0,
             vy: 1.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3736,6 +5679,61 @@ mod tests {
     }
 
     #[test]
+    fn failed_action_batch_can_retry_without_partial_world_state() {
+        let body_id = EntityId::new();
+        let initial = Body {
+            entity_id: body_id,
+            rotation: BodyRotationV1::default(),
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            vx: 0.0,
+            vy: 4.0,
+            vz: 0.0,
+        };
+        let mut driver = WorldDriver::new(
+            vec![initial],
+            Box::new(SimpleKinematicBackend::new()),
+            sample_config(),
+        );
+        let action = WorldActionV1 {
+            actor_entity_id: EntityId::new(),
+            body_entity_id: body_id,
+            action_kind: ActionKindV1::Impulse,
+            params_cbor: encode_actuator_pair_v1(1.0, 2.0).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let accepted = make_action_event_from(body_id, &action);
+        let mut malformed = make_action_event_from(body_id, &action);
+        malformed.seq = Seq::from_u64(1);
+        malformed.payload = CanonicalBytes::from_static(b"malformed");
+        let error = driver
+            .step(
+                TimelineId::new(),
+                ObservationView::from_events(&[accepted.clone(), malformed]),
+            )
+            .test_err();
+        assert!(error.to_string().contains("world.action.v1"));
+
+        let output = driver
+            .step(TimelineId::new(), ObservationView::from_events(&[accepted]))
+            .test_ok();
+        assert_eq!(output.drafts.len(), 2);
+        assert_eq!(output.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
+        let observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+        assert_eq!(observation.tick, 0);
+        assert_eq!(observation.step_index, 0);
+        assert!((observation.pos_x - 2.0).abs() < 0.05);
+        assert!((observation.pos_y - 6.0).abs() < 0.05);
+        assert!((observation.pos_z - 5.0).abs() < 0.05);
+        assert_eq!(observation.vel_lin_x.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(observation.vel_lin_y.to_bits(), 4.0_f32.to_bits());
+        assert_eq!(observation.vel_lin_z.to_bits(), 2.0_f32.to_bits());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn driver_rejects_unknown_action_target_and_parameters() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
@@ -3743,10 +5741,13 @@ mod tests {
         let entity = EntityId::new();
         let body = Body {
             entity_id: entity,
+            rotation: BodyRotationV1::default(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
         };
         let mut driver = WorldDriver::new(
             vec![body],
@@ -3758,7 +5759,7 @@ mod tests {
             actor_entity_id: EntityId::new(),
             body_entity_id: EntityId::new(),
             action_kind: ActionKindV1::Impulse,
-            params_cbor: encode_vel_params(1.0, 1.0),
+            params_cbor: encode_horizontal_velocity_params(1.0, 1.0),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
@@ -3772,251 +5773,26 @@ mod tests {
         assert!(matches!(error, RuntimeError::InvalidPayload { .. }));
         driver.abort_step();
 
-        let invalid_parameters = WorldActionV1 {
+        let valid_parameters = WorldActionV1 {
             actor_entity_id: EntityId::new(),
             body_entity_id: entity,
             action_kind: ActionKindV1::Impulse,
-            params_cbor: vec![0xf6],
+            params_cbor: encode_horizontal_velocity_params(1.0, 0.0),
             action_scope: ACTION_SCOPE_SINGLE_BODY,
             catalogue_version: 1,
             tick: 0,
         };
+        let mut invalid_parameters = make_action_event_from(entity, &valid_parameters);
+        invalid_parameters.payload = rewrite_array_field(
+            &invalid_parameters.payload,
+            5,
+            ciborium::Value::Bytes(vec![0xf6]),
+        );
         let error = driver
-            .step(
-                tl.id(),
-                ObservationView::from_events(&[make_action_event_from(
-                    entity,
-                    &invalid_parameters,
-                )]),
-            )
+            .step(tl.id(), ObservationView::from_events(&[invalid_parameters]))
             .test_err();
         assert!(matches!(error, RuntimeError::InvalidPayload { .. }));
         driver.abort_step();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn world_action_requires_complete_envelope() {
-        let incomplete = serde_json::json!({
-            "actor_entity_id": EntityId::new(),
-            "body_entity_id": EntityId::new(),
-            "action_kind": "impulse"
-        });
-        let result = serde_json::from_value::<WorldAction>(incomplete);
-        assert!(result.is_err());
-    }
-
-    // ─── helpers ──────────────────────────────────────────────────────────────
-
-    /// Serialise `action` to CBOR and wrap it in a [`ProposedAction`].
-    fn cbor_proposal(action: &WorldAction, actor: EntityId) -> ProposedAction {
-        let mut buf = Vec::new();
-        ciborium::into_writer(action, &mut buf).test_ok();
-        ProposedAction::new(
-            Kind::new(EVENT_TYPE_ACTION),
-            actor,
-            CanonicalBytes::from_vec(buf),
-            Kind::new("world.action.submit"),
-        )
-    }
-
-    /// Build a canonical `WorldAction` with sensible defaults.
-    fn default_action(actor: EntityId, body: EntityId) -> WorldAction {
-        WorldAction {
-            actor_entity_id: actor,
-            body_entity_id: body,
-            action_kind: "impulse".to_owned(),
-            params: vec![1, 2, 3],
-            action_scope: 0,
-            catalogue_version: 1,
-            tick: 10,
-        }
-    }
-
-    // ─── approver happy-path tests ────────────────────────────────────────────
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn world_plugin_approver_happy_paths() {
-        let actor = EntityId::new();
-        let body = EntityId::new();
-        let plugin = WorldPlugin::new().with_bodies(vec![body]);
-        let action = default_action(actor, body);
-
-        // 1. Valid CBOR proposal
-        let proposal = cbor_proposal(&action, actor);
-        let draft = plugin.approve(&proposal).test_ok();
-        assert_eq!(draft.entity, actor);
-        assert_eq!(draft.event_type.as_str(), EVENT_TYPE_ACTION);
-
-        // 2. Unknown event type
-        let wrong_type = ProposedAction::new(
-            Kind::new("wrong.event"),
-            actor,
-            proposal.payload,
-            Kind::new("world.action.submit"),
-        );
-        assert_eq!(
-            plugin.approve(&wrong_type),
-            Err(ActionRejected::UnknownEventType)
-        );
-    }
-
-    // ─── approver early-rejection tests ──────────────────────────────────────
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn world_plugin_approver_rejects_early_checks() {
-        let actor = EntityId::new();
-        let body = EntityId::new();
-        let plugin = WorldPlugin::new().with_bodies(vec![body]);
-        let action = default_action(actor, body);
-        let proposal = cbor_proposal(&action, actor);
-
-        // 4. Capability not granted
-        let wrong_cap = ProposedAction::new(
-            Kind::new(EVENT_TYPE_ACTION),
-            actor,
-            proposal.payload.clone(),
-            Kind::new("wrong.capability"),
-        );
-        assert_eq!(
-            plugin.approve(&wrong_cap),
-            Err(ActionRejected::CapabilityNotGranted)
-        );
-
-        // 5. Payload too large (>4096)
-        let large_payload = ProposedAction::new(
-            Kind::new(EVENT_TYPE_ACTION),
-            actor,
-            CanonicalBytes::from_vec(vec![0u8; 5000]),
-            Kind::new("world.action.submit"),
-        );
-        assert_eq!(
-            plugin.approve(&large_payload),
-            Err(ActionRejected::PayloadTooLarge {
-                size: 5000,
-                max: 4096
-            })
-        );
-
-        // 6. Malformed payload
-        let malformed = ProposedAction::new(
-            Kind::new(EVENT_TYPE_ACTION),
-            actor,
-            CanonicalBytes::from_vec(vec![0xff, 0xff, 0xff]),
-            Kind::new("world.action.submit"),
-        );
-        assert_eq!(
-            plugin.approve(&malformed),
-            Err(ActionRejected::DomainValidationFailed(
-                "malformed world.action payload".to_owned()
-            ))
-        );
-
-        // 7. Actor entity mismatch
-        let other_actor = EntityId::new();
-        let wrong_actor = ProposedAction::new(
-            Kind::new(EVENT_TYPE_ACTION),
-            other_actor,
-            proposal.payload,
-            Kind::new("world.action.submit"),
-        );
-        assert_eq!(
-            plugin.approve(&wrong_actor),
-            Err(ActionRejected::InvalidActorEntityId)
-        );
-    }
-
-    // ─── approver domain-validation tests ────────────────────────────────────
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn world_plugin_approver_rejects_domain_checks() {
-        let actor = EntityId::new();
-        let body = EntityId::new();
-        let plugin = WorldPlugin::new().with_bodies(vec![body]);
-
-        // 8. Invalid action scope (!= 0)
-        let scope_prop = cbor_proposal(
-            &WorldAction {
-                actor_entity_id: actor,
-                body_entity_id: body,
-                action_kind: "impulse".to_owned(),
-                params: vec![],
-                action_scope: 1,
-                catalogue_version: 1,
-                tick: 0,
-            },
-            actor,
-        );
-        assert_eq!(
-            plugin.approve(&scope_prop),
-            Err(ActionRejected::DomainValidationFailed(
-                "invalid action scope: expected 0, got 1".to_owned()
-            ))
-        );
-
-        // 9. Catalogue version mismatch
-        let ver_prop = cbor_proposal(
-            &WorldAction {
-                actor_entity_id: actor,
-                body_entity_id: body,
-                action_kind: "impulse".to_owned(),
-                params: vec![],
-                action_scope: 0,
-                catalogue_version: 99,
-                tick: 0,
-            },
-            actor,
-        );
-        assert_eq!(
-            plugin.approve(&ver_prop),
-            Err(ActionRejected::DomainValidationFailed(
-                "catalogue version mismatch: expected 1, got 99".to_owned()
-            ))
-        );
-
-        // 10. Unknown action kind
-        let kind_prop = cbor_proposal(
-            &WorldAction {
-                actor_entity_id: actor,
-                body_entity_id: body,
-                action_kind: "fly_to_moon".to_owned(),
-                params: vec![],
-                action_scope: 0,
-                catalogue_version: 1,
-                tick: 0,
-            },
-            actor,
-        );
-        assert_eq!(
-            plugin.approve(&kind_prop),
-            Err(ActionRejected::DomainValidationFailed(
-                "action kind 'fly_to_moon' not in allow-list".to_owned()
-            ))
-        );
-
-        // 11. Unknown body entity ID
-        let unknown_body = EntityId::new();
-        let unk_prop = cbor_proposal(
-            &WorldAction {
-                actor_entity_id: actor,
-                body_entity_id: unknown_body,
-                action_kind: "impulse".to_owned(),
-                params: vec![],
-                action_scope: 0,
-                catalogue_version: 1,
-                tick: 0,
-            },
-            actor,
-        );
-        assert_eq!(
-            plugin.approve(&unk_prop),
-            Err(ActionRejected::DomainValidationFailed(
-                "unknown body entity ID".to_owned()
-            ))
-        );
     }
 
     #[test]
@@ -4041,6 +5817,43 @@ mod tests {
         assert!(
             valid_result.is_ok(),
             "v1 valid proposal rejected: {valid_result:?}"
+        );
+
+        let legacy = ProposedAction::new(
+            Kind::new("world.action"),
+            actor,
+            payload.clone(),
+            Kind::new("world.action.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&legacy),
+            Err(ActionRejected::UnknownEventType)
+        );
+
+        let noncanonical_outer = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            overlong_version(&payload),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&noncanonical_outer),
+            Err(ActionRejected::DomainValidationFailed(
+                WorldCodecError::NonCanonicalRecord.to_string()
+            ))
+        );
+
+        let noncanonical_params = ProposedAction::new(
+            Kind::new(EVENT_TYPE_ACTION_V1),
+            actor,
+            rewrite_array_field(&payload, 5, ciborium::Value::Bytes(vec![0x18, 0x01])),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert_eq!(
+            plugin.approve(&noncanonical_params),
+            Err(ActionRejected::DomainValidationFailed(
+                WorldCodecError::NonCanonicalParamsCbor.to_string()
+            ))
         );
 
         let wrong_capability = ProposedAction::new(
@@ -4075,6 +5888,39 @@ mod tests {
             plugin.approve(&malformed),
             Err(ActionRejected::DomainValidationFailed(_))
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_plugin_v1_approver_rejects_noncanonical_map_params() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies(vec![body]);
+        let mut action = sample_action();
+        action.actor_entity_id = actor;
+        action.body_entity_id = body;
+        action.catalogue_version = 1;
+        let payload = action.encode().test_ok();
+
+        for params in [
+            vec![0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
+            vec![0xa2, 0x61, b'a', 1, 0x61, b'a', 2],
+            vec![0xa2, 0xf9, 0, 0, 1, 0xf9, 0x80, 0, 2],
+            vec![0x81, 0xa2, 0x61, b'b', 1, 0x61, b'a', 2],
+        ] {
+            let proposal = ProposedAction::new(
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                actor,
+                rewrite_array_field(&payload, 5, ciborium::Value::Bytes(params)),
+                Kind::new("world.action.v1.submit"),
+            );
+            assert_eq!(
+                plugin.approve(&proposal),
+                Err(ActionRejected::DomainValidationFailed(
+                    WorldCodecError::NonCanonicalParamsCbor.to_string()
+                ))
+            );
+        }
     }
 
     #[test]

@@ -829,18 +829,11 @@ fn append_driver_drafts(
     registry: &mut PluginRegistry,
     observed_through: pos_core::clock::Seq,
 ) -> Result<u64, ExperimentError> {
-    let drafts = match registry.step_all_anchored(timeline_id, observed_through) {
-        Ok(drafts) => drafts,
-        Err(error) => {
-            registry.abort_step();
-            return Err(error.into());
-        }
-    };
-    registry
-        .schemas
-        .validate_batch(&drafts)
-        .map_err(ExperimentError::from)
-        .inspect_err(|_| registry.abort_step())?;
+    let drafts = step_driver_with_completed_prefix(store, timeline_id, registry, observed_through)?;
+    if let Err(error) = registry.schemas.validate_batch(&drafts) {
+        registry.abort_step();
+        return Err(error.into());
+    }
     if drafts.is_empty() {
         registry
             .commit_step_at(observed_through, 0)
@@ -857,6 +850,21 @@ fn append_driver_drafts(
                     .map_err(map_runtime_error)
             })
     }
+}
+
+fn step_driver_with_completed_prefix(
+    store: &dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    registry: &mut PluginRegistry,
+    observed_through: pos_core::clock::Seq,
+) -> Result<Vec<EventDraft>, ExperimentError> {
+    let committed_events = read_completed_prefix(store, timeline_id, observed_through)?;
+    registry
+        .step_all_anchored_with_events(timeline_id, observed_through, &committed_events)
+        .map_err(|error| {
+            registry.abort_step();
+            error.into()
+        })
 }
 
 /// Advance exactly one complete tick through the experiment pipeline.
@@ -2119,12 +2127,18 @@ impl ExperimentSession {
         &self,
         name: &str,
         fork_head: pos_core::clock::Seq,
+        registry: &mut PluginRegistry,
     ) -> Result<Timeline, ExperimentError> {
         lock_store(&self.store).and_then(|mut store| {
             let durable_head = store.logical_head(self.timeline.id())?;
             let mut fork_result = None;
             let mut append = || {
-                fork_result = Some(store.fork(self.timeline.id(), fork_head, name));
+                fork_result = Some(registry.fork_restored_timeline(
+                    store.as_mut(),
+                    self.timeline.id(),
+                    fork_head,
+                    name,
+                ));
             };
             if let Some(token) = self.operation_token.as_ref() {
                 let gate = self
@@ -2219,7 +2233,7 @@ impl ExperimentSession {
             store_config: self.config.store_config.clone(),
         };
 
-        let timeline = self.fork_timeline_at(name, fork_head)?;
+        let timeline = self.fork_timeline_at(name, fork_head, &mut registry)?;
         Ok(Self {
             config,
             registry,
@@ -9229,8 +9243,9 @@ mod fault_injection_tests {
             Box::new(failing_store),
         )
         .test_ok();
+        let mut registry = PluginRegistry::new();
         assert!(session
-            .fork_timeline_at("child", pos_core::clock::Seq::ZERO)
+            .fork_timeline_at("child", pos_core::clock::Seq::ZERO, &mut registry)
             .is_err());
 
         let failing_store = FailLogicalHeadStore {

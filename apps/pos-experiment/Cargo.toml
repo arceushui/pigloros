@@ -21,7 +21,6 @@ pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-society = { path = "../../plugins/society" }
 pos-plugin-world = { path = "../../plugins/world" }
 blake3 = { workspace = true }
-ciborium = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

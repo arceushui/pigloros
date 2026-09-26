@@ -4395,7 +4395,6 @@ name = "pos-experiment"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "ciborium",
  "pos-conformance",
  "pos-core",
  "pos-crypto",
@@ -4638,6 +4637,7 @@ name = "pos-time"
 version = "0.1.0"
 dependencies = [
  "pos-core",
+ "pos-plugin-world",
  "pos-runtime",
  "pos-state",
  "pos-store",
