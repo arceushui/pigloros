@@ -2,8 +2,8 @@ use super::HostedLedgerStore;
 use pos_core::{
     store::{EventReadBounds, EventStore, SeqRange},
     CoreError, ErasureHostErrorV1, Event, EventDraft, Hash, KeyDestructionBeginOutcomeV1,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, Seq, Timeline,
-    TimelineId,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, Seq,
+    Timeline, TimelineId,
 };
 
 impl HostedLedgerStore {
@@ -124,6 +124,35 @@ impl EventStore for HostedLedgerStore {
         })
     }
 
+    fn append_timeline_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        identity: KeyIdentityV1,
+        material_digest: pos_core::Hash,
+        public_verification_key: pos_core::PublicKey,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &pos_core::CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        self.with_host(|host| {
+            host.command_sender().and_then(|mut sender| {
+                sender.append_timeline_signed_authorized(
+                    timeline,
+                    expected_registry,
+                    &draft,
+                    identity,
+                    material_digest,
+                    public_verification_key,
+                    sign,
+                )
+            })
+        })
+    }
+
     fn begin_key_registry_destruction(
         &mut self,
         request: KeyDestructionRequestV1,
@@ -226,7 +255,16 @@ mod tests {
 
         let registry = KeyRegistryStateV1::new();
         store.save_key_registry(&registry)?;
-        assert_eq!(store.load_key_registry()?, Some(registry));
+        assert_eq!(store.load_key_registry()?, Some(registry.clone()));
+        let mut retained = appended[0].clone();
+        retained.id = pos_core::EventId::new();
+        retained.origin = None;
+        let mut create_event = move |_: &KeyRegistryStateV1, seq: Seq| {
+            retained.seq = seq;
+            Ok(retained.clone())
+        };
+        store.append_signed_authorized(timeline.id(), &registry, &mut create_event)?;
+        assert_eq!(store.read_own(timeline.id(), SeqRange::all())?.len(), 2);
         let child = store.fork(timeline.id(), Seq::from_u64(1), "ledger-child")?;
         assert_eq!(
             child.meta.fork_point,
@@ -306,6 +344,26 @@ mod tests {
         let registry = KeyRegistryStateV1::new();
         let mut missing_timeline = HostedLedgerStore::open(pos_store::StoreConfig::Memory)?;
         assert!(missing_timeline.save_key_registry(&registry).is_err());
+        let mut sign = |_: &mut KeyRegistryStateV1,
+                        _: &pos_core::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            Err::<pos_core::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(missing_timeline
+            .append_timeline_signed_authorized(
+                TimelineId::new(),
+                &registry,
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("ledger.adapter.denied"),
+                    CanonicalBytes::from_static(b"closed"),
+                ),
+                identity,
+                Hash::from_bytes([1; 32]),
+                pos_core::PublicKey::from_bytes([2; 32]),
+                &mut sign,
+            )
+            .is_err());
         assert!(missing_timeline
             .begin_key_registry_destruction(request)
             .is_err());
