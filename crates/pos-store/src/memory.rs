@@ -642,40 +642,42 @@ impl MemoryStore {
         hasher: &dyn Hasher,
     ) -> Result<Event, CoreError> {
         let seq = state.timeline.head.next();
-        let origin_logical_seq = crate::checked_logical_head(
+        crate::checked_logical_head(
             state
                 .timeline
                 .meta
                 .fork_point
                 .map_or(0, |(_, fork)| fork.as_u64()),
             seq.as_u64(),
-        )?;
-        let event_id = EventId::new();
-        let id_bytes = event_id.to_string();
-        let payload_hash = hasher.hash_payload(&draft.payload);
-        state.chain_head =
-            hasher.hash_event(&state.chain_head, id_bytes.as_bytes(), &draft.payload);
-        state.timeline.head = seq;
-        let event = Event {
-            id: event_id,
-            entity: draft.entity,
-            event_type: draft.event_type.clone(),
-            payload: draft.payload.clone(),
-            wall_time: draft.wall_time.unwrap_or_else(WallTime::now),
-            seq,
-            causation_id: draft.causation_id,
-            correlation_id: draft.correlation_id,
-            schema_version: draft.schema_version,
-            signature: None,
-            signature_identity: None,
-            origin: Some(EventOriginV1 {
-                origin_timeline_id: state.timeline.id(),
-                origin_logical_seq: Seq::from_u64(origin_logical_seq),
-            }),
-            payload_hash,
-        };
-        state.events.push(event.clone());
-        Ok(event)
+        )
+        .map(|origin_logical_seq| {
+            let event_id = EventId::new();
+            let id_bytes = event_id.to_string();
+            let payload_hash = hasher.hash_payload(&draft.payload);
+            state.chain_head =
+                hasher.hash_event(&state.chain_head, id_bytes.as_bytes(), &draft.payload);
+            state.timeline.head = seq;
+            let event = Event {
+                id: event_id,
+                entity: draft.entity,
+                event_type: draft.event_type.clone(),
+                payload: draft.payload.clone(),
+                wall_time: draft.wall_time.unwrap_or_else(WallTime::now),
+                seq,
+                causation_id: draft.causation_id,
+                correlation_id: draft.correlation_id,
+                schema_version: draft.schema_version,
+                signature: None,
+                signature_identity: None,
+                origin: Some(EventOriginV1 {
+                    origin_timeline_id: state.timeline.id(),
+                    origin_logical_seq: Seq::from_u64(origin_logical_seq),
+                }),
+                payload_hash,
+            };
+            state.events.push(event.clone());
+            event
+        })
     }
 
     fn chain_head(&self, id: TimelineId) -> Hash {
@@ -2379,13 +2381,6 @@ impl GeographicAdmissionStore for MemoryStore {
             snapshot_hash,
             snapshot_cbor,
         };
-        if event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
-            || event.schema_version != pos_core::SchemaVersion::V1
-            || GeographicObservationV1::decode(&event.payload).is_err()
-            || self.hasher.hash_payload(&event.payload) != event.payload_hash
-        {
-            return Err(CoreError::GeographicAdmissionValidationFailed);
-        }
         let dedup = GeographicCellDedupRecord {
             timeline,
             entity,
