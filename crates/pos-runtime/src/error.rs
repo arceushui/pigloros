@@ -57,6 +57,7 @@ pub enum ActionSubmissionError {
 pub enum RuntimeError {
     #[error(transparent)]
     OutputAdmission(#[from] crate::OutputAdmissionErrorV1),
+    #[error(transparent)]
     WorldInstallation(#[from] WorldInstallationErrorV1),
 
     #[error(transparent)]
