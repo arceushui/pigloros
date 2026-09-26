@@ -1,8 +1,9 @@
 use pos_core::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, Event, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, State, TimelineId,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureKeyRoleV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Reducer, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, State, TimelineId,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_state::ProjectionRegistry;
@@ -35,6 +36,7 @@ impl Reducer for NoopReducer {
 }
 
 const SNAPSHOT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([51; 32]);
+const REPLAY_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([53; 32]);
 
 fn evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {
     ReplayClaimEvaluatorV1::evaluate(
@@ -60,6 +62,72 @@ fn registry(gate: &Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistr
     let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
     registry.register("noop", Box::new(NoopReducer));
     registry
+}
+
+#[test]
+fn replay_rejects_a_required_key_destroyed_in_the_registry() {
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+    )
+    .test_ok();
+    let gate = host.containment_gate();
+    let timeline = host
+        .command_sender()
+        .test_ok()
+        .create_timeline("destroyed-key-replay")
+        .test_ok();
+    let identity = KeyIdentityV1::new("replay-owner", KeyRoleV1::SubjectDataEncryption, 1);
+    let material_digest = Hash::from_bytes([54; 32]);
+    let mut key_registry = KeyRegistryStateV1::new();
+    key_registry
+        .register_key(KeyRegistrationV1::new(identity, material_digest, None))
+        .test_ok();
+    let request =
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([55; 32]));
+    key_registry.begin_key_destruction(request).test_ok();
+    key_registry
+        .complete_key_destruction(request, pos_core::deletion_receipt(&request))
+        .test_ok();
+    assert!(key_registry.tombstone(identity).is_some());
+    let artifact = ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            ErasureArtifactClassV1::TimelineReplay,
+            REPLAY_DIGEST,
+            ArtifactDataClassV1::PrivateSubjectData,
+            Some(ErasureKeyRoleV1::DataEncryption),
+            ErasureReferenceV1::from_digest([56; 32]),
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+        )
+        .with_key_dependency(ArtifactKeyDependencyV1 {
+            identity,
+            material_digest,
+            private_material_required: true,
+        })
+        .test_ok(),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state: ArtifactStateV1::Retained,
+    };
+    let facts: Vec<_> = key_registry.committed_destruction_facts().collect();
+    let evaluation = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+        ErasureReplayClaimV1::Exact,
+        &[artifact],
+        &facts,
+    )
+    .test_ok();
+    let mut reads = host.read_sender().test_ok();
+    let mut projections = registry(&gate);
+    assert!(matches!(
+        pos_time::replay(
+            &mut reads,
+            timeline.id(),
+            &mut projections,
+            REPLAY_DIGEST,
+            &evaluation,
+        ),
+        Err(pos_core::CoreError::ArtifactUnavailable)
+    ));
 }
 
 #[test]

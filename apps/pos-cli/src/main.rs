@@ -415,23 +415,17 @@ fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn retained_timeline_artifact(
+fn retained_timeline_claim_input(
     timeline: pos_core::TimelineId,
     artifact_class: pos_core::ErasureArtifactClassV1,
     owner_domain: &[u8],
-) -> Result<
-    (
-        pos_core::ErasureReferenceV1,
-        pos_core::ReplayClaimEvaluationV1,
-    ),
-    pos_core::ErasureErrorV1,
-> {
+) -> (pos_core::ErasureReferenceV1, pos_core::ArtifactClaimInputV1) {
     let artifact_digest = pos_core::ErasureReferenceV1::from_digest(
         *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
     );
-    pos_core::ReplayClaimEvaluatorV1::evaluate(
-        pos_core::ErasureReplayClaimV1::Exact,
-        &[pos_core::ArtifactClaimInputV1 {
+    (
+        artifact_digest,
+        pos_core::ArtifactClaimInputV1 {
             registration: pos_core::RegisteredArtifactV1::new(
                 artifact_class,
                 artifact_digest,
@@ -443,9 +437,25 @@ fn retained_timeline_artifact(
             ),
             current_claim: pos_core::ErasureReplayClaimV1::Exact,
             state: pos_core::ArtifactStateV1::Retained,
-        }],
+        },
     )
-    .map(|evaluation| (artifact_digest, evaluation))
+}
+
+fn retained_timeline_artifact(
+    timeline: pos_core::TimelineId,
+    artifact_class: pos_core::ErasureArtifactClassV1,
+    owner_domain: &[u8],
+) -> Result<
+    (
+        pos_core::ErasureReferenceV1,
+        pos_core::ReplayClaimEvaluationV1,
+    ),
+    pos_core::ErasureErrorV1,
+> {
+    let (artifact_digest, input) =
+        retained_timeline_claim_input(timeline, artifact_class, owner_domain);
+    pos_core::ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &[input])
+        .map(|evaluation| (artifact_digest, evaluation))
 }
 
 fn replay_retained_timeline(
@@ -453,13 +463,19 @@ fn replay_retained_timeline(
     timeline: TimelineId,
     registry: &mut pos_state::ProjectionRegistry,
 ) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
+    let (artifact_digest, input) = retained_timeline_claim_input(
         timeline,
         pos_core::ErasureArtifactClassV1::TimelineReplay,
         b"pos-cli/timeline-replay",
-    )?;
+    );
     store
-        .with_read_sender(|sender| {
+        .with_read_sender_and_destruction_facts(|sender, facts| {
+            let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+                pos_core::ErasureReplayClaimV1::Exact,
+                &[input],
+                facts,
+            )
+            .map_err(|_| pos_core::CoreError::ArtifactUnavailable)?;
             pos_time::replay(sender, timeline, registry, artifact_digest, &evaluation)
         })
         .map_err(Into::into)

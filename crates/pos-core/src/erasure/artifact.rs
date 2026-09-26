@@ -4,6 +4,8 @@ use super::{
     ErasureArtifactClassV1, ErasureErrorV1, ErasureKeyRoleV1, ErasureReferenceV1,
     ErasureReplayClaimV1, ERASURE_MAX_TARGETS,
 };
+use crate::{Hash, KeyIdentityV1, KeyTombstoneV1};
+use std::collections::BTreeMap;
 
 /// Data classification fixed before an artifact is committed.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -125,6 +127,17 @@ impl ArtifactRedactionStateV1 {
     }
 }
 
+/// Exact key material whose destruction may weaken a registered artifact.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ArtifactKeyDependencyV1 {
+    /// Owner-scoped key role and epoch fixed at artifact registration.
+    pub identity: KeyIdentityV1,
+    /// Fingerprint of the registered private material.
+    pub material_digest: Hash,
+    /// Whether reproducing this artifact needs the private bytes after commit.
+    pub private_material_required: bool,
+}
+
 /// Immutable policy facts registered by the adapter that owns artifact bytes.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegisteredArtifactV1 {
@@ -136,6 +149,8 @@ pub struct RegisteredArtifactV1 {
     data_class: ArtifactDataClassV1,
     /// Key role, when artifact availability depends on a role-separated key.
     key_role: Option<ErasureKeyRoleV1>,
+    /// Exact key dependency fixed before this artifact is committed.
+    key_dependency: Option<ArtifactKeyDependencyV1>,
     /// Registered adapter/owner identity.
     owner: ErasureReferenceV1,
     /// Whether the artifact is required by its enclosing claim.
@@ -161,6 +176,7 @@ impl RegisteredArtifactV1 {
             artifact_digest,
             data_class,
             key_role,
+            key_dependency: None,
             owner,
             optionality,
             transition_rule,
@@ -189,6 +205,33 @@ impl RegisteredArtifactV1 {
     #[must_use]
     pub const fn key_role(self) -> Option<ErasureKeyRoleV1> {
         self.key_role
+    }
+
+    /// Bind the exact role/epoch material required by this artifact.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] when the dependency's role
+    /// differs from the registered artifact role.
+    pub fn with_key_dependency(
+        mut self,
+        dependency: ArtifactKeyDependencyV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let role = if dependency.identity.role.is_signing() {
+            ErasureKeyRoleV1::Signing
+        } else {
+            ErasureKeyRoleV1::DataEncryption
+        };
+        if self.key_role != Some(role) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.key_dependency = Some(dependency);
+        Ok(self)
+    }
+
+    /// Return the exact key dependency, if this artifact has one.
+    #[must_use]
+    pub const fn key_dependency(self) -> Option<ArtifactKeyDependencyV1> {
+        self.key_dependency
     }
 
     /// Return the registered byte-owner identity.
@@ -366,11 +409,101 @@ impl ReplayClaimEvaluationV1 {
     }
 }
 
+/// Replay or `ReproManifest` authority after committed destruction facts have
+/// been applied. Only the fact-aware evaluator can construct this value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayArtifactAuthorizationV1 {
+    evaluation: ReplayClaimEvaluationV1,
+}
+
+impl ReplayArtifactAuthorizationV1 {
+    /// Return the weakest claim after key destruction is considered.
+    #[must_use]
+    pub const fn replay_claim(&self) -> ErasureReplayClaimV1 {
+        self.evaluation.replay_claim()
+    }
+
+    /// Return the canonical per-artifact results.
+    #[must_use]
+    pub fn artifacts(&self) -> &[EvaluatedArtifactClaimV1] {
+        self.evaluation.artifacts()
+    }
+
+    /// Require authoritative Replay or `ReproManifest` use after fact evaluation.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] for a missing or weakened
+    /// artifact, or for an unrelated artifact class.
+    pub fn require_authoritative_use(
+        &self,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_digest: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if !matches!(
+            artifact_class,
+            ErasureArtifactClassV1::TimelineReplay | ErasureArtifactClassV1::ReproManifest
+        ) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.evaluation
+            .require_authoritative_use(artifact_class, artifact_digest)
+    }
+}
+
 /// Sole host-owned policy evaluator for ADR-060 artifact claims.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplayClaimEvaluatorV1;
 
 impl ReplayClaimEvaluatorV1 {
+    /// Evaluate Replay and `ReproManifest` artifacts against committed key
+    /// destruction facts before permitting authoritative use. The caller must
+    /// supply the complete fact set from its authoritative store.
+    ///
+    /// # Errors
+    /// Returns [`ErasureErrorV1::PolicyConflict`] for duplicate or conflicting
+    /// facts, or a key-role artifact lacking its exact registered dependency.
+    pub fn evaluate_replay_artifacts(
+        enclosing_claim: ErasureReplayClaimV1,
+        inputs: &[ArtifactClaimInputV1],
+        committed_facts: &[KeyTombstoneV1],
+    ) -> Result<ReplayArtifactAuthorizationV1, ErasureErrorV1> {
+        if inputs.is_empty() || inputs.len() > ERASURE_MAX_TARGETS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let mut facts = BTreeMap::new();
+        for fact in committed_facts {
+            if facts.insert(fact.identity, *fact).is_some() {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+        }
+        let mut checked = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let mut input = *input;
+            if input.registration.key_role.is_some() && input.registration.key_dependency.is_none()
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            if let Some(dependency) = input.registration.key_dependency {
+                if let Some(fact) = facts.get(&dependency.identity) {
+                    if fact.destroyed_material_digest != dependency.material_digest {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                    if dependency.private_material_required
+                        && matches!(
+                            input.state,
+                            ArtifactStateV1::Retained | ArtifactStateV1::TransitionApplied
+                        )
+                    {
+                        input.state = ArtifactStateV1::MissingKey;
+                    }
+                }
+            }
+            checked.push(input);
+        }
+        Self::evaluate(enclosing_claim, &checked)
+            .map(|evaluation| ReplayArtifactAuthorizationV1 { evaluation })
+    }
+
     /// Evaluate registered artifacts without permitting claim strengthening.
     ///
     /// Optional members still receive a per-artifact result but do not weaken

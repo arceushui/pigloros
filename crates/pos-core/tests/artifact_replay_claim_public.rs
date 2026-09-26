@@ -1,8 +1,9 @@
 use pos_core::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
-    ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureErrorV1,
-    ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
-    ReplayClaimEvaluatorV1, ERASURE_MAX_TARGETS,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactRedactionStateV1, ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1,
+    ErasureErrorV1, ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+    KeyTombstoneV1, PublicKey, RegisteredArtifactV1, ReplayClaimEvaluatorV1, ERASURE_MAX_TARGETS,
 };
 
 trait TestValueExt<T> {
@@ -43,6 +44,303 @@ const fn input(
         current_claim: ErasureReplayClaimV1::Exact,
         state,
     }
+}
+
+fn destroyed_registry(role: KeyRoleV1) -> (KeyIdentityV1, Hash, KeyTombstoneV1) {
+    let identity = KeyIdentityV1::new("claim-owner", role, 1);
+    let digest = Hash::from_bytes([31; 32]);
+    let public_key = role.is_signing().then(|| PublicKey::from_bytes([32; 32]));
+    let mut registry = KeyRegistryStateV1::new();
+    registry
+        .register_key(KeyRegistrationV1::new(identity, digest, public_key))
+        .test_ok();
+    let request = KeyDestructionRequestV1::new(identity, digest, Hash::from_bytes([33; 32]));
+    registry.begin_key_destruction(request).test_ok();
+    registry
+        .complete_key_destruction(request, pos_core::deletion_receipt(&request))
+        .test_ok();
+    let facts: Vec<_> = registry.committed_destruction_facts().collect();
+    assert_eq!(facts.len(), 1);
+    (identity, digest, facts[0])
+}
+
+fn with_dependency(
+    mut artifact: ArtifactClaimInputV1,
+    identity: KeyIdentityV1,
+    material_digest: Hash,
+    private_material_required: bool,
+) -> ArtifactClaimInputV1 {
+    artifact.registration = artifact
+        .registration
+        .with_key_dependency(ArtifactKeyDependencyV1 {
+            identity,
+            material_digest,
+            private_material_required,
+        })
+        .test_ok();
+    artifact
+}
+
+const fn signing_artifact(class: ErasureArtifactClassV1) -> ArtifactClaimInputV1 {
+    ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            class,
+            reference(34),
+            ArtifactDataClassV1::StructuralAuditMetadata,
+            Some(ErasureKeyRoleV1::Signing),
+            reference(35),
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+        ),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state: ArtifactStateV1::Retained,
+    }
+}
+
+#[test]
+fn committed_encryption_key_destruction_weakens_replay_and_repro_manifest() {
+    let (identity, material_digest, fact) = destroyed_registry(KeyRoleV1::SubjectDataEncryption);
+    for (index, class) in [
+        ErasureArtifactClassV1::TimelineReplay,
+        ErasureArtifactClassV1::ReproManifest,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let artifact = with_dependency(
+            input(
+                class,
+                u8::try_from(index + 1).test_ok(),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+                ArtifactStateV1::Retained,
+            ),
+            identity,
+            material_digest,
+            true,
+        );
+        assert_eq!(
+            artifact
+                .registration
+                .key_dependency()
+                .map(|key| key.identity),
+            Some(identity)
+        );
+        let evaluation = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[artifact],
+            &[fact],
+        )
+        .test_ok();
+        assert_eq!(
+            evaluation.replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
+        assert!(!evaluation.artifacts()[0].authoritative_use_permitted());
+        assert_eq!(
+            evaluation.require_authoritative_use(class, artifact.registration.artifact_digest()),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+    }
+}
+
+#[test]
+fn historical_signing_fact_preserves_only_available_artifacts_without_upgrading() {
+    let (identity, material_digest, fact) = destroyed_registry(KeyRoleV1::TimelineIntegritySigning);
+    for class in [
+        ErasureArtifactClassV1::TimelineReplay,
+        ErasureArtifactClassV1::ReproManifest,
+    ] {
+        let retained = with_dependency(signing_artifact(class), identity, material_digest, false);
+        let exact = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[retained],
+            &[fact],
+        )
+        .test_ok();
+        assert_eq!(exact.replay_claim(), ErasureReplayClaimV1::Exact);
+        assert_eq!(
+            exact.require_authoritative_use(class, reference(34)),
+            Ok(())
+        );
+        assert_eq!(
+            exact.require_authoritative_use(ErasureArtifactClassV1::Export, reference(34)),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        for state in [
+            ArtifactStateV1::MissingKey,
+            ArtifactStateV1::MissingRequiredOutput,
+        ] {
+            let missing = ArtifactClaimInputV1 { state, ..retained };
+            let weakened = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+                ErasureReplayClaimV1::Exact,
+                &[missing],
+                &[fact],
+            )
+            .test_ok();
+            assert_eq!(
+                weakened.replay_claim(),
+                ErasureReplayClaimV1::UnverifiableArtifactsMissing
+            );
+        }
+        let structural = ArtifactClaimInputV1 {
+            current_claim: ErasureReplayClaimV1::StructuralOnly,
+            ..retained
+        };
+        assert_eq!(
+            ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+                ErasureReplayClaimV1::StructuralOnly,
+                &[structural],
+                &[fact],
+            )
+            .test_ok()
+            .replay_claim(),
+            ErasureReplayClaimV1::StructuralOnly
+        );
+    }
+}
+
+#[test]
+fn fact_aware_replay_rejects_missing_dependencies_and_conflicting_facts() {
+    let (identity, material_digest, fact) = destroyed_registry(KeyRoleV1::SubjectDataEncryption);
+    let bare = input(
+        ErasureArtifactClassV1::TimelineReplay,
+        1,
+        ArtifactOptionalityV1::Required,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[bare],
+            &[fact]
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        bare.registration
+            .with_key_dependency(ArtifactKeyDependencyV1 {
+                identity: KeyIdentityV1::new("claim-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                material_digest,
+                private_material_required: false,
+            }),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let bound = with_dependency(bare, identity, material_digest, true);
+    let mut wrong = fact;
+    wrong.destroyed_material_digest = Hash::from_bytes([99; 32]);
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[bound],
+            &[wrong]
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[bound],
+            &[fact, fact]
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[],
+            &[fact]
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &vec![bare; ERASURE_MAX_TARGETS + 1],
+            &[fact],
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+}
+
+#[test]
+fn fact_aware_replay_preserves_available_artifacts_and_weakens_missing_ones() {
+    let (identity, material_digest, fact) = destroyed_registry(KeyRoleV1::SubjectDataEncryption);
+    let bare = input(
+        ErasureArtifactClassV1::TimelineReplay,
+        1,
+        ArtifactOptionalityV1::Required,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let bound = with_dependency(bare, identity, material_digest, true);
+    let absent = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+        ErasureReplayClaimV1::Exact,
+        &[bound],
+        &[],
+    )
+    .test_ok();
+    assert_eq!(absent.replay_claim(), ErasureReplayClaimV1::Exact);
+    let not_required = with_dependency(bare, identity, material_digest, false);
+    let retained = ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+        ErasureReplayClaimV1::Exact,
+        &[not_required],
+        &[fact],
+    )
+    .test_ok();
+    assert_eq!(retained.replay_claim(), ErasureReplayClaimV1::Exact);
+    let unrelated = ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            ErasureArtifactClassV1::TimelineReplay,
+            reference(90),
+            ArtifactDataClassV1::StructuralAuditMetadata,
+            None,
+            reference(91),
+            ArtifactOptionalityV1::Required,
+            ArtifactTransitionRuleV1::PreserveExact,
+        ),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state: ArtifactStateV1::Retained,
+    };
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[unrelated],
+            &[fact],
+        )
+        .test_ok()
+        .replay_claim(),
+        ErasureReplayClaimV1::Exact
+    );
+    let already_missing = ArtifactClaimInputV1 {
+        state: ArtifactStateV1::Erased,
+        ..bound
+    };
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[already_missing],
+            &[fact],
+        )
+        .test_ok()
+        .replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    let transitioned = ArtifactClaimInputV1 {
+        state: ArtifactStateV1::TransitionApplied,
+        ..bound
+    };
+    assert_eq!(
+        ReplayClaimEvaluatorV1::evaluate_replay_artifacts(
+            ErasureReplayClaimV1::Exact,
+            &[transitioned],
+            &[fact],
+        )
+        .test_ok()
+        .replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
 }
 
 #[test]
