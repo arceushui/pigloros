@@ -822,6 +822,62 @@ mod tests {
     }
 
     #[test]
+    fn finalized_timeline_signing_rejects_sequence_overflow_and_invalid_key() {
+        let identity = pos_core::KeyIdentityV1::new(
+            "test-owner",
+            pos_core::KeyRoleV1::TimelineIntegritySigning,
+            1,
+        );
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("test.timeline"),
+            CanonicalBytes::from_static(b"signed"),
+        );
+        let hasher = pos_crypto::chain::Blake3Hasher;
+        let timeline = TimelineId::new();
+        assert!(prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::from_u64(u64::MAX),
+            0,
+            draft.clone(),
+            identity,
+            &hasher,
+        )
+        .is_err());
+        assert!(prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::ZERO,
+            u64::MAX,
+            draft.clone(),
+            identity,
+            &hasher,
+        )
+        .is_err());
+
+        let (event, envelope) = prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::ZERO,
+            0,
+            draft,
+            identity,
+            &hasher,
+        )
+        .test_ok();
+        let invalid_key = (0..=u8::MAX)
+            .map(|byte| pos_core::PublicKey::from_bytes([byte; 32]))
+            .find(|key| pos_crypto::signing::verifying_key_from_public_key(key).is_err())
+            .test_ok();
+        assert!(verify_new_timeline_signature(
+            invalid_key,
+            identity,
+            &envelope,
+            &event.payload,
+            &pos_core::Signature::from_bytes([0; 64]),
+        )
+        .is_err());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_draft_guards_cover_revocation_and_owner_failures() {
         let timeline = pos_core::TimelineId::new();

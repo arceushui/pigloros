@@ -1804,6 +1804,32 @@ mod tests {
             .test_err()?;
         assert!(error.to_string().contains("unavailable"));
 
+        let identity =
+            crate::KeyIdentityV1::new("test-owner", crate::KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut sign = |_: &mut crate::KeyRegistryStateV1,
+                        _: &crate::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            Err::<crate::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_timeline_signed_authorized(
+                TimelineId::new(),
+                &crate::KeyRegistryStateV1::new(),
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.timeline"),
+                    CanonicalBytes::from_static(b"test"),
+                ),
+                identity,
+                Hash::from_bytes([1; 32]),
+                crate::PublicKey::from_bytes([2; 32]),
+                &mut sign,
+            )
+            .test_err()?;
+        assert!(error
+            .to_string()
+            .contains("atomic Timeline signing is unavailable"));
+
         let error = store
             .begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
                 crate::KeyIdentityV1::new(

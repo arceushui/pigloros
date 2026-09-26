@@ -326,6 +326,72 @@ fn both_adapters_rollback_failed_or_unauthorized_signing() -> Result<(), Box<dyn
     Ok(())
 }
 
+fn exercise_signing_boundary_failures(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (material, identity, registry) = signing_fixture()?;
+    let timeline = store.create_timeline("signing-boundaries")?;
+
+    assert!(append_signed(
+        store,
+        timeline.id(),
+        &registry,
+        identity,
+        &material,
+        b"missing-registry",
+    )
+    .is_err());
+    store.save_key_registry(&registry)?;
+    assert!(append_signed(
+        store,
+        timeline.id(),
+        &KeyRegistryStateV1::new(),
+        identity,
+        &material,
+        b"stale-registry",
+    )
+    .is_err());
+    assert!(append_signed(
+        store,
+        pos_core::TimelineId::new(),
+        &registry,
+        identity,
+        &material,
+        b"missing-timeline",
+    )
+    .is_err());
+    assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
+
+    let committed = append_signed(
+        store,
+        timeline.id(),
+        &registry,
+        identity,
+        &material,
+        b"committed",
+    )?;
+    let mut legacy_callback = move |_: &KeyRegistryStateV1, seq: Seq| {
+        let mut event = committed.clone();
+        event.seq = seq;
+        Ok(event)
+    };
+    let rejected = store.append_signed_authorized(timeline.id(), &registry, &mut legacy_callback);
+    assert!(rejected
+        .err()
+        .is_some_and(|error| error.to_string().contains("atomic envelope append seam")));
+    assert_eq!(store.read_own(timeline.id(), SeqRange::all())?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn both_adapters_fail_closed_at_atomic_signing_boundaries() -> Result<(), Box<dyn std::error::Error>>
+{
+    exercise_signing_boundary_failures(&mut MemoryStore::new())?;
+    exercise_signing_boundary_failures(&mut SqliteStore::open_in_memory()?)?;
+    Ok(())
+}
+
 #[test]
 fn sqlite_insert_failure_discards_signed_event_and_allows_retry(
 ) -> Result<(), Box<dyn std::error::Error>> {
