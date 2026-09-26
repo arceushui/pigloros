@@ -6,7 +6,7 @@ use pos_core::{
     KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1,
 };
 
-fn digest(byte: u8) -> Hash {
+const fn digest(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 

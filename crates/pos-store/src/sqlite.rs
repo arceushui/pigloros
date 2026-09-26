@@ -62,7 +62,8 @@ use pos_core::{
     ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
     ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1,
     OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
     PublicKey, Signature, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
@@ -4744,6 +4745,43 @@ impl SqliteStore {
         )?;
         timeline.meta.owner = self.timeline_owner(timeline.id())?;
         Ok(timeline)
+    }
+}
+
+impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
+    fn with_decryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        if identity.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
+        if identity.role != KeyRoleV1::SubjectDataEncryption {
+            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
+        }
+        // A read-only decryption still takes the writer lock: rotation and
+        // destruction must serialize before or after the held callback.
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
+        let result = self
+            .load_key_registry()
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+            .and_then(|registry| registry.ok_or(KeyRegistryErrorV1::RegistryUnavailable))
+            .and_then(|mut registry| {
+                registry.with_decryption_authorization(identity, private_material_digest, operation)
+            });
+        finish_transaction(
+            &self.conn,
+            result,
+            |_, _| KeyRegistryErrorV1::RegistryUnavailable,
+            |_, _| KeyRegistryErrorV1::RegistryUnavailable,
+        )
     }
 }
 
@@ -18290,12 +18328,30 @@ mod tests {
 
     #[test]
     fn registry_storage_errors_are_reported_by_sqlite_port() {
-        let store = new_store();
+        let mut store = new_store();
         store.conn.execute("DROP TABLE key_registry", []).test_ok();
         assert!(matches!(
             store.load_key_registry(),
             Err(CoreError::Storage(_))
         ));
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::SubjectDataEncryption, 1);
+        let called = std::cell::Cell::new(false);
+        assert_eq!(
+            store.with_decryption_authorization(identity, Hash::from_bytes([3; 32]), || {
+                called.set(true);
+            }),
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
+        );
+        assert!(!called.get());
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        assert_eq!(
+            store.with_decryption_authorization(identity, Hash::from_bytes([3; 32]), || {
+                called.set(true);
+            }),
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
+        );
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(!called.get());
 
         let mut save_store = new_store();
         save_store
