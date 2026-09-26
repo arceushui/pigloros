@@ -255,7 +255,16 @@ mod tests {
 
         let registry = KeyRegistryStateV1::new();
         store.save_key_registry(&registry)?;
-        assert_eq!(store.load_key_registry()?, Some(registry));
+        assert_eq!(store.load_key_registry()?, Some(registry.clone()));
+        let mut retained = appended[0].clone();
+        retained.id = pos_core::EventId::new();
+        retained.origin = None;
+        let mut create_event = move |_: &KeyRegistryStateV1, seq: Seq| {
+            retained.seq = seq;
+            Ok(retained.clone())
+        };
+        store.append_signed_authorized(timeline.id(), &registry, &mut create_event)?;
+        assert_eq!(store.read_own(timeline.id(), SeqRange::all())?.len(), 2);
         let child = store.fork(timeline.id(), Seq::from_u64(1), "ledger-child")?;
         assert_eq!(
             child.meta.fork_point,

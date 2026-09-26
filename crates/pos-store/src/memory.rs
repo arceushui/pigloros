@@ -635,6 +635,25 @@ impl MemoryStore {
         mutable_state(&mut self.timelines, id)
     }
 
+    fn checked_signing_registry(
+        &self,
+        expected: &KeyRegistryStateV1,
+    ) -> Result<KeyRegistryStateV1, CoreError> {
+        self.load_key_registry()
+            .and_then(|registry| {
+                registry.ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))
+            })
+            .and_then(|persisted| {
+                if persisted == *expected {
+                    Ok(persisted)
+                } else {
+                    Err(CoreError::Storage(
+                        "key registry changed during signing".to_owned(),
+                    ))
+                }
+            })
+    }
+
     fn append_one_to_state(
         state: &mut TimelineState,
         draft: &EventDraft,
@@ -2707,14 +2726,7 @@ impl EventStore for MemoryStore {
     ) -> Result<(), CoreError> {
         // A MemoryStore has one mutable owner; no second handle can change its
         // registry between this check and the all-or-nothing committed append.
-        let persisted = self
-            .load_key_registry()?
-            .ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))?;
-        if persisted != *expected_registry {
-            return Err(CoreError::Storage(
-                "key registry changed during signing".to_owned(),
-            ));
-        }
+        let persisted = self.checked_signing_registry(expected_registry)?;
         let head = self
             .get_timeline(timeline)?
             .ok_or(CoreError::TimelineNotFound(timeline))?;
@@ -2744,14 +2756,7 @@ impl EventStore for MemoryStore {
             &pos_core::CanonicalBytes,
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
-        let mut persisted = self.load_key_registry().and_then(|registry| {
-            registry.ok_or_else(|| CoreError::Storage("key registry is unavailable".to_owned()))
-        })?;
-        if persisted != *expected_registry {
-            return Err(CoreError::Storage(
-                "key registry changed during signing".to_owned(),
-            ));
-        }
+        let mut persisted = self.checked_signing_registry(expected_registry)?;
         let owning_timeline = self
             .get_timeline(timeline)
             .and_then(|head| head.ok_or(CoreError::TimelineNotFound(timeline)))?;
