@@ -420,15 +420,22 @@ fn verify_store_event(
     verifying_key_from_public_key(&public_key)
         .map_err(|error| CliError::BadKey(error.to_string()))?;
     let result = verify_committed_timeline_event_v1(event, registry, Some((identity, public_key)));
+    Ok(timeline_verification_mismatch(which, result))
+}
+
+fn timeline_verification_mismatch(
+    which: String,
+    result: pos_core::TimelineEventVerificationV1,
+) -> Option<(String, String)> {
     match result {
-        pos_core::TimelineEventVerificationV1::Verified => Ok(None),
+        pos_core::TimelineEventVerificationV1::Verified => None,
         pos_core::TimelineEventVerificationV1::Invalid => {
-            Ok(Some((which, "Timeline envelope is invalid".to_owned())))
+            Some((which, "Timeline envelope is invalid".to_owned()))
         }
-        pos_core::TimelineEventVerificationV1::MissingRequiredContext => Ok(Some((
+        pos_core::TimelineEventVerificationV1::MissingRequiredContext => Some((
             which,
             "Timeline envelope is missing required context".to_owned(),
-        ))),
+        )),
     }
 }
 
