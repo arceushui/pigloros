@@ -373,8 +373,11 @@ pub enum KeyRegistryErrorV1 {
     /// The supplied encryption material does not match the registered identity.
     #[error("encryption key does not match the registered identity")]
     EncryptionKeyMismatch,
-    /// The registry adapter could not provide its atomic signing boundary.
-    #[error("key registry is unavailable for authorized signing")]
+    /// This role has no historical decryption authorization.
+    #[error("key role is not authorized for historical decryption")]
+    HistoricalDecryptionRoleRequired,
+    /// The registry adapter could not provide its atomic authorization boundary.
+    #[error("key registry is unavailable for authorized key use")]
     RegistryUnavailable,
     /// A decoded durable snapshot violates the registry invariants.
     #[error("key registry state is invalid")]
@@ -458,6 +461,32 @@ pub trait KeyRegistryEncryptionPortV1 {
     /// destroyed, inactive, mismatched, or the adapter cannot provide the
     /// authorization boundary.
     fn with_encryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T;
+}
+
+/// Decryption-only authorization for retained subject-data key epochs.
+///
+/// The adapter validates the exact owner, role, epoch, and private-material
+/// fingerprint while holding its registry transaction/lock through the
+/// non-escaping callback. An older live epoch may decrypt after rotation;
+/// this port never authorizes new encryption or restores destroyed material.
+/// The first consumer is `SubjectDataEncryption` under ADR-091. Any other
+/// role requires its own accepted policy extension.
+pub trait KeyRegistryHistoricalDecryptionPortV1 {
+    /// Run one decryption operation under a live subject-data key identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] for an invalid role/epoch,
+    /// absent, pending, destroyed, or mismatched material identity. The
+    /// callback is never invoked when authorization fails.
+    fn with_decryption_authorization<T, F>(
         &mut self,
         identity: KeyIdentityV1,
         private_material_digest: Hash,
@@ -921,6 +950,50 @@ impl KeyRegistryStateV1 {
         Ok(operation())
     }
 
+    /// Run one decryption-only operation for a live subject-data key epoch.
+    ///
+    /// Unlike encryption authorization, this permits a retained old epoch
+    /// after rotation. The mutable borrow holds the reference registry state
+    /// through the callback; durable adapters must hold an equivalent lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] for an invalid role/epoch,
+    /// absent, pending, destroyed, or mismatched material identity.
+    pub fn with_decryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        if identity.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
+        if identity.role != KeyRoleV1::SubjectDataEncryption {
+            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
+        }
+        self.validate()
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
+        let record = self
+            .records
+            .get(&identity)
+            .copied()
+            .ok_or(KeyRegistryErrorV1::NotFound)?;
+        if self.tombstones.contains_key(&identity) {
+            return Err(KeyRegistryErrorV1::Destroyed);
+        }
+        if self.pending_destructions.contains_key(&identity) {
+            return Err(KeyRegistryErrorV1::DestructionPending);
+        }
+        if record.private_material_digest != Some(private_material_digest) {
+            return Err(KeyRegistryErrorV1::EncryptionKeyMismatch);
+        }
+        Ok(operation())
+    }
+
     /// Record a destruction request and revoke active authorization.
     ///
     /// # Errors
@@ -1125,6 +1198,20 @@ impl KeyRegistryEncryptionPortV1 for KeyRegistryStateV1 {
         F: FnOnce() -> T,
     {
         Self::with_encryption_authorization(self, identity, private_material_digest, operation)
+    }
+}
+
+impl KeyRegistryHistoricalDecryptionPortV1 for KeyRegistryStateV1 {
+    fn with_decryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        Self::with_decryption_authorization(self, identity, private_material_digest, operation)
     }
 }
 
@@ -2283,6 +2370,22 @@ mod tests {
             state.with_encryption_authorization(DATA, digest(57), || ()),
             Err(KeyRegistryErrorV1::RegistryUnavailable)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_decryption_rejects_invalid_registry_state() -> Result<(), KeyRegistryErrorV1> {
+        let mut state = KeyRegistryStateV1::new();
+        state.register_key(KeyRegistrationV1::new(DATA, digest(57), None))?;
+        state.active.clear();
+        let mut called = false;
+        assert_eq!(
+            state.with_decryption_authorization(DATA, digest(57), || {
+                called = true;
+            }),
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
+        );
+        assert!(!called);
         Ok(())
     }
 
