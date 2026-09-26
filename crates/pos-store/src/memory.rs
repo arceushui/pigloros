@@ -14,7 +14,7 @@ use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     crypto::Hash,
     error::CoreError,
-    event::{Event, EventDraft, Kind},
+    event::{Event, EventDraft, EventOriginV1, Kind},
     geo_admission::{
         GeoLocationAdmissionFingerprintV1, GeoLocationAdmissionIntentV1,
         GeoLocationAdmissionLinkV1, GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1,
@@ -25,8 +25,7 @@ use pos_core::{
         AdmissionConsentRecordV1, AdmissionEntitlementSnapshotV1, AdmissionSnapshotHash,
         AdmissionSnapshotId, GeoCellAdmissionFenceV1, GeographicAdmissionAdmin,
         GeographicAdmissionConsentResolver, GeographicAdmissionOutcome, GeographicAdmissionStore,
-        GeographicObservationV1, GeographicReplayEvidenceV1, GeographicReplayVerifier,
-        ValidatedGeographicAdmissionV1,
+        GeographicReplayEvidenceV1, GeographicReplayVerifier, ValidatedGeographicAdmissionV1,
     },
     hasher::Hasher,
     ids::{EventId, TimelineId},
@@ -579,10 +578,10 @@ impl MemoryStore {
         let event = {
             let (timelines, event_ids, hasher) =
                 (&mut self.timelines, &mut self.event_ids, &self.hasher);
-            mutable_state(timelines, timeline).map(|state| {
-                let event = Self::append_one_to_state(state, draft, hasher.as_ref());
+            mutable_state(timelines, timeline).and_then(|state| {
+                let event = Self::append_one_to_state(state, draft, hasher.as_ref())?;
                 event_ids.insert(event.id);
-                event
+                Ok(event)
             })
         };
         event.and_then(|event| {
@@ -640,30 +639,44 @@ impl MemoryStore {
         state: &mut TimelineState,
         draft: &EventDraft,
         hasher: &dyn Hasher,
-    ) -> Event {
+    ) -> Result<Event, CoreError> {
         let seq = state.timeline.head.next();
-        let event_id = EventId::new();
-        let id_bytes = event_id.to_string();
-        let payload_hash = hasher.hash_payload(&draft.payload);
-        state.chain_head =
-            hasher.hash_event(&state.chain_head, id_bytes.as_bytes(), &draft.payload);
-        state.timeline.head = seq;
-        let event = Event {
-            id: event_id,
-            entity: draft.entity,
-            event_type: draft.event_type.clone(),
-            payload: draft.payload.clone(),
-            wall_time: draft.wall_time.unwrap_or_else(WallTime::now),
-            seq,
-            causation_id: draft.causation_id,
-            correlation_id: draft.correlation_id,
-            schema_version: draft.schema_version,
-            signature: None,
-            signature_identity: None,
-            payload_hash,
-        };
-        state.events.push(event.clone());
-        event
+        crate::checked_logical_head(
+            state
+                .timeline
+                .meta
+                .fork_point
+                .map_or(0, |(_, fork)| fork.as_u64()),
+            seq.as_u64(),
+        )
+        .map(|origin_logical_seq| {
+            let event_id = EventId::new();
+            let id_bytes = event_id.to_string();
+            let payload_hash = hasher.hash_payload(&draft.payload);
+            state.chain_head =
+                hasher.hash_event(&state.chain_head, id_bytes.as_bytes(), &draft.payload);
+            state.timeline.head = seq;
+            let event = Event {
+                id: event_id,
+                entity: draft.entity,
+                event_type: draft.event_type.clone(),
+                payload: draft.payload.clone(),
+                wall_time: draft.wall_time.unwrap_or_else(WallTime::now),
+                seq,
+                causation_id: draft.causation_id,
+                correlation_id: draft.correlation_id,
+                schema_version: draft.schema_version,
+                signature: None,
+                signature_identity: None,
+                origin: Some(EventOriginV1 {
+                    origin_timeline_id: state.timeline.id(),
+                    origin_logical_seq: Seq::from_u64(origin_logical_seq),
+                }),
+                payload_hash,
+            };
+            state.events.push(event.clone());
+            event
+        })
     }
 
     fn chain_head(&self, id: TimelineId) -> Hash {
@@ -1227,11 +1240,11 @@ impl MemoryStore {
     ) -> Result<Vec<Event>, CoreError> {
         let committed = {
             let (timelines, hasher) = (&mut self.timelines, &self.hasher);
-            mutable_state(timelines, timeline).map(|state| {
+            mutable_state(timelines, timeline).and_then(|state| {
                 drafts
                     .iter()
                     .map(|draft| Self::append_one_to_state(state, draft, hasher.as_ref()))
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>, _>>()
             })
         };
         committed
@@ -2133,10 +2146,10 @@ impl GeoLocationAdmissionStore for MemoryStore {
         let event = {
             let (timelines, event_ids, hasher) =
                 (&mut self.timelines, &mut self.event_ids, &self.hasher);
-            mutable_state(timelines, timeline).map(|state| {
-                let event = Self::append_one_to_state(state, &draft, hasher.as_ref());
+            mutable_state(timelines, timeline).and_then(|state| {
+                let event = Self::append_one_to_state(state, &draft, hasher.as_ref())?;
                 event_ids.insert(event.id);
-                event
+                Ok(event)
             })?
         };
         let snapshot = request.snapshot().clone();
@@ -2321,6 +2334,12 @@ impl GeographicAdmissionStore for MemoryStore {
         let mut staged_state = existing_state.clone();
         let event_id = EventId::new();
         let event_seq = staged_state.timeline.head.next();
+        let inherited_prefix = existing_state
+            .timeline
+            .meta
+            .fork_point
+            .map_or(0, |(_, fork)| fork.as_u64());
+        let origin_logical_seq = crate::checked_logical_head(inherited_prefix, event_seq.as_u64())?;
         let snapshot_id = AdmissionSnapshotId::new();
         let snapshot =
             AdmissionEntitlementSnapshotV1::new(snapshot_id.clone(), &request, event_id, event_seq);
@@ -2347,6 +2366,10 @@ impl GeographicAdmissionStore for MemoryStore {
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: Some(EventOriginV1 {
+                origin_timeline_id: timeline,
+                origin_logical_seq: Seq::from_u64(origin_logical_seq),
+            }),
             payload_hash,
         };
         staged_state.timeline.head = event_seq;
@@ -2357,11 +2380,7 @@ impl GeographicAdmissionStore for MemoryStore {
             snapshot_hash,
             snapshot_cbor,
         };
-        if event.event_type.as_str() != pos_core::GEOGRAPHIC_CELL_EVENT_TYPE
-            || event.schema_version != pos_core::SchemaVersion::V1
-            || GeographicObservationV1::decode(&event.payload).is_err()
-            || self.hasher.hash_payload(&event.payload) != event.payload_hash
-        {
+        if self.hasher.hash_payload(&event.payload) != event.payload_hash {
             return Err(CoreError::GeographicAdmissionValidationFailed);
         }
         let dedup = GeographicCellDedupRecord {
@@ -3011,11 +3030,19 @@ impl EventStore for MemoryStore {
 
                     let mut timeline_state = store.state(timeline).timeline.clone();
                     let head = timeline_state.head;
-                    let ordered = pos_core::store::validate_committed_batch(
+                    let mut ordered = pos_core::store::validate_committed_batch(
                         head,
                         events,
                         &mut |id| store.event_ids.contains(id),
                         &*store.hasher,
+                    )?;
+                    crate::finalize_committed_origins(
+                        timeline,
+                        timeline_state
+                            .meta
+                            .fork_point
+                            .map_or(0, |(_, fork)| fork.as_u64()),
+                        &mut ordered,
                     )?;
                     let mut new_head = head;
                     let mut previous_hash = store.chain_head(timeline);
@@ -3230,6 +3257,121 @@ mod tests {
 
     pub(super) fn new_store() -> MemoryStore {
         fixture_store(MemoryStore::new())
+    }
+
+    #[test]
+    fn origin_overflow_rejects_append_without_mutating_memory_state() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("origin-overflow").test_ok();
+        let draft = make_draft(EntityId::new(), b"overflow");
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .test_ok()
+            .timeline
+            .meta
+            .fork_point = Some((TimelineId::new(), Seq::from_u64(u64::MAX)));
+
+        let (timelines, hasher) = (&mut store.timelines, &store.hasher);
+        let state = timelines.get_mut(&timeline.id()).test_ok();
+        assert!(MemoryStore::append_one_to_state(state, &draft, hasher.as_ref()).is_err());
+        assert!(store
+            .append_or_duplicate_with_limit_visible(
+                timeline.id(),
+                append_identity(11, 12),
+                WallTime::from_micros(1),
+                &draft,
+                None,
+            )
+            .is_err());
+        let state = store.timelines.get(&timeline.id()).test_ok();
+        assert_eq!(state.timeline.head, Seq::ZERO);
+        assert!(state.events.is_empty());
+        assert!(store.append_identities.is_empty());
+    }
+
+    #[test]
+    fn origin_overflow_rejects_geographic_admission_without_sidecars() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("geo-origin-overflow").test_ok();
+        let entity = EntityId::new();
+        let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+            timeline.id(),
+            entity,
+            CanonicalBytes::from_static(b"geo-origin-overflow"),
+            7,
+            ([1; 32], 8, [2; 32]),
+            (1, false, 10),
+            ([4; 32], [5; 32]),
+        ));
+        pair_geographic_enrollment(
+            &mut store,
+            timeline.id(),
+            entity,
+            GeoLocationAdmissionFenceV1::new(7, ([1; 32], 8, [2; 32]), (1, false, 9)),
+        );
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .test_ok()
+            .timeline
+            .meta
+            .fork_point = Some((TimelineId::new(), Seq::from_u64(u64::MAX)));
+        assert!(store.admit_geo_location(request).is_err());
+        assert!(store.state(timeline.id()).events.is_empty());
+        assert!(store.geographic_admission_dedup.is_empty());
+        assert!(store.geographic_admission_snapshots.is_empty());
+        assert!(store.geographic_admission_links.is_empty());
+    }
+
+    #[test]
+    fn origin_overflow_rejects_geo_cell_admission_without_sidecars() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("geo-cell-origin-overflow").test_ok();
+        let entity = EntityId::new();
+        let draft = geo_cell_draft(
+            timeline.id(),
+            entity,
+            AdmissionSnapshotId::from_canonical("01ARZ3NDEKTSV4RRFFQ69G5FAZ").test_ok(),
+            12,
+            "origin-overflow",
+            vec![entity],
+            "private",
+            9,
+            1,
+            13,
+        );
+        let request = GeoCellAdmissionRequestV1::from_input(GeoCellAdmissionInputV1::new(
+            ValidatedGeoCellV1::from_adr031_bytes(&CanonicalBytes::from_static(
+                b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01",
+            ))
+            .test_ok(),
+            pos_core::SourceTimeBucket::new(123),
+            GeoCellAdmissionFenceV1::new(draft, [7; 32], 11, false),
+            pos_core::GeographicAdmissionFingerprintV1::from_ingress([8; 32]),
+        ))
+        .test_ok();
+        store
+            .set_geo_cell_admission_consent_record(geo_cell_consent_record(
+                request.fence().draft().consent_record_id().clone(),
+                request.fence().draft().consent_revision(),
+            ))
+            .test_ok();
+        store
+            .set_geo_cell_admission_fence(timeline.id(), entity, request.fence().clone())
+            .test_ok();
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .test_ok()
+            .timeline
+            .meta
+            .fork_point = Some((TimelineId::new(), Seq::from_u64(u64::MAX)));
+        assert!(store.admit(request).is_err());
+        assert!(store.state(timeline.id()).events.is_empty());
+        assert!(store.geographic_cell_dedup.is_empty());
+        assert!(store.geographic_cell_snapshots.is_empty());
+        assert!(store.geographic_cell_links.is_empty());
     }
 
     #[test]
@@ -5572,6 +5714,7 @@ mod tests {
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }
         };
@@ -5598,6 +5741,7 @@ mod tests {
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         assert!(store.append_committed(timeline.id(), &[event]).is_err());
@@ -5842,6 +5986,7 @@ mod tests {
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         store.append_committed(leaf.id(), &[ev]).test_ok();

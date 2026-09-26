@@ -129,7 +129,18 @@ impl<'de> Deserialize<'de> for SchemaVersion {
     }
 }
 
-/// A fully-formed, signed event in the kernel's event log.
+/// Immutable first-commit placement of an Event in Timeline Order.
+///
+/// A stitched Fork may expose a different visible `Event.seq`; this context
+/// continues to identify the Timeline segment and logical sequence at which
+/// the Event was first committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventOriginV1 {
+    pub origin_timeline_id: crate::TimelineId,
+    pub origin_logical_seq: Seq,
+}
+
+/// A fully-formed, signed event in the kernel's Timeline.
 ///
 /// `payload` is opaque `CanonicalBytes` — the kernel never deserializes it.
 /// Only a plugin (via the runtime schema registry) knows the payload structure.
@@ -147,6 +158,9 @@ pub struct Event {
     pub signature: Option<Signature>,
     /// Role and epoch domain used for the signature, when present.
     pub signature_identity: Option<crate::KeyIdentityV1>,
+    /// First-commit context. Store adapters populate this for every committed
+    /// Event; `None` represents unavailable context outside a committed read.
+    pub origin: Option<EventOriginV1>,
     pub payload_hash: Hash,
 }
 
@@ -210,6 +224,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         }
     }
@@ -350,6 +365,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([255u8; 32]),
         };
         let s = serde_json::to_string(&e)?;

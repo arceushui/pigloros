@@ -72,8 +72,8 @@ fn corrupt_timeline_events_fail_without_partial_stdout() -> Result<(), Box<dyn s
         "INSERT INTO events (
                 timeline_id, seq, event_id, entity_id, event_type, payload,
                 wall_time, causation_id, correlation_id, schema_version,
-                payload_hash, signature
-             ) VALUES (?1, 1, ?2, ?3, 'test.event', X'', 0, NULL, NULL, 1, X'01', NULL)",
+                payload_hash, signature, origin_timeline_id, origin_logical_seq
+             ) VALUES (?1, 1, ?2, ?3, 'test.event', X'', 0, NULL, NULL, 1, X'01', NULL, ?1, 1)",
         params![
             timeline_id,
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",

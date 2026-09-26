@@ -222,6 +222,7 @@ impl EventLedgerStore {
                 schema_version: SchemaVersion::V1,
                 signature: Some(signature),
                 signature_identity: Some(signing_identity),
+                origin: None,
                 payload_hash,
             })
         };
@@ -1147,6 +1148,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -1173,6 +1175,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -1199,6 +1202,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -1233,6 +1237,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -1264,6 +1269,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -1293,6 +1299,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;
@@ -1319,6 +1326,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.store.append_committed(store.timeline_id, &[event])?;

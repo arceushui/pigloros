@@ -138,6 +138,7 @@ fn memory_key_registry_public_contract_covers_transaction_boundaries(
         .append_signed_authorized(timeline.id(), &registry, &mut rejecting_callback)
         .is_err_and(|error| error.to_string().contains("callback rejected event")));
     seed.id = EventId::new();
+    seed.origin = None;
     let mut success = move |_registry: &KeyRegistryStateV1, seq: Seq| {
         seed.seq = seq;
         Ok::<Event, CoreError>(seed.clone())
@@ -364,6 +365,7 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
     let timeline = store.create_timeline("registry-contract")?;
     let mut event = seed_event(&mut store, timeline.id())?;
     event.id = EventId::new();
+    event.origin = None;
     let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
         event.seq = seq;
         Ok::<Event, CoreError>(event.clone())
@@ -507,6 +509,7 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
     let timeline_id = timeline.id();
     let mut event = seed_event(&mut setup, timeline_id)?;
     event.id = EventId::new();
+    event.origin = None;
     drop(setup);
 
     let mut signing_store = SqliteStore::open(path)?;
@@ -720,11 +723,13 @@ fn sqlite_key_registry_all_mutating_boundaries_reject_read_only_transactions(
 }
 
 #[test]
-fn sqlite_read_only_open_rejects_missing_signature_identity_columns(
+fn sqlite_read_only_open_rejects_missing_signature_or_origin_columns(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for schema in [
         "CREATE TABLE events (id INTEGER PRIMARY KEY);",
         "CREATE TABLE events (id INTEGER PRIMARY KEY, signature_role INTEGER);",
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, signature_owner_id TEXT, signature_role INTEGER, signature_epoch INTEGER);",
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, signature_owner_id TEXT, signature_role INTEGER, signature_epoch INTEGER, origin_timeline_id TEXT);",
     ] {
         let database = tempfile::NamedTempFile::new()?;
         let path = database
@@ -946,6 +951,7 @@ fn memory_key_registry_public_contract_covers_persistence_and_authorization(
         .next()
         .ok_or("memory seed append returned no event")?;
     event.id = EventId::new();
+    event.origin = None;
     let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
         event.seq = seq;
         Ok::<Event, CoreError>(event.clone())

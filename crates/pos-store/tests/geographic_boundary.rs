@@ -65,6 +65,7 @@ fn geographic_event(kind: &str, entity: EntityId) -> Event {
         schema_version: SchemaVersion::V1,
         signature: None,
         signature_identity: None,
+        origin: None,
         payload_hash: pos_crypto::chain::hash_payload(&payload),
     }
 }
@@ -347,8 +348,9 @@ fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() 
         .execute(
             "INSERT INTO events (
                 timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                causation_id, correlation_id, schema_version, payload_hash, signature
-             ) VALUES (?1, 1, ?2, ?3, ?4, ?5, 1, NULL, NULL, 1, ?6, NULL)",
+                causation_id, correlation_id, schema_version, payload_hash, signature,
+                origin_timeline_id, origin_logical_seq
+             ) VALUES (?1, 1, ?2, ?3, ?4, ?5, 1, NULL, NULL, 1, ?6, NULL, ?1, 1)",
             rusqlite::params![
                 timeline.id().to_string(),
                 event.id.to_string(),

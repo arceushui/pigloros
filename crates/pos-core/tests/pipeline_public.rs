@@ -106,6 +106,7 @@ fn committed(source: &EventDraft, id: u128, seq: u64) -> Event {
         schema_version: source.schema_version,
         signature: None,
         signature_identity: None,
+        origin: None,
         payload_hash: hash(90),
     }
 }

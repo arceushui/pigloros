@@ -61,6 +61,29 @@ pub use pos_core::{
     WallTime,
 };
 
+/// Finalize first-commit context for a local committed batch. A supplied
+/// origin must agree with the owning segment and inherited Fork prefix.
+fn finalize_committed_origins(
+    timeline: TimelineId,
+    inherited_prefix: u64,
+    events: &mut [Event],
+) -> Result<(), CoreError> {
+    for event in events {
+        let logical_seq = checked_logical_head(inherited_prefix, event.seq.as_u64())?;
+        let expected = pos_core::EventOriginV1 {
+            origin_timeline_id: timeline,
+            origin_logical_seq: pos_core::Seq::from_u64(logical_seq),
+        };
+        if event.origin.is_some_and(|origin| origin != expected) {
+            return Err(CoreError::Storage(
+                "committed Event origin does not match its owning Timeline".to_owned(),
+            ));
+        }
+        event.origin = Some(expected);
+    }
+    Ok(())
+}
+
 /// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
 ///
 /// The adapter stores the proof's exact canonical bytes under its content
@@ -700,6 +723,23 @@ mod tests {
     }
 
     #[test]
+    fn committed_origin_rejects_logical_sequence_overflow() {
+        let mut store = open_fixture_store(StoreConfig::Memory);
+        let timeline = store.create_timeline("origin-overflow").test_ok();
+        let mut events = store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.origin"),
+                    CanonicalBytes::from_vec(vec![1]),
+                )],
+            )
+            .test_ok();
+        assert!(finalize_committed_origins(timeline.id(), u64::MAX, &mut events).is_err());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_draft_guards_cover_revocation_and_owner_failures() {
         let timeline = pos_core::TimelineId::new();
@@ -1315,6 +1355,7 @@ mod tests {
             // TimelineEventEnvelopeV1 signature verification.
             signature: Some(pos_core::Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let second_payload = CanonicalBytes::from_vec(b"signed-second".to_vec());
@@ -1511,6 +1552,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }],
             parent_fork_hash: None,
@@ -1832,6 +1874,7 @@ mod coverage_entrypoints {
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_core::Hash::from_bytes([0; 32]),
             }],
             parent_fork_hash: None,
@@ -1860,6 +1903,7 @@ mod coverage_entrypoints {
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_core::Hash::from_bytes([0; 32]),
             }],
             parent_fork_hash: None,
