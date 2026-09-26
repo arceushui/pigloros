@@ -546,6 +546,14 @@ impl KeyRegistryStateV1 {
         }
     }
 
+    /// Return durable destruction requests that need owned-material deletion
+    /// or tombstone finalization after a restart.
+    pub fn pending_destruction_requests(
+        &self,
+    ) -> impl Iterator<Item = KeyDestructionRequestV1> + '_ {
+        self.pending_destructions.values().copied()
+    }
+
     /// Validate a decoded or adapter-provided registry snapshot.
     ///
     /// This is a public load-boundary contract because `Deserialize` can
