@@ -1479,6 +1479,14 @@ mod tests {
             ))
             .test_ok()?;
 
+        let mut missing_origin_event = signature_rejection_event();
+        missing_origin_event.signature = Some(Signature::from_bytes([0; 64]));
+        missing_origin_event.signature_identity = Some(identity);
+        let (_, missing_origin_reason) =
+            verify_store_event(&missing_origin_event, None, Some(&registry))?
+                .ok_or("expected missing Timeline origin rejection")?;
+        assert!(missing_origin_reason.contains("missing required context"));
+
         let supplied_mismatch = run_store_event(
             signature_rejection_event(),
             Some(&registry),

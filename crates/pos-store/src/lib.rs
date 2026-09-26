@@ -656,6 +656,20 @@ pub fn resolve_timeline_import_public_keys_v1(
     export: &TimelineExport,
     trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
 ) -> Result<Vec<pos_core::PublicKey>, CoreError> {
+    resolve_import_trust_context(store, export, trust_anchors).map(|(public_keys, _)| public_keys)
+}
+
+fn resolve_import_trust_context(
+    store: &dyn EventStore,
+    export: &TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<
+    (
+        Vec<pos_core::PublicKey>,
+        Option<pos_core::KeyRegistryStateV1>,
+    ),
+    CoreError,
+> {
     let mut anchors = std::collections::BTreeMap::new();
     for (identity, public_key) in trust_anchors {
         if identity.epoch == 0
@@ -675,15 +689,16 @@ pub fn resolve_timeline_import_public_keys_v1(
             registry.as_ref(),
         )?);
     }
-    Ok(public_keys)
+    Ok((public_keys, registry))
 }
 
 /// Verify every exact V1 Timeline envelope before identity-preserving import.
 ///
 /// The destination registry and caller-supplied trust set must agree on each
-/// Event's owner/role/epoch public key. An Event's retained first-commit origin
-/// must describe its own exported segment, including the Fork's inherited
-/// Timeline Order prefix. The store's `import_committed` operation then applies
+/// Event's owner/role/epoch public key using one registry snapshot. An Event's
+/// retained first-commit origin must describe its own exported segment,
+/// including the Fork's inherited Timeline Order prefix. The store's
+/// `import_committed` operation then applies
 /// the validated batch atomically or rolls it back. This makes no signed-range
 /// completeness claim or ADR-060 `ReplayClaim`.
 ///
@@ -695,8 +710,7 @@ pub fn import_timeline_verified_v1(
     export: TimelineExport,
     trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
 ) -> Result<pos_core::Timeline, CoreError> {
-    let public_keys = resolve_timeline_import_public_keys_v1(store, &export, trust_anchors)?;
-    let registry = load_import_registry(store, &export)?;
+    let (public_keys, registry) = resolve_import_trust_context(store, &export, trust_anchors)?;
     let inherited_prefix = export
         .timeline
         .meta
