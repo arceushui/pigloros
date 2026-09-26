@@ -2421,8 +2421,7 @@ mod tests {
     #[test]
     fn experiment_binding_retains_delegated_world_codec_source() {
         let plugin = ProofAgentPlugin::new();
-        let binding = proof_agent_output_binding(&plugin, 0.5, "deterministic-local-v1")
-            .test_ok();
+        let binding = proof_agent_output_binding(&plugin, 0.5, "deterministic-local-v1").test_ok();
         let world_source = include_bytes!("../../../plugins/world/src/lib.rs");
         let mut changed_world_source = binding.implementation_artifact().to_vec();
         let world_offset = changed_world_source
@@ -2439,9 +2438,11 @@ mod tests {
                 binding.execution_profile_artifact(),
                 binding.retention_policy_artifact(),
             ),
-            Err(pos_runtime::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
-                kind: "implementation"
-            })
+            Err(
+                pos_runtime::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                    kind: "implementation"
+                }
+            )
         ));
     }
 
