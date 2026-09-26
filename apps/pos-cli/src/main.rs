@@ -34,6 +34,22 @@ macro_rules! result_pipeline {
 mod coverage_entrypoints {
     use super::*;
 
+    struct ForeignDriver;
+
+    impl pos_runtime::Driver for ForeignDriver {
+        fn name(&self) -> &'static str {
+            "foreign-driver"
+        }
+
+        fn step(
+            &mut self,
+            _timeline: TimelineId,
+            _observations: pos_runtime::ObservationView<'_>,
+        ) -> Result<pos_runtime::StepOutput, pos_runtime::RuntimeError> {
+            Ok(pos_runtime::StepOutput::default())
+        }
+    }
+
     struct InvalidVersionPlugin;
 
     impl pos_core::Plugin for InvalidVersionPlugin {
@@ -86,6 +102,33 @@ mod coverage_entrypoints {
         )
         .is_err());
     }
+
+    #[test]
+    fn installed_synthetic_binding_rejects_foreign_and_duplicate_drivers() {
+        use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin};
+
+        let plugin = SyntheticObsPlugin::new();
+        let binding = || {
+            builtin_output_binding(
+                &plugin,
+                pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+                &1.0_f64.to_be_bytes(),
+                "deterministic-local-v1",
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
+        };
+        assert!(matches!(
+            binding().with_installed_driver(ForeignDriver),
+            Err(pos_runtime::OutputAdmissionErrorV1::CallbackMismatch { kind: "driver" })
+        ));
+        let bound = binding()
+            .with_installed_driver(SyntheticDriver::new(pos_core::EntityId::new()))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
+        assert!(matches!(
+            bound.with_installed_driver(SyntheticDriver::new(pos_core::EntityId::new())),
+            Err(pos_runtime::OutputAdmissionErrorV1::CallbackMismatch { kind: "driver" })
+        ));
+    }
 }
 
 macro_rules! output_stderr {
@@ -130,6 +173,22 @@ fn builtin_output_binding<P: Plugin + ?Sized>(
         configuration_details,
         profile_id,
     )
+    .map_err(Into::into)
+}
+
+fn builtin_output_registration<P: Plugin + ?Sized>(
+    plugin: &P,
+    binding: &pos_runtime::OutputPolicyBindingV1,
+) -> Result<pos_runtime::PluginRegistrationV1, Box<dyn std::error::Error>> {
+    pos_runtime::PluginPinV1::try_new(
+        pos_runtime::DomainImplementationKindV1::Plugin,
+        pos_runtime::PluginIsolationV1::OperatorTrustedNative,
+        binding.policy().digest(),
+        vec![pos_runtime::installed_plugin_role_v1(plugin)],
+    )
+    .map(|pin| {
+        pos_runtime::PluginRegistrationV1::new(pin, pos_runtime::PluginAvailabilityV1::Available)
+    })
     .map_err(Into::into)
 }
 
@@ -806,14 +865,16 @@ fn run_builtin_reference_experiment(
             &agent_configuration,
             "deterministic-local-v1",
         ) => |agent_closure|;
-        exp.register_with_verified_output_policy(
+        agent_closure.with_installed_driver(RuleAgentDriver::new(
+            agent_entity,
+            agent_plugin.actions().to_vec(),
+        )).map_err(Into::into) => |agent_closure|;
+        builtin_output_registration(&agent_plugin, &agent_closure) => |agent_registration|;
+        exp.register_installed_output(
             &agent_plugin,
             agent_closure,
+            agent_registration,
             Some(Box::new(RuleAgentReducer)),
-            Some(Box::new(RuleAgentDriver::new(
-                agent_entity,
-                agent_plugin.actions().to_vec(),
-            ))),
         ).map_err(Into::into) => |()|;
         builtin_output_binding(
             &obs_plugin,
@@ -821,11 +882,14 @@ fn run_builtin_reference_experiment(
             &obs_configuration,
             "deterministic-local-v1",
         ) => |obs_closure|;
-        exp.register_with_verified_output_policy(
+        obs_closure.with_installed_driver(SyntheticDriver::new(obs_entity))
+            .map_err(Into::into) => |obs_closure|;
+        builtin_output_registration(&obs_plugin, &obs_closure) => |obs_registration|;
+        exp.register_installed_output(
             &obs_plugin,
             obs_closure,
+            obs_registration,
             Some(Box::new(SyntheticReducer)),
-            Some(Box::new(SyntheticDriver::new(obs_entity))),
         ).map_err(Into::into) => |()|;
         exp.run().map_err(Into::into)
     }

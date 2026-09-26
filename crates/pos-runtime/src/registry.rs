@@ -18,14 +18,15 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
+use crate::output_admission::InstalledCallbacksV1;
 #[cfg(any(test, feature = "test-support"))]
 use crate::output_admission::InstalledOutputPolicySourceV1;
 use crate::{
     composition::{
-        PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
-        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
-        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
-        ResolvedPluginV1,
+        DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition,
+        PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1,
+        PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1,
+        RequiredPluginV1, ResolvedPluginCompositionV1, ResolvedPluginV1,
     },
     driver::{
         Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey, SnapshotAnchor,
@@ -2727,6 +2728,7 @@ impl PluginRegistry {
     /// # Errors
     /// Returns a registration, identity, artifact, or capability error before
     /// mutating the registry.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_with_verified_output_policy(
         &mut self,
         plugin: &dyn Plugin,
@@ -2749,6 +2751,7 @@ impl PluginRegistry {
     /// # Errors
     /// Returns the runtime registration or output-admission error when the
     /// authority, ownership, or approver route is invalid.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_with_verified_output_policy_and_approver(
         &mut self,
         plugin: &dyn Plugin,
@@ -2766,6 +2769,63 @@ impl PluginRegistry {
             approver,
             approver_event_types,
             None,
+        )
+    }
+
+    /// Register one installed Plugin with its verified callbacks and exact
+    /// available session pin. No callback or pin can be added after this seam.
+    ///
+    /// # Errors
+    /// Rejects a foreign callback, incompatible pin, invalid policy closure,
+    /// or capability mismatch before any registry mutation.
+    pub fn register_installed_output(
+        &mut self,
+        plugin: &dyn Plugin,
+        mut binding: OutputPolicyBindingV1,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+    ) -> Result<(), RuntimeError> {
+        let id = plugin.id();
+        let pin = registration.pin();
+        let incompatible = if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
+            Some(PluginPinFieldV1::ImplementationKind)
+        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
+            Some(PluginPinFieldV1::Isolation)
+        } else if pin.configuration_digest() != binding.policy().digest() {
+            Some(PluginPinFieldV1::ConfigurationDigest)
+        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
+            Some(PluginPinFieldV1::Roles)
+        } else {
+            None
+        };
+        if let Some(field) = incompatible {
+            return Err(PluginCompositionErrorV1::IncompatibleImplementation {
+                plugin_id: id,
+                field,
+            }
+            .into());
+        }
+        if registration.availability() != PluginAvailabilityV1::Available {
+            return Err(PluginCompositionErrorV1::ImplementationUnavailable {
+                plugin_id: id,
+                availability: registration.availability(),
+            }
+            .into());
+        }
+        self.validate_registration_roles(&registration)?;
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            Some(registration),
         )
     }
 
@@ -2856,7 +2916,6 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
-    #[cfg(debug_assertions)]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,

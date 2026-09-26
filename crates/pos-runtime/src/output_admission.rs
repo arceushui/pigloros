@@ -2,14 +2,17 @@
 
 use pos_conformance::ExecutionProfileV1;
 use pos_core::{
-    event::EventDraft,
+    event::{EventDraft, Kind},
     output_policy::{OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_POLICY_BYTES_V1},
     plugin::PluginOwnerTokenV1,
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash, Plugin,
-    PluginCpuReservationV1, PluginId, WorkloadProfileV1, MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
+    ActionApprover, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
+    Hash, Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
+    MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
 };
-use std::sync::Mutex;
+use std::{any::type_name, sync::Mutex};
+
+use crate::driver::Driver;
 
 /// Maximum aggregate bytes retained by one output-policy closure envelope.
 pub const MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1: usize = 2 * 65_536
@@ -60,6 +63,8 @@ pub enum OutputAdmissionErrorV1 {
     ArtifactInvalid { kind: &'static str },
     #[error("{kind} artifact identity does not match the recorded policy")]
     ArtifactIdentityMismatch { kind: &'static str },
+    #[error("{kind} callback is not the installed implementation")]
+    CallbackMismatch { kind: &'static str },
 }
 
 /// Installed implementation source selected by a trusted composition root.
@@ -187,6 +192,40 @@ impl InstalledOutputPolicySourceV1 {
         }
     }
 
+    fn accepts_driver<D: Driver + 'static>(self, plugin_name: &str) -> bool {
+        let actual = type_name::<D>();
+        match self {
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Generated => true,
+            Self::Gateway | Self::Agent | Self::Society => false,
+            Self::World => actual == "pos_plugin_world::WorldDriver",
+            Self::RuleAgent => actual == "pos_plugin_rule_agent::RuleAgentDriver",
+            Self::SyntheticObservation => actual == "pos_plugin_synthetic_obs::SyntheticDriver",
+            Self::Experiment => match plugin_name {
+                "successful-sibling" => actual == "pos_experiment::moat_proof::SiblingProbeDriver",
+                "failure-probe" => actual == "pos_experiment::moat_proof::FailureProbeDriver",
+                "proof-agent" => actual == "pos_experiment::moat_proof::ProofAgentDriver",
+                "society" => actual == "pos_experiment::moat_proof::ProofSocietyDriver",
+                _ => false,
+            },
+        }
+    }
+
+    fn accepts_approver<A: ActionApprover + 'static>(self) -> bool {
+        let actual = type_name::<A>();
+        match self {
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Generated => true,
+            Self::Gateway => actual == "piglor_gateway::GatewayWorldActionApprover",
+            Self::World => actual == "pos_plugin_world::WorldPlugin",
+            Self::RuleAgent
+            | Self::Agent
+            | Self::SyntheticObservation
+            | Self::Society
+            | Self::Experiment => false,
+        }
+    }
+
     fn implementation_artifact<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<u8> {
         #[cfg(not(any(test, feature = "test-support")))]
         let _ = plugin;
@@ -225,6 +264,10 @@ impl InstalledOutputPolicySourceV1 {
                 (
                     "src/main.rs",
                     include_bytes!("../../../apps/piglor-gateway/src/main.rs"),
+                ),
+                (
+                    "plugins/world/src/lib.rs",
+                    include_bytes!("../../../plugins/world/src/lib.rs"),
                 ),
             ]),
             Self::World => source_artifact_bundle(&[(
@@ -273,6 +316,14 @@ impl InstalledOutputPolicySourceV1 {
                 (
                     "src/moat_proof.rs",
                     include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs"),
+                ),
+                (
+                    "plugins/world/src/lib.rs",
+                    include_bytes!("../../../plugins/world/src/lib.rs"),
+                ),
+                (
+                    "plugins/society/src/lib.rs",
+                    include_bytes!("../../../plugins/society/src/lib.rs"),
                 ),
             ]),
         }
@@ -457,13 +508,24 @@ fn hash_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(bytes);
 }
 
+/// Concrete callbacks retained with one installed output-policy binding.
+pub(crate) struct InstalledCallbacksV1 {
+    pub(crate) driver: Option<Box<dyn Driver>>,
+    pub(crate) approver: Option<Box<dyn ActionApprover>>,
+    pub(crate) approver_event_types: Vec<Kind>,
+}
+
 /// A host-owned output policy binding with no caller-supplied artifact leaves.
 pub struct OutputPolicyBindingV1 {
     policy: OutputPolicyV1,
     budget: ExecutableBudgetPolicyV1,
     artifacts: OutputPolicyArtifactInputV1,
     source: InstalledOutputPolicySourceV1,
+    plugin_name: &'static str,
     owner_token: PluginOwnerTokenV1,
+    driver: Option<Box<dyn Driver>>,
+    approver: Option<Box<dyn ActionApprover>>,
+    approver_event_types: Vec<Kind>,
 }
 
 impl OutputPolicyBindingV1 {
@@ -545,8 +607,79 @@ impl OutputPolicyBindingV1 {
             budget,
             artifacts,
             source,
+            plugin_name: plugin.name(),
             owner_token: plugin.installed_owner_token(),
+            driver: None,
+            approver: None,
+            approver_event_types: Vec::new(),
         })
+    }
+
+    /// Attach only the concrete Driver compiled into this installed source.
+    ///
+    /// # Errors
+    /// Rejects a foreign or duplicate Driver before registration can mutate state.
+    pub fn with_installed_driver<D: Driver + 'static>(
+        mut self,
+        driver: D,
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        if self.driver.is_some() || !self.source.accepts_driver::<D>(self.plugin_name) {
+            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "driver" });
+        }
+        self.driver = Some(Box::new(driver));
+        Ok(self)
+    }
+
+    /// Attach only the concrete `ActionApprover` compiled into this installed source.
+    ///
+    /// # Errors
+    /// Rejects a foreign or duplicate approver before registration can mutate state.
+    pub fn with_installed_action_approver<A: ActionApprover + 'static>(
+        mut self,
+        approver: A,
+        event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        if self.approver.is_some()
+            || self.source == InstalledOutputPolicySourceV1::World
+            || !self.source.accepts_approver::<A>()
+        {
+            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
+        }
+        self.approver = Some(Box::new(approver));
+        self.approver_event_types = event_types.into_iter().collect();
+        Ok(self)
+    }
+
+    /// Clone the World approver from the exact `Plugin` instance that owns this binding.
+    ///
+    /// # Errors
+    /// Rejects a foreign instance, foreign implementation, or duplicate approver.
+    pub fn with_installed_plugin_action_approver<A>(
+        mut self,
+        plugin: &A,
+        event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<Self, OutputAdmissionErrorV1>
+    where
+        A: Plugin + ActionApprover + Clone + 'static,
+    {
+        if self.approver.is_some()
+            || self.source != InstalledOutputPolicySourceV1::World
+            || self.owner_token != plugin.installed_owner_token()
+            || !self.source.accepts_approver::<A>()
+        {
+            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
+        }
+        self.approver = Some(Box::new(plugin.clone()));
+        self.approver_event_types = event_types.into_iter().collect();
+        Ok(self)
+    }
+
+    pub(crate) fn take_callbacks(&mut self) -> InstalledCallbacksV1 {
+        InstalledCallbacksV1 {
+            driver: self.driver.take(),
+            approver: self.approver.take(),
+            approver_event_types: std::mem::take(&mut self.approver_event_types),
+        }
     }
 
     pub(crate) fn into_parts(
