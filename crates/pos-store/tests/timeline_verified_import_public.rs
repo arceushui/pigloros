@@ -1,14 +1,17 @@
 #![cfg(feature = "sqlite")]
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, CoreError, EntityId, ErasureArtifactClassV1,
-    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, EventDraft, EventOriginV1,
-    EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
+    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft,
+    EventOriginV1, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryStateV1, KeyRoleV1, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1, Seq,
-    SeqRange, TimelineEventEnvelopeV1,
+    SeqRange, Timeline, TimelineEventEnvelopeV1, TimelineId,
 };
 use pos_crypto::{
     key_roles::{sign_timeline_event_for_registered_role, SigningKeyMaterial},
@@ -84,6 +87,60 @@ struct Fixture {
     destruction_request: KeyDestructionRequestV1,
     registry: KeyRegistryStateV1,
     anchors: [(KeyIdentityV1, pos_core::PublicKey); 2],
+}
+
+struct SingleRegistryReadStore {
+    registry: KeyRegistryStateV1,
+    reads: AtomicUsize,
+}
+
+fn unexpected_store_call<T>() -> Result<T, CoreError> {
+    Err(CoreError::Storage("unexpected store operation".to_owned()))
+}
+
+impl EventStore for SingleRegistryReadStore {
+    fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+        unexpected_store_call()
+    }
+
+    fn append(
+        &mut self,
+        _timeline: TimelineId,
+        _drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        unexpected_store_call()
+    }
+
+    fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        unexpected_store_call()
+    }
+
+    fn fork(
+        &mut self,
+        _parent: TimelineId,
+        _at_seq: Seq,
+        _name: &str,
+    ) -> Result<Timeline, CoreError> {
+        unexpected_store_call()
+    }
+
+    fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+        unexpected_store_call()
+    }
+
+    fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+        unexpected_store_call()
+    }
+
+    fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Some(self.registry.clone()))
+        } else {
+            Err(CoreError::Storage(
+                "registry loaded more than once".to_owned(),
+            ))
+        }
+    }
 }
 
 fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
@@ -217,6 +274,28 @@ fn memory_and_sqlite_import_verified_nested_cow_with_rotated_destroyed_key(
     Ok(())
 }
 
+#[test]
+fn verified_import_resolves_and_verifies_against_one_registry_snapshot(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let export = export_timeline_own(
+        &fixture.source,
+        fixture.root,
+        EXPORT_DIGEST,
+        &export_evaluation()?,
+    )?;
+    let mut store = SingleRegistryReadStore {
+        registry: fixture.registry.clone(),
+        reads: AtomicUsize::new(0),
+    };
+    let error = import_timeline_verified_v1(&mut store, export, &fixture.anchors)
+        .err()
+        .ok_or("expected test store import rejection")?;
+    assert!(error.to_string().contains("import_committed not supported"));
+    assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
 fn reject_export(
     store: &mut dyn EventStore,
     fixture: &Fixture,
@@ -274,6 +353,15 @@ fn invalid_signature_origin_and_trust_reject_without_partial_import(
         &mut SqliteStore::open_in_memory()?,
         &fixture,
         wrong_epoch,
+        &fixture.anchors,
+    )?;
+
+    let mut overflowed_fork = original.clone();
+    overflowed_fork.timeline.meta.fork_point = Some((fixture.child, Seq::from_u64(u64::MAX)));
+    reject_export(
+        &mut MemoryStore::new(),
+        &fixture,
+        overflowed_fork,
         &fixture.anchors,
     )?;
 

@@ -390,6 +390,26 @@ mod tests {
         store
     }
 
+    #[test]
+    fn nonempty_ledger_read_requires_a_persisted_registry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut store = gated_memory_store();
+        let timeline = store.create_timeline("unregistered-ledger")?;
+        store.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_PREDICTION),
+                CanonicalBytes::from_static(b"unregistered"),
+            )],
+        )?;
+        let error = read_verified_ledger_events(&store, timeline.id())
+            .err()
+            .ok_or("expected missing registry rejection")?;
+        assert!(error.to_string().contains("registry is unavailable"));
+        Ok(())
+    }
+
     fn open_store(config: pos_store::StoreConfig) -> Result<Box<dyn EventStore>, CoreError> {
         let mut store = pos_store::open_store(config)?;
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
@@ -459,6 +479,7 @@ mod tests {
         registry: KeyRegistryStateV1,
         failure: RegistryFailure,
         save_calls: Option<Arc<Mutex<usize>>>,
+        events: Vec<Event>,
     }
 
     impl RegistryFailureStore {
@@ -468,7 +489,13 @@ mod tests {
                 registry,
                 failure,
                 save_calls: None,
+                events: Vec::new(),
             }
+        }
+
+        fn with_events(mut self, events: Vec<Event>) -> Self {
+            self.events = events;
+            self
         }
 
         fn with_save_counter(mut self, save_calls: Arc<Mutex<usize>>) -> Self {
@@ -495,7 +522,7 @@ mod tests {
             _timeline: pos_core::ids::TimelineId,
             _range: SeqRange,
         ) -> Result<Vec<Event>, CoreError> {
-            Ok(Vec::new())
+            Ok(self.events.clone())
         }
 
         fn fork(
@@ -568,6 +595,28 @@ mod tests {
         .join();
         assert!(poisoned.is_err());
         registry
+    }
+
+    #[test]
+    fn nonempty_ledger_read_propagates_registry_load_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut source = gated_memory_store();
+        let timeline = source.create_timeline("registry-read-failure")?;
+        let events = source.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_PREDICTION),
+                CanonicalBytes::from_static(b"registry-load-failure"),
+            )],
+        )?;
+        let store = RegistryFailureStore::new(KeyRegistryStateV1::new(), RegistryFailure::Load)
+            .with_events(events);
+        let error = read_verified_ledger_events(&store, store.timeline.id())
+            .err()
+            .ok_or("expected registry load failure")?;
+        assert!(error.to_string().contains("registry load failed"));
+        Ok(())
     }
 
     #[test]
