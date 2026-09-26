@@ -144,10 +144,11 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
         std::thread::scope(|scope| {
             let decryption = scope.spawn(move || {
                 decrypting_store.with_decryption_authorization(old, digest(1), || {
-                    entered_tx
-                        .send(())
-                        .expect("callback entry must be observed");
-                    release_rx.recv().expect("callback must be released");
+                    assert!(
+                        entered_tx.send(()).is_ok(),
+                        "callback entry must be observed"
+                    );
+                    assert!(release_rx.recv().is_ok(), "callback must be released");
                     "plaintext"
                 })
             });
@@ -171,22 +172,24 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
                         .begin_key_registry_destruction(request)
                         .map(|_| ())
                 };
-                mutation_tx
-                    .send(result)
-                    .expect("mutation result must be observed");
+                assert!(
+                    mutation_tx.send(result).is_ok(),
+                    "mutation result must be observed"
+                );
             });
             let blocked = mutation_rx.recv_timeout(Duration::from_millis(100));
-            release_tx.send(()).expect("callback must be released");
+            assert!(release_tx.send(()).is_ok(), "callback must be released");
             assert!(matches!(blocked, Err(RecvTimeoutError::Timeout)));
-            assert_eq!(
-                decryption.join().expect("decryption worker must join"),
-                Ok("plaintext")
+            assert!(decryption
+                .join()
+                .is_ok_and(|result| result == Ok("plaintext")));
+            assert!(mutation.join().is_ok(), "mutation worker must join");
+            assert!(
+                mutation_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .is_ok_and(|result| result.is_ok()),
+                "mutation must succeed"
             );
-            mutation.join().expect("mutation worker must join");
-            mutation_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("mutation result must arrive")
-                .expect("mutation must succeed");
         });
 
         let mut verify = SqliteStore::open(path)?;
