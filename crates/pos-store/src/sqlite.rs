@@ -3782,8 +3782,10 @@ impl EventStore for SqliteStore {
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let prepared = (|| {
-            let persisted = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
+            let persisted = self.load_key_registry().and_then(|registry| {
+                registry.ok_or_else(|| {
+                    CoreError::Storage("durable key registry is unavailable".to_owned())
+                })
             })?;
             if persisted != *expected_registry {
                 return Err(CoreError::Storage(
@@ -3791,8 +3793,8 @@ impl EventStore for SqliteStore {
                 ));
             }
             let owning_timeline = self
-                .get_timeline(timeline)?
-                .ok_or(CoreError::TimelineNotFound(timeline))?;
+                .get_timeline(timeline)
+                .and_then(|head| head.ok_or(CoreError::TimelineNotFound(timeline)))?;
             let inherited_prefix = owning_timeline
                 .meta
                 .fork_point
@@ -15114,6 +15116,7 @@ pub(super) mod key_registry_coverage {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn atomic_timeline_signing_rejects_a_failed_transaction_begin(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (registry, identity, material_digest) = registered_state()?;

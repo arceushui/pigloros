@@ -139,15 +139,17 @@ impl EventStore for HostedLedgerStore {
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
         self.with_host(|host| {
-            host.command_sender()?.append_timeline_signed_authorized(
-                timeline,
-                expected_registry,
-                &draft,
-                identity,
-                material_digest,
-                public_verification_key,
-                sign,
-            )
+            host.command_sender().and_then(|mut sender| {
+                sender.append_timeline_signed_authorized(
+                    timeline,
+                    expected_registry,
+                    &draft,
+                    identity,
+                    material_digest,
+                    public_verification_key,
+                    sign,
+                )
+            })
         })
     }
 
