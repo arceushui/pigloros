@@ -2800,6 +2800,7 @@ mod coverage_entrypoints {
             schema_version: pos_core::event::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_core::crypto::Hash::from_bytes([0; 32]),
         };
         assert!(matches!(
