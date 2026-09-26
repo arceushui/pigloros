@@ -6,7 +6,8 @@
 //!
 //! Subcommands:
 //!   pos store init|info `<path>`
-//!   pos timeline list|fork|replay|snapshot|compare|merge …
+//!   pos timeline list|fork|merge …
+//!   pos timeline replay|snapshot|compare … (currently unavailable)
 //!   pos events log …
 //!   pos experiment run|verify|reproduce …
 //!   pos version
@@ -133,11 +134,6 @@ fn builtin_output_binding<P: Plugin + ?Sized>(
     .map_err(Into::into)
 }
 
-struct OpenedCliStore {
-    store: HostedCliStore,
-    erasure_gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
-}
-
 /// Open a store through the CLI composition seam.
 ///
 /// The concrete adapter remains exclusively owned by the recovered erasure
@@ -145,19 +141,8 @@ struct OpenedCliStore {
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    open_store_with_gate(config)
-        .map(|opened| Box::new(opened.store) as Box<dyn pos_core::store::EventStore>)
-}
-
-fn open_store_with_gate(config: StoreConfig) -> Result<OpenedCliStore, pos_core::CoreError> {
     HostedCliStore::open(config)
-        .map(|store| {
-            let erasure_gate = store.containment_gate();
-            OpenedCliStore {
-                store,
-                erasure_gate,
-            }
-        })
+        .map(|store| Box::new(store) as Box<dyn pos_core::store::EventStore>)
         .map_err(hosted_cli_store_error)
 }
 
@@ -387,13 +372,13 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if args.len() < 3 {
                 return Err("Usage: pos timeline replay <path> <timeline-id>".into());
             }
-            cmd_timeline_replay(&args[1], &args[2])
+            Err(timeline_operation_unavailable("replay"))
         }
         Some("snapshot") => {
             if args.len() < 3 {
                 return Err("Usage: pos timeline snapshot <path> <timeline-id>".into());
             }
-            cmd_timeline_snapshot(&args[1], &args[2])
+            Err(timeline_operation_unavailable("snapshot"))
         }
         Some("compare") => {
             if args.len() < 5 {
@@ -401,7 +386,7 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     "Usage: pos timeline compare <path> <tl-a-id> <tl-b-id> <fork-seq>".into(),
                 );
             }
-            cmd_timeline_compare(&args[1], &args[2], &args[3], &args[4])
+            Err(timeline_operation_unavailable("compare"))
         }
         Some("merge") => {
             if args.len() < 6 {
@@ -415,6 +400,9 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             output_stderr!("Usage: pos timeline <list|fork|replay|snapshot|compare|merge> ...");
+            output_stderr!(
+                "replay, snapshot, and compare require a CLI owner-verified evidence path"
+            );
             Ok(())
         }
     }
@@ -451,203 +439,11 @@ fn cmd_timeline_fork(
     Ok(())
 }
 
-fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let tl_id = parse_timeline_id(tl_id_str)?;
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let events = replay_retained_timeline(&store, tl_id, &mut registry)?;
-    let entity_count = events
-        .iter()
-        .map(|e| e.entity)
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-
-    output_stdout!("events: {}", events.len());
-    output_stdout!("entity_count: {entity_count}");
-    Ok(())
-}
-
-fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let tl_id = parse_timeline_id(tl_id_str)?;
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let snapshot = snapshot_retained_timeline(&store, tl_id, &mut registry)?;
-
-    let entity_count = count_snapshot_entities(&snapshot);
-
-    output_stdout!("at_seq: {}", snapshot.at_seq.as_u64());
-    output_stdout!("entity_count: {entity_count}");
-
-    Ok(())
-}
-
-fn retained_timeline_artifact(
-    timeline: pos_core::TimelineId,
-    artifact_class: pos_core::ErasureArtifactClassV1,
-    owner_domain: &[u8],
-) -> Result<
-    (
-        pos_core::ErasureReferenceV1,
-        pos_core::ReplayClaimEvaluationV1,
-    ),
-    pos_core::ErasureErrorV1,
-> {
-    let artifact_digest = pos_core::ErasureReferenceV1::from_digest(
-        *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-    );
-    pos_core::ReplayClaimEvaluatorV1::evaluate(
-        pos_core::ErasureReplayClaimV1::Exact,
-        &[pos_core::ArtifactClaimInputV1 {
-            registration: pos_core::RegisteredArtifactV1::new(
-                artifact_class,
-                artifact_digest,
-                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                None,
-                pos_core::ErasureReferenceV1::from_digest(*blake3::hash(owner_domain).as_bytes()),
-                pos_core::ArtifactOptionalityV1::Required,
-                pos_core::ArtifactTransitionRuleV1::PreserveExact,
-            ),
-            current_claim: pos_core::ErasureReplayClaimV1::Exact,
-            state: pos_core::ArtifactStateV1::Retained,
-        }],
+fn timeline_operation_unavailable(operation: &str) -> Box<dyn std::error::Error> {
+    format!(
+        "timeline {operation} is unavailable: the CLI has no owner-verified evidence path for this operation"
     )
-    .map(|evaluation| (artifact_digest, evaluation))
-}
-
-fn replay_retained_timeline(
-    store: &HostedCliStore,
-    timeline: TimelineId,
-    registry: &mut pos_state::ProjectionRegistry,
-) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        timeline,
-        pos_core::ErasureArtifactClassV1::TimelineReplay,
-        b"pos-cli/timeline-replay",
-    )?;
-    store
-        .with_read_sender(|sender| {
-            pos_time::replay(sender, timeline, registry, artifact_digest, &evaluation)
-        })
-        .map_err(Into::into)
-}
-
-fn snapshot_retained_timeline(
-    store: &HostedCliStore,
-    timeline: TimelineId,
-    registry: &mut pos_state::ProjectionRegistry,
-) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        timeline,
-        pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-        b"pos-cli/timeline-snapshot",
-    )?;
-    store
-        .with_read_sender(|sender| {
-            pos_time::snapshot(sender, timeline, registry, artifact_digest, &evaluation)
-        })
-        .map_err(Into::into)
-}
-
-fn retained_comparison_artifacts(
-    timelines: [TimelineId; 2],
-) -> Result<
-    (
-        [pos_core::ErasureReferenceV1; 2],
-        pos_core::ReplayClaimEvaluationV1,
-    ),
-    pos_core::ErasureErrorV1,
-> {
-    let digests = timelines.map(|timeline| {
-        pos_core::ErasureReferenceV1::from_digest(
-            *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-        )
-    });
-    let claims = digests.map(|digest| pos_core::ArtifactClaimInputV1 {
-        registration: pos_core::RegisteredArtifactV1::new(
-            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-            digest,
-            pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-            None,
-            pos_core::ErasureReferenceV1::from_digest(
-                *blake3::hash(b"pos-cli/timeline-compare").as_bytes(),
-            ),
-            pos_core::ArtifactOptionalityV1::Required,
-            pos_core::ArtifactTransitionRuleV1::PreserveExact,
-        ),
-        current_claim: pos_core::ErasureReplayClaimV1::Exact,
-        state: pos_core::ArtifactStateV1::Retained,
-    });
-    pos_core::ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &claims)
-        .map(|evaluation| (digests, evaluation))
-}
-
-fn cmd_timeline_compare(
-    path: &str,
-    first_timeline_str: &str,
-    second_timeline_str: &str,
-    fork_seq_str: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let diff = run_timeline_compare(path, first_timeline_str, second_timeline_str, fork_seq_str)?;
-
-    output_stdout!("only_in_a: {}", diff.only_in_a.len());
-    output_stdout!("only_in_b: {}", diff.only_in_b.len());
-    output_stdout!("diverged_entities: {}", diff.diverged_entities.len());
-
-    Ok(())
-}
-
-fn run_timeline_compare(
-    path: &str,
-    first_timeline_str: &str,
-    second_timeline_str: &str,
-    fork_seq_str: &str,
-) -> Result<pos_time::ForkDiff, Box<dyn std::error::Error>> {
-    let timeline_a = parse_timeline_id(first_timeline_str)?;
-    let timeline_b = parse_timeline_id(second_timeline_str)?;
-    let fork_seq = parse_seq(fork_seq_str)?;
-
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut reg_a = pos_state::ProjectionRegistry::new()
-        .with_erasure_gate(std::sync::Arc::clone(&erasure_gate));
-    reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let mut reg_b = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let (artifact_digests, evaluation) = retained_comparison_artifacts([timeline_a, timeline_b])?;
-    let diff = store.with_read_sender(|sender| {
-        pos_time::compare(
-            sender,
-            [timeline_a, timeline_b],
-            fork_seq,
-            [&mut reg_a, &mut reg_b],
-            artifact_digests,
-            &evaluation,
-        )
-    })?;
-
-    Ok(diff)
+    .into()
 }
 
 fn parse_merge_strategy_flag(
@@ -987,44 +783,6 @@ fn parse_limit_flag(args: &[String]) -> Result<Option<usize>, Box<dyn std::error
     Ok(None)
 }
 
-#[cfg(test)]
-thread_local! {
-    static FAIL_STATE_REG_JSON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn state_registry_to_json(
-    state_reg: &pos_core::StateRegistry,
-) -> Result<serde_json::Value, serde_json::Error> {
-    #[cfg(test)]
-    if FAIL_STATE_REG_JSON.with(std::cell::Cell::get) {
-        return serde_json::from_str("{");
-    }
-    serde_json::to_value(state_reg)
-}
-
-/// Count unique entity IDs captured in a snapshot's projection state.
-fn count_snapshot_entities(snapshot: &pos_time::Snapshot) -> usize {
-    let mut entities = std::collections::HashSet::new();
-    for state_reg in snapshot.registry.values() {
-        // Soft-skip registries that cannot be JSON-encoded.
-        let Ok(value) = state_registry_to_json(state_reg) else {
-            continue;
-        };
-        accumulate_entities_from_registry_json(&value, &mut entities);
-    }
-    entities.len()
-}
-
-/// Pull entity id keys from a serialized [`pos_core::StateRegistry`]-shaped JSON value.
-fn accumulate_entities_from_registry_json(
-    value: &serde_json::Value,
-    entities: &mut std::collections::HashSet<String>,
-) {
-    if let Some(states) = value.get("states").and_then(serde_json::Value::as_object) {
-        entities.extend(states.keys().cloned());
-    }
-}
-
 /// Serialize and write the run manifest next to the store.
 fn save_run_manifest(
     path: &str,
@@ -1120,54 +878,6 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
     };
-
-    #[test]
-    fn accumulate_entities_skips_missing_or_non_object_states() {
-        let mut entities = std::collections::HashSet::new();
-        accumulate_entities_from_registry_json(&serde_json::Value::Null, &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(&serde_json::json!({"nope": 1}), &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": "not-an-object"}),
-            &mut entities,
-        );
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": {"e1": {}, "e2": {}}}),
-            &mut entities,
-        );
-        assert_eq!(entities.len(), 2);
-        assert!(entities.contains("e1"));
-        assert!(entities.contains("e2"));
-    }
-
-    #[test]
-    fn count_snapshot_entities_counts_unique_ids() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-        };
-        assert_eq!(count_snapshot_entities(&snapshot), 0);
-    }
-
-    #[test]
-    fn count_snapshot_entities_soft_skips_json_errors() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-        };
-        FAIL_STATE_REG_JSON.with(|f| f.set(true));
-        let n = count_snapshot_entities(&snapshot);
-        FAIL_STATE_REG_JSON.with(|f| f.set(false));
-        assert_eq!(n, 0);
-    }
 
     #[test]
     fn open_memory_store_ok() {
@@ -1684,55 +1394,6 @@ mod tests {
     fn handle_events_log_missing_path_returns_err() {
         let a = args(&["log"]);
         assert!(handle_events(&a).is_err());
-    }
-
-    #[test]
-    fn handle_timeline_replay_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-
-        // Add some events to replay
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id();
-        let entity = EntityId::new();
-        let drafts = vec![EventDraft::new(
-            entity,
-            Kind::new("test.event"),
-            CanonicalBytes::from_vec(vec![]),
-        )];
-        store.append(tl_id, &drafts).test_ok();
-        drop(store);
-
-        let tl_id_str = tl_id.to_string();
-        let a = args(&["replay", &path, &tl_id_str]);
-        handle_timeline(&a).test_ok();
-    }
-
-    #[test]
-    fn handle_timeline_snapshot_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id().to_string();
-        let a = args(&["snapshot", &path, &tl_id]);
-        handle_timeline(&a).test_ok();
-    }
-
-    #[test]
-    fn handle_timeline_compare_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id().to_string();
-        let forked = store
-            .fork(timelines[0].id(), timelines[0].head, "fork-b")
-            .test_ok();
-        let fork_id = forked.id().to_string();
-        let a = args(&["compare", &path, &tl_id, &fork_id, "0"]);
-        handle_timeline(&a).test_ok();
     }
 
     #[test]
@@ -2469,118 +2130,6 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_bad_timeline_id_returns_err() {
-        let (_dir, path, _) = seeded_db();
-        assert!(cmd_timeline_replay(&path, "not-a-ulid").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("replay.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_replay(&path, &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_bad_timeline_id_returns_err() {
-        let (_dir, path, _) = seeded_db();
-        assert!(cmd_timeline_snapshot(&path, "not-a-ulid").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("snapshot.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_snapshot(&path, &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_counts_entities_from_projection_state() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("snapshot.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        cmd_timeline_snapshot(&path, &tl_id).test_ok();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_bad_timeline_id_returns_err() {
-        let (_dir, path, tl_id) = seeded_db();
-        assert!(cmd_timeline_compare(&path, "not-a-ulid", &tl_id, "0").is_err());
-        assert!(cmd_timeline_compare(&path, &tl_id, "not-a-ulid", "0").is_err());
-        assert!(cmd_timeline_compare(&path, &tl_id, &tl_id, "not-a-seq").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let base = store.list_timelines().test_ok()[0].clone();
-        let entity = EntityId::new();
-        store
-            .append(
-                base.id(),
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("cmp.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        let forked = store.fork(base.id(), base.head, "cmp-fork").test_ok();
-        let fork_id = forked.id().to_string();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_compare(&path, &tl_id, &fork_id, "0").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn handle_timeline_merge_invalid_strategy_returns_err() {
         let (_dir, path, tl_id) = seeded_db();
         let missing_b = TimelineId::new().to_string();
@@ -2786,31 +2335,6 @@ mod fault_injection_tests {
         let dir = tempfile::tempdir().test_ok();
         let tl_id = TimelineId::new().to_string();
         assert!(cmd_timeline_fork(dir.path().to_str().test_ok(), &tl_id, "0", "child").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_replay(dir.path().to_str().test_ok(), &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_snapshot(dir.path().to_str().test_ok(), &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_a = TimelineId::new().to_string();
-        let tl_b = TimelineId::new().to_string();
-        assert!(cmd_timeline_compare(dir.path().to_str().test_ok(), &tl_a, &tl_b, "0").is_err());
     }
 
     #[test]

@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+# Enables downstream fixture registration and deterministic verifier seam tests only.
 test-support = []
 
 [dependencies]

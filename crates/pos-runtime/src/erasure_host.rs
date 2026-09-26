@@ -31,6 +31,11 @@ use pos_core::{
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
 
+use crate::{
+    VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+};
+use pos_core::WorldReplayClosureV1;
+
 #[cfg(test)]
 use pos_core::PreparedErasureForkBatchV1;
 
@@ -404,6 +409,7 @@ impl ErasureCoordinatorAuthorityV1 for ClosedErasureCoordinatorAuthorityV1 {
 pub struct ErasureCoordinatorCompositionV1 {
     authority: Arc<dyn ErasureCoordinatorAuthorityV1>,
     coordinator: ErasureReferenceV1,
+    world_replay_verifier: Option<Arc<dyn WorldReplayVerifierV1>>,
 }
 
 impl ErasureCoordinatorCompositionV1 {
@@ -422,7 +428,20 @@ impl ErasureCoordinatorCompositionV1 {
         Ok(Self {
             authority,
             coordinator,
+            world_replay_verifier: None,
         })
+    }
+
+    /// Install the native World Replay verifier for this composition root.
+    ///
+    /// The verifier is the only component allowed to mint the opaque
+    /// [`VerifiedWorldReplayV1`] capability.  A composition without one
+    /// remains intentionally closed for World Replay, even when its erasure
+    /// inventory is otherwise ready.
+    #[must_use]
+    pub fn with_world_replay_verifier(mut self, verifier: Arc<dyn WorldReplayVerifierV1>) -> Self {
+        self.world_replay_verifier = Some(verifier);
+        self
     }
 
     /// Construct an explicitly closed composition for a deployment that has
@@ -436,11 +455,16 @@ impl ErasureCoordinatorCompositionV1 {
         Self {
             authority: Arc::new(ClosedErasureCoordinatorAuthorityV1),
             coordinator: ErasureReferenceV1::from_digest([0xee; 32]),
+            world_replay_verifier: None,
         }
     }
 
     const fn coordinator(&self) -> ErasureReferenceV1 {
         self.coordinator
+    }
+
+    fn world_replay_verifier(&self) -> Option<Arc<dyn WorldReplayVerifierV1>> {
+        self.world_replay_verifier.clone()
     }
 }
 
@@ -995,6 +1019,7 @@ pub struct ErasureExecutionHostV1 {
     gate: Arc<ErasureContainmentGateV1>,
     authority: Option<Arc<dyn ErasureCoordinatorAuthorityV1>>,
     coordinator: Option<ErasureReferenceV1>,
+    world_replay_verifier: Option<Arc<dyn WorldReplayVerifierV1>>,
     inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
     recovery_limits: ErasureRecoveryLimitsV1,
     state: HostStateV1,
@@ -1063,6 +1088,7 @@ impl ErasureExecutionHostV1 {
             gate,
             authority: None,
             coordinator: None,
+            world_replay_verifier: None,
             inventory: None,
             recovery_limits: ErasureRecoveryLimitsV1::compiled_maximum(),
             state: HostStateV1::Closed,
@@ -1132,6 +1158,7 @@ impl ErasureExecutionHostV1 {
         let mut host = Self::new_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
+        host.world_replay_verifier = composition.world_replay_verifier();
         host.install_inventory_from_coordinator_with_limits(limits)?;
         Ok(host)
     }
@@ -1193,6 +1220,7 @@ impl ErasureExecutionHostV1 {
         let mut host = Self::new_gateway_closed(store)?;
         host.authority = Some(Arc::clone(&composition.authority));
         host.coordinator = Some(composition.coordinator());
+        host.world_replay_verifier = composition.world_replay_verifier();
         host.install_inventory_from_coordinator_with_limits(limits)
             .map(|_| host)
     }
@@ -2497,6 +2525,50 @@ pub struct ErasureReadSenderV1<'host> {
 }
 
 impl ErasureReadSenderV1<'_> {
+    /// Verify one structural World Replay closure through the installed host
+    /// owner and bind the result to this sender's inventory generation.
+    ///
+    /// The caller supplies structural input plus the exact intended protected
+    /// use. Exact native disposition, dependency closure, source-head coverage,
+    /// lease time, and owner authority remain inside the installed verifier. A
+    /// closed composition has no verifier and therefore cannot issue a
+    /// protected-use result.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error when the verifier is absent, rejects
+    /// the closure, or observes a stale generation.
+    pub fn admit_world_replay(
+        &mut self,
+        closure: &WorldReplayClosureV1,
+        requested_use: &WorldReplayUseV1,
+    ) -> Result<VerifiedWorldReplayV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        if closure.inventory_generation() != Hash::from_bytes(self.generation.digest())
+            || !requested_use.is_covered_by(closure)
+        {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        let verification_owner = self
+            .host
+            .world_replay_verifier
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let capability = verification_owner
+            .verify(closure, requested_use, self.generation)
+            .map_err(map_world_replay_verification_error)?;
+        let closure_digest = closure.digest();
+        if capability.closure_digest() != closure_digest
+            || capability.timeline_id() != closure.timeline_id()
+            || capability.source_head() != closure.source_head()
+            || capability.inventory_generation() != self.generation
+            || capability.requested_use() != requested_use
+            || !capability.has_finite_read_bounds()
+        {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        Ok(capability)
+    }
+
     /// Recover one authoritative, payload-free ERS1 state through the
     /// coordinator that owns this host's installed generation.
     ///
@@ -2720,6 +2792,20 @@ impl ErasureReadSenderV1<'_> {
     }
 }
 
+const fn map_world_replay_verification_error(
+    error: WorldReplayVerificationErrorV1,
+) -> ErasureHostErrorV1 {
+    match error {
+        WorldReplayVerificationErrorV1::RequestMismatch => ErasureHostErrorV1::Conflict,
+        WorldReplayVerificationErrorV1::StaleGeneration => ErasureHostErrorV1::StaleGeneration,
+        WorldReplayVerificationErrorV1::MissingVerifier
+        | WorldReplayVerificationErrorV1::EvidenceUnavailable
+        | WorldReplayVerificationErrorV1::ClaimUnavailable => {
+            ErasureHostErrorV1::AuthorizationDenied
+        }
+    }
+}
+
 const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
     match error {
         CoreError::ErasureAccessFrozen => ErasureHostErrorV1::AccessFrozen,
@@ -2811,6 +2897,262 @@ mod tests {
         maximum_requests: usize,
     ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
         ErasureVerifiedEmptyInventoryQueryV1::new(snapshot).verified_inventory(maximum_requests)
+    }
+
+    #[derive(Clone, Copy)]
+    enum WorldReplayVerifierModeV1 {
+        Exact,
+        Reject(WorldReplayVerificationErrorV1),
+        WrongDigest,
+        WrongTimeline,
+        WrongSourceHead,
+        WrongGeneration,
+        WrongUse,
+        UnboundedRead,
+    }
+
+    impl WorldReplayVerifierV1 for WorldReplayVerifierModeV1 {
+        fn verify(
+            &self,
+            closure: &WorldReplayClosureV1,
+            requested_use: &WorldReplayUseV1,
+            inventory_generation: ErasureReferenceV1,
+        ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+            match self {
+                Self::Exact => Ok(crate::world_replay::test_verified_world_replay(
+                    closure,
+                    requested_use,
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                )),
+                Self::Reject(error) => Err(*error),
+                Self::WrongDigest => {
+                    Ok(crate::world_replay::test_verified_world_replay_with_fields(
+                        Hash::from_bytes([1; 32]),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        requested_use.clone(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+                Self::WrongTimeline => {
+                    Ok(crate::world_replay::test_verified_world_replay_with_fields(
+                        closure.digest(),
+                        TimelineId::new(),
+                        closure.source_head(),
+                        requested_use.clone(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+                Self::WrongSourceHead => {
+                    Ok(crate::world_replay::test_verified_world_replay_with_fields(
+                        closure.digest(),
+                        closure.timeline_id(),
+                        Hash::from_bytes([2; 32]),
+                        requested_use.clone(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+                Self::WrongGeneration => {
+                    Ok(crate::world_replay::test_verified_world_replay_with_fields(
+                        closure.digest(),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        requested_use.clone(),
+                        reference(1),
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+                Self::WrongUse => {
+                    let wrong_use = test_ok(WorldReplayUseV1::new(
+                        requested_use.timeline_id(),
+                        ErasureProtectedOperationV1::Snapshot,
+                        requested_use.range(),
+                        requested_use.consumer_ids().to_vec(),
+                        Vec::new(),
+                    ));
+                    Ok(crate::world_replay::test_verified_world_replay(
+                        closure,
+                        &wrong_use,
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                    ))
+                }
+                Self::UnboundedRead => Ok(
+                    crate::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                        closure.digest(),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        requested_use.clone(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                        EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                    ),
+                ),
+            }
+        }
+    }
+
+    fn replay_use(closure: &WorldReplayClosureV1) -> WorldReplayUseV1 {
+        test_ok(WorldReplayUseV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            pos_core::store::SeqRange::all(),
+            vec!["count".to_owned()],
+            Vec::new(),
+        ))
+    }
+
+    fn test_ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
+        })
+    }
+
+    fn world_replay_host(
+        mode: WorldReplayVerifierModeV1,
+    ) -> (ErasureExecutionHostV1, WorldReplayClosureV1) {
+        let composition =
+            ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(Arc::new(mode));
+        let host = test_ok(ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ));
+        let generation = test_ok(host.containment_gate().inventory_generation());
+        let closure = test_ok(
+            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
+                generation.digest(),
+            )),
+        );
+        (host, closure)
+    }
+
+    #[test]
+    fn world_replay_admission_binds_the_installed_verifier_and_generation() {
+        let mut absent_host = test_ok(ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ));
+        let absent_generation = test_ok(absent_host.containment_gate().inventory_generation());
+        let absent_closure = test_ok(
+            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
+                absent_generation.digest(),
+            )),
+        );
+        let mut absent_reads = test_ok(absent_host.read_sender());
+        let absent_use = replay_use(&absent_closure);
+        assert_eq!(
+            absent_reads.admit_world_replay(&absent_closure, &absent_use),
+            Err(ErasureHostErrorV1::AuthorizationDenied)
+        );
+
+        for (mode, expected) in [
+            (
+                WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::MissingVerifier),
+                ErasureHostErrorV1::AuthorizationDenied,
+            ),
+            (
+                WorldReplayVerifierModeV1::Reject(
+                    WorldReplayVerificationErrorV1::EvidenceUnavailable,
+                ),
+                ErasureHostErrorV1::AuthorizationDenied,
+            ),
+            (
+                WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::StaleGeneration),
+                ErasureHostErrorV1::StaleGeneration,
+            ),
+            (
+                WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::ClaimUnavailable),
+                ErasureHostErrorV1::AuthorizationDenied,
+            ),
+            (
+                WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::RequestMismatch),
+                ErasureHostErrorV1::Conflict,
+            ),
+        ] {
+            let (mut host, closure) = world_replay_host(mode);
+            let mut reads = test_ok(host.read_sender());
+            let requested_use = replay_use(&closure);
+            assert_eq!(
+                reads.admit_world_replay(&closure, &requested_use),
+                Err(expected)
+            );
+        }
+
+        let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+        let generation = test_ok(host.containment_gate().inventory_generation());
+        let mut reads = test_ok(host.read_sender());
+        let requested_use = replay_use(&closure);
+        let capability = test_ok(reads.admit_world_replay(&closure, &requested_use));
+        assert_eq!(capability.closure_digest(), closure.digest());
+        assert_eq!(capability.inventory_generation(), generation);
+
+        let wrong_timeline_use = test_ok(WorldReplayUseV1::new(
+            TimelineId::new(),
+            ErasureProtectedOperationV1::Read,
+            pos_core::store::SeqRange::all(),
+            vec!["count".to_owned()],
+            Vec::new(),
+        ));
+        assert_eq!(
+            reads.admit_world_replay(&closure, &wrong_timeline_use),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        let unknown_consumer_use = test_ok(WorldReplayUseV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            pos_core::store::SeqRange::all(),
+            vec!["unknown".to_owned()],
+            Vec::new(),
+        ));
+        assert_eq!(
+            reads.admit_world_replay(&closure, &unknown_consumer_use),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+
+        let bad_generation = test_ok(
+            WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes([2; 32])),
+        );
+        assert_eq!(
+            reads.admit_world_replay(&bad_generation, &replay_use(&bad_generation)),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+
+        for mode in [
+            WorldReplayVerifierModeV1::WrongDigest,
+            WorldReplayVerifierModeV1::WrongTimeline,
+            WorldReplayVerifierModeV1::WrongSourceHead,
+            WorldReplayVerifierModeV1::WrongGeneration,
+            WorldReplayVerifierModeV1::WrongUse,
+            WorldReplayVerifierModeV1::UnboundedRead,
+        ] {
+            let (mut host, closure) = world_replay_host(mode);
+            let mut reads = test_ok(host.read_sender());
+            assert_eq!(
+                reads.admit_world_replay(&closure, &replay_use(&closure)),
+                Err(ErasureHostErrorV1::Conflict)
+            );
+        }
+    }
+
+    #[test]
+    fn world_replay_admission_rejects_a_stale_sender_before_verification() {
+        let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+        let current = test_ok(host.containment_gate().inventory_generation());
+        let stale = reference(1);
+        assert_ne!(stale, current);
+        let mut reads = ErasureReadSenderV1 {
+            host: &mut host,
+            generation: stale,
+        };
+        assert_eq!(
+            reads.admit_world_replay(&closure, &replay_use(&closure)),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]

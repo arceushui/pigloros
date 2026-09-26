@@ -44,6 +44,7 @@ pub mod world_consumer_set;
 pub mod world_dependency_directory;
 pub mod world_history;
 pub mod world_recording_receipt;
+pub mod world_replay;
 pub mod world_transform;
 
 pub use world_artifact::{
@@ -230,6 +231,12 @@ pub use world_history::{
 pub use world_recording_receipt::{
     WorldRecordingReceiptErrorV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
     MAX_WORLD_RECORDING_RECEIPT_BYTES_V1,
+};
+#[cfg(feature = "test-support")]
+pub use world_replay::{WorldReplayAdmissionV1, WorldReplayClosureAuthorityV1};
+pub use world_replay::{
+    WorldReplayClosureErrorV1, WorldReplayClosureInputV1, WorldReplayClosureV1,
+    MAX_WORLD_REPLAY_ARTIFACTS_V1,
 };
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,

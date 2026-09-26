@@ -654,6 +654,31 @@ impl ProjectionRegistry {
         }
     }
 
+    /// Run an operation, restoring accumulated state maps when it fails.
+    ///
+    /// This does not isolate protected Replay or Snapshot candidates. Reducer
+    /// registrations, reducer internals, policies, and external effects are not
+    /// rolled back; an owner-controlled private candidate is still required
+    /// before releasing protected results.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error produced by `operation` after restoring the original
+    /// accumulated state.
+    pub fn try_with_state_transaction<T, E>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let before = self.snapshot_unfenced();
+        match operation(self) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.restore_from_snapshot(&before);
+                Err(error)
+            }
+        }
+    }
+
     /// Retain only one subject's accumulated state in every reducer.
     pub fn retain_subject(&mut self, subject: &EntityId) {
         for (_, slot) in &mut self.slots {

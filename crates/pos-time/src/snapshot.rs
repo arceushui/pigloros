@@ -2,9 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use pos_core::store::{EventReadBounds, SeqRange};
-use pos_core::{CoreError, EntityId, ErasureProtectedOperationV1, Seq, StateRegistry, TimelineId};
-use pos_runtime::ErasureReadSenderV1;
+use pos_core::store::SeqRange;
+use pos_core::{
+    CoreError, EntityId, ErasureProtectedOperationV1, Seq, StateRegistry, TimelineId,
+    WorldReplayClosureV1,
+};
+use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
 use pos_state::ProjectionRegistry;
 
 /// A snapshot of all per-reducer entity states at a specific sequence number
@@ -31,52 +34,60 @@ pub struct Snapshot {
 /// [`Snapshot`].
 ///
 /// # Errors
-/// Returns [`CoreError::ArtifactUnavailable`] when snapshot creation is not
-/// authoritative; otherwise propagates [`CoreError`] from the store.
+/// Fails closed when protected Snapshot authority or complete reads are
+/// unavailable. Host failures map to [`CoreError::ArtifactUnavailable`],
+/// [`CoreError::ErasureAccessFrozen`], or
+/// [`CoreError::ErasureContainmentUnavailable`].
 pub fn snapshot(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<Snapshot, CoreError> {
-    run_snapshot_fence(sender, timeline, registry, artifact_digest, evaluation)
+    run_snapshot_fence(sender, timeline, registry, closure)
 }
 
 fn run_snapshot_fence(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<Snapshot, CoreError> {
-    let mut outcome = Err(CoreError::ArtifactUnavailable);
-    let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = snapshot_effect(sender, timeline, registry, artifact_digest, evaluation);
-    };
-    sender
-        .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut effect)
-        .map_err(crate::host_error_to_core)?;
-    outcome
+    let requested_use =
+        snapshot_use(timeline, registry).map_err(|_| CoreError::ArtifactUnavailable)?;
+    registry.try_with_state_transaction(|candidate| {
+        let mut outcome = Err(CoreError::ArtifactUnavailable);
+        let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
+            outcome =
+                snapshot_effect_with_rechecks(sender, timeline, candidate, closure, &requested_use);
+        };
+        sender
+            .with_protected_effect_fence(
+                timeline,
+                ErasureProtectedOperationV1::Snapshot,
+                &mut effect,
+            )
+            .map_err(crate::host_error_to_core)
+            .and(outcome)
+    })
 }
 
-fn snapshot_effect(
+fn snapshot_effect_with_rechecks(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
+    requested_use: &WorldReplayUseV1,
 ) -> Result<Snapshot, CoreError> {
-    evaluation
-        .require_authoritative_use(
-            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-            artifact_digest,
-        )
-        .map_err(|_| CoreError::ArtifactUnavailable)?;
-    let events = sender
-        .read_bounded(timeline, SeqRange::all(), unbounded_snapshot_read())
-        .map_err(crate::host_error_to_core)?;
-    snapshot_from_events(timeline, registry, &events)
+    let read_bounds = crate::require_world_replay(sender, closure, requested_use)?;
+    let events = crate::read_complete_world_replay(sender, timeline, SeqRange::all(), read_bounds)?;
+    let snapshot = snapshot_from_events(timeline, registry, &events)?;
+    let final_bounds = crate::require_world_replay(sender, closure, requested_use)?;
+    if final_bounds == read_bounds {
+        Ok(snapshot)
+    } else {
+        Err(CoreError::ArtifactUnavailable)
+    }
 }
 
 /// Error type for snapshot consistency checks.
@@ -85,19 +96,29 @@ pub enum SnapshotError {
     /// ADR-060 no longer permits the snapshot as authoritative state.
     #[error("snapshot artifact is unavailable for authoritative use")]
     ArtifactUnavailable,
-    /// A store I/O error occurred.
-    #[error("store error: {0}")]
-    Store(#[from] CoreError),
+    /// A non-artifact host, containment, or store error occurred.
+    #[error("host or store error: {0}")]
+    Store(CoreError),
     /// The snapshot and full-replay state disagree for an entity.
     #[error("snapshot inconsistent: entity {entity:?} differs")]
     Inconsistent { entity: EntityId },
 }
 
+impl From<CoreError> for SnapshotError {
+    fn from(error: CoreError) -> Self {
+        if matches!(error, CoreError::ArtifactUnavailable) {
+            Self::ArtifactUnavailable
+        } else {
+            Self::Store(error)
+        }
+    }
+}
+
 /// Verify that `snapshot` + tail events produces the same state as a full replay.
 ///
 /// Steps:
-/// 1. Read events after `snapshot.at_seq` (the "tail") and all events.
-/// 2. Restore `registry` to `snap.registry` state, then fold the tail to build
+/// 1. Read all events once, then select the tail after `snapshot.at_seq`.
+/// 2. Restore `registry` to `snapshot.registry` state, then fold the tail to build
 ///    the incremental projection.
 /// 3. Reset `registry` to empty and fold all events to build the full-replay
 ///    reference projection.
@@ -105,72 +126,92 @@ pub enum SnapshotError {
 ///
 /// `registry` must be pre-populated with the same reducers used when the
 /// snapshot was originally taken. Its accumulated state is managed internally
-/// and will be in the full-replay state when this function returns.
+/// and is in the full-replay state on success. On failure, its original
+/// accumulated state is restored.
 ///
 /// # Errors
 /// Returns [`SnapshotError::ArtifactUnavailable`] when the registered snapshot
-/// may no longer be used authoritatively, [`SnapshotError::Store`] on I/O
-/// failure, or [`SnapshotError::Inconsistent`] if the states differ.
+/// may no longer be used authoritatively, [`SnapshotError::Store`] on a
+/// non-artifact host or store error, or [`SnapshotError::Inconsistent`] if the
+/// states differ.
 pub fn verify_snapshot_consistency(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<(), SnapshotError> {
-    run_verification_fence(sender, snap, registry, artifact_digest, evaluation)
+    run_verification_fence(sender, snap, registry, closure)
 }
 
 fn run_verification_fence(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<(), SnapshotError> {
-    let mut outcome = Err(SnapshotError::ArtifactUnavailable);
-    let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = verify_snapshot_effect(sender, snap, registry, artifact_digest, evaluation);
-    };
-    sender
-        .with_protected_effect_fence(
-            snap.timeline,
-            ErasureProtectedOperationV1::Snapshot,
-            &mut effect,
-        )
-        .map_err(crate::host_error_to_core)
-        .map_err(SnapshotError::from)?;
-    outcome
+    let requested_use =
+        snapshot_use(snap.timeline, registry).map_err(|_| SnapshotError::ArtifactUnavailable)?;
+    registry.try_with_state_transaction(|candidate| {
+        let mut outcome = Err(SnapshotError::ArtifactUnavailable);
+        let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
+            outcome = verify_snapshot_effect_with_rechecks(
+                sender,
+                snap,
+                candidate,
+                closure,
+                &requested_use,
+            );
+        };
+        sender
+            .with_protected_effect_fence(
+                snap.timeline,
+                ErasureProtectedOperationV1::Snapshot,
+                &mut effect,
+            )
+            .map_err(crate::host_error_to_core)
+            .map_err(SnapshotError::from)
+            .and(outcome)
+    })
 }
 
-fn verify_snapshot_effect(
+fn verify_snapshot_effect_with_rechecks(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
+    requested_use: &WorldReplayUseV1,
 ) -> Result<(), SnapshotError> {
-    evaluation
-        .require_authoritative_use(
-            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-            artifact_digest,
-        )
-        .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-    let tail_events = sender
-        .read_bounded(
-            snap.timeline,
-            SeqRange::from_seq(snap.at_seq.next()),
-            unbounded_snapshot_read(),
-        )
-        .map_err(crate::host_error_to_core)?;
-    let all_events = sender
-        .read_bounded(snap.timeline, SeqRange::all(), unbounded_snapshot_read())
-        .map_err(crate::host_error_to_core)?;
-    verify_snapshot_event_sets(snap, registry, &tail_events, &all_events)
+    let read_bounds =
+        crate::require_world_replay(sender, closure, requested_use).map_err(SnapshotError::from)?;
+    let all_events =
+        crate::read_complete_world_replay(sender, snap.timeline, SeqRange::all(), read_bounds)
+            .map_err(SnapshotError::from)?;
+    let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
+    verify_snapshot_event_sets(snap, registry, &all_events[tail_start..], &all_events)?;
+    let final_bounds =
+        crate::require_world_replay(sender, closure, requested_use).map_err(SnapshotError::from)?;
+    if final_bounds == read_bounds {
+        Ok(())
+    } else {
+        Err(SnapshotError::ArtifactUnavailable)
+    }
 }
 
-const fn unbounded_snapshot_read() -> EventReadBounds {
-    EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX)
+fn snapshot_use(
+    timeline: TimelineId,
+    registry: &ProjectionRegistry,
+) -> Result<WorldReplayUseV1, pos_runtime::WorldReplayVerificationErrorV1> {
+    WorldReplayUseV1::new(
+        timeline,
+        ErasureProtectedOperationV1::Snapshot,
+        SeqRange::all(),
+        registry
+            .reducer_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        Vec::new(),
+    )
 }
 
 fn snapshot_from_events(
@@ -322,7 +363,10 @@ mod tests {
     };
     use pos_state::{EntityStateProjection, ProjectionRegistry};
     use pos_store::{open_store, StoreConfig};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     struct ReadFailStore;
 
@@ -454,7 +498,120 @@ mod tests {
         store
     }
 
+    #[derive(Clone, Copy)]
+    enum SecondPassBehavior {
+        Reject,
+        StructuralOnly,
+        StaleGeneration,
+    }
+
+    struct SecondPassVerifier {
+        calls: AtomicUsize,
+        behavior: SecondPassBehavior,
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for SecondPassVerifier {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(pos_runtime::world_replay::test_verified_world_replay(
+                    closure,
+                    requested_use,
+                    inventory_generation,
+                    ErasureReplayClaimV1::Exact,
+                ))
+            } else {
+                match self.behavior {
+                    SecondPassBehavior::Reject => {
+                        Err(pos_runtime::WorldReplayVerificationErrorV1::MissingVerifier)
+                    }
+                    SecondPassBehavior::StructuralOnly => {
+                        Ok(pos_runtime::world_replay::test_verified_world_replay(
+                            closure,
+                            requested_use,
+                            inventory_generation,
+                            ErasureReplayClaimV1::StructuralOnly,
+                        ))
+                    }
+                    SecondPassBehavior::StaleGeneration => {
+                        Err(pos_runtime::WorldReplayVerificationErrorV1::StaleGeneration)
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_second_pass_host(behavior: SecondPassBehavior) -> pos_runtime::ErasureExecutionHostV1 {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(SecondPassVerifier {
+                calls: AtomicUsize::new(0),
+                behavior,
+            }));
+        pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok()
+    }
+
+    struct StaleGenerationVerifier;
+
+    impl pos_runtime::WorldReplayVerifierV1 for StaleGenerationVerifier {
+        fn verify(
+            &self,
+            _: &pos_core::WorldReplayClosureV1,
+            _: &pos_runtime::WorldReplayUseV1,
+            _: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            Err(pos_runtime::WorldReplayVerificationErrorV1::StaleGeneration)
+        }
+    }
+
+    fn open_stale_generation_host() -> pos_runtime::ErasureExecutionHostV1 {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(StaleGenerationVerifier));
+        pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok()
+    }
+
     // ── tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn public_snapshot_rejects_empty_consumer_selection() {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
+        let timeline = TimelineId::new();
+        let mut registry = ProjectionRegistry::new();
+        assert!(matches!(
+            super::snapshot(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        let snap = Snapshot {
+            timeline,
+            at_seq: Seq::ZERO,
+            registry: HashMap::new(),
+        };
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &snap, &mut registry, &closure),
+            Err(SnapshotError::ArtifactUnavailable)
+        ));
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -477,45 +634,237 @@ mod tests {
     }
 
     #[test]
-    fn public_snapshot_commands_hold_the_host_generation_fence() {
+    fn public_snapshot_commands_fail_closed_without_installed_world_verifier() {
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gate = host.containment_gate();
-        let (timeline, entity) = {
+        let timeline = {
             let mut commands = host.command_sender().test_ok();
             let timeline = commands.create_timeline("hosted-snapshot").test_ok();
             let entity = EntityId::new();
             commands
                 .append(timeline.id(), &[draft(entity), draft(entity)])
                 .test_ok();
+            timeline.id()
+        };
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(gate);
+        projected.register("count", Box::new(CountReducer));
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut reads = host.read_sender().test_ok();
+        let result = super::snapshot(&mut reads, timeline, &mut projected, &closure);
+        assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_snapshot_commands_use_an_installed_world_verifier() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("verified-snapshot").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(
+                    timeline.id(),
+                    &[draft(entity), draft(entity), draft(entity)],
+                )
+                .test_ok();
             (timeline.id(), entity)
         };
-        let evaluation = snapshot_evaluation(ArtifactStateV1::Retained);
-        let mut projected = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         projected.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let captured = super::snapshot(&mut reads, timeline, &mut projected, &closure).test_ok();
+        assert_eq!(count_in_snapshot(&captured, &entity), 3);
+
+        let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
+        verified.register("count", Box::new(CountReducer));
+        super::verify_snapshot_consistency(&mut reads, &captured, &mut verified, &closure)
+            .test_ok();
+    }
+
+    #[test]
+    fn public_snapshot_reports_projection_authority_failure() {
+        let mut host = crate::test_support::open_exact_host();
+        let timeline = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("unbound-snapshot").test_ok();
+            commands
+                .append(timeline.id(), &[draft(EntityId::new())])
+                .test_ok();
+            timeline.id()
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut projected = ProjectionRegistry::new();
+        projected.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::snapshot(&mut reads, timeline, &mut projected, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+    }
+
+    #[test]
+    fn public_snapshot_rechecks_the_verifier_after_reading() {
+        for behavior in [
+            SecondPassBehavior::Reject,
+            SecondPassBehavior::StructuralOnly,
+            SecondPassBehavior::StaleGeneration,
+        ] {
+            let mut host = open_second_pass_host(behavior);
+            let gate = host.containment_gate();
+            let (timeline, entity) = {
+                let mut commands = host.command_sender().test_ok();
+                let timeline = commands.create_timeline("second-pass-snapshot").test_ok();
+                let entity = EntityId::new();
+                commands.append(timeline.id(), &[draft(entity)]).test_ok();
+                (timeline.id(), entity)
+            };
+            let closure = crate::test_support::closure_for_host(&host, timeline);
+            let mut projected = ProjectionRegistry::new().with_erasure_gate(gate);
+            projected.register("count", Box::new(CountReducer));
+            let mut reads = host.read_sender().test_ok();
+            let result = super::snapshot(&mut reads, timeline, &mut projected, &closure);
+            if matches!(behavior, SecondPassBehavior::StaleGeneration) {
+                assert!(matches!(
+                    result,
+                    Err(CoreError::ErasureContainmentUnavailable)
+                ));
+            } else {
+                assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+            }
+            assert_eq!(
+                projected
+                    .state_for_reducer("count", &entity)
+                    .and_then(|state| state.get("n"))
+                    .and_then(serde_json::Value::as_u64),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn public_snapshot_verification_rechecks_the_verifier_after_comparing() {
+        let mut host = open_second_pass_host(SecondPassBehavior::Reject);
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands
+                .create_timeline("second-pass-verification")
+                .test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let snap = Snapshot {
+            timeline,
+            at_seq: Seq::ZERO,
+            registry: std::collections::HashMap::new(),
+        };
         let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
         verified.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
-        let snapshot = super::snapshot(
-            &mut reads,
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &snap, &mut verified, &closure),
+            Err(SnapshotError::ArtifactUnavailable)
+        ));
+        assert_eq!(verified.state_for_reducer("count", &entity), None);
+    }
+
+    #[test]
+    fn public_snapshot_preserves_stale_generation_from_initial_verification() {
+        let mut host = open_stale_generation_host();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("stale-snapshot").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut projected = ProjectionRegistry::new();
+        projected.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::snapshot(&mut reads, timeline, &mut projected, &closure),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+
+        let snap = Snapshot {
             timeline,
-            &mut projected,
-            SNAPSHOT_DIGEST,
-            &evaluation,
-        )
-        .test_ok();
-        assert_eq!(count_in_snapshot(&snapshot, &entity), 2);
-        super::verify_snapshot_consistency(
-            &mut reads,
-            &snapshot,
-            &mut verified,
-            SNAPSHOT_DIGEST,
-            &evaluation,
-        )
-        .test_ok();
+            at_seq: Seq::ZERO,
+            registry: std::collections::HashMap::new(),
+        };
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &snap, &mut projected, &closure),
+            Err(SnapshotError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+        assert_eq!(projected.state_for_reducer("count", &entity), None);
+    }
+
+    #[test]
+    fn public_snapshot_verification_preserves_stale_generation_after_comparing() {
+        let mut host = open_second_pass_host(SecondPassBehavior::StaleGeneration);
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("stale-snapshot-recheck").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let snap = Snapshot {
+            timeline,
+            at_seq: Seq::ZERO,
+            registry: std::collections::HashMap::new(),
+        };
+        let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
+        verified.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &snap, &mut verified, &closure),
+            Err(SnapshotError::Store(
+                CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+        assert_eq!(verified.state_for_reducer("count", &entity), None);
+    }
+
+    #[test]
+    fn public_snapshot_verification_reports_inconsistent_state() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands
+                .create_timeline("inconsistent-hosted-snapshot")
+                .test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        projected.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let mut captured =
+            super::snapshot(&mut reads, timeline, &mut projected, &closure).test_ok();
+        captured.registry.remove("count");
+        let mut verified = ProjectionRegistry::new().with_erasure_gate(gate);
+        verified.register("count", Box::new(CountReducer));
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &captured, &mut verified, &closure),
+            Err(SnapshotError::Inconsistent { entity: actual }) if actual == entity
+        ));
     }
 
     #[test]
