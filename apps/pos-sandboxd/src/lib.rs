@@ -18,7 +18,9 @@ pub use hardening::{
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
 };
 pub use kernel_cgroup::{
-    AttemptCgroupEmptyBasis, AttemptCgroupEmptyObservation, AttemptCgroupError, BoundAttemptCgroup,
+    AttemptCgroupEmptyBasis, AttemptCgroupEmptyObservation, AttemptCgroupError,
+    AttemptLimitEventCounter, AttemptLimitEventDelta, AttemptLimitEventSnapshot,
+    AttemptLimitEventSource, BoundAttemptCgroup,
 };
 pub use system_bus::{
     SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
