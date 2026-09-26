@@ -3259,6 +3259,37 @@ mod tests {
     }
 
     #[test]
+    fn origin_overflow_rejects_append_without_mutating_memory_state() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("origin-overflow").test_ok();
+        let draft = make_draft(EntityId::new(), b"overflow");
+        store
+            .timelines
+            .get_mut(&timeline.id())
+            .test_ok()
+            .timeline
+            .meta
+            .fork_point = Some((TimelineId::new(), Seq::from_u64(u64::MAX)));
+
+        let (timelines, hasher) = (&mut store.timelines, &store.hasher);
+        let state = timelines.get_mut(&timeline.id()).test_ok();
+        assert!(MemoryStore::append_one_to_state(state, &draft, hasher.as_ref()).is_err());
+        assert!(store
+            .append_or_duplicate_with_limit_visible(
+                timeline.id(),
+                append_identity(11, 12),
+                WallTime::from_micros(1),
+                &draft,
+                None,
+            )
+            .is_err());
+        let state = store.timelines.get(&timeline.id()).test_ok();
+        assert_eq!(state.timeline.head, Seq::ZERO);
+        assert!(state.events.is_empty());
+        assert!(store.append_identities.is_empty());
+    }
+
+    #[test]
     fn default_store_is_fail_closed_in_test_builds_too() {
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("unbound").test_ok();
