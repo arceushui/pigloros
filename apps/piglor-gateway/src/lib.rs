@@ -60,6 +60,35 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
+fn gateway_binding_error(
+    plugin_name: &str,
+    error: pos_runtime::OutputAdmissionErrorV1,
+) -> pos_runtime::RuntimeError {
+    match error {
+        error @ pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" } => {
+            pos_runtime::RuntimeError::CapabilityMismatch {
+                name: plugin_name.to_owned(),
+                reason: error.to_string(),
+            }
+        }
+        error => error.into(),
+    }
+}
+
+fn gateway_output_binding<P: Plugin + ?Sized>(
+    plugin: &P,
+    configuration_details: &[u8],
+) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Gateway,
+        configuration_details,
+        "deterministic-local-v1",
+    )
+    .map_err(|error| gateway_binding_error(plugin.name(), error))
+}
+
+#[cfg(test)]
 fn gateway_output_binding_with_inputs<P: Plugin + ?Sized>(
     plugin: &P,
     configuration_details: &[u8],
@@ -78,15 +107,7 @@ fn gateway_output_binding_with_inputs<P: Plugin + ?Sized>(
         configuration_details,
         profile_id,
     )
-    .map_err(|error| match error {
-        error @ pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" } => {
-            pos_runtime::RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: error.to_string(),
-            }
-        }
-        error => error.into(),
-    })
+    .map_err(|error| gateway_binding_error(plugin.name(), error))
 }
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).
@@ -726,11 +747,9 @@ fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
     configuration_details
 }
 
-fn gateway_action_registry_builder_with_inputs(
+fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    profile_id: &str,
-    event_type: &str,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
     let max_bodies = pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 / 16;
     let mut bodies = bodies.into_iter().take(max_bodies + 1).collect::<Vec<_>>();
@@ -748,19 +767,14 @@ fn gateway_action_registry_builder_with_inputs(
     bodies.dedup();
     let configuration_details = gateway_configuration_details(&bodies);
     let world_plugin = WorldPlugin::new().with_bodies(bodies);
-    let closure = gateway_output_binding_with_inputs(
-        &descriptor,
-        &configuration_details,
-        profile_id,
-        event_type,
-    )?;
+    let binding = gateway_output_binding(&descriptor, &configuration_details)?;
     registry.register_with_verified_output_policy_and_approver(
         &descriptor,
-        closure,
+        binding,
         None,
         None,
         Some(Box::new(world_plugin)),
-        [Kind::new(event_type)],
+        [Kind::new(EVENT_TYPE_ACTION)],
     )?;
     if let Some(authority) = authority {
         registry = registry.with_consent_authority(authority);
@@ -774,13 +788,7 @@ fn gateway_action_registry_builder_for_test(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> PluginRegistry {
-    gateway_action_registry_builder_with_inputs(
-        bodies,
-        authority,
-        "deterministic-local-v1",
-        EVENT_TYPE_ACTION,
-    )
-    .unwrap_or_else(|error| {
+    gateway_action_registry_builder(bodies, authority).unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!(
             "gateway action registration must remain valid in test fixtures: {error:?}"
         )))
@@ -792,24 +800,7 @@ fn gateway_action_registry_with_authority_and_erasure_gate_checked(
     authority: Option<ConsentAuthority>,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
-    gateway_action_registry_with_authority_and_erasure_gate_checked_with_inputs(
-        bodies,
-        authority,
-        gate,
-        "deterministic-local-v1",
-        EVENT_TYPE_ACTION,
-    )
-}
-
-fn gateway_action_registry_with_authority_and_erasure_gate_checked_with_inputs(
-    bodies: impl IntoIterator<Item = EntityId>,
-    authority: Option<ConsentAuthority>,
-    gate: Arc<ErasureContainmentGateV1>,
-    profile_id: &str,
-    event_type: &str,
-) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
-    let mut registry =
-        gateway_action_registry_builder_with_inputs(bodies, authority, profile_id, event_type)?;
+    let mut registry = gateway_action_registry_builder(bodies, authority)?;
     registry.bind_erasure_gate(gate);
     Ok(Arc::new(registry))
 }
@@ -3339,12 +3330,8 @@ mod tests {
 
     #[test]
     fn gateway_action_registry_builder_propagates_binding_errors() {
-        let too_many_bodies = gateway_action_registry_builder_with_inputs(
-            std::iter::repeat(EntityId::new()),
-            None,
-            "deterministic-local-v1",
-            EVENT_TYPE_ACTION,
-        );
+        let too_many_bodies =
+            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None);
         assert!(matches!(
             too_many_bodies,
             Err(pos_runtime::RuntimeError::OutputAdmission(
@@ -3354,9 +3341,13 @@ mod tests {
             ))
         ));
 
-        let invalid_profile = gateway_action_registry_builder_with_inputs(
-            std::iter::empty(),
-            None,
+        let descriptor = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        let configuration_details = gateway_configuration_details(&[]);
+        let invalid_profile = gateway_output_binding_with_inputs(
+            &descriptor,
+            &configuration_details,
             "unknown-profile",
             EVENT_TYPE_ACTION,
         );
@@ -3365,27 +3356,14 @@ mod tests {
             Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
         ));
 
-        let invalid_event_type = gateway_action_registry_builder_with_inputs(
-            std::iter::empty(),
-            None,
+        let invalid_event_type = gateway_output_binding_with_inputs(
+            &descriptor,
+            &configuration_details,
             "deterministic-local-v1",
             "world.unowned",
         );
         assert!(matches!(
             invalid_event_type,
-            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
-        ));
-
-        let checked_error =
-            gateway_action_registry_with_authority_and_erasure_gate_checked_with_inputs(
-                std::iter::empty(),
-                None,
-                Arc::new(ErasureContainmentGateV1::new_test_open()),
-                "unknown-profile",
-                EVENT_TYPE_ACTION,
-            );
-        assert!(matches!(
-            checked_error,
             Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
         ));
 
