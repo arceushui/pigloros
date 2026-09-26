@@ -12,83 +12,76 @@ pub const MAX_WORLD_ARTIFACT_KEYS_V1: usize = 16;
 /// Maximum complete native dependency node addresses in one leaf.
 pub const MAX_WORLD_ARTIFACT_CHILDREN_V1: usize = 256;
 
-/// Closed native artifact meanings from accepted ADR-081 Revision 1.
+/// Closed native artifact meanings from ADR-081 Revision 1 and ADR-089 Revision 4.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum WorldArtifactKindV1 {
     /// Canonical Plugin output declaration.
-    OutputPolicy,
+    OutputPolicy = 0,
     /// Executable admission budget policy.
-    ExecutableBudgetPolicy,
+    ExecutableBudgetPolicy = 1,
     /// Finite retention policy.
-    RetentionPolicy,
+    RetentionPolicy = 2,
     /// Concrete native retention lease.
-    RetentionLease,
+    RetentionLease = 3,
     /// Recorded base configuration.
-    BaseConfiguration,
+    BaseConfiguration = 4,
     /// Recorded execution profile.
-    ExecutionProfile,
+    ExecutionProfile = 5,
     /// Admitted audience policy.
-    AudiencePolicy,
+    AudiencePolicy = 6,
     /// Recorded payload or reducer schema.
-    Schema,
+    Schema = 7,
     /// Recorded consumer reducer implementation.
-    ReducerImplementation,
+    ReducerImplementation = 8,
     /// Recorded host runtime identity.
-    RuntimeIdentity,
+    RuntimeIdentity = 9,
     /// Host-admitted Plugin implementation identity.
-    PluginImplementationIdentity,
+    PluginImplementationIdentity = 10,
     /// Non-secret native key dependency evidence.
-    KeyDependencyEvidence,
+    KeyDependencyEvidence = 11,
     /// Source Event canonical payload.
-    TimelinePayload,
+    TimelinePayload = 12,
     /// Separately admitted optional derived view.
-    OptionalView,
+    OptionalView = 13,
+    /// Exact retained OPC1 output-policy closure; native verification is separate.
+    OutputPolicyClosure = 14,
 }
 
 impl WorldArtifactKindV1 {
+    const KINDS_BY_CODE: [Self; 15] = [
+        Self::OutputPolicy,
+        Self::ExecutableBudgetPolicy,
+        Self::RetentionPolicy,
+        Self::RetentionLease,
+        Self::BaseConfiguration,
+        Self::ExecutionProfile,
+        Self::AudiencePolicy,
+        Self::Schema,
+        Self::ReducerImplementation,
+        Self::RuntimeIdentity,
+        Self::PluginImplementationIdentity,
+        Self::KeyDependencyEvidence,
+        Self::TimelinePayload,
+        Self::OptionalView,
+        Self::OutputPolicyClosure,
+    ];
+
     /// Exact accepted wire code, independent of native owner verification.
     #[must_use]
     pub const fn code(self) -> u8 {
-        match self {
-            Self::OutputPolicy => 0,
-            Self::ExecutableBudgetPolicy => 1,
-            Self::RetentionPolicy => 2,
-            Self::RetentionLease => 3,
-            Self::BaseConfiguration => 4,
-            Self::ExecutionProfile => 5,
-            Self::AudiencePolicy => 6,
-            Self::Schema => 7,
-            Self::ReducerImplementation => 8,
-            Self::RuntimeIdentity => 9,
-            Self::PluginImplementationIdentity => 10,
-            Self::KeyDependencyEvidence => 11,
-            Self::TimelinePayload => 12,
-            Self::OptionalView => 13,
-        }
+        self as u8
     }
 
     /// Decode only the accepted closed artifact kinds.
     ///
     /// # Errors
-    /// Rejects unknown kind codes, including unapproved proposed extensions.
+    /// Rejects unknown kind codes; recognizing a code grants no native authority.
     pub const fn from_code(code: u8) -> Result<Self, WorldArtifactErrorV1> {
-        match code {
-            0 => Ok(Self::OutputPolicy),
-            1 => Ok(Self::ExecutableBudgetPolicy),
-            2 => Ok(Self::RetentionPolicy),
-            3 => Ok(Self::RetentionLease),
-            4 => Ok(Self::BaseConfiguration),
-            5 => Ok(Self::ExecutionProfile),
-            6 => Ok(Self::AudiencePolicy),
-            7 => Ok(Self::Schema),
-            8 => Ok(Self::ReducerImplementation),
-            9 => Ok(Self::RuntimeIdentity),
-            10 => Ok(Self::PluginImplementationIdentity),
-            11 => Ok(Self::KeyDependencyEvidence),
-            12 => Ok(Self::TimelinePayload),
-            13 => Ok(Self::OptionalView),
-            _ => Err(WorldArtifactErrorV1::UnsupportedValue),
+        if code <= Self::OutputPolicyClosure as u8 {
+            Ok(Self::KINDS_BY_CODE[code as usize])
+        } else {
+            Err(WorldArtifactErrorV1::UnsupportedValue)
         }
     }
 }

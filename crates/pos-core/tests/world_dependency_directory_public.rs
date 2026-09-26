@@ -349,6 +349,51 @@ fn public_child_rejects_more_leaves_than_distinct_keys_in_range() -> TestResult 
         child(kind_edge, next_256, 258, hash(40)),
         Err(WorldDependencyBranchErrorV1::InvalidRange)
     );
+
+    let old_last = key(
+        WorldArtifactKindV1::OptionalView,
+        Hash::from_bytes([u8::MAX; 32]),
+    )?;
+    let closure_first = key(WorldArtifactKindV1::OutputPolicyClosure, indexed_hash(1))?;
+    let closure_second = key(WorldArtifactKindV1::OutputPolicyClosure, indexed_hash(2))?;
+    assert!(child(old_last, closure_first, 2, hash(40)).is_ok());
+    assert_eq!(
+        child(old_last, closure_first, 3, hash(40)),
+        Err(WorldDependencyBranchErrorV1::InvalidRange)
+    );
+    assert!(child(old_last, closure_second, 3, hash(40)).is_ok());
+    Ok(())
+}
+
+#[test]
+fn public_wdb1_key_roundtrips_closure_and_rejects_next_kind() -> TestResult {
+    let first = key(WorldArtifactKindV1::OutputPolicy, hash(10))?;
+    let closure = key(WorldArtifactKindV1::OutputPolicyClosure, hash(11))?;
+    let directory = WorldDependencyBranchV1::new(WorldDependencyBranchInputV1 {
+        scope: hash(1),
+        height: 1,
+        children: vec![
+            child(first, first, 1, hash(50))?,
+            child(closure, closure, 1, hash(51))?,
+        ],
+    })?;
+    let bytes = directory.encode().as_slice().to_vec();
+    assert_eq!(
+        WorldDependencyBranchV1::decode(&CanonicalBytes::from_vec(bytes.clone()))?,
+        directory
+    );
+    assert_eq!(directory.last_key(), closure);
+
+    let mut unsupported = bytes;
+    let kind_offset = unsupported
+        .windows(4)
+        .position(|window| window == [0x82, 14, 0x58, 0x20])
+        .ok_or("missing encoded closure key")?;
+    unsupported[kind_offset + 1] = 15;
+    assert_eq!(
+        WorldDependencyBranchV1::decode(&CanonicalBytes::from_vec(unsupported)),
+        Err(WorldDependencyBranchErrorV1::UnsupportedKind)
+    );
     Ok(())
 }
 
