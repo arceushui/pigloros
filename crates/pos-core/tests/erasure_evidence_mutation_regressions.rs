@@ -105,6 +105,7 @@ evidence_roundtrip!(scope_commitment_roundtrips, ErasureScopeCommitmentV1, {
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members: vec![reference(2)],
+        scope_timeline_ids: Vec::new(),
         target_closure: reference(3),
         lineage_rule: Some(reference(4)),
     })
@@ -165,6 +166,7 @@ evidence_roundtrip!(scope_extension_roundtrips, ErasureScopeExtensionV1, {
         request: reference(1),
         scope_commitment: reference(2),
         fork: reference(3),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule: reference(4),
         predecessor_extension: None,
         admission_provenance: reference(5),

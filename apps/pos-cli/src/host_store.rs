@@ -4,7 +4,7 @@
 /// authority never escape `ErasureExecutionHostV1`.
 struct HostedCliStore {
     host: std::sync::Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
+    gate: std::sync::Arc<dyn pos_core::ErasureGate>,
 }
 
 impl HostedCliStore {
@@ -59,8 +59,8 @@ impl HostedCliStore {
             })
     }
 
-    fn containment_gate(&self) -> std::sync::Arc<pos_core::ErasureContainmentGateV1> {
-        self.gate.clone()
+    fn containment_gate(&self) -> std::sync::Arc<dyn pos_core::ErasureGate> {
+        std::sync::Arc::clone(&self.gate)
     }
 }
 
@@ -69,6 +69,7 @@ impl pos_core::store::EventStore for HostedCliStore {
         &mut self,
         gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
     ) -> Result<(), pos_core::CoreError> {
+        let gate: std::sync::Arc<dyn pos_core::ErasureGate> = gate;
         if std::sync::Arc::ptr_eq(&self.gate, &gate) {
             Ok(())
         } else {
@@ -186,8 +187,6 @@ mod hosted_cli_store_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn delegates_the_cli_store_surface() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = HostedCliStore::open(StoreConfig::Memory)?;
-        let gate = std::sync::Arc::clone(&store.gate);
-        store.bind_erasure_gate(gate)?;
         assert!(store
             .bind_erasure_gate(std::sync::Arc::new(
                 pos_core::ErasureContainmentGateV1::new_test_open()

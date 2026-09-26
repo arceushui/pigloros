@@ -25,6 +25,8 @@ pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
 #[cfg(test)]
 use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
+#[cfg(test)]
+use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -35,8 +37,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError,
-    ErasureContainmentGateV1, Plugin, ProposedAction,
+    ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate,
+    Plugin, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -684,7 +686,7 @@ fn gateway_action_registry_builder(
 fn gateway_action_registry_with_authority_and_erasure_gate(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    gate: Arc<ErasureContainmentGateV1>,
+    gate: Arc<dyn ErasureGate>,
 ) -> Arc<PluginRegistry> {
     let mut registry = gateway_action_registry_builder(bodies, authority);
     registry.bind_erasure_gate(gate);
@@ -6987,10 +6989,11 @@ mod coverage_entrypoints {
         drop(gateway);
 
         let owner_key = OwnTracksOwnerKey([7; 32]);
+        let owntracks_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
             pos_store::sqlite::SqliteStore::open_in_memory()?,
             &owner_key,
-            gate,
+            owntracks_gate,
         )?;
         drop(owntracks);
         Ok(())

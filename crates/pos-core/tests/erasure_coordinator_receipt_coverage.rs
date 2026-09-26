@@ -263,6 +263,7 @@ fn atomic_freeze_input(
     let scope = ErasureScopeCommitmentInputV1 {
         request,
         scope_members: vec![reference(2)],
+        scope_timeline_ids: Vec::new(),
         target_closure: target_closure_digest(&targets),
         lineage_rule: Some(reference(3)),
     };
@@ -740,6 +741,7 @@ fn coordinator_scope(
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request,
         scope_members: vec![reference(7)],
+        scope_timeline_ids: Vec::new(),
         target_closure: target_closure_digest(&[target]),
         lineage_rule: Some(lineage_rule),
     })
@@ -755,6 +757,7 @@ fn coordinator_extension(
         request,
         scope_commitment: scope.reference(),
         fork: reference(160),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule,
         predecessor_extension,
         admission_provenance: reference(161),
@@ -2182,7 +2185,7 @@ fn coordinator_recovery_rejects_scope_chain_mismatches() -> Result<(), ErasureEr
     for (field, replacement) in [
         (2, Value::Bytes(reference(240).digest().to_vec())),
         (3, Value::Bytes(reference(240).digest().to_vec())),
-        (4, Value::Bytes(reference(240).digest().to_vec())),
+        (4, Value::Array(Vec::new())),
         (5, Value::Integer(1.into())),
         (6, Value::Bytes(reference(240).digest().to_vec())),
     ] {
@@ -2195,8 +2198,11 @@ fn coordinator_recovery_rejects_scope_chain_mismatches() -> Result<(), ErasureEr
     for (field, replacement) in [
         (2, Value::Bytes(reference(240).digest().to_vec())),
         (3, Value::Bytes(reference(240).digest().to_vec())),
+        (4, Value::Bytes(reference(240).digest().to_vec())),
         (5, Value::Bytes(reference(240).digest().to_vec())),
         (6, Value::Bytes(reference(240).digest().to_vec())),
+        (7, Value::Bytes(reference(240).digest().to_vec())),
+        (8, Value::Bytes(reference(240).digest().to_vec())),
     ] {
         assert_scope_graph_mutation_rejected(|graph| {
             graph.adapter.replace_scope_extension_field(
@@ -2659,6 +2665,7 @@ fn coordinator_recovery_rejects_missing_scope_and_resolution_indexes() -> Result
             request: graph.request.reference(),
             scope_commitment: scope.reference(),
             fork: reference(162),
+            child_timeline: pos_core::TimelineId::new(),
             lineage_rule,
             predecessor_extension: Some(extension_reference),
             admission_provenance: reference(163),
@@ -2836,6 +2843,7 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
         request: reference(204),
         scope_commitment: scope.reference(),
         fork: reference(160),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule,
         predecessor_extension: None,
         admission_provenance: reference(161),
@@ -3135,6 +3143,7 @@ fn public_errors_lifecycles_and_digest_helpers_are_closed() {
         ErasureErrorV1::ReceiptCommitFailed,
         ErasureErrorV1::TrustSnapshotInvalid,
         ErasureErrorV1::ProvenanceMissing,
+        ErasureErrorV1::StaleGeneration,
     ];
     for (code, error) in errors.into_iter().enumerate() {
         assert_eq!(error.code(), code as u64);
@@ -3278,6 +3287,7 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
     let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members: vec![reference(2), reference(8)],
+        scope_timeline_ids: Vec::new(),
         target_closure: reference(9),
         lineage_rule: None,
     })?;
@@ -3292,6 +3302,7 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
         ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: reference(1),
             scope_members: vec![reference(8), reference(2)],
+            scope_timeline_ids: Vec::new(),
             target_closure: reference(9),
             lineage_rule: None,
         }),
@@ -3304,6 +3315,7 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
         request: positioned.reference(),
         scope_commitment: scope.reference(),
         fork: reference(10),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule: reference(11),
         predecessor_extension: None,
         admission_provenance: reference(12),
@@ -4463,6 +4475,7 @@ fn portable_decoders_reject_wrong_types_in_every_foundation_field() -> Result<()
     let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members: vec![reference(2)],
+        scope_timeline_ids: Vec::new(),
         target_closure: reference(3),
         lineage_rule: Some(reference(4)),
     })?;
@@ -4473,6 +4486,7 @@ fn portable_decoders_reject_wrong_types_in_every_foundation_field() -> Result<()
         request: reference(1),
         scope_commitment: scope.reference(),
         fork: reference(5),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule: reference(4),
         predecessor_extension: Some(reference(6)),
         admission_provenance: reference(7),

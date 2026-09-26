@@ -61,6 +61,19 @@ pub use pos_core::{
     WallTime,
 };
 
+pub(crate) fn issue_erasure_topology_store_binding(
+    already_bound: bool,
+    gate: &pos_core::ErasureContainmentGateV1,
+) -> Result<pos_core::ErasureTopologyStoreBindingV1, CoreError> {
+    if already_bound {
+        return Err(CoreError::Storage(
+            "erasure containment gate is already bound".to_owned(),
+        ));
+    }
+    gate.issue_topology_store_binding()
+        .map_err(|_| CoreError::ErasureContainmentUnavailable)
+}
+
 /// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
 ///
 /// The adapter stores the proof's exact canonical bytes under its content
@@ -195,6 +208,60 @@ pub(crate) fn generic_timeline_is_visible(
         Ok(true) => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// Validate one exact persisted Fork child independently of backend storage.
+///
+/// Backends supply their own metadata and ordered event readers, while this
+/// helper owns the shared metadata, sequence, and chain-head invariant.
+pub(crate) struct ForkChildVerificationInput<'a, I> {
+    pub(crate) expected_meta: &'a pos_core::TimelineMeta,
+    pub(crate) actual_meta: &'a pos_core::TimelineMeta,
+    pub(crate) stored_head: pos_core::Seq,
+    pub(crate) stored_chain_head: &'a [u8],
+    pub(crate) chain_head: pos_core::Hash,
+    pub(crate) events: I,
+    pub(crate) hasher: &'a dyn pos_core::Hasher,
+}
+
+pub(crate) fn fork_child_is_exact<I>(
+    input: ForkChildVerificationInput<'_, I>,
+) -> Result<bool, pos_core::ErasureErrorV1>
+where
+    I: IntoIterator<
+        Item = Result<
+            (pos_core::Seq, pos_core::EventId, pos_core::CanonicalBytes),
+            pos_core::ErasureErrorV1,
+        >,
+    >,
+{
+    let ForkChildVerificationInput {
+        expected_meta,
+        actual_meta,
+        stored_head,
+        stored_chain_head,
+        chain_head,
+        events,
+        hasher,
+    } = input;
+    if actual_meta != expected_meta {
+        return Ok(false);
+    }
+    let mut expected_head = pos_core::Seq::ZERO;
+    let mut expected_chain_head = chain_head;
+    for event in events {
+        let (seq, event_id, payload) = event?;
+        if seq.as_u64().saturating_sub(expected_head.as_u64()) != 1 {
+            return Ok(false);
+        }
+        expected_chain_head = hasher.hash_event(
+            &expected_chain_head,
+            event_id.to_string().as_bytes(),
+            &payload,
+        );
+        expected_head = seq;
+    }
+    Ok(stored_head == expected_head && stored_chain_head == expected_chain_head.as_bytes())
 }
 
 /// Refuse protected drafts before a generic adapter evaluates Timeline visibility.
@@ -622,6 +689,7 @@ fn resolve_import_event_key(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pos_core::Hasher;
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -697,6 +765,26 @@ mod tests {
             checked_logical_head(u64::MAX, 1),
             Err(CoreError::Storage(_))
         ));
+    }
+
+    #[test]
+    fn fork_child_exactness_propagates_event_reader_failure() {
+        let parent = pos_core::TimelineId::new();
+        let expected = pos_core::TimelineMeta::forked_from(parent, pos_core::Seq::ZERO, "child");
+        let hasher = pos_crypto::chain::Blake3Hasher;
+        let genesis = hasher.genesis_hash();
+        assert_eq!(
+            fork_child_is_exact(ForkChildVerificationInput {
+                expected_meta: &expected,
+                actual_meta: &expected,
+                stored_head: pos_core::Seq::ZERO,
+                stored_chain_head: genesis.as_bytes(),
+                chain_head: genesis,
+                events: [Err(pos_core::ErasureErrorV1::ProvenanceMissing)],
+                hasher: &hasher,
+            }),
+            Err(pos_core::ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     #[test]

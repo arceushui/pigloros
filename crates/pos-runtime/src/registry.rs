@@ -760,7 +760,7 @@ pub struct PluginRegistry {
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
-    erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
+    erasure_gate: Option<Arc<dyn ErasureGate>>,
     /// Whether the current gate was supplied by the host composition root.
     /// The constructor's fail-closed gate can be replaced exactly once.
     erasure_gate_bound: bool,
@@ -1096,14 +1096,14 @@ impl PluginRegistry {
     /// Bind the host-owned erasure containment gate used for snapshots,
     /// Plugin input, proposed actions, and staged Event commits.
     #[must_use]
-    pub fn with_erasure_gate(mut self, gate: Arc<ErasureContainmentGateV1>) -> Self {
+    pub fn with_erasure_gate(mut self, gate: Arc<dyn ErasureGate>) -> Self {
         self.bind_erasure_gate(gate);
         self
     }
 
     /// Bind the host-owned erasure gate in place for a shared Gateway/runtime
     /// composition.
-    pub fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) {
+    pub fn bind_erasure_gate(&mut self, gate: Arc<dyn ErasureGate>) {
         if self.erasure_gate_bound {
             return;
         }
@@ -1123,7 +1123,7 @@ impl PluginRegistry {
     /// Return the host-bound erasure gate for consumers that share the same
     /// Tick Boundary fence as this registry.
     #[must_use]
-    pub fn clone_erasure_gate(&self) -> Option<Arc<ErasureContainmentGateV1>> {
+    pub fn clone_erasure_gate(&self) -> Option<Arc<dyn ErasureGate>> {
         self.erasure_gate.clone()
     }
 
@@ -5450,7 +5450,8 @@ mod erasure_gate_coverage {
     #[test]
     fn with_erasure_gate_binds_the_shared_gate() {
         let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
-        let registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let registry_gate = Arc::clone(&gate);
+        let registry = PluginRegistry::new().with_erasure_gate(registry_gate);
         assert!(registry.clone_erasure_gate().is_some());
     }
 

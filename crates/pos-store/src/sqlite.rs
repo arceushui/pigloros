@@ -46,12 +46,15 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
-    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
-    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureProtectedOperationV1,
-    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
+    ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate,
+    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
+    ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
+    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, Hash, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE,
 };
@@ -141,13 +144,22 @@ fn bounded_read_delay_for_test(phase: u8) {
 
 pub struct SqliteStore {
     conn: Connection,
+    /// Writable lock connection used only to serialize protected effects for
+    /// a read-only store connection. It never performs application writes.
+    erasure_effect_lock_connection: Option<Connection>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
-    erasure_gate: Option<Arc<dyn ErasureGate>>,
+    erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
+    /// `SQLite` revision observed with the last complete host inventory.
+    erasure_inventory_data_version: i64,
+    /// Host-managed topology may only change through verified transitions.
+    erasure_topology_requires_permit: bool,
+    /// Opaque host-issued identity for this adapter's topology transitions.
+    erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     #[cfg(test)]
     destruction_transaction_hook:
@@ -207,6 +219,18 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 primary_key: false,
             },
             ErasureSchemaColumn {
+                name: "expected_generation",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "child_scope",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
                 name: "child_id",
                 kind: "TEXT",
                 not_null: true,
@@ -258,9 +282,40 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
         constraints: &[
             "CHECK (length(operation_digest) = 32)",
             "CHECK (length(binding_digest) = 32)",
+            "CHECK (length(expected_generation) = 32)",
+            "CHECK (length(child_scope) = 32)",
             "CHECK (length(successor_generation) = 32)",
             "CHECK (length(receipt_digest) = 32)",
             "CHECK (fork_seq >= 0)",
+        ],
+    },
+    ErasureSchemaTable {
+        name: "erasure_fork_recovery_proofs",
+        columns_query: "PRAGMA table_info(erasure_fork_recovery_proofs)",
+        columns: &[
+            ErasureSchemaColumn {
+                name: "operation_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            ErasureSchemaColumn {
+                name: "proof_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "proof_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(operation_digest) = 32)",
+            "CHECK (length(proof_digest) = 32)",
+            "CHECK (length(proof_cbor) <= 16777216)",
         ],
     },
     ErasureSchemaTable {
@@ -491,6 +546,7 @@ impl SqliteStore {
     #[must_use]
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
+        self.erasure_topology_store_binding = None;
         self
     }
 
@@ -553,7 +609,7 @@ impl SqliteStore {
     }
 
     fn append_one_in_transaction(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         hasher: &dyn Hasher,
         timeline: TimelineId,
         draft: EventDraft,
@@ -638,7 +694,7 @@ impl SqliteStore {
     }
 
     fn retained_event_matches_draft(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         event_id: &str,
         timeline: TimelineId,
         draft: &EventDraft,
@@ -730,15 +786,32 @@ impl SqliteStore {
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
+        let erasure_effect_lock_connection = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+            )
+            .ok()
+            .and_then(|connection| {
+                Self::configure_busy_timeout(&connection)
+                    .ok()
+                    .map(|()| connection)
+            })
+        } else {
+            None
+        };
+
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
-        let erasure_gate: Option<Arc<dyn ErasureGate>> =
-            Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        let erasure_inventory_data_version =
+            sqlite_data_version(&conn).map_err(|error| CoreError::Storage(error.to_string()))?;
+        let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let erasure_gate_bound = false;
 
         let store = Self {
             conn,
+            erasure_effect_lock_connection,
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
@@ -746,6 +819,9 @@ impl SqliteStore {
             // before the composition root supplies the host-owned gate.
             erasure_gate,
             erasure_gate_bound,
+            erasure_inventory_data_version,
+            erasure_topology_requires_permit: false,
+            erasure_topology_store_binding: None,
             authority_persistence_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
@@ -1999,6 +2075,11 @@ struct ForkChainRow {
 /// non-root entries carry their validated fork sequence.
 type ForkChain = Vec<(TimelineId, Seq)>;
 type ForkChainWithLeafHead = (ForkChain, u64);
+struct SqliteErasureEffectRow {
+    effect_digest: Vec<u8>,
+    effect_cbor: Vec<u8>,
+    subject_digest: Option<Vec<u8>>,
+}
 
 #[derive(Debug)]
 enum DecodedForkChainRow {
@@ -2126,6 +2207,14 @@ fn timeline_fields_to_timeline(
 }
 
 impl SqliteStore {
+    const fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
+        if self.erasure_topology_requires_permit {
+            Err(CoreError::ErasureContainmentUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+
     fn append_or_duplicate_with_limit(
         &mut self,
         timeline: TimelineId,
@@ -2148,35 +2237,36 @@ impl SqliteStore {
     }
 
     fn append_or_duplicate_with_limit_visible(
-        &mut self,
+        &self,
         timeline: TimelineId,
         identity: AppendIdentity,
         admitted_at: WallTime,
         draft: &EventDraft,
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
-        let logical_prefix = self.logical_prefix(timeline)?;
-        self.get_head_seq(timeline)
-            .map(Seq::as_u64)
-            .and_then(|head_seq| {
-                let tx = self
-                    .conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(Self::into_storage_error)?;
-                let existing = tx.query_row(
-                    "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
-                    params![identity.dedup_key.as_bytes().as_slice()],
-                    |row| {
-                        row.get::<_, String>(0).and_then(|event_id| {
-                            row.get::<_, i64>(1).map(|expires| (event_id, expires))
-                        })
-                    },
-                );
-                match existing {
-                    Ok((event_id, expires_at))
-                        if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
-                    {
-                        return Self::retained_event_matches_draft(&tx, &event_id, timeline, draft)
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                (|| {
+                    let logical_prefix = self.logical_prefix(timeline)?;
+                    let head_seq = self.get_head_seq(timeline)?.as_u64();
+                    let existing = self.conn.query_row(
+                        "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
+                        params![identity.dedup_key.as_bytes().as_slice()],
+                        |row| {
+                            row.get::<_, String>(0).and_then(|event_id| {
+                                row.get::<_, i64>(1).map(|expires| (event_id, expires))
+                            })
+                        },
+                    );
+                    let expired_identity = match existing {
+                        Ok((event_id, expires_at))
+                            if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
+                        {
+                            return Self::retained_event_matches_draft(
+                                &self.conn, &event_id, timeline, draft,
+                            )
                             .and_then(|matches| {
                                 if matches {
                                     parse_event_id(&event_id).map(|id| {
@@ -2186,28 +2276,30 @@ impl SqliteStore {
                                     Ok(Some(AppendOrDuplicateOutcome::Conflict))
                                 }
                             });
+                        }
+                        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+                        Err(error) => return Err(CoreError::Storage(error.to_string())),
+                        Ok(_) => true,
+                    };
+                    if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
+                        return Ok(None);
                     }
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                    Err(error) => return Err(CoreError::Storage(error.to_string())),
-                    Ok(_) => {
-                        tx.execute(
-                            "DELETE FROM append_identities WHERE dedup_key = ?1",
-                            params![identity.dedup_key.as_bytes().as_slice()],
-                        )
-                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    if expired_identity {
+                        self.conn
+                            .execute(
+                                "DELETE FROM append_identities WHERE dedup_key = ?1",
+                                params![identity.dedup_key.as_bytes().as_slice()],
+                            )
+                            .map_err(|error| CoreError::Storage(error.to_string()))?;
                     }
-                }
-                if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
-                    return Ok(None);
-                }
-                let expires_at = checked_append_identity_expires_at(admitted_at)?;
-                let event = Self::append_one_in_transaction(
-                    &tx,
-                    self.hasher.as_ref(),
-                    timeline,
-                    draft.clone(),
-                )?;
-                tx.execute(
+                    let expires_at = checked_append_identity_expires_at(admitted_at)?;
+                    let event = Self::append_one_in_transaction(
+                        &self.conn,
+                        self.hasher.as_ref(),
+                        timeline,
+                        draft.clone(),
+                    )?;
+                    self.conn.execute(
                     "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
              VALUES (?1, ?2, ?3, ?4)",
                     params![
@@ -2218,11 +2310,11 @@ impl SqliteStore {
                     ],
                 )
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
-                tx.commit()
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
-                Self::logical_event(logical_prefix, event)
-                    .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
-            })
+                    Self::logical_event(logical_prefix, event)
+                        .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+                })()
+            });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 }
 
@@ -2309,14 +2401,16 @@ impl SqliteStore {
         let Some(gate) = self.erasure_gate.clone() else {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
+        self.validate_erasure_inventory_data_version()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
         let mut run = || {
             result = effect(self);
         };
-        gate.with_fence(timeline, operation, &mut run)
-            .map_err(pos_core::store::erasure_containment_error)?;
+        let fenced = gate.with_fence(timeline, operation, &mut run);
+        self.validate_erasure_inventory_data_version()?;
+        fenced.map_err(pos_core::store::erasure_containment_error)?;
         result
     }
 
@@ -2329,16 +2423,41 @@ impl SqliteStore {
         let Some(gate) = self.erasure_gate.clone() else {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
+        self.validate_erasure_inventory_data_version()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
         let mut run = || {
             result = effect(self);
         };
-        match gate.with_fence(timeline, operation, &mut run) {
+        let fenced = gate.with_fence(timeline, operation, &mut run);
+        self.validate_erasure_inventory_data_version()?;
+        match fenced {
             Ok(()) => result.map(Some),
             Err(pos_core::ErasureContainmentErrorV1::AccessFrozen) => Ok(None),
             Err(error) => Err(pos_core::store::erasure_containment_error(error)),
+        }
+    }
+
+    fn validate_erasure_inventory_data_version(&self) -> Result<(), CoreError> {
+        Self::validate_erasure_inventory_data_version_on(
+            &self.conn,
+            self.erasure_gate_bound,
+            self.erasure_inventory_data_version,
+        )
+    }
+
+    fn validate_erasure_inventory_data_version_on(
+        connection: &Connection,
+        gate_bound: bool,
+        expected_version: i64,
+    ) -> Result<(), CoreError> {
+        if !gate_bound {
+            return Ok(());
+        }
+        match sqlite_data_version(connection) {
+            Ok(observed) if observed == expected_version => Ok(()),
+            Ok(_) | Err(_) => Err(CoreError::ErasureContainmentUnavailable),
         }
     }
 
@@ -2379,29 +2498,32 @@ impl SqliteStore {
     }
 
     fn append_visible(
-        &mut self,
+        &self,
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
         if drafts.is_empty() {
             return Ok(Vec::new());
         }
-        let logical_prefix = self.logical_prefix(timeline)?;
-        let mut committed = Vec::with_capacity(drafts.len());
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        for draft in drafts {
-            committed.push(Self::append_one_in_transaction(
-                &tx,
-                self.hasher.as_ref(),
-                timeline,
-                draft.clone(),
-            )?);
-        }
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                let logical_prefix = self.logical_prefix(timeline)?;
+                drafts
+                    .iter()
+                    .map(|draft| {
+                        Self::append_one_in_transaction(
+                            &self.conn,
+                            self.hasher.as_ref(),
+                            timeline,
+                            draft.clone(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|committed| (logical_prefix, committed))
+            });
+        let (logical_prefix, committed) = finish_immediate_scope(&self.conn, scope, result)?;
         committed
             .into_iter()
             .map(|event| Self::logical_event(logical_prefix, event))
@@ -2409,7 +2531,7 @@ impl SqliteStore {
     }
 
     fn append_bounded_visible(
-        &mut self,
+        &self,
         timeline: TimelineId,
         drafts: &[EventDraft],
         max_owned_events: u64,
@@ -2430,58 +2552,51 @@ impl SqliteStore {
                 ));
             }
         }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&tx, timeline)?;
-        let logical_prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
-        let owner = if gateway_consent {
-            Some(crate::ensure_gateway_consent_drafts(
-                drafts,
-                timeline,
-                Self::timeline_owner_in_transaction(&tx, timeline)?,
-                logical_prefix.saturating_add(owned_head).saturating_add(1),
-            )?)
-        } else {
-            None
-        };
-        let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
-        let next_head = owned_head.saturating_add(batch_len);
-        if next_head > max_owned_events {
-            return Ok(None);
-        }
-        let mut committed = Vec::with_capacity(drafts.len());
-        for draft in drafts {
-            committed.push(Self::append_one_in_transaction(
-                &tx,
-                self.hasher.as_ref(),
-                timeline,
-                draft.clone(),
-            )?);
-        }
-        if let Some(scope) = cleanup_scope {
-            tx.execute(
-                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
-                params![scope.as_bytes().as_slice()],
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        }
-        let owner_result = owner.map_or_else(
-            || Ok(()),
-            |owner| {
-                Self::timeline_owner_in_transaction(&tx, timeline).and_then(|current| {
-                    current.map_or_else(
-                        || Self::persist_timeline_owner(&tx, timeline, owner),
-                        |_| Ok(()),
-                    )
-                })
-            },
-        );
-        owner_result
-            .and_then(|()| tx.commit().map_err(Self::into_storage_error))
-            .map(|()| {
-                Some(
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self.validate_erasure_inventory_data_version().and_then(|()| {
+            (|| {
+                let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&self.conn, timeline)?;
+                let logical_prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
+                let owner = if gateway_consent {
+                    Some(crate::ensure_gateway_consent_drafts(
+                        drafts,
+                        timeline,
+                        Self::timeline_owner_in_transaction(&self.conn, timeline)?,
+                        logical_prefix.saturating_add(owned_head).saturating_add(1),
+                    )?)
+                } else {
+                    None
+                };
+                let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
+                let next_head = owned_head.saturating_add(batch_len);
+                if next_head > max_owned_events {
+                    return Ok(None);
+                }
+                let committed = drafts
+                    .iter()
+                    .map(|draft| {
+                        Self::append_one_in_transaction(
+                            &self.conn,
+                            self.hasher.as_ref(),
+                            timeline,
+                            draft.clone(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(cleanup_scope) = cleanup_scope {
+                    self.conn
+                        .execute(
+                            "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                            params![cleanup_scope.as_bytes().as_slice()],
+                        )
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                }
+                if let Some(owner) = owner {
+                    if Self::timeline_owner_in_transaction(&self.conn, timeline)?.is_none() {
+                        Self::persist_timeline_owner(&self.conn, timeline, owner)?;
+                    }
+                }
+                Ok(Some(
                     committed
                         .into_iter()
                         .map(|mut event| {
@@ -2489,8 +2604,10 @@ impl SqliteStore {
                             event
                         })
                         .collect(),
-                )
-            })
+                ))
+            })()
+        });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
@@ -3491,6 +3608,34 @@ impl GeoLocationReplayVerifier for SqliteStore {
 }
 
 impl SqliteStore {
+    fn ensure_host_transition_permit(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+    ) -> Result<(), CoreError> {
+        let (Some(gate), Some(binding)) = (
+            self.erasure_gate.as_ref(),
+            self.erasure_topology_store_binding.as_ref(),
+        ) else {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        };
+        permit
+            .claim_for_store(gate, binding)
+            .then_some(())
+            .ok_or(CoreError::ErasureContainmentUnavailable)
+    }
+
+    fn bind_erasure_gate_impl(
+        &mut self,
+        gate: Arc<ErasureContainmentGateV1>,
+    ) -> Result<(), CoreError> {
+        let binding = crate::issue_erasure_topology_store_binding(self.erasure_gate_bound, &gate)?;
+        self.erasure_topology_requires_permit = binding.requires_transition_permit();
+        self.erasure_gate = Some(gate);
+        self.erasure_topology_store_binding = Some(binding);
+        self.erasure_gate_bound = true;
+        Ok(())
+    }
+
     fn timeline_owner(&self, timeline: TimelineId) -> Result<Option<EntityId>, CoreError> {
         self.conn
             .query_row(
@@ -3505,7 +3650,7 @@ impl SqliteStore {
     }
 
     fn timeline_owner_in_transaction(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         timeline: TimelineId,
     ) -> Result<Option<EntityId>, CoreError> {
         tx.query_row(
@@ -3520,7 +3665,7 @@ impl SqliteStore {
     }
 
     fn persist_timeline_owner(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         timeline: TimelineId,
         owner: EntityId,
     ) -> Result<(), CoreError> {
@@ -3573,11 +3718,61 @@ impl SqliteStore {
         Ok(hash)
     }
 
+    fn fork_unchecked(
+        &self,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, CoreError> {
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self.validate_erasure_inventory_data_version().and_then(|()| {
+            (|| {
+                let head = self.logical_head_unchecked(parent)?;
+                if at_seq > head {
+                    return Err(CoreError::ForkBeyondHead {
+                        fork_seq: at_seq.as_u64(),
+                        head: head.as_u64(),
+                    });
+                }
+                let fork_hash = Self::compute_chain_hash_at_unchecked_on(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    parent,
+                    at_seq,
+                )?;
+                let meta = self.timeline_owner(parent)?.map_or_else(
+                    || TimelineMeta::forked_from(parent, at_seq, name),
+                    |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+                );
+                let child = Timeline::new(meta);
+                self.conn
+                    .execute(
+                        "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                        params![
+                            child.id().to_string(),
+                            child.meta.name.as_deref(),
+                            mode_str(child.mode()),
+                            parent.to_string(),
+                            i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
+                            fork_hash.as_bytes().as_slice(),
+                        ],
+                    )
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                if let Some(owner) = child.meta.owner {
+                    Self::persist_timeline_owner(&self.conn, child.id(), owner)?;
+                }
+                Ok(child)
+            })()
+        });
+        finish_immediate_scope(&self.conn, scope, result)
+    }
+
     fn insert_timeline_with_meta_on(
         conn: &Connection,
         meta: &TimelineMeta,
         chain_head: Hash,
-    ) -> Result<(), ErasureErrorV1> {
+    ) -> Result<(), CoreError> {
         let (parent_id, fork_seq) = meta.fork_point.map_or((None, None), |(parent, at_seq)| {
             (Some(parent.to_string()), Some(seq_as_i64(at_seq)))
         });
@@ -3593,15 +3788,68 @@ impl SqliteStore {
                 chain_head.as_bytes().as_slice(),
             ],
         )
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
         if let Some(owner) = meta.owner {
             conn.execute(
                 "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
                 params![meta.id.to_string(), owner.to_string()],
             )
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
         Ok(())
+    }
+
+    fn create_timeline_with_meta_for_host_transition_unchecked(
+        &self,
+        meta: &TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                Self::create_timeline_with_meta_in_transaction(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    meta,
+                )
+            });
+        finish_immediate_scope(&self.conn, scope, result)
+    }
+
+    fn create_timeline_with_meta_in_transaction(
+        connection: &Connection,
+        hasher: &dyn Hasher,
+        meta: &TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        let chain_head = match meta.fork_point {
+            Some((parent, at_seq)) => {
+                let parent_head = Self::logical_head_unchecked_on(connection, parent)?;
+                if at_seq > parent_head {
+                    return Err(CoreError::ForkBeyondHead {
+                        fork_seq: at_seq.as_u64(),
+                        head: parent_head.as_u64(),
+                    });
+                }
+                Self::compute_chain_hash_at_unchecked_on(connection, hasher, parent, at_seq)?
+            }
+            None => hasher.genesis_hash(),
+        };
+        let already_exists = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM timelines WHERE id = ?1)",
+                params![meta.id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if already_exists {
+            return Err(CoreError::Storage(format!(
+                "timeline already exists: {}",
+                meta.id
+            )));
+        }
+        let timeline = Timeline::new(meta.clone());
+        Self::insert_timeline_with_meta_on(connection, meta, chain_head)?;
+        Ok(timeline)
     }
 
     fn save_key_registry_in_transaction(
@@ -3640,7 +3888,20 @@ impl SqliteStore {
         &mut self,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
-    ) -> Result<Timeline, CoreError> {
+    ) -> Result<(Timeline, bool), CoreError> {
+        self.initialize_timeline_with_key_registry_in_transaction_with_meta(
+            &TimelineMeta::root(name),
+            expected_registry,
+            false,
+        )
+    }
+
+    fn initialize_timeline_with_key_registry_in_transaction_with_meta(
+        &mut self,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+        host_transition: bool,
+    ) -> Result<(Timeline, bool), CoreError> {
         let persisted = self.load_key_registry()?;
         if persisted
             .as_ref()
@@ -3654,23 +3915,79 @@ impl SqliteStore {
             self.save_key_registry_in_transaction(expected_registry)?;
         }
 
-        self.list_timelines()?
-            .into_iter()
-            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
-            .map_or_else(|| self.create_timeline(name), Ok)
+        let name = meta
+            .name
+            .as_deref()
+            .ok_or_else(|| CoreError::Storage("ledger Timeline name is missing".to_owned()))?;
+        self.find_timeline_by_name_unchecked(name)?.map_or_else(
+            || {
+                if !host_transition {
+                    self.ensure_direct_topology_mutation_allowed()?;
+                }
+                self.create_timeline_with_meta_for_host_transition_unchecked(meta)
+                    .map(|timeline| (timeline, true))
+            },
+            |timeline| Ok((timeline, false)),
+        )
+    }
+
+    fn find_timeline_by_name_unchecked(&self, name: &str) -> Result<Option<Timeline>, CoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq
+                 FROM timelines WHERE name = ?1 LIMIT 1",
+                params![name],
+                read_timeline_row,
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        row.map_or(Ok(None), |timeline_row| {
+            let mut timeline = timeline_fields_to_timeline(
+                &timeline_row.id,
+                timeline_row.name,
+                &timeline_row.mode,
+                timeline_row.parent_id,
+                timeline_row.fork_seq,
+                timeline_row.head_seq,
+            )?;
+            timeline.meta.owner = self.timeline_owner(timeline.id())?;
+            Ok(Some(timeline))
+        })
+    }
+
+    fn get_timeline_for_host_transition_unchecked(
+        &self,
+        id: TimelineId,
+    ) -> Result<Option<Timeline>, CoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+                params![id.to_string()],
+                read_timeline_row,
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+
+        row.map_or(Ok(None), |timeline_row| {
+            let mut timeline = timeline_fields_to_timeline(
+                &timeline_row.id,
+                timeline_row.name,
+                &timeline_row.mode,
+                timeline_row.parent_id,
+                timeline_row.fork_seq,
+                timeline_row.head_seq,
+            )?;
+            timeline.meta.owner = self.timeline_owner(timeline.id())?;
+            Ok(Some(timeline))
+        })
     }
 }
 
 impl EventStore for SqliteStore {
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
-        if self.erasure_gate_bound {
-            return Err(CoreError::Storage(
-                "erasure containment gate is already bound".to_owned(),
-            ));
-        }
-        self.erasure_gate = Some(gate);
-        self.erasure_gate_bound = true;
-        Ok(())
+        self.bind_erasure_gate_impl(gate)
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
@@ -3687,6 +4004,7 @@ impl EventStore for SqliteStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
         let chain_head = self.hasher.genesis_hash();
@@ -3703,6 +4021,15 @@ impl EventStore for SqliteStore {
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(timeline)
+    }
+
+    fn create_timeline_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.create_timeline_with_meta_for_host_transition_unchecked(&meta)
     }
 
     fn append(
@@ -3739,11 +4066,11 @@ impl EventStore for SqliteStore {
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = self.save_key_registry_in_transaction(registry);
-        finish_immediate_transaction(&self.conn, result)
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| self.save_key_registry_in_transaction(registry));
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn initialize_timeline_with_key_registry(
@@ -3751,12 +4078,30 @@ impl EventStore for SqliteStore {
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
         let result =
             self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
-        finish_immediate_transaction(&self.conn, result)
+        finish_immediate_scope(&self.conn, scope, result).map(|(timeline, _)| timeline)
+    }
+
+    fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<(Timeline, bool), CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                self.initialize_timeline_with_key_registry_in_transaction_with_meta(
+                    meta,
+                    expected_registry,
+                    true,
+                )
+            });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn append_signed_authorized(
@@ -3765,50 +4110,55 @@ impl EventStore for SqliteStore {
         expected_registry: &KeyRegistryStateV1,
         create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
     ) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = (|| {
-            let persisted = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
-            })?;
-            if persisted != *expected_registry {
-                return Err(CoreError::Storage(
-                    "durable key registry changed during signing".to_owned(),
-                ));
-            }
-            let head = self
-                .get_timeline(timeline)?
-                .ok_or(CoreError::TimelineNotFound(timeline))?;
-            let event = create_event(&persisted, head.head.next())?;
-            self.append_committed(timeline, &[event])
-        })();
-        finish_immediate_transaction(&self.conn, result)
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                (|| {
+                    let persisted = self.load_key_registry()?.ok_or_else(|| {
+                        CoreError::Storage("durable key registry is unavailable".to_owned())
+                    })?;
+                    if persisted != *expected_registry {
+                        return Err(CoreError::Storage(
+                            "durable key registry changed during signing".to_owned(),
+                        ));
+                    }
+                    let head = self
+                        .get_timeline(timeline)?
+                        .ok_or(CoreError::TimelineNotFound(timeline))?;
+                    let event = create_event(&persisted, head.head.next())?;
+                    self.append_committed(timeline, &[event])
+                })()
+            });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn begin_key_registry_destruction(
         &mut self,
         request: KeyDestructionRequestV1,
     ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let scope = begin_immediate_scope(&self.conn)?;
+        let version_check = self.validate_erasure_inventory_data_version();
         #[cfg(test)]
-        if let Some((started, release)) = self.destruction_transaction_hook.take() {
-            assert!(started.send(()).is_ok());
-            assert!(release.recv().is_ok());
+        if version_check.is_ok() {
+            if let Some((started, release)) = self.destruction_transaction_hook.take() {
+                assert!(started.send(()).is_ok());
+                assert!(release.recv().is_ok());
+            }
         }
-        let result = (|| {
-            let mut registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
-            })?;
-            let outcome = registry
-                .begin_key_destruction(request)
-                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
-            self.save_key_registry_in_transaction(&registry)?;
-            Ok((outcome, registry))
-        })();
-        finish_immediate_transaction(&self.conn, result)
+        let result = version_check.and_then(|()| {
+            (|| {
+                let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                    CoreError::Storage("durable key registry is unavailable".to_owned())
+                })?;
+                let outcome = registry.begin_key_destruction(request).map_err(|error| {
+                    CoreError::Storage(format!("ledger key destruction: {error}"))
+                })?;
+                self.save_key_registry_in_transaction(&registry)?;
+                Ok((outcome, registry))
+            })()
+        });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn complete_key_registry_destruction(
@@ -3816,20 +4166,24 @@ impl EventStore for SqliteStore {
         request: KeyDestructionRequestV1,
         deletion_receipt: Hash,
     ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = (|| {
-            let mut registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
-            })?;
-            let outcome = registry
-                .complete_key_destruction(request, deletion_receipt)
-                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
-            self.save_key_registry_in_transaction(&registry)?;
-            Ok((outcome, registry))
-        })();
-        finish_immediate_transaction(&self.conn, result)
+        let scope = begin_immediate_scope(&self.conn)?;
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                (|| {
+                    let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                        CoreError::Storage("durable key registry is unavailable".to_owned())
+                    })?;
+                    let outcome = registry
+                        .complete_key_destruction(request, deletion_receipt)
+                        .map_err(|error| {
+                            CoreError::Storage(format!("ledger key destruction: {error}"))
+                        })?;
+                    self.save_key_registry_in_transaction(&registry)?;
+                    Ok((outcome, registry))
+                })()
+            });
+        finish_immediate_scope(&self.conn, scope, result)
     }
 
     fn append_bounded(
@@ -4185,59 +4539,30 @@ impl EventStore for SqliteStore {
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
             store
                 .ensure_generic_timeline_visibility(parent)
-                .and_then(|()| {
-                    let head = store.logical_head(parent)?;
-                    if at_seq > head {
-                        return Err(CoreError::ForkBeyondHead {
-                            fork_seq: at_seq.as_u64(),
-                            head: head.as_u64(),
-                        });
-                    }
-
-                    // Compute chain hash at the fork point
-                    let fork_hash = store.compute_chain_hash_at(parent, at_seq)?;
-
-                    let meta = store.timeline_owner(parent)?.map_or_else(
-                        || TimelineMeta::forked_from(parent, at_seq, name),
-                        |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
-                    );
-                    let child = Timeline::new(meta);
-
-                    let tx = match store
-                        .conn
-                        .transaction_with_behavior(TransactionBehavior::Immediate)
-                    {
-                        Ok(tx) => tx,
-                        Err(error) => return Err(CoreError::Storage(error.to_string())),
-                    };
-                    tx.execute(
-            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-            params![
-                child.id().to_string(),
-                child.meta.name.as_deref(),
-                mode_str(child.mode()),
-                parent.to_string(),
-                i64::try_from(at_seq.as_u64()).unwrap_or(i64::MAX),
-                fork_hash.as_bytes().as_slice(),
-            ],
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-                    if let Some(owner) = child.meta.owner {
-                        Self::persist_timeline_owner(&tx, child.id(), owner)?;
-                    }
-
-                    if let Err(error) = tx.commit() {
-                        return Err(CoreError::Storage(error.to_string()));
-                    }
-
-                    Ok(child)
-                })
+                .and_then(|()| store.fork_unchecked(parent, at_seq, name))
         })
+    }
+
+    fn fork_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        parent: TimelineId,
+        at_seq: Seq,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        if meta.fork_point != Some((parent, at_seq)) {
+            return Err(CoreError::Storage(
+                "preallocated Fork metadata does not match the requested parent and sequence"
+                    .to_owned(),
+            ));
+        }
+        self.ensure_generic_timeline_visibility(parent)
+            .and_then(|()| self.create_timeline_with_meta_for_host_transition_unchecked(&meta))
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
@@ -4301,36 +4626,35 @@ impl EventStore for SqliteStore {
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
         self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
-            let row = store
-                .conn
-                .query_row(
-                    "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
-                    params![id.to_string()],
-                    read_timeline_row,
-                )
-                .optional()
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-            match row {
-                None => Ok(None),
-                Some(timeline_row) => {
-                    let timeline = timeline_fields_to_timeline(
-                        &timeline_row.id,
-                        timeline_row.name,
-                        &timeline_row.mode,
-                        timeline_row.parent_id,
-                        timeline_row.fork_seq,
-                        timeline_row.head_seq,
-                    )?;
-                    let mut timeline = timeline;
-                    timeline.meta.owner = store.timeline_owner(timeline.id())?;
-                    crate::generic_timeline_is_visible(
-                        store.timeline_contains_geographic_evidence(timeline.id()),
-                    )
-                    .map(|visible| visible.then_some(timeline))
-                }
-            }
+            store
+                .get_timeline_for_host_transition_unchecked(id)
+                .and_then(|timeline| {
+                    timeline.map_or(Ok(None), |timeline| {
+                        crate::generic_timeline_is_visible(
+                            store.timeline_contains_geographic_evidence(timeline.id()),
+                        )
+                        .map(|visible| visible.then_some(timeline))
+                    })
+                })
         })
+    }
+
+    fn get_timeline_for_host_transition(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        id: TimelineId,
+    ) -> Result<Option<Timeline>, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.get_timeline_for_host_transition_unchecked(id)
+    }
+
+    fn find_timeline_by_name_for_host_transition(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        name: &str,
+    ) -> Result<Option<Timeline>, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.find_timeline_by_name_unchecked(name)
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
@@ -4342,6 +4666,7 @@ impl EventStore for SqliteStore {
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         let mut create = |store: &mut Self| {
             let id = meta.id;
             // Resolve fork parent before the duplicate-id check so storage failures on the
@@ -4493,6 +4818,7 @@ impl EventStore for SqliteStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.ensure_admin_visibility(id).and_then(|()| {
             let id_str = id.to_string();
             // Refuse delete while child forks still reference this timeline.
@@ -4604,6 +4930,7 @@ impl EventStore for SqliteStore {
         meta: TimelineMeta,
         events: &[Event],
     ) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         // Single transaction so create+append is all-or-nothing for concurrent readers.
         self.conn
             .execute_batch(begin_immediate_sql())
@@ -4813,14 +5140,74 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         &mut self,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
+        let version_before =
+            sqlite_data_version(&self.conn).map_err(map_erasure_receipt_failure)?;
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(map_erasure_receipt_failure)?;
         let snapshot = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
+        let version_after =
+            sqlite_data_version(&transaction).map_err(map_erasure_receipt_failure)?;
+        if version_before != version_after {
+            return Err(ErasureErrorV1::StaleGeneration);
+        }
         transaction.commit().map_err(map_erasure_receipt_failure)?;
+        self.erasure_inventory_data_version = version_after;
         Ok(snapshot)
     }
+
+    fn begin_protected_effect_interval(
+        &self,
+    ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
+        let interval_connection = self
+            .erasure_effect_lock_connection
+            .as_ref()
+            .unwrap_or(&self.conn);
+        if !interval_connection.is_autocommit() {
+            return Ok(ErasureProtectedEffectIntervalV1::Unowned);
+        }
+        interval_connection
+            .execute_batch(begin_immediate_sql())
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let Ok(observed) = sqlite_data_version(&self.conn) else {
+            drop(interval_connection.execute_batch("ROLLBACK"));
+            return Err(ErasureErrorV1::ReceiptCommitFailed);
+        };
+        if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
+            return match interval_connection.execute_batch("ROLLBACK") {
+                Ok(()) => Err(ErasureErrorV1::StaleGeneration),
+                Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
+            };
+        }
+        Ok(ErasureProtectedEffectIntervalV1::Owned)
+    }
+
+    fn finish_protected_effect_interval(
+        &self,
+        interval: ErasureProtectedEffectIntervalV1,
+        disposition: ErasureProtectedEffectDispositionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if interval == ErasureProtectedEffectIntervalV1::Unowned {
+            return Ok(());
+        }
+        let interval_connection = self
+            .erasure_effect_lock_connection
+            .as_ref()
+            .unwrap_or(&self.conn);
+        let statement = match disposition {
+            ErasureProtectedEffectDispositionV1::Commit => "COMMIT",
+            ErasureProtectedEffectDispositionV1::Rollback => "ROLLBACK",
+        };
+        interval_connection.execute_batch(statement).map_err(|_| {
+            drop(interval_connection.execute_batch("ROLLBACK"));
+            ErasureErrorV1::ReceiptCommitFailed
+        })
+    }
+}
+
+fn sqlite_data_version(connection: &Connection) -> rusqlite::Result<i64> {
+    connection.query_row("PRAGMA data_version", [], |row| row.get(0))
 }
 
 fn map_erasure_receipt_failure(_error: rusqlite::Error) -> ErasureErrorV1 {
@@ -4897,26 +5284,59 @@ fn sqlite_erasure_inventory_snapshot(
 impl ErasureForkPersistencePortV1 for SqliteStore {
     fn commit_fork_admission(
         &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.commit_fork_admission_unchecked(permit, &admission)
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        sqlite_recover_fork_admission(
+            &self.conn,
+            self.hasher.as_ref(),
+            operation,
+            successor_inventory,
+        )
+    }
+}
+
+impl SqliteStore {
+    fn commit_fork_admission_unchecked(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        admission: &PreparedErasureForkBatchV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.ensure_host_transition_permit(permit)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(map_erasure_receipt_failure)?;
         let result = (|| {
+            let recovery_proof = admission.recovery_proof()?;
+            let recovery_proof_cbor = recovery_proof.to_canonical_cbor()?;
+            let recovery_proof_digest = recovery_proof.content_digest()?;
             let child = admission.child();
             let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
-            let chain_head = Self::compute_chain_hash_at_unchecked_on(
-                &self.conn,
-                self.hasher.as_ref(),
-                parent,
-                at_seq,
-            )
-            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
             if let Some(receipt) = sqlite_fork_admission_receipt(&self.conn, admission.operation())?
             {
+                let chain_head = Self::compute_chain_hash_at_unchecked_on(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    parent,
+                    at_seq,
+                )
+                .map_err(|_| ErasureErrorV1::PolicyConflict)?;
                 return sqlite_fork_admission_is_exact(
-                    &self.conn, &admission, chain_head, &receipt,
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    admission,
+                    chain_head,
+                    &receipt,
                 )?
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
@@ -4927,14 +5347,16 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?
             .generation();
-            if (
-                generation == admission.expected_inventory_generation(),
-                sqlite_timeline_exists(&self.conn, child.id)?,
-            ) != (true, false)
-            {
-                return Err(ErasureErrorV1::PolicyConflict);
+            if generation != admission.expected_inventory_generation() {
+                return Err(ErasureErrorV1::StaleGeneration);
             }
-
+            let chain_head = Self::compute_chain_hash_at_unchecked_on(
+                &self.conn,
+                self.hasher.as_ref(),
+                parent,
+                at_seq,
+            )
+            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
             for prepared in admission.admissions() {
                 // The complete inventory-generation comparison above binds
                 // every active request head. An exact retry is therefore
@@ -4942,17 +5364,21 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                 // before this fresh transaction.
                 let _outcome = apply_sqlite_erasure_cas(&self.conn, prepared.mutation())?;
             }
-            Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)?;
+            Self::insert_timeline_with_meta_on(&self.conn, child, chain_head)
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
             let recovery = admission.recovery_result()?;
             self.conn
                 .execute(
                     "INSERT INTO erasure_fork_admissions
-                     (operation_digest, binding_digest, child_id, child_name, child_mode,
-                      parent_id, fork_seq, owner_id, successor_generation, receipt_digest)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     (operation_digest, binding_digest, expected_generation, child_scope,
+                      child_id, child_name, child_mode, parent_id, fork_seq, owner_id,
+                      successor_generation, receipt_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         admission.operation().digest().as_slice(),
                         admission.binding_digest().digest().as_slice(),
+                        recovery.expected_inventory_generation().digest().as_slice(),
+                        recovery.child_scope().digest().as_slice(),
                         child.id.to_string(),
                         child.name.as_deref(),
                         mode_str(child.mode),
@@ -4968,32 +5394,28 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
                     ],
                 )
                 .map_err(map_erasure_receipt_failure)?;
+            self.conn
+                .execute(
+                    "INSERT INTO erasure_fork_recovery_proofs
+                     (operation_digest, proof_digest, proof_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        admission.operation().digest().as_slice(),
+                        recovery_proof_digest.digest().as_slice(),
+                        recovery_proof_cbor,
+                    ],
+                )
+                .map_err(map_erasure_receipt_failure)?;
             Ok(ErasureCasOutcomeV1::Applied)
         })();
         finish_erasure_transaction(&self.conn, result)
     }
-
-    fn recover_fork_admission(
-        &mut self,
-        operation: ErasureReferenceV1,
-    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-        sqlite_recover_fork_admission(&self.conn, operation)
-    }
-}
-
-fn sqlite_timeline_exists(conn: &Connection, timeline: TimelineId) -> Result<bool, ErasureErrorV1> {
-    conn.query_row(
-        "SELECT 1 FROM timelines WHERE id=?1",
-        params![timeline.to_string()],
-        |_| Ok(()),
-    )
-    .optional()
-    .map(|row| row.is_some())
-    .map_err(map_erasure_receipt_failure)
 }
 
 struct SqliteForkAdmissionReceiptV1 {
     binding: ErasureReferenceV1,
+    expected_generation: ErasureReferenceV1,
+    child_scope: ErasureReferenceV1,
     child_id: String,
     child_name: Option<String>,
     child_mode: String,
@@ -5006,6 +5428,8 @@ struct SqliteForkAdmissionReceiptV1 {
 
 struct SqliteForkAdmissionReceiptRow {
     binding: Vec<u8>,
+    expected_generation: Vec<u8>,
+    child_scope: Vec<u8>,
     child_id: String,
     child_name: Option<String>,
     child_mode: String,
@@ -5042,6 +5466,8 @@ impl SqliteForkAdmissionReceiptV1 {
         ErasureForkRecoveryV1::from_persisted(
             operation,
             self.binding,
+            self.expected_generation,
+            self.child_scope,
             self.successor,
             child,
             self.receipt,
@@ -5054,22 +5480,25 @@ fn sqlite_fork_admission_receipt(
     operation: ErasureReferenceV1,
 ) -> Result<Option<SqliteForkAdmissionReceiptV1>, ErasureErrorV1> {
     conn.query_row(
-        "SELECT binding_digest, child_id, child_name, child_mode, parent_id, fork_seq,
-                owner_id, successor_generation, receipt_digest
+        "SELECT binding_digest, expected_generation, child_scope, child_id, child_name,
+                child_mode, parent_id, fork_seq, owner_id, successor_generation,
+                receipt_digest
          FROM erasure_fork_admissions
          WHERE operation_digest=?1",
         params![operation.digest().as_slice()],
         |row| {
             Ok(SqliteForkAdmissionReceiptRow {
                 binding: row.get(0)?,
-                child_id: row.get(1)?,
-                child_name: row.get(2)?,
-                child_mode: row.get(3)?,
-                parent_id: row.get(4)?,
-                fork_seq: row.get(5)?,
-                owner_id: row.get(6)?,
-                successor: row.get(7)?,
-                receipt: row.get(8)?,
+                expected_generation: row.get(1)?,
+                child_scope: row.get(2)?,
+                child_id: row.get(3)?,
+                child_name: row.get(4)?,
+                child_mode: row.get(5)?,
+                parent_id: row.get(6)?,
+                fork_seq: row.get(7)?,
+                owner_id: row.get(8)?,
+                successor: row.get(9)?,
+                receipt: row.get(10)?,
             })
         },
     )
@@ -5078,6 +5507,8 @@ fn sqlite_fork_admission_receipt(
     .map(|row| {
         Ok(SqliteForkAdmissionReceiptV1 {
             binding: reference_from_sql(row.binding)?,
+            expected_generation: reference_from_sql(row.expected_generation)?,
+            child_scope: reference_from_sql(row.child_scope)?,
             child_id: row.child_id,
             child_name: row.child_name,
             child_mode: row.child_mode,
@@ -5093,35 +5524,275 @@ fn sqlite_fork_admission_receipt(
 
 fn sqlite_recover_fork_admission(
     conn: &Connection,
+    hasher: &dyn Hasher,
     operation: ErasureReferenceV1,
+    successor_inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
     let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
+        let has_orphaned_proof = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM erasure_fork_recovery_proofs WHERE operation_digest=?1
+                )",
+                params![operation.digest().as_slice()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(map_erasure_receipt_failure)?;
+        if has_orphaned_proof {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         return Ok(None);
     };
     let recovered = receipt.recover(operation)?;
-    if !sqlite_timeline_exists(conn, recovered.child().id)? {
-        return Err(ErasureErrorV1::ProvenanceMissing);
-    }
+    let proof = sqlite_fork_recovery_proof(conn, operation)?;
+    proof.validate_complete_for_inventory_with_persisted_state(
+        &recovered,
+        successor_inventory,
+        || {
+            sqlite_recovery_proof_is_exact(conn, &proof)?;
+            sqlite_verify_recovered_fork_child(conn, hasher, &recovered)
+        },
+    )?;
     Ok(Some(recovered))
 }
 
-fn sqlite_fork_admission_is_exact(
+fn sqlite_fork_recovery_proof(
     conn: &Connection,
-    admission: &PreparedErasureForkBatchV1,
+    operation: ErasureReferenceV1,
+) -> Result<ErasureForkRecoveryProofV1, ErasureErrorV1> {
+    let (proof_digest, proof_cbor) = conn
+        .query_row(
+            "SELECT proof_digest, proof_cbor
+             FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+            params![operation.digest().as_slice()],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(map_erasure_receipt_failure)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let proof_digest = reference_from_sql(proof_digest)?;
+    let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_cbor)?;
+    let canonical = proof.to_canonical_cbor()?;
+    if canonical.as_slice() != proof_cbor.as_slice() || proof.content_digest()? != proof_digest {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(proof)
+}
+
+fn sqlite_recovery_proof_is_exact(
+    conn: &Connection,
+    proof: &ErasureForkRecoveryProofV1,
+) -> Result<(), ErasureErrorV1> {
+    for mutation in proof.admissions() {
+        sqlite_recovery_proof_mutation_is_exact(conn, mutation)?;
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_mutation_is_exact(
+    conn: &Connection,
+    mutation: &ErasureForkRecoveryMutationV1,
+) -> Result<(), ErasureErrorV1> {
+    // `erasure_records` stores only the mutable current head. The immutable
+    // effect keyed by this successor manifest proves the historical CAS;
+    // the verified inventory checks that its extension remains in the chain.
+    sqlite_recovery_proof_objects_are_exact(conn, mutation)?;
+    sqlite_recovery_proof_states_are_exact(conn, mutation)?;
+    sqlite_recovery_proof_indexes_are_exact(conn, mutation)?;
+    sqlite_recovery_proof_effect_is_exact(conn, mutation)?;
+    sqlite_recovery_proof_subject_is_exact(conn, mutation)
+}
+
+fn sqlite_recovery_proof_objects_are_exact(
+    conn: &Connection,
+    mutation: &ErasureForkRecoveryMutationV1,
+) -> Result<(), ErasureErrorV1> {
+    if !mutation
+        .objects()
+        .iter()
+        .any(|object| object.reference() == mutation.extension())
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    for object in mutation.objects() {
+        let bytes = load_sqlite_erasure_evidence(conn, object.reference())?;
+        if ErasureForkRecoveryProofV1::bytes_digest(&bytes) != object.bytes_digest() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_states_are_exact(
+    conn: &Connection,
+    mutation: &ErasureForkRecoveryMutationV1,
+) -> Result<(), ErasureErrorV1> {
+    for state in mutation.states() {
+        let row = load_sqlite_erasure_state_row(conn, state.reference())?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if reference_from_sql(row.request_digest)? != mutation.request()
+            || ErasureForkRecoveryProofV1::bytes_digest(&row.state_cbor) != state.bytes_digest()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_indexes_are_exact(
+    conn: &Connection,
+    mutation: &ErasureForkRecoveryMutationV1,
+) -> Result<(), ErasureErrorV1> {
+    for index in mutation.index_inserts() {
+        let (index, ordinal, reference) = sqlite_erasure_index_parts(*index);
+        if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_effect_is_exact(
+    conn: &Connection,
+    mutation: &ErasureForkRecoveryMutationV1,
+) -> Result<(), ErasureErrorV1> {
+    let effect_row = sqlite_erasure_effect_row(conn, mutation.next_manifest())?;
+    let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&effect_row.effect_cbor)?;
+    if reference_from_sql(effect_row.effect_digest)? != mutation.effect()
+        || effect.identity() != mutation.effect()
+        || effect.subject() != mutation.effect_subject()
+        || ErasureForkRecoveryProofV1::bytes_digest(&effect_row.effect_cbor)
+            != mutation.effect_bytes_digest()
+        || effect_row
+            .subject_digest
+            .map(reference_from_sql)
+            .transpose()?
+            != mutation.effect_subject()
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
+}
+
+fn sqlite_recovery_proof_subject_is_exact(
+    conn: &Connection,
+    mutation: &ErasureForkRecoveryMutationV1,
+) -> Result<(), ErasureErrorV1> {
+    let Some(subject) = mutation.effect_subject() else {
+        return Ok(());
+    };
+    let subject_manifest = sqlite_effect_manifest_digest_for_subject(conn, subject)
+        .map_err(map_erasure_receipt_failure)?
+        .map(reference_from_sql)
+        .transpose()?;
+    if subject_manifest != Some(mutation.next_manifest()) {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
+}
+
+fn sqlite_effect_manifest_digest_for_subject(
+    conn: &Connection,
+    subject: ErasureReferenceV1,
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    conn.query_row(
+        "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
+        params![subject.digest().as_slice()],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn sqlite_erasure_effect_row(
+    conn: &Connection,
+    manifest: ErasureReferenceV1,
+) -> Result<SqliteErasureEffectRow, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT effect_digest, effect_cbor, subject_digest
+         FROM erasure_effects WHERE manifest_digest=?1",
+        params![manifest.digest().as_slice()],
+        |row| {
+            Ok(SqliteErasureEffectRow {
+                effect_digest: row.get(0)?,
+                effect_cbor: row.get(1)?,
+                subject_digest: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(map_erasure_receipt_failure)?
+    .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+fn sqlite_verify_recovered_fork_child(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    recovered: &ErasureForkRecoveryV1,
+) -> Result<(), ErasureErrorV1> {
+    let (parent, at_seq) = recovered.fork_point();
+    let chain_head = SqliteStore::compute_chain_hash_at_unchecked_on(conn, hasher, parent, at_seq)
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    if !sqlite_timeline_is_exact(conn, hasher, recovered.child(), chain_head)? {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
+}
+
+fn sqlite_timeline_is_exact(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    child: &TimelineMeta,
     chain_head: Hash,
-    receipt: &SqliteForkAdmissionReceiptV1,
 ) -> Result<bool, ErasureErrorV1> {
-    let child = admission.child();
-    let Ok(recovered) = receipt.recover(admission.operation()) else {
+    let Some((actual_meta, stored_head, stored_chain_head)) =
+        sqlite_timeline_exact_metadata(conn, child)?
+    else {
         return Ok(false);
     };
-    if recovered != admission.recovery_result()? {
-        return Ok(false);
-    }
+    let mut statement = conn
+        .prepare(
+            "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+                    causation_id, correlation_id, schema_version, payload_hash, signature,
+                    signature_owner_id, signature_role, signature_epoch
+             FROM events
+             WHERE timeline_id=?1
+             ORDER BY seq",
+        )
+        .map_err(map_erasure_receipt_failure)?;
+    let mut event_rows = statement
+        .query(params![child.id.to_string()])
+        .map_err(map_erasure_receipt_failure)?;
+    let events = std::iter::from_fn(|| match event_rows.next() {
+        Ok(Some(row)) => Some((|| {
+            let event = decode_event_row(row).map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            if hasher.hash_payload(&event.payload) != event.payload_hash {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            Ok((event.seq, event.id, event.payload))
+        })()),
+        Ok(None) => None,
+        Err(error) => Some(Err(map_erasure_receipt_failure(error))),
+    });
+    crate::fork_child_is_exact(crate::ForkChildVerificationInput {
+        expected_meta: child,
+        actual_meta: &actual_meta,
+        stored_head,
+        stored_chain_head: &stored_chain_head,
+        chain_head,
+        events,
+        hasher,
+    })
+}
+
+fn sqlite_timeline_exact_metadata(
+    conn: &Connection,
+    child: &TimelineMeta,
+) -> Result<Option<(TimelineMeta, Seq, Vec<u8>)>, ErasureErrorV1> {
     let row = conn
         .query_row(
             "SELECT name, mode, parent_id, fork_seq, head_seq, chain_head
-             FROM timelines WHERE id=?1",
+             FROM timelines
+             WHERE id=?1",
             params![child.id.to_string()],
             |row| {
                 Ok((
@@ -5137,10 +5808,28 @@ fn sqlite_fork_admission_is_exact(
         .optional()
         .map_err(map_erasure_receipt_failure)?;
     let Some((name, mode, parent, fork_seq, head, stored_chain_head)) = row else {
-        return Ok(false);
+        return Ok(None);
     };
-    let expected_parent = child.fork_point.map(|(parent, _)| parent.to_string());
-    let expected_fork = child.fork_point.map(|(_, at_seq)| seq_as_i64(at_seq));
+    let actual_mode = match mode.as_str() {
+        "historical" => TimelineMode::Historical,
+        "live" => TimelineMode::Live,
+        "future" => TimelineMode::Future,
+        _ => return Ok(None),
+    };
+    let actual_fork_point = match (parent, fork_seq) {
+        (Some(parent), Some(fork_seq)) => Some((
+            match parse_timeline_id(&parent) {
+                Ok(parent) => parent,
+                Err(_) => return Ok(None),
+            },
+            match u64::try_from(fork_seq) {
+                Ok(fork_seq) => Seq::from_u64(fork_seq),
+                Err(_) => return Ok(None),
+            },
+        )),
+        (None, None) => None,
+        _ => return Ok(None),
+    };
     let owner = conn
         .query_row(
             "SELECT owner_id FROM timeline_owners WHERE timeline_id=?1",
@@ -5149,46 +5838,81 @@ fn sqlite_fork_admission_is_exact(
         )
         .optional()
         .map_err(map_erasure_receipt_failure)?;
-    let expected_owner = child.owner.map(|value| value.to_string());
-    if (
-        name.as_ref(),
-        mode.as_str(),
-        parent.as_ref(),
-        fork_seq,
-        head,
-        stored_chain_head.as_slice(),
-        owner.as_ref(),
-    ) != (
-        child.name.as_ref(),
-        mode_str(child.mode),
-        expected_parent.as_ref(),
-        expected_fork,
-        0,
-        chain_head.as_bytes(),
-        expected_owner.as_ref(),
-    ) {
+    let actual_owner = match owner {
+        Some(owner) => match parse_entity_id(&owner) {
+            Ok(owner) => Some(owner),
+            Err(_) => return Ok(None),
+        },
+        None => None,
+    };
+    let actual_meta = TimelineMeta {
+        id: child.id,
+        mode: actual_mode,
+        name,
+        owner: actual_owner,
+        fork_point: actual_fork_point,
+    };
+    let stored_head = match u64::try_from(head) {
+        Ok(head) => Seq::from_u64(head),
+        Err(_) => return Ok(None),
+    };
+    Ok(Some((actual_meta, stored_head, stored_chain_head)))
+}
+
+fn sqlite_fork_admission_recovery_is_exact(
+    conn: &Connection,
+    admission: &PreparedErasureForkBatchV1,
+    receipt: &SqliteForkAdmissionReceiptV1,
+) -> Result<bool, ErasureErrorV1> {
+    let Ok(recovered) = receipt.recover(admission.operation()) else {
+        return Ok(false);
+    };
+    if recovered != admission.recovery_result()? {
+        return Ok(false);
+    }
+    let stored_proof = match sqlite_fork_recovery_proof(conn, admission.operation()) {
+        Ok(proof) => proof,
+        Err(ErasureErrorV1::ProvenanceMissing | ErasureErrorV1::InvalidEncoding) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    if stored_proof.validate(&recovered).is_err() {
+        return Ok(false);
+    }
+    if stored_proof != admission.recovery_proof()? {
+        return Ok(false);
+    }
+    match sqlite_recovery_proof_is_exact(conn, &stored_proof) {
+        Ok(()) => {}
+        Err(ErasureErrorV1::ProvenanceMissing | ErasureErrorV1::InvalidEncoding) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(true)
+}
+
+fn sqlite_fork_admission_is_exact(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    admission: &PreparedErasureForkBatchV1,
+    chain_head: Hash,
+    receipt: &SqliteForkAdmissionReceiptV1,
+) -> Result<bool, ErasureErrorV1> {
+    let child = admission.child();
+    if !sqlite_fork_admission_recovery_is_exact(conn, admission, receipt)? {
+        return Ok(false);
+    }
+    if !sqlite_timeline_is_exact(conn, hasher, child, chain_head)? {
         return Ok(false);
     }
     for prepared in admission.admissions() {
         let mutation = prepared.mutation();
-        let manifest = conn
-            .query_row(
-                "SELECT manifest_digest, manifest_cbor FROM erasure_records
-                 WHERE request_digest=?1",
-                params![mutation.request().digest().as_slice()],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()
-            .map_err(map_erasure_receipt_failure)?;
-        let expected_digest = mutation.next_manifest().digest().digest();
-        let exact_manifest = manifest.is_some_and(|(digest, bytes)| {
-            (digest.as_slice(), bytes.as_slice())
-                == (
-                    expected_digest.as_slice(),
-                    mutation.next_manifest().canonical_cbor(),
-                )
-        });
-        if !exact_manifest || !sqlite_mutation_is_exact(conn, mutation)? {
+        // `erasure_records` is a mutable head and may have advanced through a
+        // later Fork. The immutable mutation evidence and indexed extension
+        // prove that this operation's original successor remains committed.
+        if !sqlite_mutation_is_exact(conn, mutation)? {
             return Ok(false);
         }
     }
@@ -5340,6 +6064,14 @@ enum SqliteErasureIndex {
 }
 
 impl SqliteErasureIndex {
+    const fn insert_query(self) -> &'static str {
+        match self {
+            Self::Attempt => "INSERT INTO erasure_attempt_pages(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
+            Self::Scope => "INSERT INTO erasure_scope_nodes(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
+            Self::AdministrativeResolution => "INSERT INTO erasure_administrative_resolutions(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
+        }
+    }
+
     const fn reference_query(self) -> &'static str {
         match self {
             Self::Attempt => "SELECT reference_digest FROM erasure_attempt_pages WHERE request_digest=?1 AND ordinal=?2",
@@ -5356,6 +6088,24 @@ impl SqliteErasureIndex {
                 "SELECT COUNT(*) FROM erasure_administrative_resolutions WHERE request_digest=?1"
             }
         }
+    }
+}
+
+const fn sqlite_erasure_index_parts(
+    index: ErasureIndexInsertV1,
+) -> (SqliteErasureIndex, u64, ErasureReferenceV1) {
+    match index {
+        ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+            (SqliteErasureIndex::Attempt, ordinal, reference)
+        }
+        ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+            (SqliteErasureIndex::Scope, ordinal, reference)
+        }
+        ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+            SqliteErasureIndex::AdministrativeResolution,
+            ordinal,
+            reference,
+        ),
     }
 }
 
@@ -5542,28 +6292,9 @@ fn insert_sqlite_index(
     request: ErasureReferenceV1,
     index: ErasureIndexInsertV1,
 ) -> Result<(), ErasureErrorV1> {
-    let (sql, index, ordinal, reference) = match index {
-        ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (
-            "INSERT INTO erasure_attempt_pages(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            SqliteErasureIndex::Attempt,
-            ordinal,
-            reference,
-        ),
-        ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (
-            "INSERT INTO erasure_scope_nodes(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            SqliteErasureIndex::Scope,
-            ordinal,
-            reference,
-        ),
-        ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
-            "INSERT INTO erasure_administrative_resolutions(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            SqliteErasureIndex::AdministrativeResolution,
-            ordinal,
-            reference,
-        ),
-    };
+    let (index, ordinal, reference) = sqlite_erasure_index_parts(index);
     conn.execute(
-        sql,
+        index.insert_query(),
         params![
             request.digest().as_slice(),
             i64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?,
@@ -5645,19 +6376,7 @@ fn sqlite_mutation_is_exact(
         }
     }
     for index in mutation.index_inserts() {
-        let (index, ordinal, reference) = match *index {
-            ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
-                (SqliteErasureIndex::Attempt, ordinal, reference)
-            }
-            ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
-                (SqliteErasureIndex::Scope, ordinal, reference)
-            }
-            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
-                SqliteErasureIndex::AdministrativeResolution,
-                ordinal,
-                reference,
-            ),
-        };
+        let (index, ordinal, reference) = sqlite_erasure_index_parts(*index);
         if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
             return Ok(false);
         }
@@ -5670,15 +6389,10 @@ fn sqlite_mutation_is_exact(
         .effect()
         .subject()
         .map(|subject| {
-            conn.query_row(
-                "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
-                params![subject.digest().as_slice()],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-            .map(reference_from_sql)
-            .transpose()
+            sqlite_effect_manifest_digest_for_subject(conn, subject)
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+                .map(reference_from_sql)
+                .transpose()
         })
         .transpose()?;
     Ok(subject_manifest.is_none_or(|manifest| manifest == Some(mutation.next_manifest().digest())))
@@ -5766,6 +6480,58 @@ const fn begin_immediate_sql() -> &'static str {
     "BEGIN IMMEDIATE"
 }
 
+#[derive(Clone, Copy)]
+enum SqliteImmediateScopeV1 {
+    Transaction,
+    Savepoint,
+}
+
+fn begin_immediate_scope(connection: &Connection) -> Result<SqliteImmediateScopeV1, CoreError> {
+    if connection.is_autocommit() {
+        connection
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(SqliteImmediateScopeV1::Transaction)
+    } else {
+        connection
+            .execute_batch("SAVEPOINT pigloros_protected_effect")
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(SqliteImmediateScopeV1::Savepoint)
+    }
+}
+
+fn finish_immediate_scope<T>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_immediate_transaction(connection, result),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|error| {
+                    CoreError::StorageOutcomeUnknown(format!(
+                        "savepoint release outcome uncertain: {error}"
+                    ))
+                }),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(CoreError::StorageOutcomeUnknown(format!(
+                        "{error}; savepoint rollback failed: {rollback_error}"
+                    ))),
+                }
+            }
+        },
+    }
+}
+
 fn finish_immediate_transaction<T>(
     conn: &Connection,
     result: Result<T, CoreError>,
@@ -5777,14 +6543,14 @@ fn finish_immediate_transaction<T>(
             rollback_error.map_or_else(
                 || CoreError::Storage(format!("transaction commit failed: {commit_error}")),
                 |rollback_error| {
-                    CoreError::Storage(format!(
+                    CoreError::StorageOutcomeUnknown(format!(
                         "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
                     ))
                 },
             )
         },
         |error, rollback_error| {
-            CoreError::Storage(format!("{error}; rollback failed: {rollback_error}"))
+            CoreError::StorageOutcomeUnknown(format!("{error}; rollback failed: {rollback_error}"))
         },
     )
 }
@@ -5970,6 +6736,12 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
     let causation_id: Option<String> = row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
     let correlation_id: Option<String> =
         row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let schema_version: i64 = row.get(8).map_err(|e| CoreError::Storage(e.to_string()))?;
+    if schema_version != i64::from(SchemaVersion::V1.as_u32()) {
+        return Err(CoreError::Serialization(
+            "unsupported event schema version".to_owned(),
+        ));
+    }
     let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
     let sig_bytes: Option<Vec<u8>> = row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
     let signature_owner_id: Option<String> =
@@ -5983,13 +6755,17 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
     let signature = decode_signature(sig_bytes)?;
     let signature_identity =
         decode_signature_identity(signature_owner_id, signature_role, signature_epoch)?;
+    let seq = u64::try_from(seq)
+        .map_err(|_| CoreError::Serialization("bad event sequence".to_owned()))?;
+    let wall_time = u64::try_from(wall_time)
+        .map_err(|_| CoreError::Serialization("bad event wall time".to_owned()))?;
     let event = Event {
         id: parse_event_id(&event_id)?,
         entity: parse_entity_id(&entity_id)?,
         event_type: Kind::new(event_type),
         payload: CanonicalBytes::from_vec(payload),
-        wall_time: WallTime::from_micros(u64::try_from(wall_time).unwrap_or(0)),
-        seq: Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
+        wall_time: WallTime::from_micros(wall_time),
+        seq: Seq::from_u64(seq),
         causation_id: causation_id.as_deref().map(parse_event_id).transpose()?,
         correlation_id: correlation_id
             .as_deref()
@@ -6077,8 +6853,9 @@ mod tests {
         geo_admission::GeoLocationAdmissionFenceV1,
         ids::{EntityId, EventId},
         store::{EventReadBounds, SeqRange, TimelineExport},
-        CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
-        OwnTracksEnrollmentStore,
+        CoreError, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+        ErasureVerifiedInventoryV1, KeyRegistrationV1, OwnTracksEnrollmentRequestV1,
+        OwnTracksEnrollmentStatusV1, OwnTracksEnrollmentStore,
     };
 
     fn authorized_export_timeline(
@@ -6192,6 +6969,416 @@ mod tests {
             .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
             .test_err();
         assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
+
+        let mut unbound = SqliteStore::open_in_memory()
+            .test_ok()
+            .without_erasure_gate();
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        let gate = ErasureContainmentGateV1::new_test_open();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(unbound
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("unbound-transition"),
+                )
+                .is_err());
+            Ok((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+    }
+
+    fn cover_sqlite_host_transition_success(
+        store: &mut SqliteStore,
+        gate: &ErasureContainmentGateV1,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let root = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-root"),
+                )
+                .test_ok();
+            let meta_root = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-root-with-meta"),
+                )
+                .test_ok();
+            assert!(store
+                .get_timeline_for_host_transition(permit, root.id())
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "host-root-with-meta")
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "missing-host-name")
+                .test_ok()
+                .is_none());
+
+            let other_parent = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-other-parent"),
+                )
+                .test_ok();
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(
+                        other_parent.id(),
+                        Seq::ZERO,
+                        "host-child-wrong-parent",
+                    ),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::from_u64(1),
+                    TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-wrong-sequence"),
+                )
+                .is_err());
+
+            let child_meta = TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-meta");
+            let child = store
+                .fork_for_host_transition_with_meta(permit, root.id(), Seq::ZERO, child_meta)
+                .test_ok();
+            assert_eq!(child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+            let ordinary_child = store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child"),
+                )
+                .test_ok();
+            assert_eq!(ordinary_child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+
+            let ledger_meta = TimelineMeta::root("host-ledger-existing");
+            let existing = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &ledger_meta,
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(existing.1);
+            let reused = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &ledger_meta,
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(!reused.1);
+            let preallocated = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("host-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(preallocated.1);
+            assert_ne!(meta_root.id(), preallocated.0.id());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+    }
+
+    fn cover_sqlite_host_transition_rejections(
+        store: &mut SqliteStore,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
+        let foreign_gate = ErasureContainmentGateV1::new_test_open();
+        let mut rejected = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("foreign-root"),
+                )
+                .is_err());
+            assert!(store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("foreign-root-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::ZERO, "foreign-child",),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    TimelineMeta::root("foreign-child-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .get_timeline_for_host_transition(permit, TimelineId::new())
+                .is_err());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "foreign-name")
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("foreign-ledger"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("foreign-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        foreign_gate
+            .install_from_verified_inventory_transition(&mut rejected)
+            .test_ok();
+    }
+
+    fn cover_sqlite_duplicate_and_invalid_paths(inventory: &ErasureVerifiedInventoryV1) {
+        let preissued_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        preissued_gate.issue_topology_store_binding().test_ok();
+        assert!(matches!(
+            SqliteStore::open_in_memory()
+                .test_ok()
+                .bind_erasure_gate(preissued_gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+
+        let mut duplicate = new_store();
+        let duplicate_gate = Arc::clone(
+            duplicate
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing duplicate gate"))),
+        );
+        let mut duplicate_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let root = duplicate
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("duplicate-root"),
+                )
+                .test_ok();
+            let mut duplicate_meta = TimelineMeta::root("duplicate-meta");
+            duplicate_meta.id = root.id();
+            assert!(duplicate
+                .create_timeline_for_host_transition_with_meta(permit, duplicate_meta)
+                .is_err());
+            let beyond =
+                TimelineMeta::forked_from(root.id(), Seq::from_u64(1), "beyond-host-parent");
+            assert!(duplicate
+                .fork_for_host_transition_with_meta(permit, root.id(), Seq::from_u64(1), beyond,)
+                .is_err());
+            let missing_name = TimelineMeta {
+                id: TimelineId::new(),
+                mode: TimelineMode::Live,
+                name: None,
+                owner: None,
+                fork_point: None,
+            };
+            assert!(duplicate
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &missing_name,
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        duplicate_gate
+            .install_from_verified_inventory_transition(&mut duplicate_transition)
+            .test_ok();
+    }
+
+    #[test]
+    fn host_transition_store_seams_cover_success_and_rejection_paths() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing sqlite test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        cover_sqlite_host_transition_success(&mut store, &gate, &inventory);
+        cover_sqlite_host_transition_rejections(&mut store, &inventory);
+        cover_sqlite_duplicate_and_invalid_paths(&inventory);
+    }
+
+    #[test]
+    fn host_transition_timeline_creation_rejects_missing_corrupt_and_duplicate_rows() {
+        let mut missing_parent = new_store();
+        let missing_parent_meta = TimelineMeta::forked_from(
+            TimelineId::new(),
+            Seq::ZERO,
+            "missing-host-transition-parent",
+        );
+        assert!(missing_parent
+            .create_timeline_with_meta_for_host_transition_unchecked(&missing_parent_meta)
+            .is_err());
+
+        let mut corrupt_parent = new_store();
+        let parent = corrupt_parent
+            .create_timeline("corrupt-host-transition-parent")
+            .test_ok();
+        let event = corrupt_parent
+            .append(parent.id(), &[make_draft(EntityId::new(), b"parent-event")])
+            .test_ok()
+            .remove(0);
+        corrupt_parent
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .test_ok();
+        corrupt_parent
+            .conn
+            .execute(
+                "UPDATE events SET wall_time=-1 WHERE event_id=?1",
+                params![event.id.to_string()],
+            )
+            .test_ok();
+        let corrupt_child = TimelineMeta::forked_from(
+            parent.id(),
+            Seq::from_u64(1),
+            "corrupt-host-transition-child",
+        );
+        assert!(corrupt_parent
+            .create_timeline_with_meta_for_host_transition_unchecked(&corrupt_child)
+            .is_err());
+
+        let mut duplicate = new_store();
+        let existing = duplicate
+            .create_timeline("duplicate-host-transition-row")
+            .test_ok();
+        let mut duplicate_meta = TimelineMeta::root("duplicate-host-transition-name");
+        duplicate_meta.id = existing.id();
+        assert!(duplicate
+            .create_timeline_with_meta_for_host_transition_unchecked(&duplicate_meta)
+            .is_err());
+
+        let mut denied_begin = new_store();
+        denied_begin
+            .conn
+            .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Begin
+                    }
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert!(matches!(
+            denied_begin.create_timeline_with_meta_for_host_transition_unchecked(
+                &TimelineMeta::root("denied-host-transition-begin"),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        denied_begin
+            .conn
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )
+            .test_ok();
+    }
+
+    #[test]
+    fn direct_ledger_initialization_requires_host_transition_authority() {
+        let mut store = SqliteStore::open_in_memory().test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))
+            .test_ok();
+
+        assert!(matches!(
+            store.initialize_timeline_with_key_registry(
+                "direct-ledger-initialization",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+    }
+
+    #[test]
+    fn host_transition_ledger_initialization_closes_begin_failure() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing SQLite test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+            let result = store.initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                permit,
+                &TimelineMeta::root("host-ledger-begin-failure"),
+                &KeyRegistryStateV1::new(),
+            );
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+            assert!(matches!(result, Err(CoreError::Storage(_))));
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+    }
+
+    #[test]
+    fn host_transition_meta_creation_reports_an_uncertain_commit() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing sqlite test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        store.conn.commit_hook(Some(|| true)).test_ok();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let error = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("uncertain-commit"),
+                )
+                .test_err();
+            assert!(matches!(
+                error,
+                CoreError::StorageOutcomeUnknown(message)
+                    if message.contains("transaction commit outcome uncertain")
+            ));
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+        store.conn.commit_hook::<fn() -> bool>(None).test_ok();
     }
 
     #[test]
@@ -11717,6 +12904,56 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_ledger_initialization_reports_missing_timeline_owner_storage() {
+        let mut store = new_store();
+        store.create_timeline("owner-storage-failure").test_ok();
+        store
+            .conn
+            .execute_batch("DROP TABLE timeline_owners")
+            .test_ok();
+
+        assert!(store
+            .initialize_timeline_with_key_registry(
+                "owner-storage-failure",
+                &KeyRegistryStateV1::new(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn sqlite_ledger_initialization_reports_timeline_lookup_failures() {
+        let mut malformed = new_store();
+        malformed
+            .create_timeline("malformed-timeline-row")
+            .test_ok();
+        malformed
+            .conn
+            .execute(
+                "UPDATE timelines SET id='not-a-ulid' WHERE name='malformed-timeline-row'",
+                [],
+            )
+            .test_ok();
+        assert!(malformed
+            .initialize_timeline_with_key_registry(
+                "malformed-timeline-row",
+                &KeyRegistryStateV1::new(),
+            )
+            .is_err());
+
+        let mut missing_table = new_store();
+        missing_table
+            .conn
+            .execute_batch("DROP TABLE timelines")
+            .test_ok();
+        assert!(missing_table
+            .initialize_timeline_with_key_registry(
+                "missing-timelines-table",
+                &KeyRegistryStateV1::new(),
+            )
+            .is_err());
+    }
+
+    #[test]
     fn sqlite_key_registry_persists_and_rejects_stale_authorization() {
         let mut store = new_store();
         let mut persisted = KeyRegistryStateV1::new();
@@ -12350,7 +13587,10 @@ mod tests {
             .test_ok();
         rollback_conn.commit_hook(Some(|| true)).test_ok();
         let rollback_error = finish_immediate_transaction::<()>(&rollback_conn, Ok(())).test_err();
-        assert!(matches!(rollback_error, CoreError::Storage(_)));
+        assert!(matches!(
+            rollback_error,
+            CoreError::StorageOutcomeUnknown(_)
+        ));
         assert!(rollback_error
             .to_string()
             .contains("transaction commit failed"));
@@ -12362,7 +13602,10 @@ mod tests {
             Err(CoreError::Storage("operation failed".to_owned())),
         )
         .test_err();
-        assert!(matches!(error_rollback, CoreError::Storage(_)));
+        assert!(matches!(
+            error_rollback,
+            CoreError::StorageOutcomeUnknown(_)
+        ));
         assert!(error_rollback.to_string().contains("rollback failed"));
     }
 
@@ -13147,6 +14390,461 @@ mod tests {
             load_sqlite_erasure_effect(&store.conn, manifest),
             Err(ErasureErrorV1::InvalidEncoding)
         );
+    }
+
+    #[test]
+    fn sqlite_fork_recovery_effect_matches_proof_and_decoded_subject() {
+        use ciborium::value::Value;
+
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let digest = |reference: ErasureReferenceV1| Value::Bytes(reference.digest().to_vec());
+        let original_subject = reference(40);
+        let rewritten_subject = reference(41);
+        let manifest = reference(42);
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: original_subject,
+        };
+        let effect_bytes = effect.to_canonical_cbor().test_ok();
+        let make_proof = |declared_subject| {
+            let mutation = Value::Array(vec![
+                digest(reference(1)),
+                digest(reference(2)),
+                digest(reference(3)),
+                digest(reference(4)),
+                digest(reference(5)),
+                Value::Null,
+                digest(manifest),
+                digest(reference(6)),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new()),
+                digest(effect.identity()),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)),
+                digest(declared_subject),
+                digest(reference(7)),
+            ]);
+            let value = Value::Array(vec![
+                Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+                Value::Integer(1.into()),
+                digest(reference(1)),
+                digest(reference(2)),
+                digest(reference(3)),
+                digest(reference(4)),
+                digest(reference(5)),
+                Value::Array(vec![mutation]),
+            ]);
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&value, &mut encoded).test_ok();
+            ErasureForkRecoveryProofV1::from_canonical_cbor(&encoded).test_ok()
+        };
+
+        let store = new_store();
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
+                 VALUES(?1,?2,?3,?4)",
+                params![
+                    manifest.digest().as_slice(),
+                    effect.identity().digest().as_slice(),
+                    original_subject.digest().as_slice(),
+                    effect_bytes.as_slice(),
+                ],
+            )
+            .test_ok();
+        let matching_proof = make_proof(original_subject);
+        sqlite_recovery_proof_effect_is_exact(
+            &store.conn,
+            matching_proof.admissions().first().test_ok(),
+        )
+        .test_ok();
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET subject_digest=?1 WHERE manifest_digest=?2",
+                params![
+                    rewritten_subject.digest().as_slice(),
+                    manifest.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        let rewritten_proof = make_proof(rewritten_subject);
+        assert_eq!(
+            sqlite_recovery_proof_effect_is_exact(
+                &store.conn,
+                rewritten_proof.admissions().first().test_ok(),
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn sqlite_recovery_proof_checks_objects_states_all_indexes_and_subject() {
+        use ciborium::value::Value;
+
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let digest = |reference: ErasureReferenceV1| Value::Bytes(reference.digest().to_vec());
+        let extension = reference(50);
+        let request = reference(51);
+        let state_reference = reference(52);
+        let manifest = reference(53);
+        let effect_subject = reference(54);
+        let object_bytes = b"extension";
+        let state_bytes = b"state";
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: effect_subject,
+        };
+        let effect_bytes = effect.to_canonical_cbor().test_ok();
+        let index_references = [reference(55), reference(56), reference(57)];
+        let mutation = Value::Array(vec![
+            digest(reference(58)),
+            digest(reference(59)),
+            digest(reference(60)),
+            digest(extension),
+            digest(request),
+            Value::Null,
+            digest(manifest),
+            digest(reference(61)),
+            Value::Array(vec![Value::Array(vec![
+                digest(extension),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(object_bytes)),
+            ])]),
+            Value::Array(vec![Value::Array(vec![
+                digest(state_reference),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(state_bytes)),
+            ])]),
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Integer(0.into()),
+                    Value::Integer(0.into()),
+                    digest(index_references[0]),
+                ]),
+                Value::Array(vec![
+                    Value::Integer(1.into()),
+                    Value::Integer(1.into()),
+                    digest(index_references[1]),
+                ]),
+                Value::Array(vec![
+                    Value::Integer(2.into()),
+                    Value::Integer(2.into()),
+                    digest(index_references[2]),
+                ]),
+            ]),
+            digest(effect.identity()),
+            digest(ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)),
+            digest(effect_subject),
+            digest(reference(62)),
+        ]);
+        let proof_value = Value::Array(vec![
+            Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+            Value::Integer(1.into()),
+            digest(reference(58)),
+            digest(reference(62)),
+            digest(reference(59)),
+            digest(reference(60)),
+            digest(reference(63)),
+            Value::Array(vec![mutation]),
+        ]);
+        let mut proof_bytes = Vec::new();
+        ciborium::into_writer(&proof_value, &mut proof_bytes).test_ok();
+        let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes).test_ok();
+        let proof_mutation = proof.admissions().first().test_ok();
+
+        let store = new_store();
+        insert_sqlite_exact(&store.conn, extension, object_bytes).test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_states(state_digest,request_digest,state_cbor)
+                 VALUES(?1,?2,?3)",
+                params![
+                    state_reference.digest().as_slice(),
+                    request.digest().as_slice(),
+                    state_bytes,
+                ],
+            )
+            .test_ok();
+        for (index, (ordinal, reference)) in [
+            (0, index_references[0]),
+            (1, index_references[1]),
+            (2, index_references[2]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let index = match index {
+                0 => ErasureIndexInsertV1::AttemptPage { ordinal, reference },
+                1 => ErasureIndexInsertV1::ScopeNode { ordinal, reference },
+                _ => ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
+            };
+            insert_sqlite_index(&store.conn, request, index).test_ok();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
+                 VALUES(?1,?2,?3,?4)",
+                params![
+                    manifest.digest().as_slice(),
+                    effect.identity().digest().as_slice(),
+                    effect_subject.digest().as_slice(),
+                    effect_bytes.as_slice(),
+                ],
+            )
+            .test_ok();
+
+        sqlite_recovery_proof_mutation_is_exact(&store.conn, proof_mutation).test_ok();
+        sqlite_recovery_proof_indexes_are_exact(&store.conn, proof_mutation).test_ok();
+        sqlite_recovery_proof_subject_is_exact(&store.conn, proof_mutation).test_ok();
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO erasure_fork_recovery_proofs(operation_digest,proof_digest,proof_cbor)
+                 VALUES(?1,?2,?3)",
+                params![
+                    reference(58).digest().as_slice(),
+                    proof.content_digest().test_ok().digest().as_slice(),
+                    proof_bytes.as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_fork_recovery_proof(&store.conn, reference(58)).test_ok(),
+            proof
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=?1
+                 WHERE operation_digest=?2",
+                params![
+                    reference(64).digest().as_slice(),
+                    reference(58).digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_fork_recovery_proof(&store.conn, reference(58)),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+                params![reference(58).digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_fork_recovery_proof(&store.conn, reference(58)),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut missing_extension = proof_value.clone();
+        let Value::Array(fields) = &mut missing_extension else {
+            std::panic::resume_unwind(Box::new("recovery proof root is not an array"));
+        };
+        let Value::Array(admissions) = &mut fields[7] else {
+            std::panic::resume_unwind(Box::new("recovery proof admissions are not an array"));
+        };
+        let Value::Array(mutation_fields) = &mut admissions[0] else {
+            std::panic::resume_unwind(Box::new("recovery mutation is not an array"));
+        };
+        mutation_fields[8] = Value::Array(Vec::new());
+        let mut missing_extension_bytes = Vec::new();
+        ciborium::into_writer(&missing_extension, &mut missing_extension_bytes).test_ok();
+        let missing_extension_proof =
+            ErasureForkRecoveryProofV1::from_canonical_cbor(&missing_extension_bytes).test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_objects_are_exact(
+                &store.conn,
+                missing_extension_proof.admissions().first().test_ok(),
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET manifest_digest=?1 WHERE subject_digest=?2",
+                params![
+                    reference(64).digest().as_slice(),
+                    effect_subject.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_subject_is_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET manifest_digest=?1 WHERE subject_digest=?2",
+                params![
+                    manifest.digest().as_slice(),
+                    effect_subject.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_evidence SET object_cbor=X'00' WHERE reference_digest=?1",
+                params![extension.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_objects_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_states SET request_digest=?1 WHERE state_digest=?2",
+                params![
+                    reference(64).digest().as_slice(),
+                    state_reference.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_states_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_states SET request_digest=?1,state_cbor=X'00'
+                 WHERE state_digest=?2",
+                params![
+                    request.digest().as_slice(),
+                    state_reference.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_states_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_attempt_pages SET reference_digest=?1
+                 WHERE request_digest=?2 AND ordinal=0",
+                params![
+                    reference(64).digest().as_slice(),
+                    request.digest().as_slice(),
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_indexes_are_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE erasure_effects SET effect_cbor=X'FF' WHERE manifest_digest=?1",
+                params![manifest.digest().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_effect_is_exact(&store.conn, proof_mutation),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn sqlite_fork_recovery_rejects_orphaned_proof_and_missing_proof_table() {
+        let operation = ErasureReferenceV1::from_digest([65; 32]);
+
+        let mut orphaned = new_store();
+        let snapshot = orphaned.complete_erasure_inventory_snapshot(4).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(4).test_ok();
+        orphaned
+            .conn
+            .execute(
+                "INSERT INTO erasure_fork_recovery_proofs(operation_digest,proof_digest,proof_cbor)
+                 VALUES(?1,?2,?3)",
+                params![
+                    operation.digest().as_slice(),
+                    [66_u8; 32].as_slice(),
+                    b"orphaned-proof",
+                ],
+            )
+            .test_ok();
+        assert_eq!(
+            sqlite_recover_fork_admission(
+                &orphaned.conn,
+                orphaned.hasher.as_ref(),
+                operation,
+                &inventory,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut missing_table = new_store();
+        let snapshot = missing_table
+            .complete_erasure_inventory_snapshot(4)
+            .test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(4).test_ok();
+        missing_table
+            .conn
+            .execute_batch("DROP TABLE erasure_fork_recovery_proofs")
+            .test_ok();
+        assert_eq!(
+            sqlite_recover_fork_admission(
+                &missing_table.conn,
+                missing_table.hasher.as_ref(),
+                operation,
+                &inventory,
+            ),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+    }
+
+    #[test]
+    fn sqlite_event_decoder_rejects_unsupported_schema_and_negative_wall_time() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("event-decoder-corruption").test_ok();
+        let event = store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"event")])
+            .test_ok()
+            .remove(0);
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET schema_version=2 WHERE event_id=?1",
+                params![event.id.to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET schema_version=1,wall_time=-1 WHERE event_id=?1",
+                params![event.id.to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
     }
 
     #[test]

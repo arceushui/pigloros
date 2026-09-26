@@ -46,11 +46,13 @@ use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
     CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
-    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
+    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
+    ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
+    ErasureVerifiedInventoryV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
     PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
     ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
@@ -73,6 +75,10 @@ thread_local! {
     /// Test-only delay used to exercise the final materialization elapsed guard.
     static BOUNDED_MATERIALIZE_FINAL_DELAY_MILLIS: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
+    /// Test-only fault injection for the next unchecked chain-hash lookup.
+    static FAIL_NEXT_CHAIN_HASH_AT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection for the next visible Timeline deletion.
+    static FAIL_NEXT_VISIBLE_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -123,6 +129,16 @@ fn bounded_materialize_final_delay_for_test() {
     }
 }
 
+#[cfg(test)]
+fn fail_next_chain_hash_at_for_test() {
+    FAIL_NEXT_CHAIN_HASH_AT.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn fail_next_visible_delete_for_test() {
+    FAIL_NEXT_VISIBLE_DELETE.with(|fail| fail.set(true));
+}
+
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
 pub struct MemoryStore {
     /// Complete state per timeline. Keeping this together makes missing companion state
@@ -159,10 +175,14 @@ pub struct MemoryStore {
     /// Trusted Gateway authority bound to this adapter's protected append port.
     consent_authority_permit: Option<ConsentAppendPermit>,
     /// Host-owned erasure containment gate for protected Timeline operations.
-    erasure_gate: Option<Arc<dyn ErasureGate>>,
+    erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host. The constructor's
     /// local gate is replaceable exactly once by the composition root.
     erasure_gate_bound: bool,
+    /// Host-managed topology may only change through verified transitions.
+    erasure_topology_requires_permit: bool,
+    /// Opaque host-issued identity for this adapter's topology transitions.
+    erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
@@ -183,6 +203,8 @@ pub struct MemoryStore {
     erasure_recovery_errors: BTreeMap<ErasureReferenceV1, BTreeSet<ErasureReferenceV1>>,
     /// Stable Fork operation identity to complete prepared-admission binding.
     erasure_fork_admissions: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryV1>,
+    /// Complete prepared Fork proof retained for exact post-commit recovery.
+    erasure_fork_recovery_proofs: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryProofV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -290,6 +312,16 @@ fn delete_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreEr
 }
 
 fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+    delete_visible_timeline_impl(store, id)
+}
+
+fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+    #[cfg(test)]
+    if FAIL_NEXT_VISIBLE_DELETE.with(|fail| fail.replace(false)) {
+        return Err(CoreError::Storage(
+            "injected visible Timeline deletion failure".to_owned(),
+        ));
+    }
     if has_child_timeline(&store.timelines, id) {
         return Err(CoreError::Storage(
             "cannot delete timeline that still has forks".to_owned(),
@@ -462,13 +494,13 @@ impl MemoryStore {
     #[must_use]
     pub fn without_erasure_gate(mut self) -> Self {
         self.erasure_gate = None;
+        self.erasure_topology_store_binding = None;
         self
     }
 
     #[must_use]
     fn with_default_components(hasher: Box<dyn Hasher>) -> Self {
-        let erasure_gate: Option<Arc<dyn ErasureGate>> =
-            Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let erasure_gate_bound = false;
 
         Self {
@@ -491,6 +523,8 @@ impl MemoryStore {
             // before the composition root supplies the host-owned gate.
             erasure_gate,
             erasure_gate_bound,
+            erasure_topology_requires_permit: false,
+            erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             authority_persistence_binding: None,
@@ -504,6 +538,7 @@ impl MemoryStore {
             erasure_effect_subjects: BTreeMap::new(),
             erasure_recovery_errors: BTreeMap::new(),
             erasure_fork_admissions: BTreeMap::new(),
+            erasure_fork_recovery_proofs: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1246,13 +1281,13 @@ impl MemoryStore {
             })
     }
 
-    fn fork_visible_timeline(
+    fn fork_timeline_unchecked(
         &mut self,
         parent: TimelineId,
         at_seq: Seq,
         name: &str,
     ) -> Result<Timeline, CoreError> {
-        let parent_head = self.logical_head(parent)?;
+        let parent_head = self.logical_head_unchecked(parent)?;
         if at_seq > parent_head {
             return Err(CoreError::ForkBeyondHead {
                 fork_seq: at_seq.as_u64(),
@@ -1269,7 +1304,7 @@ impl MemoryStore {
                 |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
             );
         let child = Timeline::new(meta);
-        let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
+        let fork_hash = self.compute_chain_hash_at_unchecked(parent, at_seq)?;
         self.timelines
             .insert(child.id(), TimelineState::new(child.clone(), fork_hash));
         Ok(child)
@@ -1447,28 +1482,48 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
 impl ErasureForkPersistencePortV1 for MemoryStore {
     fn commit_fork_admission(
         &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.commit_fork_admission_impl(permit, &admission)
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        self.recover_fork_admission_impl(operation, successor_inventory)
+    }
+}
+
+impl MemoryStore {
+    fn commit_fork_admission_impl(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        admission: &PreparedErasureForkBatchV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        self.ensure_host_transition_permit(permit)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         let binding = admission.binding_digest();
         let operation = admission.operation();
+        let proof = admission.recovery_proof()?;
         let child = admission.child().clone();
         let (parent, at_seq) = child.fork_point.ok_or(ErasureErrorV1::PolicyConflict)?;
-        let chain_head = self
-            .compute_chain_hash_at_unchecked(parent, at_seq)
-            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
 
         if let Some(stored_result) = self.erasure_fork_admissions.get(&operation) {
-            let exact_child = self.timelines.get(&child.id).is_some_and(|state| {
-                (
-                    &state.timeline.meta,
-                    state.timeline.head,
-                    state.events.is_empty(),
-                    state.chain_head,
-                ) == (&child, Seq::ZERO, true, chain_head)
-            });
-            let exact_manifest = self.erasure_fork_batch_is_exact(&admission);
-            return ((stored_result.binding_digest(), exact_child, exact_manifest)
-                == (binding, true, true))
+            let chain_head = self
+                .compute_chain_hash_at_unchecked(parent, at_seq)
+                .map_err(|_| ErasureErrorV1::PolicyConflict)?;
+            let exact_child = self.memory_fork_child_is_exact(&child, chain_head)?;
+            let exact_manifest = self.persisted_fork_erasure_mutations_are_exact(admission);
+            let exact_proof = self.erasure_fork_recovery_proofs.get(&operation) == Some(&proof);
+            return ((
+                stored_result.binding_digest(),
+                exact_child,
+                exact_manifest,
+                exact_proof,
+            ) == (binding, true, true, true))
                 .then_some(ErasureCasOutcomeV1::ExactRetry)
                 .ok_or(ErasureErrorV1::PolicyConflict);
         }
@@ -1476,14 +1531,12 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         let generation = self
             .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
             .generation();
-        if (
-            generation == admission.expected_inventory_generation(),
-            self.timelines.contains_key(&child.id),
-        ) != (true, false)
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
+        if generation != admission.expected_inventory_generation() {
+            return Err(ErasureErrorV1::StaleGeneration);
         }
-
+        let chain_head = self
+            .compute_chain_hash_at_unchecked(parent, at_seq)
+            .map_err(|_| ErasureErrorV1::PolicyConflict)?;
         let timeline = Timeline::new(child);
         let mut delta = MemoryErasureCasDelta::default();
         for prepared in admission.admissions() {
@@ -1507,36 +1560,158 @@ impl ErasureForkPersistencePortV1 for MemoryStore {
         self.timelines
             .insert(timeline.id(), TimelineState::new(timeline, chain_head));
         let result = admission.recovery_result()?;
+        self.erasure_fork_recovery_proofs.insert(operation, proof);
         self.erasure_fork_admissions.insert(operation, result);
         Ok(ErasureCasOutcomeV1::Applied)
     }
 
-    fn recover_fork_admission(
-        &mut self,
+    fn recover_fork_admission_impl(
+        &self,
         operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
         let Some(result) = self.erasure_fork_admissions.get(&operation).cloned() else {
+            if self.erasure_fork_recovery_proofs.contains_key(&operation) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             return Ok(None);
         };
-        let exact_child = self.timelines.contains_key(&result.child().id);
-        exact_child
-            .then_some(Some(result))
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
+        let proof = self
+            .erasure_fork_recovery_proofs
+            .get(&operation)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        proof.validate_complete_for_inventory_with_persisted_state(
+            &result,
+            successor_inventory,
+            || {
+                self.memory_fork_recovery_proof_is_exact(proof)?;
+                self.verify_memory_fork_child(&result)
+            },
+        )?;
+        Ok(Some(result))
     }
 }
 
 impl MemoryStore {
-    fn erasure_fork_batch_is_exact(&self, admission: &PreparedErasureForkBatchV1) -> bool {
+    fn verify_memory_fork_child(
+        &self,
+        result: &ErasureForkRecoveryV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let (parent, at_seq) = result.fork_point();
+        let chain_head = self
+            .compute_chain_hash_at_unchecked(parent, at_seq)
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        self.memory_fork_child_is_exact(result.child(), chain_head)?
+            .then_some(())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn memory_fork_child_is_exact(
+        &self,
+        child: &TimelineMeta,
+        chain_head: Hash,
+    ) -> Result<bool, ErasureErrorV1> {
+        let Some(state) = self.timelines.get(&child.id) else {
+            return Ok(false);
+        };
+        crate::fork_child_is_exact(crate::ForkChildVerificationInput {
+            expected_meta: child,
+            actual_meta: &state.timeline.meta,
+            stored_head: state.timeline.head,
+            stored_chain_head: state.chain_head.as_bytes(),
+            chain_head,
+            events: state
+                .events
+                .iter()
+                .map(|event| Ok((event.seq, event.id, event.payload.clone()))),
+            hasher: self.hasher.as_ref(),
+        })
+    }
+
+    fn persisted_fork_erasure_mutations_are_exact(
+        &self,
+        admission: &PreparedErasureForkBatchV1,
+    ) -> bool {
         admission.admissions().iter().all(|prepared| {
             let mutation = prepared.mutation();
-            self.erasure_records
-                .get(&mutation.request())
-                .is_some_and(|(digest, bytes)| {
-                    *digest == mutation.next_manifest().digest()
-                        && bytes.as_slice() == mutation.next_manifest().canonical_cbor()
-                })
-                && memory_mutation_is_exact(self, mutation)
+            // The current manifest is a mutable head and may have advanced
+            // since this operation's receipt. Its immutable evidence and
+            // indexed extension remain the authority for exact replay.
+            memory_mutation_is_exact(self, mutation)
         })
+    }
+
+    fn memory_fork_recovery_proof_is_exact(
+        &self,
+        proof: &ErasureForkRecoveryProofV1,
+    ) -> Result<(), ErasureErrorV1> {
+        for mutation in proof.admissions() {
+            // `erasure_records` is the mutable current head and may have
+            // advanced through a later Fork. The immutable effect below
+            // proves this admission was committed; the verified inventory
+            // separately proves its extension remains in the current chain.
+            if !mutation
+                .objects()
+                .iter()
+                .any(|object| object.reference() == mutation.extension())
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            for object in mutation.objects() {
+                let Some(bytes) = self.erasure_evidence.get(&object.reference()) else {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                };
+                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != object.bytes_digest() {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+            }
+            for state in mutation.states() {
+                let Some(bytes) = self.erasure_states.get(&state.reference()) else {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                };
+                if ErasureForkRecoveryProofV1::bytes_digest(bytes) != state.bytes_digest() {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+            }
+            for index in mutation.index_inserts() {
+                let (stored, reference) = match *index {
+                    ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (
+                        self.erasure_attempt_pages
+                            .get(&(mutation.request(), ordinal)),
+                        reference,
+                    ),
+                    ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (
+                        self.erasure_scope_nodes.get(&(mutation.request(), ordinal)),
+                        reference,
+                    ),
+                    ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+                        self.erasure_administrative_resolutions
+                            .get(&(mutation.request(), ordinal)),
+                        reference,
+                    ),
+                };
+                if stored != Some(&reference) {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+            }
+            let Some((effect_digest, bytes)) = self.erasure_effects.get(&mutation.next_manifest())
+            else {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            };
+            let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes)?;
+            if effect.identity() != *effect_digest
+                || effect.subject() != mutation.effect_subject()
+                || ErasureForkRecoveryProofV1::bytes_digest(bytes) != mutation.effect_bytes_digest()
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            if mutation.effect_subject().is_some_and(|subject| {
+                self.erasure_effect_subjects.get(&subject) != Some(&mutation.next_manifest())
+            }) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2522,6 +2697,30 @@ impl GeographicReplayVerifier for MemoryStore {
 }
 
 impl MemoryStore {
+    const fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
+        if self.erasure_topology_requires_permit {
+            Err(CoreError::ErasureContainmentUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_host_transition_permit(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+    ) -> Result<(), CoreError> {
+        let (Some(gate), Some(binding)) = (
+            self.erasure_gate.as_ref(),
+            self.erasure_topology_store_binding.as_ref(),
+        ) else {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        };
+        permit
+            .claim_for_store(gate, binding)
+            .then_some(())
+            .ok_or(CoreError::ErasureContainmentUnavailable)
+    }
+
     fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
         let chain = self.fork_chain(id)?;
         let mut logical_head = 0_u64;
@@ -2539,6 +2738,20 @@ impl MemoryStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<Hash, CoreError> {
+        self.compute_chain_hash_at_unchecked_impl(timeline, at_seq)
+    }
+
+    fn compute_chain_hash_at_unchecked_impl(
+        &self,
+        timeline: TimelineId,
+        at_seq: Seq,
+    ) -> Result<Hash, CoreError> {
+        #[cfg(test)]
+        if FAIL_NEXT_CHAIN_HASH_AT.with(|fail| fail.replace(false)) {
+            return Err(CoreError::Storage(
+                "injected chain-hash lookup failure".to_owned(),
+            ));
+        }
         let logical_head = self.logical_head_unchecked(timeline)?;
         if at_seq > logical_head {
             return Err(CoreError::ForkBeyondHead {
@@ -2561,63 +2774,131 @@ impl MemoryStore {
         Ok(hash)
     }
 
+    fn create_timeline_with_meta_unchecked(
+        &mut self,
+        meta: &TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        // Resolve fork parent before duplicate-id check (parity with SqliteStore).
+        let chain = if let Some((parent, at_seq)) = meta.fork_point {
+            self.ensure_generic_timeline_visibility(parent)
+                .and_then(|()| {
+                    let parent_head = self.logical_head_unchecked(parent)?;
+                    if at_seq > parent_head {
+                        Err(CoreError::ForkBeyondHead {
+                            fork_seq: at_seq.as_u64(),
+                            head: parent_head.as_u64(),
+                        })
+                    } else {
+                        self.compute_chain_hash_at_unchecked(parent, at_seq)
+                    }
+                })
+        } else {
+            Ok(self.hasher.genesis_hash())
+        }?;
+        if self.timelines.contains_key(&meta.id) {
+            return Err(CoreError::Storage(format!(
+                "timeline already exists: {}",
+                meta.id
+            )));
+        }
+        let id = meta.id;
+        let timeline = Timeline::new(meta.clone());
+        self.timelines
+            .insert(id, TimelineState::new(timeline.clone(), chain));
+        Ok(timeline)
+    }
+
     fn create_timeline_with_meta_with_erasure_fence(
         &mut self,
         meta: &TimelineMeta,
     ) -> Result<Timeline, CoreError> {
-        let mut create = |store: &mut Self| {
-            // Resolve fork parent before duplicate-id check (parity with SqliteStore).
-            let chain = if let Some((parent, at_seq)) = meta.fork_point {
-                store
-                    .ensure_generic_timeline_visibility(parent)
-                    .and_then(|()| {
-                        let parent_head = store.logical_head(parent)?;
-                        if at_seq > parent_head {
-                            Err(CoreError::ForkBeyondHead {
-                                fork_seq: at_seq.as_u64(),
-                                head: parent_head.as_u64(),
-                            })
-                        } else {
-                            store.compute_chain_hash_at(parent, at_seq)
-                        }
-                    })
-            } else {
-                Ok(store.hasher.genesis_hash())
-            };
-            chain.and_then(|chain| {
-                if store.timelines.contains_key(&meta.id) {
-                    return Err(CoreError::Storage(format!(
-                        "timeline already exists: {}",
-                        meta.id
-                    )));
-                }
-                let id = meta.id;
-                let timeline = Timeline::new(meta.clone());
-                store
-                    .timelines
-                    .insert(id, TimelineState::new(timeline.clone(), chain));
-                Ok(timeline)
-            })
-        };
         match meta.fork_point {
             Some((parent, _)) => {
-                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
+                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
+                    store.create_timeline_with_meta_unchecked(meta)
+                })
             }
-            None => create(self),
+            None => self.create_timeline_with_meta_unchecked(meta),
         }
+    }
+
+    fn initialize_timeline_with_key_registry_for_host_transition_unchecked(
+        &mut self,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<(Timeline, bool), CoreError> {
+        let persisted = self.load_key_registry()?;
+        if persisted
+            .as_ref()
+            .is_some_and(|current| current != expected_registry)
+        {
+            return Err(CoreError::Storage(
+                "durable key registry changed during ledger initialization".to_owned(),
+            ));
+        }
+
+        if let Some(timeline) = self
+            .timelines
+            .values()
+            .map(|state| &state.timeline)
+            .find(|timeline| timeline.meta.name == meta.name)
+            .cloned()
+        {
+            if persisted.is_none() {
+                self.save_key_registry_unchecked(expected_registry)?;
+            }
+            return Ok((timeline, false));
+        }
+
+        let timeline = self.create_timeline_with_meta_unchecked(meta)?;
+        if persisted.is_some() {
+            return Ok((timeline, true));
+        }
+        if let Err(error) = self.save_key_registry_unchecked(expected_registry) {
+            return match delete_visible_timeline(self, timeline.id()) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(CoreError::StorageOutcomeUnknown(format!(
+                    "ledger initialization failed ({error}); Timeline rollback also failed ({rollback_error})"
+                ))),
+            };
+        }
+        Ok((timeline, true))
+    }
+
+    fn save_key_registry_unchecked(
+        &mut self,
+        registry: &KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        registry
+            .validate()
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        if let Some(previous) = &self.key_registry {
+            previous
+                .validate_replacement(registry)
+                .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        }
+        self.key_registry = Some(registry.clone());
+        Ok(())
+    }
+}
+
+impl MemoryStore {
+    fn bind_erasure_gate_impl(
+        &mut self,
+        gate: Arc<ErasureContainmentGateV1>,
+    ) -> Result<(), CoreError> {
+        let binding = crate::issue_erasure_topology_store_binding(self.erasure_gate_bound, &gate)?;
+        self.erasure_topology_requires_permit = binding.requires_transition_permit();
+        self.erasure_gate = Some(gate);
+        self.erasure_topology_store_binding = Some(binding);
+        self.erasure_gate_bound = true;
+        Ok(())
     }
 }
 
 impl EventStore for MemoryStore {
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
-        if self.erasure_gate_bound {
-            return Err(CoreError::Storage(
-                "erasure containment gate is already bound".to_owned(),
-            ));
-        }
-        self.erasure_gate = Some(gate);
-        self.erasure_gate_bound = true;
-        Ok(())
+        self.bind_erasure_gate_impl(gate)
     }
 
     fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
@@ -2634,6 +2915,7 @@ impl EventStore for MemoryStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
         self.timelines.insert(
@@ -2641,6 +2923,15 @@ impl EventStore for MemoryStore {
             TimelineState::new(timeline.clone(), self.hasher.genesis_hash()),
         );
         Ok(timeline)
+    }
+
+    fn create_timeline_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        self.create_timeline_with_meta_unchecked(&meta)
     }
 
     fn append(
@@ -2668,16 +2959,21 @@ impl EventStore for MemoryStore {
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
-        registry
-            .validate()
-            .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        if let Some(previous) = &self.key_registry {
-            previous
-                .validate_replacement(registry)
-                .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        }
-        self.key_registry = Some(registry.clone());
-        Ok(())
+        self.save_key_registry_unchecked(registry)
+    }
+
+    fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        meta: &TimelineMeta,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<(Timeline, bool), CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        Self::initialize_timeline_with_key_registry_for_host_transition_unchecked(
+            self,
+            meta,
+            expected_registry,
+        )
     }
 
     fn append_signed_authorized(
@@ -2950,11 +3246,30 @@ impl EventStore for MemoryStore {
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
             store
                 .ensure_generic_timeline_visibility(parent)
-                .and_then(|()| store.fork_visible_timeline(parent, at_seq, name))
+                .and_then(|()| store.fork_timeline_unchecked(parent, at_seq, name))
         })
+    }
+
+    fn fork_for_host_transition_with_meta(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        parent: TimelineId,
+        at_seq: Seq,
+        meta: TimelineMeta,
+    ) -> Result<Timeline, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        if meta.fork_point != Some((parent, at_seq)) {
+            return Err(CoreError::Storage(
+                "preallocated Fork metadata does not match the requested parent and sequence"
+                    .to_owned(),
+            ));
+        }
+        self.ensure_generic_timeline_visibility(parent)
+            .and_then(|()| self.create_timeline_with_meta_unchecked(&meta))
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
@@ -2984,6 +3299,28 @@ impl EventStore for MemoryStore {
         })
     }
 
+    fn get_timeline_for_host_transition(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        id: TimelineId,
+    ) -> Result<Option<Timeline>, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        Ok(self.timelines.get(&id).map(|state| state.timeline.clone()))
+    }
+
+    fn find_timeline_by_name_for_host_transition(
+        &self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        name: &str,
+    ) -> Result<Option<Timeline>, CoreError> {
+        self.ensure_host_transition_permit(permit)?;
+        Ok(self
+            .timelines
+            .values()
+            .find(|state| state.timeline.meta.name.as_deref() == Some(name))
+            .map(|state| state.timeline.clone()))
+    }
+
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
         self.with_erasure_read_fence(id, ErasureProtectedOperationV1::Read, |store| {
             store
@@ -2993,6 +3330,7 @@ impl EventStore for MemoryStore {
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         self.create_timeline_with_meta_with_erasure_fence(&meta)
     }
 
@@ -3041,6 +3379,7 @@ impl EventStore for MemoryStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         delete_timeline(self, id)
     }
 
@@ -3057,6 +3396,7 @@ impl EventStore for MemoryStore {
         meta: TimelineMeta,
         events: &[Event],
     ) -> Result<Timeline, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
         pos_core::store::import_committed_with_rollback(self, meta, events)
     }
 }
@@ -3144,8 +3484,9 @@ mod tests {
         },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
-        KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
-        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
+        ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+        ErasureVerifiedInventoryV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
+        KeyRoleV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
     };
 
     fn authorized_export_timeline(
@@ -3240,6 +3581,293 @@ mod tests {
             .append(timeline.id(), &[make_draft(EntityId::new(), b"denied")])
             .test_err();
         assert!(matches!(error, CoreError::ErasureContainmentUnavailable));
+
+        let mut unbound = MemoryStore::new().without_erasure_gate();
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        let gate = ErasureContainmentGateV1::new_test_open();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(unbound
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("unbound-transition"),
+                )
+                .is_err());
+            Ok((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+    }
+
+    fn cover_memory_host_transition_success(
+        store: &mut MemoryStore,
+        gate: &ErasureContainmentGateV1,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let root = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-root"),
+                )
+                .test_ok();
+            let meta_root = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-root-with-meta"),
+                )
+                .test_ok();
+            assert!(store
+                .get_timeline_for_host_transition(permit, root.id())
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "host-root-with-meta")
+                .test_ok()
+                .is_some());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "missing-host-name")
+                .test_ok()
+                .is_none());
+
+            let other_parent = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-other-parent"),
+                )
+                .test_ok();
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(
+                        other_parent.id(),
+                        Seq::ZERO,
+                        "host-child-wrong-parent",
+                    ),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::from_u64(1),
+                    TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-wrong-sequence"),
+                )
+                .is_err());
+
+            let child_meta = TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child-meta");
+            let child = store
+                .fork_for_host_transition_with_meta(permit, root.id(), Seq::ZERO, child_meta)
+                .test_ok();
+            assert_eq!(child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+            let ordinary_child = store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(root.id(), Seq::ZERO, "host-child"),
+                )
+                .test_ok();
+            assert_eq!(ordinary_child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+
+            let ledger_meta = TimelineMeta::root("host-ledger-existing");
+            let existing = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &ledger_meta,
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(existing.1);
+            let reused = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &ledger_meta,
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(!reused.1);
+            let preallocated = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("host-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert!(preallocated.1);
+            assert_ne!(meta_root.id(), preallocated.0.id());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        gate.install_from_verified_inventory_transition(&mut transition)
+            .test_ok();
+    }
+
+    fn cover_memory_host_transition_rejections(
+        store: &mut MemoryStore,
+        inventory: &ErasureVerifiedInventoryV1,
+    ) {
+        let foreign_gate = ErasureContainmentGateV1::new_test_open();
+        let mut rejected = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("foreign-root"),
+                )
+                .is_err());
+            assert!(store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("foreign-root-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    TimelineMeta::forked_from(TimelineId::new(), Seq::ZERO, "foreign-child",),
+                )
+                .is_err());
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    TimelineId::new(),
+                    Seq::ZERO,
+                    TimelineMeta::root("foreign-child-with-meta"),
+                )
+                .is_err());
+            assert!(store
+                .get_timeline_for_host_transition(permit, TimelineId::new())
+                .is_err());
+            assert!(store
+                .find_timeline_by_name_for_host_transition(permit, "foreign-name")
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("foreign-ledger"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            assert!(store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("foreign-ledger-with-meta"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        foreign_gate
+            .install_from_verified_inventory_transition(&mut rejected)
+            .test_ok();
+    }
+
+    fn cover_memory_mismatched_registry(inventory: &ErasureVerifiedInventoryV1) {
+        let mut mismatch = new_store();
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("host-transition", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([8; 32]),
+                Some(PublicKey::from_bytes([9; 32])),
+            ))
+            .test_ok();
+        mismatch.save_key_registry(&persisted).test_ok();
+        let mismatch_gate = Arc::clone(
+            mismatch
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing mismatch gate"))),
+        );
+        let mut mismatch_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(mismatch
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("mismatched-host-ledger"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        mismatch_gate
+            .install_from_verified_inventory_transition(&mut mismatch_transition)
+            .test_ok();
+    }
+
+    fn cover_memory_invalid_loaded_registry(inventory: &ErasureVerifiedInventoryV1) {
+        let mut invalid_loaded = new_store();
+        invalid_loaded.key_registry = Some(super::coverage_entrypoints::invalid_registry());
+        let invalid_loaded_gate =
+            Arc::clone(invalid_loaded.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing invalid registry gate"))
+            }));
+        let mut invalid_loaded_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            assert!(invalid_loaded
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("invalid-loaded-host-ledger"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .is_err());
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        invalid_loaded_gate
+            .install_from_verified_inventory_transition(&mut invalid_loaded_transition)
+            .test_ok();
+    }
+
+    fn cover_memory_rollback_failure(inventory: &ErasureVerifiedInventoryV1) {
+        let mut rollback = new_store();
+        let rollback_gate = Arc::clone(
+            rollback
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing rollback gate"))),
+        );
+        let mut rollback_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            fail_next_visible_delete_for_test();
+            let error = rollback
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("rollback-host-ledger"),
+                    &super::coverage_entrypoints::invalid_registry(),
+                )
+                .test_err();
+            assert!(error.to_string().contains("rollback also failed"));
+            Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
+        };
+        rollback_gate
+            .install_from_verified_inventory_transition(&mut rollback_transition)
+            .test_ok();
+    }
+
+    #[test]
+    fn host_transition_store_seams_cover_success_and_rejection_paths() {
+        let mut store = new_store();
+        let gate =
+            Arc::clone(store.erasure_gate.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("missing memory test gate"))
+            }));
+        let snapshot =
+            ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), 1).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(1).test_ok();
+        cover_memory_host_transition_success(&mut store, &gate, &inventory);
+        cover_memory_host_transition_rejections(&mut store, &inventory);
+        let preissued_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        preissued_gate.issue_topology_store_binding().test_ok();
+        assert!(matches!(
+            MemoryStore::new().bind_erasure_gate(preissued_gate),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+        cover_memory_mismatched_registry(&inventory);
+        cover_memory_invalid_loaded_registry(&inventory);
+        cover_memory_rollback_failure(&inventory);
     }
 
     #[test]
@@ -6068,6 +6696,82 @@ mod tests {
     }
 
     #[test]
+    fn memory_ledger_initialization_covers_registry_and_rollback_boundaries() {
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+
+        let mut missing_parent = new_store();
+        let orphan = TimelineMeta::forked_from(TimelineId::new(), Seq::ZERO, "orphan");
+        assert!(missing_parent
+            .initialize_timeline_with_key_registry_for_host_transition_unchecked(
+                &orphan,
+                &KeyRegistryStateV1::new(),
+            )
+            .is_err());
+
+        let mut mismatch = new_store();
+        mismatch.save_key_registry(&persisted).test_ok();
+        assert!(mismatch
+            .initialize_timeline_with_key_registry("mismatch", &KeyRegistryStateV1::new(),)
+            .is_err());
+        assert!(mismatch.list_timelines().test_ok().is_empty());
+
+        let mut existing = new_store();
+        let existing_timeline = existing.create_timeline("existing").test_ok();
+        let reused = existing
+            .initialize_timeline_with_key_registry("existing", &KeyRegistryStateV1::new())
+            .test_ok();
+        assert_eq!(reused.id(), existing_timeline.id());
+        assert_eq!(
+            existing.load_key_registry().test_ok(),
+            Some(KeyRegistryStateV1::new())
+        );
+
+        let mut existing_invalid = new_store();
+        existing_invalid
+            .create_timeline("existing-invalid")
+            .test_ok();
+        assert!(existing_invalid
+            .initialize_timeline_with_key_registry(
+                "existing-invalid",
+                &super::coverage_entrypoints::invalid_registry(),
+            )
+            .is_err());
+
+        let mut already_registered = new_store();
+        already_registered.save_key_registry(&persisted).test_ok();
+        let created = already_registered
+            .initialize_timeline_with_key_registry("new-ledger", &persisted)
+            .test_ok();
+        assert_eq!(created.meta.name.as_deref(), Some("new-ledger"));
+
+        let mut rollback = new_store();
+        assert!(rollback
+            .initialize_timeline_with_key_registry(
+                "invalid-registry",
+                &super::coverage_entrypoints::invalid_registry(),
+            )
+            .is_err());
+        assert!(rollback.list_timelines().test_ok().is_empty());
+
+        let mut rollback_failure = new_store();
+        fail_next_visible_delete_for_test();
+        let error = rollback_failure
+            .initialize_timeline_with_key_registry(
+                "rollback-failure",
+                &super::coverage_entrypoints::invalid_registry(),
+            )
+            .test_err();
+        assert!(error.to_string().contains("rollback also failed"));
+    }
+
+    #[test]
     fn memory_effect_read_rejects_a_mismatched_stored_digest() {
         let mut store = new_store();
         let manifest = ErasureReferenceV1::from_digest([1; 32]);
@@ -6222,8 +6926,8 @@ mod coverage_entrypoints {
     use super::tests::new_store;
     use super::*;
     use pos_core::{
-        ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey,
-        ERASURE_MAX_INVENTORY_TIMELINES,
+        ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+        KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey, ERASURE_MAX_INVENTORY_TIMELINES,
     };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -6258,6 +6962,51 @@ mod coverage_entrypoints {
         )
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_recovery_receipt_digest(
+        operation: ErasureReferenceV1,
+        binding: ErasureReferenceV1,
+        expected_generation: ErasureReferenceV1,
+        child_scope: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
+        child: &TimelineMeta,
+    ) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-fork-recovery/v1");
+        hasher.update(&operation.digest());
+        hasher.update(&binding.digest());
+        hasher.update(&expected_generation.digest());
+        hasher.update(&child_scope.digest());
+        hasher.update(&successor_generation.digest());
+        hasher.update(&child.id.inner().to_bytes());
+        hasher.update(b"historical");
+        match &child.name {
+            Some(name) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(name.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        match child.owner {
+            Some(owner) => {
+                hasher.update(&[1]);
+                hasher.update(&owner.inner().to_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        let (parent, at_seq) = child
+            .fork_point
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fork point")));
+        hasher.update(&parent.inner().to_bytes());
+        hasher.update(&at_seq.as_u64().to_be_bytes());
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    }
+
     fn identity(key: u8, scope: u8) -> AppendIdentity {
         AppendIdentity::new(
             AppendDedupKey::from_keyed_hash([key; 32]),
@@ -6265,8 +7014,426 @@ mod coverage_entrypoints {
         )
     }
 
+    fn memory_recovery_reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    fn memory_recovery_proof_cbor(
+        extension: u8,
+        object_reference: u8,
+        manifest_bytes: &[u8],
+        object_bytes: &[u8],
+        state_bytes: &[u8],
+        effect_reference: &ErasureReferenceV1,
+        effect_bytes: &[u8],
+    ) -> Vec<u8> {
+        let reference = memory_recovery_reference;
+        let digest_value =
+            |value| ciborium::value::Value::Bytes(reference(value).digest().to_vec());
+        let proof_value = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
+            ciborium::value::Value::Integer(1.into()),
+            digest_value(1),
+            digest_value(2),
+            digest_value(3),
+            digest_value(4),
+            digest_value(5),
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                digest_value(1),
+                digest_value(3),
+                digest_value(4),
+                digest_value(extension),
+                digest_value(7),
+                digest_value(8),
+                digest_value(9),
+                ciborium::value::Value::Bytes(
+                    ErasureForkRecoveryProofV1::bytes_digest(manifest_bytes)
+                        .digest()
+                        .to_vec(),
+                ),
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                    digest_value(object_reference),
+                    ciborium::value::Value::Bytes(
+                        ErasureForkRecoveryProofV1::bytes_digest(object_bytes)
+                            .digest()
+                            .to_vec(),
+                    ),
+                ])]),
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                    digest_value(11),
+                    ciborium::value::Value::Bytes(
+                        ErasureForkRecoveryProofV1::bytes_digest(state_bytes)
+                            .digest()
+                            .to_vec(),
+                    ),
+                ])]),
+                ciborium::value::Value::Array(vec![
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(0.into()),
+                        ciborium::value::Value::Integer(0.into()),
+                        digest_value(15),
+                    ]),
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(1.into()),
+                        ciborium::value::Value::Integer(1.into()),
+                        digest_value(16),
+                    ]),
+                    ciborium::value::Value::Array(vec![
+                        ciborium::value::Value::Integer(2.into()),
+                        ciborium::value::Value::Integer(2.into()),
+                        digest_value(17),
+                    ]),
+                ]),
+                ciborium::value::Value::Bytes(effect_reference.digest().to_vec()),
+                ciborium::value::Value::Bytes(
+                    ErasureForkRecoveryProofV1::bytes_digest(effect_bytes)
+                        .digest()
+                        .to_vec(),
+                ),
+                digest_value(13),
+                digest_value(14),
+            ])]),
+        ]);
+        let mut encoded = Vec::new();
+        ok(ciborium::into_writer(&proof_value, &mut encoded));
+        encoded
+    }
+
+    fn memory_recovery_proof_fixture(
+        extension: u8,
+        object_reference: u8,
+    ) -> (MemoryStore, ErasureForkRecoveryProofV1) {
+        let manifest_bytes = vec![0xA1, 0xB2];
+        let object_bytes = vec![0xC3, 0xD4];
+        let state_bytes = vec![0xE5, 0xF6];
+        let reference = memory_recovery_reference;
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: reference(13),
+        };
+        let effect_reference = effect.identity();
+        let effect_bytes = ok(effect.to_canonical_cbor());
+        let encoded = memory_recovery_proof_cbor(
+            extension,
+            object_reference,
+            &manifest_bytes,
+            &object_bytes,
+            &state_bytes,
+            &effect_reference,
+            &effect_bytes,
+        );
+        let proof = ok(ErasureForkRecoveryProofV1::from_canonical_cbor(&encoded));
+
+        let mut store = new_store();
+        store
+            .erasure_records
+            .insert(reference(7), (reference(9), manifest_bytes));
+        store
+            .erasure_evidence
+            .insert(reference(object_reference), object_bytes);
+        store.erasure_states.insert(reference(11), state_bytes);
+        store
+            .erasure_attempt_pages
+            .insert((reference(7), 0), reference(15));
+        store
+            .erasure_scope_nodes
+            .insert((reference(7), 1), reference(16));
+        store
+            .erasure_administrative_resolutions
+            .insert((reference(7), 2), reference(17));
+        store
+            .erasure_effects
+            .insert(reference(9), (effect_reference, effect_bytes));
+        store
+            .erasure_effect_subjects
+            .insert(reference(13), reference(9));
+        (store, proof)
+    }
+
+    fn assert_memory_recovery_proof_error(
+        extension: u8,
+        object_reference: u8,
+        mutate: impl FnOnce(&mut MemoryStore),
+    ) {
+        assert_memory_recovery_proof_error_kind(
+            ErasureErrorV1::ProvenanceMissing,
+            extension,
+            object_reference,
+            mutate,
+        );
+    }
+
+    fn assert_memory_recovery_proof_error_kind(
+        expected_error: ErasureErrorV1,
+        extension: u8,
+        object_reference: u8,
+        mutate: impl FnOnce(&mut MemoryStore),
+    ) {
+        let (mut store, proof) = memory_recovery_proof_fixture(extension, object_reference);
+        mutate(&mut store);
+        assert_eq!(
+            store.memory_fork_recovery_proof_is_exact(&proof),
+            Err(expected_error)
+        );
+    }
+
+    fn assert_memory_recovery_proof_survives_manifest_change(
+        mutate: impl FnOnce(&mut MemoryStore),
+    ) {
+        let (mut store, proof) = memory_recovery_proof_fixture(10, 10);
+        mutate(&mut store);
+        assert_eq!(store.memory_fork_recovery_proof_is_exact(&proof), Ok(()));
+    }
+
+    fn memory_recovery_proof_ignores_mutable_manifest_head() {
+        assert_memory_recovery_proof_survives_manifest_change(|store| {
+            store
+                .erasure_records
+                .remove(&ErasureReferenceV1::from_digest([7; 32]));
+        });
+        assert_memory_recovery_proof_survives_manifest_change(|store| {
+            store.erasure_records.insert(
+                ErasureReferenceV1::from_digest([7; 32]),
+                (ErasureReferenceV1::from_digest([18; 32]), vec![0xA1, 0xB2]),
+            );
+        });
+    }
+
+    fn memory_recovery_proof_checks_objects_and_state() {
+        assert_memory_recovery_proof_error(99, 10, |_| {});
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_evidence
+                .remove(&ErasureReferenceV1::from_digest([10; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_evidence
+                .insert(ErasureReferenceV1::from_digest([10; 32]), vec![0xBA, 0xDB]);
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_states
+                .remove(&ErasureReferenceV1::from_digest([11; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_states
+                .insert(ErasureReferenceV1::from_digest([11; 32]), vec![0xBA, 0xDB]);
+        });
+    }
+
+    fn memory_recovery_proof_checks_indexes_and_effects() {
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_attempt_pages
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 0));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_attempt_pages.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 0),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_scope_nodes
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 1));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_scope_nodes.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 1),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_administrative_resolutions
+                .remove(&(ErasureReferenceV1::from_digest([7; 32]), 2));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_administrative_resolutions.insert(
+                (ErasureReferenceV1::from_digest([7; 32]), 2),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_effects
+                .remove(&ErasureReferenceV1::from_digest([9; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            let key = ErasureReferenceV1::from_digest([9; 32]);
+            let (_, bytes) = store.erasure_effects[&key].clone();
+            store
+                .erasure_effects
+                .insert(key, (ErasureReferenceV1::from_digest([18; 32]), bytes));
+        });
+        assert_memory_recovery_proof_error_kind(ErasureErrorV1::InvalidEncoding, 10, 10, |store| {
+            store.erasure_effects.insert(
+                ErasureReferenceV1::from_digest([9; 32]),
+                (ErasureReferenceV1::from_digest([18; 32]), vec![0x17, 0x28]),
+            );
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store
+                .erasure_effect_subjects
+                .remove(&ErasureReferenceV1::from_digest([13; 32]));
+        });
+        assert_memory_recovery_proof_error(10, 10, |store| {
+            store.erasure_effect_subjects.insert(
+                ErasureReferenceV1::from_digest([13; 32]),
+                ErasureReferenceV1::from_digest([18; 32]),
+            );
+        });
+    }
+
+    #[test]
+    fn memory_fork_recovery_proof_checks_every_persisted_side() {
+        let (store, proof) = memory_recovery_proof_fixture(10, 10);
+        assert_eq!(store.memory_fork_recovery_proof_is_exact(&proof), Ok(()));
+        memory_recovery_proof_ignores_mutable_manifest_head();
+        memory_recovery_proof_checks_objects_and_state();
+        memory_recovery_proof_checks_indexes_and_effects();
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn invalid_registry() -> KeyRegistryStateV1 {
+    fn memory_fork_recovery_rejects_missing_or_mismatched_proof() {
+        let mut store = new_store();
+        let parent = ok(store.create_timeline("recovery-proof-parent"));
+        let snapshot =
+            ok(store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS));
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = ok(query.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS));
+        let operation = ErasureReferenceV1::from_digest([246; 32]);
+        let first_input = pos_core::ErasureForkAdmissionInputV1 {
+            operation,
+            expected_inventory_generation: inventory.generation(),
+            child_scope: ErasureReferenceV1::from_digest([247; 32]),
+            child: TimelineMeta {
+                id: TimelineId::new(),
+                mode: pos_core::timeline::TimelineMode::Historical,
+                name: Some("recovery-proof-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent.id(), Seq::ZERO)),
+            },
+        };
+        let second_input = pos_core::ErasureForkAdmissionInputV1 {
+            child_scope: ErasureReferenceV1::from_digest([248; 32]),
+            child: TimelineMeta {
+                id: TimelineId::new(),
+                mode: pos_core::timeline::TimelineMode::Historical,
+                name: Some("different-recovery-proof-child".to_owned()),
+                owner: None,
+                fork_point: Some((parent.id(), Seq::ZERO)),
+            },
+            ..first_input
+        };
+        let first = ok(inventory
+            .clone()
+            .prepare_fork_batch(first_input, Vec::new()));
+        let stale_inventory = inventory.clone();
+        let second = ok(inventory.prepare_fork_batch(second_input, Vec::new()));
+        let expected = ok(first.recovery_result());
+        let proof = ok(first.recovery_proof());
+        let gate = Arc::clone(
+            store
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing recovery gate"))),
+        );
+        let candidate = first.successor_inventory().clone();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let outcome = ok(store.commit_fork_admission(permit, first.clone()));
+            Ok::<_, ErasureErrorV1>((candidate.clone(), outcome))
+        };
+        ok(gate.install_from_verified_inventory_transition(&mut transition));
+
+        assert_eq!(
+            ok(store.recover_fork_admission(operation, &candidate)),
+            Some(expected.clone())
+        );
+        store.erasure_fork_recovery_proofs.remove(&operation);
+        assert_eq!(
+            store.recover_fork_admission(operation, &stale_inventory),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store
+            .erasure_fork_recovery_proofs
+            .insert(operation, ok(second.recovery_proof()));
+        assert_eq!(
+            store.recover_fork_admission(operation, &stale_inventory),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store.erasure_fork_recovery_proofs.insert(operation, proof);
+        assert_eq!(
+            store.recover_fork_admission(operation, &stale_inventory),
+            Err(ErasureErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            ok(store.recover_fork_admission(operation, &candidate)),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_fork_recovery_rejects_proof_without_receipt() {
+        let mut store = new_store();
+        let parent = ok(store.create_timeline("orphan-proof-parent"));
+        let snapshot =
+            ok(store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS));
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = ok(query.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS));
+        let operation = ErasureReferenceV1::from_digest([249; 32]);
+        let admission = ok(inventory.clone().prepare_fork_batch(
+            pos_core::ErasureForkAdmissionInputV1 {
+                operation,
+                expected_inventory_generation: inventory.generation(),
+                child_scope: ErasureReferenceV1::from_digest([250; 32]),
+                child: TimelineMeta {
+                    id: TimelineId::new(),
+                    mode: pos_core::timeline::TimelineMode::Historical,
+                    name: Some("orphan-proof-child".to_owned()),
+                    owner: None,
+                    fork_point: Some((parent.id(), Seq::ZERO)),
+                },
+            },
+            Vec::new(),
+        ));
+        let proof = ok(admission.recovery_proof());
+        let expected = ok(admission.recovery_result());
+        let gate = Arc::clone(
+            store
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing recovery gate"))),
+        );
+        let successor = admission.successor_inventory().clone();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let outcome = ok(store.commit_fork_admission(permit, admission.clone()));
+            Ok::<_, ErasureErrorV1>((successor.clone(), outcome))
+        };
+        ok(gate.install_from_verified_inventory_transition(&mut transition));
+
+        assert_eq!(
+            ok(store.recover_fork_admission(operation, &successor)),
+            Some(expected)
+        );
+        store.erasure_fork_admissions.remove(&operation);
+        store.erasure_fork_recovery_proofs.insert(operation, proof);
+        assert_eq!(
+            store.recover_fork_admission(operation, &successor),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            store.recover_fork_admission(ErasureReferenceV1::from_digest([251; 32]), &successor),
+            Ok(None)
+        );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(super) fn invalid_registry() -> KeyRegistryStateV1 {
         fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
             match value {
                 ciborium::value::Value::Integer(integer)
@@ -6394,6 +7561,11 @@ mod coverage_entrypoints {
 
     #[test]
     fn memory_error_and_fork_boundaries_are_instrumented() {
+        memory_error_and_fork_boundaries();
+        memory_visibility_boundaries();
+    }
+
+    fn memory_error_and_fork_boundaries() {
         let mut store = new_store();
         let root = ok(store.create_timeline("coverage-root"));
         let first = ok(store.append_or_duplicate(
@@ -6413,9 +7585,55 @@ mod coverage_entrypoints {
         expect_err(store.revoke_owntracks_enrollment());
         expect_err(store.logical_head(pos_core::TimelineId::new()));
         expect_err(store.fork(root.id(), Seq::from_u64(2), "beyond"));
+        fail_next_chain_hash_at_for_test();
+        expect_err(store.fork(root.id(), Seq::ZERO, "chain-hash-failure"));
         let child = ok(store.fork(root.id(), Seq::ZERO, "child"));
         let _ = ok(store.compute_chain_hash_at(root.id(), Seq::ZERO));
         expect_err(store.compute_chain_hash_at(child.id(), Seq::from_u64(1)));
+
+        let mut recovery_store = new_store();
+        let recovery_parent = ok(recovery_store.create_timeline("recovery-parent"));
+        let recovery_child =
+            TimelineMeta::forked_from(recovery_parent.id(), Seq::ZERO, "recovery-child");
+        let recovery_operation = ErasureReferenceV1::from_digest([241; 32]);
+        let recovery_binding = ErasureReferenceV1::from_digest([242; 32]);
+        let recovery_generation = ErasureReferenceV1::from_digest([243; 32]);
+        let recovery_scope = ErasureReferenceV1::from_digest([244; 32]);
+        let recovery_successor = ErasureReferenceV1::from_digest([245; 32]);
+        let recovery_receipt = fork_recovery_receipt_digest(
+            recovery_operation,
+            recovery_binding,
+            recovery_generation,
+            recovery_scope,
+            recovery_successor,
+            &recovery_child,
+        );
+        recovery_store.erasure_fork_admissions.insert(
+            recovery_operation,
+            ok(ErasureForkRecoveryV1::from_persisted(
+                recovery_operation,
+                recovery_binding,
+                recovery_generation,
+                recovery_scope,
+                recovery_successor,
+                recovery_child,
+                recovery_receipt,
+            )),
+        );
+        let recovery_snapshot =
+            ok(recovery_store.complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS));
+        let mut recovery_query = ErasureVerifiedEmptyInventoryQueryV1::new(recovery_snapshot);
+        let recovery_inventory =
+            ok(recovery_query.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS));
+        fail_next_chain_hash_at_for_test();
+        assert_eq!(
+            ErasureForkPersistencePortV1::recover_fork_admission(
+                &mut recovery_store,
+                recovery_operation,
+                &recovery_inventory,
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
         store.test_corrupt(TestCorruption::ForkParent {
             timeline: child.id(),
             parent: pos_core::TimelineId::new(),
@@ -6437,7 +7655,10 @@ mod coverage_entrypoints {
             None,
         ));
         expect_err(store.append_visible(TimelineId::new(), &[draft(b"missing-visible")]));
+    }
 
+    fn memory_visibility_boundaries() {
+        let mut store = new_store();
         let protected = ok(store.create_timeline("coverage-protected"));
         ok(
             store.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(

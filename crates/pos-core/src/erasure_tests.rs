@@ -176,6 +176,7 @@ fn scope_with_members(
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members,
+        scope_timeline_ids: Vec::new(),
         target_closure: reference(8),
         lineage_rule: Some(reference(9)),
     })
@@ -326,6 +327,113 @@ roundtrip!(
     }
 );
 roundtrip!(scope_codec_roundtrips, ErasureScopeCommitmentV1, scope());
+
+#[test]
+fn scope_commitment_binds_canonical_initial_timeline_ids() -> Result<(), ErasureErrorV1> {
+    let first = TimelineId::from_ulid(ulid::Ulid::from(1_u128));
+    let second = TimelineId::from_ulid(ulid::Ulid::from(2_u128));
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: reference(1),
+        scope_members: vec![reference(7)],
+        scope_timeline_ids: vec![first, second],
+        target_closure: reference(8),
+        lineage_rule: Some(reference(9)),
+    })?;
+    let Value::Array(scope_fields) = decode_value(&scope.to_canonical_cbor()?)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(scope_fields.len(), 6);
+    let Value::Array(affected_scope) = &scope_fields[3] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(affected_scope.len(), 3);
+    assert_eq!(scope.scope_timeline_ids(), &[first, second]);
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&scope.to_canonical_cbor()?)?,
+        scope
+    );
+
+    let mut malformed = decode_value(&scope.to_canonical_cbor()?)?;
+    let Value::Array(fields) = &mut malformed else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[3] = Value::Array(vec![Value::Array(vec![
+        Value::Integer(2_u64.into()),
+        Value::Null,
+    ])]);
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&encode_value(&malformed)?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let mut reordered = decode_value(&scope.to_canonical_cbor()?)?;
+    let Value::Array(fields) = &mut reordered else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[3] = Value::Array(vec![
+        Value::Array(vec![
+            Value::Integer(1_u64.into()),
+            Value::Bytes(first.inner().to_bytes().to_vec()),
+        ]),
+        Value::Array(vec![
+            Value::Integer(0_u64.into()),
+            Value::Bytes(reference(7).digest().to_vec()),
+        ]),
+    ]);
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&encode_value(&reordered)?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    for scope_timeline_ids in [vec![second, first], vec![first, first]] {
+        assert_eq!(
+            ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+                request: reference(1),
+                scope_members: vec![reference(7)],
+                scope_timeline_ids,
+                target_closure: reference(8),
+                lineage_rule: Some(reference(9)),
+            }),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    assert_eq!(
+        ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: reference(1),
+            scope_members: vec![reference(7)],
+            scope_timeline_ids: vec![first; ERASURE_MAX_INVENTORY_TIMELINES + 1],
+            target_closure: reference(8),
+            lineage_rule: Some(reference(9)),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let scope_members = (0..ERASURE_MAX_SCOPE_EXTENSIONS)
+        .map(|index| {
+            let mut digest = [0; 32];
+            digest[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_be_bytes());
+            ErasureReferenceV1::from_digest(digest)
+        })
+        .collect();
+    let scope_timeline_ids = (1..=ERASURE_MAX_INVENTORY_TIMELINES - ERASURE_MAX_SCOPE_EXTENSIONS
+        + 1)
+        .map(|index| {
+            TimelineId::from_ulid(ulid::Ulid::from(u128::try_from(index).unwrap_or(u128::MAX)))
+        })
+        .collect();
+    assert_eq!(
+        ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request: reference(1),
+            scope_members,
+            scope_timeline_ids,
+            target_closure: reference(8),
+            lineage_rule: Some(reference(9)),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
 roundtrip!(
     freeze_provenance_codec_roundtrips,
     ErasureFreezeProvenanceV1,
@@ -379,6 +487,7 @@ roundtrip!(scope_extension_codec_roundtrips, ErasureScopeExtensionV1, {
         request: reference(1),
         scope_commitment: reference(2),
         fork: reference(3),
+        child_timeline: TimelineId::new(),
         lineage_rule: reference(4),
         predecessor_extension: None,
         admission_provenance: reference(5),
@@ -568,10 +677,19 @@ fn freeze_and_scope_codecs_reject_header_and_length_mutations() -> Result<(), Er
         request: reference(1),
         scope_commitment: reference(2),
         fork: reference(3),
+        child_timeline: TimelineId::new(),
         lineage_rule: reference(4),
         predecessor_extension: None,
         admission_provenance: reference(5),
     })?;
+    let Value::Array(extension_fields) = decode_value(&extension.to_canonical_cbor()?)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(extension_fields.len(), 8);
+    let Value::Array(fork_scope_reference) = &extension_fields[4] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    assert_eq!(fork_scope_reference.len(), 2);
     codec_shape_guards!(
         extension.to_canonical_cbor()?,
         ErasureScopeExtensionV1::from_canonical_cbor
@@ -806,6 +924,25 @@ fn verified_state_for_containment(
     ))
 }
 
+fn collect_fork_retry_scope_requirements(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<Vec<ErasureForkRetryScopeRequirementV1>, ErasureErrorV1> {
+    collect_fork_retry_scope_requirements_for_scope(inventory, parent, child, reference(35))
+}
+
+fn collect_fork_retry_scope_requirements_for_scope(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+    child_scope: ErasureReferenceV1,
+) -> Result<Vec<ErasureForkRetryScopeRequirementV1>, ErasureErrorV1> {
+    inventory
+        .fork_retry_scope_requirements(parent, child, child_scope)?
+        .collect()
+}
+
 #[test]
 fn containment_blocks_only_effective_frozen_scope() -> Result<(), ErasureErrorV1> {
     let frozen = verified_state_for_containment(
@@ -848,6 +985,7 @@ fn containment_includes_admitted_future_fork_extensions() -> Result<(), ErasureE
         request: reference(1),
         scope_commitment: scope()?.reference(),
         fork: reference(33),
+        child_timeline: TimelineId::new(),
         lineage_rule: reference(9),
         predecessor_extension: None,
         admission_provenance: reference(34),
@@ -860,6 +998,367 @@ fn containment_includes_admitted_future_fork_extensions() -> Result<(), ErasureE
     assert_eq!(
         state.permit_protected_operation(reference(33)),
         Err(ErasureContainmentErrorV1::AccessFrozen)
+    );
+    Ok(())
+}
+
+#[test]
+fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
+) -> Result<(), ErasureErrorV1> {
+    let parent = TimelineId::new();
+    let child = TimelineId::new();
+    let first_child = TimelineId::new();
+    let scope = scope()?;
+    let first_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: scope.reference(),
+        fork: reference(33),
+        child_timeline: first_child,
+        lineage_rule: reference(9),
+        predecessor_extension: None,
+        admission_provenance: reference(34),
+    })?;
+    let second_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: scope.reference(),
+        fork: reference(35),
+        child_timeline: child,
+        lineage_rule: reference(9),
+        predecessor_extension: Some(first_extension.reference()),
+        admission_provenance: reference(36),
+    })?;
+    let first_fork = first_extension.fork();
+    let second_fork = second_extension.fork();
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope.clone()),
+        vec![first_extension, second_extension],
+    )?;
+    let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+        vec![(
+            state,
+            ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                reference(5),
+                vec![
+                    (parent, reference(7)),
+                    (first_child, first_fork),
+                    (child, second_fork),
+                ],
+                Vec::new(),
+            ),
+        )],
+        vec![parent, first_child, child],
+        4,
+    )?;
+
+    let requirements = collect_fork_retry_scope_requirements(&inventory, parent, child)?;
+    assert_eq!(requirements.len(), 1);
+    assert_eq!(requirements[0].requirement().request(), reference(1));
+    assert_eq!(
+        requirements[0].requirement().scope_commitment(),
+        scope.reference()
+    );
+    assert_eq!(
+        requirements[0].requirement().predecessor_extension(),
+        Some(first_extension.reference())
+    );
+    assert_eq!(requirements[0].extension(), &second_extension);
+
+    assert_directly_included_child_does_not_add_retry_requirement(
+        scope,
+        first_extension,
+        second_extension,
+        parent,
+        child,
+    )?;
+
+    let excluded_state =
+        verified_state_for_containment(ErasureLifecycleV1::Submitted, None, Vec::new())?;
+    let excluded = ErasureVerifiedInventoryV1::from_verified_recovery(
+        vec![(
+            excluded_state,
+            ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                reference(5),
+                Vec::new(),
+                vec![parent, child],
+            ),
+        )],
+        vec![parent, child],
+        4,
+    )?;
+    assert!(collect_fork_retry_scope_requirements(&excluded, parent, child)?.is_empty());
+
+    assert_fork_retry_rejects_missing_classifications(&inventory, parent, child);
+    assert_fork_retry_rejects_no_lineage(parent, child)?;
+    assert_fork_retry_rejects_excluded_parent_with_included_child(&inventory, parent, child)?;
+    assert_fork_retry_rejects_parent_corruption(&inventory, parent, child)?;
+    assert_fork_retry_rejects_child_corruption(&inventory, parent, child)?;
+    assert_fork_retry_rejects_included_excluded_child(excluded, parent, child)?;
+
+    assert_empty_fork_batch_proof_round_trip(parent)?;
+    Ok(())
+}
+
+fn assert_directly_included_child_does_not_add_retry_requirement(
+    scope: ErasureScopeCommitmentV1,
+    first_extension: ErasureScopeExtensionV1,
+    second_extension: ErasureScopeExtensionV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    // A later request can include this historical child directly and then
+    // admit another Fork whose child-scope reference matches the old Fork.
+    // That later extension is not part of the old operation's proof.
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope),
+        vec![first_extension, second_extension],
+    )?;
+    let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+        vec![(
+            state,
+            ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                reference(5),
+                vec![(parent, reference(7)), (child, reference(7))],
+                Vec::new(),
+            ),
+        )],
+        vec![parent, child],
+        4,
+    )?;
+    assert!(collect_fork_retry_scope_requirements_for_scope(
+        &inventory,
+        parent,
+        child,
+        second_extension.fork(),
+    )?
+    .is_empty());
+    Ok(())
+}
+
+fn assert_empty_fork_batch_proof_round_trip(parent: TimelineId) -> Result<(), ErasureErrorV1> {
+    let empty = ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), vec![parent], 4)?;
+    let empty_generation = empty.generation();
+    let child_without_name = crate::TimelineMeta {
+        id: TimelineId::new(),
+        mode: crate::TimelineMode::Historical,
+        name: None,
+        owner: None,
+        fork_point: Some((parent, crate::Seq::ZERO)),
+    };
+    let batch = empty.prepare_fork_batch(
+        ErasureForkAdmissionInputV1 {
+            operation: reference(41),
+            expected_inventory_generation: empty_generation,
+            child_scope: reference(42),
+            child: child_without_name,
+        },
+        Vec::new(),
+    )?;
+    assert!(batch.recovery_result().is_ok());
+    let proof = batch.recovery_proof()?;
+    let proof_bytes = proof.to_canonical_cbor()?;
+    assert_eq!(
+        ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes)?,
+        proof
+    );
+    assert_eq!(proof.validate(&batch.recovery_result()?), Ok(()));
+    assert_eq!(
+        proof.content_digest()?,
+        ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes)?.content_digest()?
+    );
+    assert_eq!(
+        ErasureForkRecoveryProofV1::bytes_digest(b"proof"),
+        ErasureReferenceV1::from_digest(*blake3::hash(b"proof").as_bytes())
+    );
+    Ok(())
+}
+
+fn assert_fork_retry_rejects_missing_classifications(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) {
+    assert_eq!(
+        collect_fork_retry_scope_requirements(inventory, TimelineId::new(), child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        collect_fork_retry_scope_requirements(inventory, parent, TimelineId::new()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+}
+
+fn assert_fork_retry_rejects_no_lineage(
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: reference(1),
+        scope_members: vec![reference(7)],
+        scope_timeline_ids: Vec::new(),
+        target_closure: reference(8),
+        lineage_rule: None,
+    })?;
+    let state = verified_state_for_containment(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(scope.clone()),
+        Vec::new(),
+    )?;
+    let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+        vec![(
+            state,
+            ErasureVerifiedTopologyProofV1::from_verified_recovery(
+                reference(5),
+                Vec::new(),
+                vec![parent, child],
+            ),
+        )],
+        vec![parent, child],
+        4,
+    )?;
+    assert!(collect_fork_retry_scope_requirements(&inventory, parent, child)?.is_empty());
+    let mut child_included = inventory;
+    child_included
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Included(scope.reference());
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&child_included, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+fn assert_fork_retry_rejects_excluded_parent_with_included_child(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    let mut parent_excluded = inventory.clone();
+    parent_excluded
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == parent)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Excluded;
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&parent_excluded, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    parent_excluded
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Excluded;
+    assert!(collect_fork_retry_scope_requirements(&parent_excluded, parent, child)?.is_empty());
+    Ok(())
+}
+
+fn assert_fork_retry_rejects_parent_corruption(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    let mut incomplete_classifications = inventory.clone();
+    incomplete_classifications
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == parent)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .1
+        .clear();
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&incomplete_classifications, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut mismatched_parent = inventory.clone();
+    mismatched_parent
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == parent)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .request = reference(37);
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&mismatched_parent, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut missing_state_scope = inventory.clone();
+    missing_state_scope.members[0].0.scope = None;
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&missing_state_scope, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+fn assert_fork_retry_rejects_child_corruption(
+    inventory: &ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    let mut missing_child_request = inventory.clone();
+    missing_child_request
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .request = reference(38);
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&missing_child_request, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut excluded_child = inventory.clone();
+    excluded_child
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Excluded;
+    assert!(collect_fork_retry_scope_requirements(&excluded_child, parent, child)?.is_empty());
+
+    let mut wrong_extension = inventory.clone();
+    wrong_extension
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Included(reference(40));
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&wrong_extension, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+fn assert_fork_retry_rejects_included_excluded_child(
+    mut excluded: ErasureVerifiedInventoryV1,
+    parent: TimelineId,
+    child: TimelineId,
+) -> Result<(), ErasureErrorV1> {
+    excluded
+        .classifications
+        .iter_mut()
+        .find(|(timeline, _)| *timeline == child)
+        .and_then(|(_, classifications)| classifications.first_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .membership = ErasureInventoryMembershipV1::Included(reference(39));
+    assert_eq!(
+        collect_fork_retry_scope_requirements(&excluded, parent, child),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
@@ -1027,6 +1526,10 @@ fn containment_gate_allows_nested_store_fences() {
     assert_eq!(
         gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
             assert_eq!(
+                gate.authorize(timeline, ErasureProtectedOperationV1::Read),
+                Ok(())
+            );
+            assert_eq!(
                 gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
                     invoked = true;
                 }),
@@ -1170,6 +1673,15 @@ fn containment_gate_covers_public_error_codes_and_safe_scope_paths() -> Result<(
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
     Ok(())
+}
+
+#[test]
+fn stale_generation_error_has_a_stable_round_trip_code() {
+    assert_eq!(ErasureErrorV1::StaleGeneration.code(), 16);
+    assert_eq!(
+        ErasureErrorV1::from_code(16),
+        Ok(ErasureErrorV1::StaleGeneration)
+    );
 }
 
 #[test]

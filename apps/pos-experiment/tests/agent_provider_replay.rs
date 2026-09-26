@@ -471,7 +471,8 @@ impl SharedMemoryAdapter {
     }
 
     fn gate_experiment(&self, experiment: Experiment) -> Experiment {
-        experiment.with_erasure_gate(Arc::clone(&self.erasure_gate))
+        let gate = Arc::clone(&self.erasure_gate);
+        experiment.with_erasure_gate(gate)
     }
 
     fn fail_next_append(&self) {
@@ -739,7 +740,10 @@ fn backtest_runner_rejects_a_foreign_train_erasure_gate() {
             eval_ticks: 0,
             store_config: StoreConfig::Memory,
         },
-        move || PluginRegistry::new().with_erasure_gate(Arc::clone(&foreign)),
+        move || {
+            let gate = Arc::clone(&foreign);
+            PluginRegistry::new().with_erasure_gate(gate)
+        },
     )
     .run()
     .err()
@@ -762,8 +766,9 @@ fn backtest_runner_rejects_a_removed_bound_train_gate() {
             store_config: StoreConfig::Memory,
         },
         move || {
+            let gate = Arc::clone(&removed);
             PluginRegistry::new()
-                .with_erasure_gate(Arc::clone(&removed))
+                .with_erasure_gate(gate)
                 .without_erasure_gate()
         },
     )
@@ -793,7 +798,8 @@ fn backtest_runner_rejects_a_foreign_eval_erasure_gate() {
             move || {
                 let mut registry = PluginRegistry::new();
                 if calls.fetch_add(1, Ordering::SeqCst) == 1 {
-                    registry.bind_erasure_gate(Arc::clone(&foreign));
+                    let gate = Arc::clone(&foreign);
+                    registry.bind_erasure_gate(gate);
                 }
                 registry
             }

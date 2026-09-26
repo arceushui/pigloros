@@ -5,26 +5,28 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use ciborium::value::Value;
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    CoreError, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAcknowledgementV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
     ErasureContainmentGateV1, ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1,
     ErasureDestructionCommandV1, ErasureErrorV1, ErasureForkAdmissionInputV1,
-    ErasureForkPersistencePortV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureForkPersistencePortV1, ErasureForkRecoveryProofV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
     ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryObservationV1,
     ErasureInventoryPersistencePortV1, ErasureInventoryResultV1, ErasureLifecycleV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedInventoryQueryV1, ErasureVerifiedTopologyObservationV1,
-    EventStore, Seq, TimelineId, TimelineMeta, TimelineMode, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_RECOVERY_ERRORS,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureRecoveryErrorV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedInventoryQueryV1,
+    ErasureVerifiedInventoryV1, ErasureVerifiedTopologyObservationV1, EventStore, Seq, TimelineId,
+    TimelineMeta, TimelineMode, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_INVENTORY_TIMELINES,
+    ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
@@ -90,6 +92,7 @@ const fn transition() -> ErasureStateTransitionV1 {
 struct Host<S> {
     store: Rc<RefCell<S>>,
     targets: Vec<ErasureRequiredTargetV1>,
+    topology_override: Option<(ErasureReferenceV1, ErasureReferenceV1)>,
     verify_exact_retry: bool,
     fail_read_object: bool,
     manifest_sequence: Option<Rc<RefCell<VecDeque<pos_core::StoredErasureManifestV1>>>>,
@@ -99,10 +102,135 @@ type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
 type CompletedErasure<S> = (Rc<RefCell<S>>, ErasureRequestV1, Vec<RetainedEffect>);
 type PreparedFork<S> = (
     Rc<RefCell<S>>,
+    Arc<ErasureContainmentGateV1>,
     ErasureReferenceV1,
     TimelineId,
     pos_core::PreparedErasureForkBatchV1,
 );
+
+fn bind_test_gate<S: EventStore>(
+    store: &mut S,
+) -> Result<Arc<ErasureContainmentGateV1>, Box<dyn std::error::Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    Ok(gate)
+}
+
+fn assert_host_managed_topology_requires_verified_transitions<S: EventStore>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing = store.create_timeline("topology-guard-existing")?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
+
+    assert!(matches!(
+        store.create_timeline("topology-guard-root"),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.create_timeline_with_meta(TimelineMeta::root("topology-guard-import")),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.fork(existing.id(), Seq::ZERO, "topology-guard-fork"),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.delete_timeline(existing.id()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.import_committed(TimelineMeta::root("topology-guard-committed"), &[]),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    Ok(())
+}
+
+#[test]
+fn memory_host_managed_topology_requires_verified_transitions(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_host_managed_topology_requires_verified_transitions(MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_host_managed_topology_requires_verified_transitions(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_host_managed_topology_requires_verified_transitions(SqliteStore::open_in_memory()?)
+}
+
+fn recover_fork_admission<S: ErasureForkPersistencePortV1>(
+    store: &mut S,
+    operation: ErasureReferenceV1,
+    successor_inventory: &ErasureVerifiedInventoryV1,
+) -> Result<Option<pos_core::ErasureForkRecoveryV1>, ErasureErrorV1> {
+    ErasureForkPersistencePortV1::recover_fork_admission(store, operation, successor_inventory)
+}
+
+fn verified_empty_inventory(
+    maximum_requests: usize,
+) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+    let snapshot =
+        ErasurePersistenceInventorySnapshotV1::new(Vec::new(), Vec::new(), maximum_requests)?;
+    pos_core::ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+        .verified_inventory(maximum_requests)
+}
+
+fn commit_fork_admission_with(
+    gate: &Arc<ErasureContainmentGateV1>,
+    admission: &pos_core::PreparedErasureForkBatchV1,
+    mut commit: impl FnMut(
+        &pos_core::ErasureTopologyTransitionPermitV1,
+        pos_core::PreparedErasureForkBatchV1,
+    ) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>,
+) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1> {
+    let candidate = admission.successor_inventory().clone();
+    let mut transition_error = None;
+    let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| match commit(
+        permit,
+        admission.clone(),
+    ) {
+        Ok(outcome) => Ok((candidate.clone(), outcome)),
+        Err(error) => {
+            transition_error = Some(error);
+            Err(error)
+        }
+    };
+    let publication = gate.install_from_verified_inventory_transition(&mut transition);
+    transition_error.map_or_else(
+        || {
+            publication
+                .map(|(_, outcome)| outcome)
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)
+        },
+        Err,
+    )
+}
+
+fn commit_fork_admission<S>(
+    shared: &Rc<RefCell<S>>,
+    gate: &Arc<ErasureContainmentGateV1>,
+    admission: &pos_core::PreparedErasureForkBatchV1,
+) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>
+where
+    S: ErasureForkPersistencePortV1,
+{
+    commit_fork_admission_with(gate, admission, |permit, batch| {
+        shared.borrow_mut().commit_fork_admission(permit, batch)
+    })
+}
+
+fn commit_fork_admission_direct<S>(
+    store: &mut S,
+    gate: &Arc<ErasureContainmentGateV1>,
+    admission: &pos_core::PreparedErasureForkBatchV1,
+) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>
+where
+    S: ErasureForkPersistencePortV1,
+{
+    commit_fork_admission_with(gate, admission, |permit, batch| {
+        store.commit_fork_admission(permit, batch)
+    })
+}
 
 impl<S: ErasurePersistencePortV1> ErasureStateResolverV1 for Host<S> {
     fn resolve_state(
@@ -193,18 +321,53 @@ impl<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1> ErasureCoo
         let request_topology = request_heads
             .iter()
             .map(|(request, manifest)| {
-                let bindings = topology
-                    .first()
+                let resolver = Host {
+                    store: Rc::clone(&self.store),
+                    targets: self.targets.clone(),
+                    topology_override: self.topology_override,
+                    verify_exact_retry: false,
+                    fail_read_object: false,
+                    manifest_sequence: None,
+                };
+                let mut coordinator =
+                    ErasureCoordinatorStateMachineV1::new(resolver, reference(30));
+                let state = coordinator
+                    .verified_state(*request)?
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                if state.manifest_digest() != *manifest {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+                let mut bindings = Vec::new();
+                if let Some(scope) = state.scope() {
+                    let member = scope
+                        .scope_members()
+                        .first()
+                        .copied()
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                    bindings.extend(
+                        scope
+                            .scope_timeline_ids()
+                            .iter()
+                            .map(|timeline| (*timeline, member)),
+                    );
+                }
+                bindings.extend(
+                    state
+                        .scope_extensions()
+                        .iter()
+                        .map(|extension| (extension.child_timeline(), extension.fork())),
+                );
+                let unaffected = topology
+                    .iter()
+                    .filter(|timeline| !bindings.iter().any(|(affected, _)| affected == *timeline))
                     .copied()
-                    .map(|timeline| vec![(timeline, reference(9))])
-                    .unwrap_or_default();
-                let unaffected = topology.iter().copied().skip(1).collect();
-                (
+                    .collect();
+                Ok((
                     *request,
                     ErasureVerifiedTopologyObservationV1::new(*manifest, bindings, unaffected),
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<Vec<_>, ErasureErrorV1>>()?;
         Ok(ErasureInventoryObservationV1::new(
             request_heads,
             topology,
@@ -263,9 +426,28 @@ impl<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1> ErasureCoo
             policy: reference(6),
             trust: reference(8),
         })?;
+        let scope_members = self
+            .topology_override
+            .filter(|(overridden_request, _)| *overridden_request == request)
+            .map_or_else(|| vec![reference(9)], |(_, member)| vec![member]);
+        let topology = self
+            .store
+            .borrow_mut()
+            .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+            .topology()
+            .to_vec();
+        let scope_timeline_ids = if self
+            .topology_override
+            .is_some_and(|(overridden_request, _)| overridden_request == request)
+        {
+            Vec::new()
+        } else {
+            topology.first().copied().into_iter().collect()
+        };
         let scope = ErasureScopeCommitmentInputV1 {
             request,
-            scope_members: vec![reference(9)],
+            scope_members,
+            scope_timeline_ids,
             target_closure: target_closure_digest(&targets),
             lineage_rule: Some(reference(100)),
         };
@@ -366,6 +548,7 @@ fn complete_with_retry_validation<
         Host {
             store: Rc::clone(&shared),
             targets: vec![target],
+            topology_override: None,
             verify_exact_retry,
             fail_read_object: false,
             manifest_sequence: None,
@@ -480,6 +663,7 @@ fn assert_raw_backend<S: ErasurePersistencePortV1 + ErasureInventoryPersistenceP
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -501,6 +685,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePo
         Host {
             store: Rc::clone(&shared),
             targets: Vec::new(),
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -511,6 +696,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePo
         Host {
             store: shared,
             targets: Vec::new(),
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -585,7 +771,7 @@ fn prepared_fork<S>(mut store: S) -> Result<PreparedFork<S>, Box<dyn std::error:
 where
     S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let gate = bind_test_gate(&mut store)?;
     let parent = store.create_timeline("fork-parent")?.id();
     store.append(
         parent,
@@ -602,6 +788,7 @@ where
         Host {
             store: Rc::clone(&shared),
             targets: vec![required_target],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -615,14 +802,17 @@ where
     let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: request.reference(),
         scope_members: vec![reference(9)],
+        scope_timeline_ids: vec![parent],
         target_closure: target_closure_digest(&[required_target]),
         lineage_rule: Some(reference(100)),
     })?;
     let child_scope = reference(101);
+    let child = TimelineId::new();
     let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: request.reference(),
         scope_commitment: scope.reference(),
         fork: child_scope,
+        child_timeline: child,
         lineage_rule: reference(100),
         predecessor_extension: None,
         admission_provenance: reference(102),
@@ -631,7 +821,6 @@ where
         .borrow_mut()
         .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
         .generation();
-    let child = TimelineId::new();
     let input = ErasureForkAdmissionInputV1 {
         operation: reference(103),
         expected_inventory_generation: generation,
@@ -648,7 +837,281 @@ where
         coordinator.prepare_fork_admission(request.reference(), extension, input.clone())?;
     let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     let prepared = inventory.prepare_fork_batch(input, vec![prepared])?;
-    Ok((shared, request.reference(), child, prepared))
+    Ok((shared, gate, request.reference(), child, prepared))
+}
+
+fn assert_fork_exact_retry_after_later_scope_extension<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (shared, gate, request, _, first) = prepared_fork(store)?;
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &first)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            topology_override: None,
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let snapshot = shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let parent = *snapshot
+        .topology()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let previous_extension = first
+        .admissions()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .extension();
+    let child = TimelineId::new();
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: previous_extension.scope_commitment(),
+        fork: reference(104),
+        child_timeline: child,
+        lineage_rule: previous_extension.lineage_rule(),
+        predecessor_extension: Some(previous_extension.reference()),
+        admission_provenance: reference(105),
+    })?;
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(106),
+        expected_inventory_generation: inventory.generation(),
+        child_scope: reference(104),
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("later-admitted-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::ZERO)),
+        },
+    };
+    let later_admission = coordinator.prepare_fork_admission(request, extension, input.clone())?;
+    let later = inventory.prepare_fork_batch(input, vec![later_admission])?;
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &later)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(
+        shared
+            .borrow_mut()
+            .read_manifest(request)?
+            .map(|manifest| manifest.digest()),
+        Some(later.admissions()[0].mutation().next_manifest().digest())
+    );
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &first)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
+    Ok(())
+}
+
+fn assert_duplicate_fork_scope_is_rejected<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (shared, gate, request, _, first) = prepared_fork(store)?;
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &first)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    let previous_extension = first
+        .admissions()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .extension();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            topology_override: None,
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let snapshot = shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let parent = *snapshot
+        .topology()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(109),
+        expected_inventory_generation: inventory.generation(),
+        child_scope: previous_extension.fork(),
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("duplicate-scope-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::ZERO)),
+        },
+    };
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: previous_extension.scope_commitment(),
+        fork: previous_extension.fork(),
+        child_timeline: child,
+        lineage_rule: previous_extension.lineage_rule(),
+        predecessor_extension: Some(previous_extension.reference()),
+        admission_provenance: reference(110),
+    })?;
+    let admission = coordinator.prepare_fork_admission(request, extension, input.clone())?;
+    assert_eq!(
+        inventory.prepare_fork_batch(input, vec![admission]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let base_member_child_scope = reference(9);
+    let base_member_child = TimelineId::new();
+    let base_member_input = ErasureForkAdmissionInputV1 {
+        operation: reference(111),
+        expected_inventory_generation: inventory.generation(),
+        child_scope: base_member_child_scope,
+        child: TimelineMeta {
+            id: base_member_child,
+            mode: TimelineMode::Historical,
+            name: Some("base-member-scope-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::ZERO)),
+        },
+    };
+    let base_member_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: previous_extension.scope_commitment(),
+        fork: base_member_child_scope,
+        child_timeline: base_member_child,
+        lineage_rule: previous_extension.lineage_rule(),
+        predecessor_extension: Some(previous_extension.reference()),
+        admission_provenance: reference(112),
+    })?;
+    let base_member_admission = coordinator.prepare_fork_admission(
+        request,
+        base_member_extension,
+        base_member_input.clone(),
+    )?;
+    assert_eq!(
+        inventory.prepare_fork_batch(base_member_input, vec![base_member_admission]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(shared.borrow().scope_index_count(request)?, 1);
+    assert_eq!(
+        shared
+            .borrow_mut()
+            .read_manifest(request)?
+            .map(|manifest| manifest.digest()),
+        Some(first.admissions()[0].mutation().next_manifest().digest())
+    );
+    assert!(!shared
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
+        .topology()
+        .contains(&child));
+    Ok(())
+}
+
+fn assert_fork_admission_rejects_a_deleted_parent_as_stale<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (store, gate, request, child, prepared) = prepared_fork(store)?;
+    let (parent, _) = prepared
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    store.borrow_mut().delete_timeline(parent)?;
+
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(store.borrow().scope_index_count(request)?, 0);
+    let inventory = store
+        .borrow_mut()
+        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert!(!inventory.topology().contains(&parent));
+    assert!(!inventory.topology().contains(&child));
+    Ok(())
+}
+
+fn assert_fork_admission_exact_retry_rejects_a_deleted_parent<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (store, gate, _, child, prepared) = prepared_fork(store)?;
+    let (parent, _) = prepared
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().delete_timeline(child)?;
+    store.borrow_mut().delete_timeline(parent)?;
+
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+fn assert_fork_admission_rejects_a_foreign_transition_permit<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (shared, _, _, _, prepared) = prepared_fork(store)?;
+    let foreign_gate = ErasureContainmentGateV1::new_test_open();
+    let successor = prepared.successor_inventory().clone();
+    let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| {
+        let outcome = shared
+            .borrow_mut()
+            .commit_fork_admission(permit, prepared.clone());
+        Ok::<_, ErasureErrorV1>((successor.clone(), outcome))
+    };
+    let (_, outcome) = foreign_gate.install_from_verified_inventory_transition(&mut transition)?;
+    assert_eq!(outcome, Err(ErasureErrorV1::ProvenanceMissing));
+    Ok(())
 }
 
 fn prepare_overlap_admission<S>(
@@ -665,6 +1128,11 @@ where
     let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request,
         scope_members: vec![reference(9)],
+        scope_timeline_ids: input
+            .child
+            .fork_point
+            .map(|(parent, _)| vec![parent])
+            .unwrap_or_default(),
         target_closure: target_closure_digest(&[required_target]),
         lineage_rule: Some(reference(100)),
     })?;
@@ -672,6 +1140,7 @@ where
         request,
         scope_commitment: scope.reference(),
         fork: child_scope,
+        child_timeline: input.child.id,
         lineage_rule: reference(100),
         predecessor_extension: None,
         admission_provenance: provenance,
@@ -687,10 +1156,23 @@ fn frozen_coordinator<S>(
 where
     S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
+    frozen_coordinator_with_topology_override(store, request, required_target, None)
+}
+
+fn frozen_coordinator_with_topology_override<S>(
+    store: Rc<RefCell<S>>,
+    request: &ErasureRequestV1,
+    required_target: ErasureRequiredTargetV1,
+    topology_override: Option<(ErasureReferenceV1, ErasureReferenceV1)>,
+) -> Result<ErasureCoordinatorStateMachineV1<Host<S>>, ErasureErrorV1>
+where
+    S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
         Host {
             store,
             targets: vec![required_target],
+            topology_override,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -701,6 +1183,77 @@ where
     coordinator.authorize(request.reference(), reference(31))?;
     coordinator.freeze_inventory(request.reference(), &transition())?;
     Ok(coordinator)
+}
+
+fn assert_fork_scope_collision_with_unaffected_request_is_rejected<S>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    let _gate = bind_test_gate(&mut store)?;
+    let parent = store.create_timeline("fork-collision-parent")?.id();
+    store.append(
+        parent,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.collision.parent"),
+            pos_core::CanonicalBytes::from_vec(vec![1]),
+        )],
+    )?;
+    let shared = Rc::new(RefCell::new(store));
+    let affected_request = request()?;
+    let unaffected_request = overlapping_request()?;
+    let required_target = target();
+    let child_scope = reference(113);
+
+    let _affected = frozen_coordinator(Rc::clone(&shared), &affected_request, required_target)?;
+    let _unaffected = frozen_coordinator_with_topology_override(
+        Rc::clone(&shared),
+        &unaffected_request,
+        required_target,
+        Some((unaffected_request.reference(), child_scope)),
+    )?;
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![required_target],
+            topology_override: Some((unaffected_request.reference(), child_scope)),
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let child = TimelineId::new();
+    let input = ErasureForkAdmissionInputV1 {
+        operation: reference(114),
+        expected_inventory_generation: inventory.generation(),
+        child_scope,
+        child: TimelineMeta {
+            id: child,
+            mode: TimelineMode::Historical,
+            name: Some("colliding-unaffected-child".to_owned()),
+            owner: None,
+            fork_point: Some((parent, Seq::from_u64(1))),
+        },
+    };
+    let admission = prepare_overlap_admission(
+        &mut coordinator,
+        affected_request.reference(),
+        reference(115),
+        required_target,
+        child_scope,
+        &input,
+    )?;
+
+    assert_eq!(
+        inventory.prepare_fork_batch(input, vec![admission]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
 }
 
 fn overlapping_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
@@ -754,7 +1307,7 @@ where
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1,
 {
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let gate = bind_test_gate(&mut store)?;
     let parent = store.create_timeline("overlap-parent")?.id();
     store.append(
         parent,
@@ -812,7 +1365,7 @@ where
     let batch = inventory.prepare_fork_batch(input, admissions)?;
     assert_eq!(batch.admissions().len(), 2);
     assert_eq!(
-        shared.borrow_mut().commit_fork_admission(batch.clone())?,
+        commit_fork_admission(&shared, &gate, &batch)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(
@@ -833,20 +1386,27 @@ where
         .topology()
         .contains(&child));
     assert_eq!(
-        shared.borrow_mut().commit_fork_admission(batch)?,
+        commit_fork_admission(&shared, &gate, &batch)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
     );
     Ok(())
 }
 
-fn assert_positively_unaffected_fork<S>(mut store: S) -> Result<(), Box<dyn std::error::Error>>
+type PreparedPositiveFork<S> = (
+    Rc<RefCell<S>>,
+    Arc<ErasureContainmentGateV1>,
+    ErasureReferenceV1,
+    TimelineId,
+    pos_core::PreparedErasureForkBatchV1,
+);
+
+fn prepared_positively_unaffected_fork<S>(
+    mut store: S,
+) -> Result<PreparedPositiveFork<S>, Box<dyn std::error::Error>>
 where
-    S: EventStore
-        + ErasurePersistencePortV1
-        + ErasureInventoryPersistencePortV1
-        + ErasureForkPersistencePortV1,
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
 {
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let gate = bind_test_gate(&mut store)?;
     let first = store.create_timeline("first")?.id();
     let second = store.create_timeline("second")?.id();
     let parent = first.max(second);
@@ -868,17 +1428,85 @@ where
         },
     };
     let batch = inventory.prepare_fork_batch(input, Vec::new())?;
-    assert!(batch.admissions().is_empty());
+    Ok((shared, gate, request.reference(), child, batch))
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_proof_without_receipt() -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
-        shared.borrow_mut().commit_fork_admission(batch)?,
+        commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
-    assert_eq!(shared.borrow().scope_index_count(request.reference())?, 0);
-    assert!(shared
-        .borrow_mut()
-        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
-        .topology()
-        .contains(&child));
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "DELETE FROM erasure_fork_admissions WHERE operation_digest=?1",
+            rusqlite::params![operation.digest().as_slice()],
+        )?,
+        1
+    );
+    drop(connection);
+
+    let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        recover_fork_admission(&mut reopened, operation, successor_inventory),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut reopened, reference(251), successor_inventory)?,
+        None
+    );
+    Ok(())
+}
+
+fn assert_positively_unaffected_fork<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
+{
+    let (shared, gate, request, child, batch) = prepared_positively_unaffected_fork(store)?;
+    let operation = batch.operation();
+    let expected_result = batch.recovery_result()?;
+    let successor_inventory = batch.successor_inventory().clone();
+    assert!(batch.admissions().is_empty());
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(shared.borrow().scope_index_count(request)?, 0);
+    assert_eq!(
+        successor_inventory.require_unaffected_topology(child),
+        Ok(())
+    );
+    shared.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.retry"),
+            pos_core::CanonicalBytes::from_vec(vec![2]),
+        )],
+    )?;
+    assert_eq!(
+        recover_fork_admission(&mut *shared.borrow_mut(), operation, &successor_inventory)?,
+        Some(expected_result)
+    );
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
     Ok(())
 }
 
@@ -920,9 +1548,10 @@ fn memory_manifest_cas_accepts_exact_retry_for_every_effect(
 #[test]
 fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (store, request, child, prepared) = prepared_fork(MemoryStore::new())?;
+    let (store, gate, request, child, prepared) = prepared_fork(MemoryStore::new())?;
     let operation = prepared.operation();
     let expected_result = prepared.recovery_result()?;
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(expected_result.operation(), operation);
     assert_eq!(expected_result.binding_digest(), prepared.binding_digest());
     assert_eq!(
@@ -934,6 +1563,8 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureForkRecoveryV1::from_persisted(
             operation,
             prepared.binding_digest(),
+            prepared.expected_inventory_generation(),
+            prepared.child_scope(),
             prepared.successor_inventory().generation(),
             prepared.child().clone(),
             reference(249),
@@ -946,6 +1577,8 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureForkRecoveryV1::from_persisted(
             operation,
             prepared.binding_digest(),
+            prepared.expected_inventory_generation(),
+            prepared.child_scope(),
             prepared.successor_inventory().generation(),
             invalid_child,
             expected_result.receipt_digest(),
@@ -958,6 +1591,8 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         pos_core::ErasureForkRecoveryV1::from_persisted(
             operation,
             prepared.binding_digest(),
+            prepared.expected_inventory_generation(),
+            prepared.child_scope(),
             prepared.successor_inventory().generation(),
             root_child,
             expected_result.receipt_digest(),
@@ -965,33 +1600,69 @@ fn memory_fork_admission_is_atomic_and_exactly_retryable() -> Result<(), Box<dyn
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared.clone())?,
+        commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 1);
-    assert!(store
-        .borrow_mut()
-        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?
-        .topology()
-        .contains(&child));
+    let (parent, _) = prepared
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::PolicyConflict)?;
+    let retry_requirements = successor_inventory
+        .fork_retry_scope_requirements(parent, child, prepared.child_scope())?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(retry_requirements.len(), prepared.admissions().len());
+    for (retry_requirement, admission) in retry_requirements.iter().zip(prepared.admissions()) {
+        assert_eq!(retry_requirement.extension(), admission.extension());
+    }
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        successor_inventory.generation()
+    );
     assert_eq!(
-        store.borrow_mut().recover_fork_admission(operation)?,
+        recover_fork_admission(&mut *store.borrow_mut(), operation, &stale_inventory,),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut *store.borrow_mut(), operation, successor_inventory)?,
         Some(expected_result)
     );
     assert_eq!(
-        store.borrow_mut().recover_fork_admission(reference(250))?,
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            reference(250),
+            successor_inventory
+        )?,
         None
     );
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared)?,
+        commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
     );
     store.borrow_mut().delete_timeline(child)?;
     assert_eq!(
-        store.borrow_mut().recover_fork_admission(operation),
+        recover_fork_admission(&mut *store.borrow_mut(), operation, successor_inventory),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
+}
+
+#[test]
+fn memory_fork_exact_retry_survives_a_later_scope_manifest(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_exact_retry_after_later_scope_extension(MemoryStore::new())
+}
+
+#[test]
+fn memory_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error::Error>> {
+    assert_duplicate_fork_scope_is_rejected(MemoryStore::new())
+}
+
+#[test]
+fn memory_rejects_child_scope_already_in_an_unaffected_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_scope_collision_with_unaffected_request_is_rejected(MemoryStore::new())
 }
 
 #[test]
@@ -1009,7 +1680,7 @@ fn memory_fork_admission_preserves_a_positively_unaffected_request(
 #[test]
 fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (store, request, child, prepared) = prepared_fork(MemoryStore::new())?;
+    let (store, gate, request, child, prepared) = prepared_fork(MemoryStore::new())?;
     store.borrow_mut().create_timeline("generation-change")?;
     let topology_before = store
         .borrow_mut()
@@ -1017,8 +1688,8 @@ fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
         .topology()
         .to_vec();
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared),
-        Err(ErasureErrorV1::PolicyConflict)
+        commit_fork_admission(&store, &gate, &prepared),
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 0);
     let topology_after = store
@@ -1029,6 +1700,23 @@ fn memory_fork_admission_rejects_stale_generation_without_partial_commit(
     assert_eq!(topology_after, topology_before);
     assert!(!topology_after.contains(&child));
     Ok(())
+}
+
+#[test]
+fn memory_fork_admission_reports_stale_generation_before_missing_parent(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_deleted_parent_as_stale(MemoryStore::new())
+}
+
+#[test]
+fn memory_fork_exact_retry_rejects_a_deleted_parent() -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_exact_retry_rejects_a_deleted_parent(MemoryStore::new())
+}
+
+#[test]
+fn memory_fork_admission_rejects_a_foreign_transition_permit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_foreign_transition_permit(MemoryStore::new())
 }
 
 #[test]
@@ -1044,6 +1732,7 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
         Host {
             store: Rc::clone(&shared),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: true,
             manifest_sequence: None,
@@ -1062,6 +1751,7 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -1105,6 +1795,7 @@ fn memory_recovery_error_bound_rejects_without_partial_writes(
         Host {
             store: Rc::clone(&shared),
             targets: Vec::new(),
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: Some(Rc::new(RefCell::new(VecDeque::from(manifests)))),
@@ -1145,6 +1836,7 @@ fn retained_recovery_failure<S: ErasurePersistencePortV1 + ErasureInventoryPersi
         Host {
             store: Rc::clone(&shared),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: true,
             manifest_sequence: None,
@@ -1159,6 +1851,7 @@ fn retained_recovery_failure<S: ErasurePersistencePortV1 + ErasureInventoryPersi
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -1223,23 +1916,37 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
     let expected_result = prepared.recovery_result()?;
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared.clone())?,
+        commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     drop(store);
 
     let mut reopened = SqliteStore::open(path)?;
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        successor_inventory.generation()
+    );
     assert_eq!(
-        reopened.recover_fork_admission(operation)?,
+        recover_fork_admission(&mut reopened, operation, &stale_inventory),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut reopened, operation, successor_inventory)?,
         Some(expected_result)
     );
-    assert_eq!(reopened.recover_fork_admission(reference(251))?, None);
     assert_eq!(
-        reopened.commit_fork_admission(prepared)?,
+        recover_fork_admission(&mut reopened, reference(251), successor_inventory)?,
+        None
+    );
+    let reopened_gate = bind_test_gate(&mut reopened)?;
+    assert_eq!(
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
     );
     assert_eq!(reopened.scope_index_count(request)?, 1);
@@ -1252,6 +1959,184 @@ fn sqlite_fork_admission_is_atomic_and_exactly_retryable_after_reopen(
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_exact_retry_survives_a_later_scope_manifest(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_exact_retry_after_later_scope_extension(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error::Error>> {
+    assert_duplicate_fork_scope_is_rejected(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rejects_child_scope_already_in_an_unaffected_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_scope_collision_with_unaffected_request_is_rejected(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, child, batch) =
+        prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
+    let operation = batch.operation();
+    let expected_result = batch.recovery_result()?;
+    let successor_inventory = batch.successor_inventory();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.retry"),
+            pos_core::CanonicalBytes::from_vec(vec![2]),
+        )],
+    )?;
+    drop(store);
+
+    let mut reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        recover_fork_admission(&mut reopened, operation, successor_inventory)?,
+        Some(expected_result)
+    );
+    let reopened_gate = bind_test_gate(&mut reopened)?;
+    assert_eq!(
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_retry_rejects_an_appended_child_with_a_corrupt_payload_hash(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, child, batch) =
+        prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.corrupt-payload"),
+            pos_core::CanonicalBytes::from_vec(vec![2]),
+        )],
+    )?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE events SET payload=X'03' WHERE timeline_id=?1 AND seq=1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+
+    let mut reopened = SqliteStore::open(path)?;
+    let reopened_gate = bind_test_gate(&mut reopened)?;
+    assert_eq!(
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &batch),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_a_missing_events_table() -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, batch) = prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
+    let operation = batch.operation();
+    let successor_inventory = batch.successor_inventory();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("DROP TABLE events")?;
+    drop(connection);
+    assert_eq!(
+        recover_fork_admission(&mut *store.borrow_mut(), operation, successor_inventory),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_an_invalid_child_event_entity_id(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, child, batch) =
+        prepared_positively_unaffected_fork(SqliteStore::open(path)?)?;
+    let operation = batch.operation();
+    let successor_inventory = batch.successor_inventory();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.retry"),
+            pos_core::CanonicalBytes::from_vec(vec![2]),
+        )],
+    )?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE events SET entity_id='not-an-ulid' WHERE timeline_id=?1 AND seq=1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+
+    let mut reopened = SqliteStore::open(path)?;
+    assert!(reopened
+        .read(child, pos_core::store::SeqRange::all())
+        .is_err());
+    assert_eq!(
+        recover_fork_admission(&mut reopened, operation, successor_inventory),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn std::error::Error>>
 {
     let database = tempfile::NamedTempFile::new()?;
@@ -1259,10 +2144,11 @@ fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared)?,
+        commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     drop(store);
@@ -1276,7 +2162,48 @@ fn sqlite_fork_recovery_rejects_a_missing_original_child() -> Result<(), Box<dyn
     );
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(operation),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_a_mismatched_original_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE timelines SET name='different-child' WHERE id=?1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+    assert_eq!(
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1297,6 +2224,13 @@ fn sqlite_fork_admission_preserves_a_positively_unaffected_request(
 }
 
 #[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_admission_rejects_a_foreign_transition_permit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_foreign_transition_permit(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
 fn assert_sqlite_fork_retry_corruption(
     corrupt: impl FnOnce(
         &rusqlite::Connection,
@@ -1314,14 +2248,35 @@ fn assert_sqlite_fork_retry_corruption_error(
     ) -> rusqlite::Result<usize>,
     expected: ErasureErrorV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_result(corrupt, Err(expected))
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_manifest_change(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_result(corrupt, Ok(pos_core::ErasureCasOutcomeV1::ExactRetry))
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_result(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<usize>,
+    expected: Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared.clone())?,
+        commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     drop(store);
@@ -1329,7 +2284,98 @@ fn assert_sqlite_fork_retry_corruption_error(
     let connection = rusqlite::Connection::open(path)?;
     assert_eq!(corrupt(&connection, &prepared)?, 1);
     drop(connection);
-    assert_eq!(reopened.commit_fork_admission(prepared), Err(expected));
+    let reopened_gate = bind_test_gate(&mut reopened)?;
+    assert_eq!(
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared),
+        expected
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_corruption_error(
+    corrupt: impl FnOnce(
+        &rusqlite::Connection,
+        &pos_core::PreparedErasureForkBatchV1,
+    ) -> rusqlite::Result<usize>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(corrupt(&connection, &prepared)?, 1);
+    drop(connection);
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        prepared.successor_inventory().generation()
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            &stale_inventory,
+        ),
+        Err(expected)
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_sql_error(
+    sql: &str,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch(sql)?;
+    drop(connection);
+    let stale_inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_ne!(
+        stale_inventory.generation(),
+        prepared.successor_inventory().generation()
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            &stale_inventory,
+        ),
+        Err(expected)
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut *store.borrow_mut(),
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
+        Err(expected)
+    );
     Ok(())
 }
 
@@ -1346,12 +2392,12 @@ fn assert_sqlite_fork_first_commit_failure(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let connection = rusqlite::Connection::open(path)?;
     corrupt(&connection, &prepared)?;
     drop(connection);
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared),
+        commit_fork_admission(&store, &gate, &prepared),
         Err(expected)
     );
     Ok(())
@@ -1365,14 +2411,136 @@ fn only_fork_mutation(
 }
 
 #[cfg(feature = "sqlite")]
+fn recovery_proof_mutation_fields(value: &mut Value) -> Result<&mut Vec<Value>, ErasureErrorV1> {
+    let Value::Array(fields) = value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Some(Value::Array(admissions)) = fields.get_mut(7) else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Some(Value::Array(mutation)) = admissions.get_mut(0) else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    Ok(mutation)
+}
+
+#[cfg(feature = "sqlite")]
+fn digest_value(reference: ErasureReferenceV1) -> Value {
+    Value::Bytes(reference.digest().to_vec())
+}
+
+#[cfg(feature = "sqlite")]
+fn rewrite_sqlite_recovery_proof(
+    connection: &rusqlite::Connection,
+    prepared: &pos_core::PreparedErasureForkBatchV1,
+    mutate: impl FnOnce(&mut Value) -> Result<(), ErasureErrorV1>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let proof_cbor: Vec<u8> = connection.query_row(
+        "SELECT proof_cbor FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+        rusqlite::params![prepared.operation().digest().as_slice()],
+        |row| row.get(0),
+    )?;
+    let mut value: Value = ciborium::from_reader(proof_cbor.as_slice())?;
+    mutate(&mut value)?;
+    let mut modified = Vec::new();
+    ciborium::into_writer(&value, &mut modified)?;
+    let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&modified)?;
+    let proof_cbor = proof.to_canonical_cbor()?;
+    let proof_digest = proof.content_digest()?;
+    connection.execute(
+        "UPDATE erasure_fork_recovery_proofs
+         SET proof_digest=?1, proof_cbor=?2 WHERE operation_digest=?3",
+        rusqlite::params![
+            proof_digest.digest().as_slice(),
+            proof_cbor,
+            prepared.operation().digest().as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_proof_rewrite_error(
+    mutate: impl FnOnce(&mut Value) -> Result<(), ErasureErrorV1>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    rewrite_sqlite_recovery_proof(&connection, &prepared, mutate)?;
+    drop(connection);
+    assert_eq!(
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_rewritten_proof_error(
+    mutate: impl FnOnce(&mut Value) -> Result<(), ErasureErrorV1>,
+    expected: ErasureErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    rewrite_sqlite_recovery_proof(&connection, &prepared, mutate)?;
+    drop(connection);
+    let mut reopened = SqliteStore::open(path)?;
+    let reopened_gate = bind_test_gate(&mut reopened)?;
+    assert_eq!(
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared),
+        Err(expected)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 fn fork_recovery_receipt_digest(
     prepared: &pos_core::PreparedErasureForkBatchV1,
+    child: &TimelineMeta,
+) -> ErasureReferenceV1 {
+    fork_recovery_receipt_digest_with_generation(
+        prepared,
+        prepared.expected_inventory_generation(),
+        child,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+fn fork_recovery_receipt_digest_with_generation(
+    prepared: &pos_core::PreparedErasureForkBatchV1,
+    expected_generation: ErasureReferenceV1,
     child: &TimelineMeta,
 ) -> ErasureReferenceV1 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/erasure-fork-recovery/v1");
     hasher.update(&prepared.operation().digest());
     hasher.update(&prepared.binding_digest().digest());
+    hasher.update(&expected_generation.digest());
+    hasher.update(&prepared.child_scope().digest());
     hasher.update(&prepared.successor_inventory().generation().digest());
     hasher.update(&child.id.inner().to_bytes());
     hasher.update(b"historical");
@@ -1404,68 +2572,54 @@ fn fork_recovery_receipt_digest(
 }
 
 #[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_retry_corrupt_sql_field(
+    field: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            &format!(
+                "UPDATE erasure_fork_admissions SET {field}={value} WHERE operation_digest=?1"
+            ),
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
+    })
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::error::Error>> {
+    for (field, value) in [
+        ("binding_digest", "zeroblob(32)"),
+        ("expected_generation", "zeroblob(32)"),
+        ("child_scope", "zeroblob(32)"),
+        ("child_id", "'corrupted'"),
+        ("child_name", "'corrupted'"),
+        ("child_mode", "'live'"),
+        ("parent_id", "'corrupted'"),
+        ("fork_seq", "2"),
+        ("owner_id", "'corrupted'"),
+        ("successor_generation", "zeroblob(32)"),
+        ("receipt_digest", "zeroblob(32)"),
+    ] {
+        assert_sqlite_fork_retry_corrupt_sql_field(field, value)?;
+    }
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        let expected_generation = ErasureReferenceV1::from_digest([201; 32]);
+        let receipt = fork_recovery_receipt_digest_with_generation(
+            prepared,
+            expected_generation,
+            prepared.child(),
+        );
         connection.execute(
-            "UPDATE erasure_fork_admissions SET binding_digest=?1 WHERE operation_digest=?2",
+            "UPDATE erasure_fork_admissions
+             SET expected_generation=?1, receipt_digest=?2
+             WHERE operation_digest=?3",
             rusqlite::params![
-                [0_u8; 32].as_slice(),
-                prepared.operation().digest().as_slice()
+                expected_generation.digest().as_slice(),
+                receipt.digest().as_slice(),
+                prepared.operation().digest().as_slice(),
             ],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET child_id='corrupted' WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET child_name='corrupted'
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET child_mode='live' WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET parent_id='corrupted'
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET fork_seq=2 WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET owner_id='corrupted'
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET successor_generation=zeroblob(32)
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_fork_admissions SET receipt_digest=zeroblob(32)
-             WHERE operation_digest=?1",
-            rusqlite::params![prepared.operation().digest().as_slice()],
         )
     })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
@@ -1489,6 +2643,8 @@ fn sqlite_fork_retry_rejects_corrupted_receipt() -> Result<(), Box<dyn std::erro
 fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std::error::Error>> {
     for assignment in [
         "binding_digest='not-a-blob'",
+        "expected_generation='not-a-blob'",
+        "child_scope='not-a-blob'",
         "child_id=X'00'",
         "child_name=X'00'",
         "child_mode=X'00'",
@@ -1520,6 +2676,11 @@ fn sqlite_fork_retry_rejects_mistyped_receipt_fields() -> Result<(), Box<dyn std
 fn sqlite_fork_retry_rejects_invalid_receipt_values() -> Result<(), Box<dyn std::error::Error>> {
     for (assignment, expected) in [
         ("binding_digest=X'00'", ErasureErrorV1::ProvenanceMissing),
+        (
+            "expected_generation=X'00'",
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+        ("child_scope=X'00'", ErasureErrorV1::ProvenanceMissing),
         (
             "successor_generation=X'00'",
             ErasureErrorV1::ProvenanceMissing,
@@ -1699,6 +2860,264 @@ fn sqlite_fork_retry_rejects_corrupted_child() -> Result<(), Box<dyn std::error:
 }
 
 #[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_malformed_timeline_metadata(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for mode in ["live", "future", "unknown"] {
+        assert_sqlite_fork_recovery_corruption_error(
+            |connection, prepared| {
+                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                connection.execute(
+                    "UPDATE timelines SET mode=?1 WHERE id=?2",
+                    rusqlite::params![mode, prepared.child().id.to_string()],
+                )
+            },
+            ErasureErrorV1::ProvenanceMissing,
+        )?;
+    }
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE timelines SET parent_id='not-a-timeline-id' WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET fork_seq=-1 WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET parent_id=NULL WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET fork_seq=NULL WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET parent_id=NULL, fork_seq=NULL WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE timeline_owners SET owner_id='not-an-entity-id' WHERE timeline_id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE timelines SET head_seq=-1 WHERE id=?1",
+                rusqlite::params![prepared.child().id.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_a_missing_parent() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            let parent = prepared
+                .child()
+                .fork_point
+                .map_or_else(TimelineId::new, |(parent, _)| parent);
+            connection.execute(
+                "DELETE FROM timelines WHERE id=?1",
+                rusqlite::params![parent.to_string()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_a_missing_parent_or_mismatched_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_rejects_malformed_timeline_metadata()?;
+    assert_sqlite_fork_recovery_rejects_a_missing_parent()?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            let mut altered_child = prepared.child().clone();
+            altered_child.fork_point = Some((TimelineId::new(), Seq::ZERO));
+            let receipt = fork_recovery_receipt_digest(prepared, &altered_child);
+            connection.execute(
+                "UPDATE erasure_fork_admissions
+                 SET parent_id=?1, fork_seq=0, receipt_digest=?2
+                 WHERE operation_digest=?3",
+                rusqlite::params![
+                    altered_child
+                        .fork_point
+                        .map(|(parent, _)| parent.to_string()),
+                    receipt.digest().as_slice(),
+                    prepared.operation().digest().as_slice(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            let mut altered_child = prepared.child().clone();
+            altered_child.name = Some("valid-but-different".to_owned());
+            let receipt = fork_recovery_receipt_digest(prepared, &altered_child);
+            connection.execute(
+                "UPDATE erasure_fork_admissions SET child_name=?1, receipt_digest=?2
+                 WHERE operation_digest=?3",
+                rusqlite::params![
+                    altered_child.name,
+                    receipt.digest().as_slice(),
+                    prepared.operation().digest().as_slice(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_malformed_child_event_rows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "INSERT INTO events
+                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                  schema_version, payload_hash)
+                 VALUES (?1, -1, ?2, ?3, 'test.fork.corrupt', X'00', 0, 1, zeroblob(32))",
+                rusqlite::params![
+                    prepared.child().id.to_string(),
+                    pos_core::EventId::new().to_string(),
+                    pos_core::EntityId::new().to_string(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "INSERT INTO events
+                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                  schema_version, payload_hash)
+                 VALUES (?1, 1, 'not-an-event-id', ?2, 'test.fork.corrupt', X'00', 0, 1,
+                         zeroblob(32))",
+                rusqlite::params![
+                    prepared.child().id.to_string(),
+                    pos_core::EntityId::new().to_string(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "INSERT INTO events
+                 (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+                  schema_version, payload_hash)
+                 VALUES (?1, 1, ?2, ?3, 'test.fork.corrupt', 'not-a-blob', 0, 1,
+                         zeroblob(32))",
+                rusqlite::params![
+                    prepared.child().id.to_string(),
+                    pos_core::EventId::new().to_string(),
+                    pos_core::EntityId::new().to_string(),
+                ],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_rejects_a_skipped_child_event_sequence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    store.borrow_mut().append(
+        child,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("test.fork.child.sequence"),
+            pos_core::CanonicalBytes::from_vec(vec![1]),
+        )],
+    )?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE events SET seq=2 WHERE timeline_id=?1 AND seq=1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    assert_eq!(
+        connection.execute(
+            "UPDATE timelines SET head_seq=2 WHERE id=?1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+
+    assert_eq!(
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_retry_rejects_mistyped_child_fields() -> Result<(), Box<dyn std::error::Error>> {
     for assignment in [
@@ -1734,21 +3153,45 @@ fn sqlite_fork_retry_rejects_mistyped_child_fields() -> Result<(), Box<dyn std::
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_fork_retry_rejects_mistyped_manifest_fields() -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_fork_retry_ignores_mutable_manifest_head() -> Result<(), Box<dyn std::error::Error>> {
+    // The immutable recovery proof establishes the committed Fork; the
+    // erasure record is only the mutable current manifest head.
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_records WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_records SET manifest_digest=zeroblob(32) WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+        connection.execute(
+            "UPDATE erasure_records SET manifest_digest=X'00' WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
+    assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+        connection.execute(
+            "UPDATE erasure_records SET manifest_cbor=X'00' WHERE request_digest=?1",
+            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+        )
+    })?;
     for assignment in [
         "manifest_digest=printf('%032d', 0)",
         "manifest_cbor='not-a-blob'",
     ] {
-        assert_sqlite_fork_retry_corruption_error(
-            |connection, prepared| {
-                connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
-                connection.execute(
-                    &format!("UPDATE erasure_records SET {assignment} WHERE request_digest=?1"),
-                    rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-                )
-            },
-            ErasureErrorV1::ReceiptCommitFailed,
-        )?;
+        assert_sqlite_fork_retry_manifest_change(|connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                &format!("UPDATE erasure_records SET {assignment} WHERE request_digest=?1"),
+                rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+            )
+        })?;
     }
     Ok(())
 }
@@ -1775,7 +3218,7 @@ fn sqlite_fresh_fork_rejects_adapter_failures() -> Result<(), Box<dyn std::error
             )?;
             Ok(())
         },
-        ErasureErrorV1::PolicyConflict,
+        ErasureErrorV1::StaleGeneration,
     )?;
     assert_sqlite_fork_first_commit_failure(
         |connection, prepared| {
@@ -1785,7 +3228,7 @@ fn sqlite_fresh_fork_rejects_adapter_failures() -> Result<(), Box<dyn std::error
             )?;
             Ok(())
         },
-        ErasureErrorV1::PolicyConflict,
+        ErasureErrorV1::StaleGeneration,
     )?;
     assert_sqlite_fork_first_commit_failure(
         |connection, _| {
@@ -1804,6 +3247,16 @@ fn sqlite_fresh_fork_rejects_adapter_failures() -> Result<(), Box<dyn std::error
             )
         },
         ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_first_commit_failure(
+        |connection, _| {
+            connection.execute_batch(
+                "CREATE TRIGGER reject_fork_recovery_proof
+                 BEFORE INSERT ON erasure_fork_recovery_proofs
+                 BEGIN SELECT RAISE(ABORT, 'proof rejected'); END;",
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
     )
 }
 
@@ -1815,11 +3268,11 @@ fn sqlite_fresh_fork_rejects_a_locked_database() -> Result<(), Box<dyn std::erro
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("BEGIN IMMEDIATE")?;
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared),
+        commit_fork_admission(&store, &gate, &prepared),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     connection.execute_batch("ROLLBACK")?;
@@ -1836,12 +3289,16 @@ fn sqlite_fork_recovery_returns_none_for_unknown_operation(
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let mut store = SqliteStore::open(path)?;
-    assert_eq!(store.recover_fork_admission(reference(250))?, None);
+    let inventory = verified_empty_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    assert_eq!(
+        recover_fork_admission(&mut store, reference(250), &inventory)?,
+        None
+    );
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("DROP TABLE erasure_fork_admissions")?;
     drop(connection);
     assert_eq!(
-        store.recover_fork_admission(reference(250)),
+        recover_fork_admission(&mut store, reference(250), &inventory),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     Ok(())
@@ -1856,10 +3313,11 @@ fn sqlite_fork_recovery_rejects_negative_persisted_sequence(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     let operation = prepared.operation();
+    let successor_inventory = prepared.successor_inventory();
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared)?,
+        commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     drop(store);
@@ -1871,7 +3329,11 @@ fn sqlite_fork_recovery_rejects_negative_persisted_sequence(
     )?;
     drop(connection);
     assert_eq!(
-        SqliteStore::open(path)?.recover_fork_admission(operation),
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1879,33 +3341,461 @@ fn sqlite_fork_recovery_rejects_negative_persisted_sequence(
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_recovery_rejects_missing_or_corrupt_recovery_proof(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=zeroblob(32)
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=zeroblob(31)
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_cbor=X'00'
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::InvalidEncoding,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_digest=1
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_fork_recovery_proofs SET proof_cbor=1
+                 WHERE operation_digest=?1",
+                rusqlite::params![prepared.operation().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rejects_rewritten_fork_indexes_and_inconsistent_effect_subject(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let successor_inventory = prepared.successor_inventory();
+    let operation = prepared.operation();
+    let request = only_fork_mutation(&prepared).request();
+    let manifest = only_fork_mutation(&prepared).next_manifest().digest();
+    assert_eq!(
+        commit_fork_admission(&store, &gate, &prepared)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "INSERT INTO erasure_attempt_pages(request_digest, ordinal, reference_digest)
+         VALUES(?1, ?2, ?3)",
+        rusqlite::params![
+            request.digest().as_slice(),
+            1_i64,
+            reference(230).digest().as_slice()
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO erasure_administrative_resolutions(request_digest, ordinal, reference_digest)
+         VALUES(?1, ?2, ?3)",
+        rusqlite::params![
+            request.digest().as_slice(),
+            2_i64,
+            reference(231).digest().as_slice()
+        ],
+    )?;
+    connection.execute(
+        "UPDATE erasure_effects SET subject_digest=?1 WHERE manifest_digest=?2",
+        rusqlite::params![
+            reference(232).digest().as_slice(),
+            manifest.digest().as_slice()
+        ],
+    )?;
+    rewrite_sqlite_recovery_proof(&connection, &prepared, |value| {
+        let mutation = recovery_proof_mutation_fields(value)?;
+        let Some(Value::Array(indexes)) = mutation.get_mut(10) else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        indexes.push(Value::Array(vec![
+            Value::Integer(0.into()),
+            Value::Integer(1.into()),
+            digest_value(reference(230)),
+        ]));
+        indexes.push(Value::Array(vec![
+            Value::Integer(2.into()),
+            Value::Integer(2.into()),
+            digest_value(reference(231)),
+        ]));
+        let Some(effect_subject) = mutation.get_mut(13) else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        *effect_subject = digest_value(reference(232));
+        Ok(())
+    })?;
+    drop(connection);
+    assert_eq!(
+        recover_fork_admission(
+            &mut SqliteStore::open(path)?,
+            operation,
+            successor_inventory,
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_proof_corruption_errors() -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(effect_bytes) = mutation.get_mut(12) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *effect_bytes = digest_value(reference(233));
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(objects) = mutation.get_mut(8) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *objects = Value::Array(Vec::new());
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(Value::Array(states)) = mutation.get_mut(9) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            states.pop().ok_or(ErasureErrorV1::InvalidEncoding)?;
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(Value::Array(indexes)) = mutation.get_mut(10) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            indexes.pop().ok_or(ErasureErrorV1::InvalidEncoding)?;
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_proof_rewrite_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(next_manifest_bytes) = mutation.get_mut(7) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *next_manifest_bytes = digest_value(reference(234));
+            Ok(())
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_persisted_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_evidence SET object_cbor=X'00' WHERE reference_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_objects()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_states SET request_digest=zeroblob(32) WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_states SET request_digest=X'00' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_states SET state_cbor=X'00' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_states SET request_digest='not-a-blob' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_states SET state_cbor='not-a-blob' WHERE state_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared).new_states()[0]
+                    .reference()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_scope_nodes SET reference_digest=zeroblob(32)
+                 WHERE request_digest=?1 AND ordinal=0",
+                rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_scope_nodes SET reference_digest=X'00'
+                 WHERE request_digest=?1 AND ordinal=0",
+                rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_effect_digests(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_effects SET effect_digest=zeroblob(32) WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_digest=X'00' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_digest='not-a-blob' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_effect() -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_rejects_corrupt_effect_digests()?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute(
+                "UPDATE erasure_effects SET subject_digest=zeroblob(32) WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET subject_digest=X'00' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ProvenanceMissing,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_cbor=X'00' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::InvalidEncoding,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET effect_cbor='not-a-blob' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_corruption_error(
+        |connection, prepared| {
+            connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+            connection.execute(
+                "UPDATE erasure_effects SET subject_digest='not-a-blob' WHERE manifest_digest=?1",
+                rusqlite::params![only_fork_mutation(prepared)
+                    .next_manifest()
+                    .digest()
+                    .digest()
+                    .as_slice()],
+            )
+        },
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_sqlite_fork_recovery_rejects_corrupt_effect_tables(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_sql_error(
+        "DROP TABLE erasure_states",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )?;
+    assert_sqlite_fork_recovery_sql_error(
+        "DROP TABLE erasure_effects",
+        ErasureErrorV1::ReceiptCommitFailed,
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_recovery_proof_rejects_corrupt_persisted_sides(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_fork_recovery_rejects_corrupt_persisted_state()?;
+    assert_sqlite_fork_recovery_rejects_corrupt_effect()?;
+    assert_sqlite_fork_recovery_rejects_corrupt_effect_tables()?;
+    assert_sqlite_fork_recovery_proof_corruption_errors()
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn std::error::Error>>
 {
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "DELETE FROM erasure_records WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_records SET manifest_digest=zeroblob(32) WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
-        connection.execute(
-            "UPDATE erasure_records SET manifest_digest=X'00' WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
-    assert_sqlite_fork_retry_corruption(|connection, prepared| {
-        connection.execute(
-            "UPDATE erasure_records SET manifest_cbor=X'00' WHERE request_digest=?1",
-            rusqlite::params![only_fork_mutation(prepared).request().digest().as_slice()],
-        )
-    })?;
     assert_sqlite_fork_retry_corruption(|connection, prepared| {
         connection.execute(
             "DELETE FROM erasure_evidence WHERE reference_digest=?1",
@@ -1939,18 +3829,64 @@ fn sqlite_fork_retry_rejects_corrupted_erasure_successor() -> Result<(), Box<dyn
                 .digest()
                 .as_slice()],
         )
+    })?;
+    assert_sqlite_fork_retry_rewritten_proof_error(
+        |value| {
+            let mutation = recovery_proof_mutation_fields(value)?;
+            let Some(objects) = mutation.get_mut(8) else {
+                return Err(ErasureErrorV1::InvalidEncoding);
+            };
+            *objects = Value::Array(Vec::new());
+            Ok(())
+        },
+        ErasureErrorV1::PolicyConflict,
+    )?;
+    assert_sqlite_fork_retry_corruption(|connection, prepared| {
+        connection.execute(
+            "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
+            rusqlite::params![prepared.operation().digest().as_slice()],
+        )
     })
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_exact_retry_preserves_proof_storage_errors() -> Result<(), Box<dyn std::error::Error>>
+{
+    for table in ["erasure_fork_recovery_proofs", "erasure_evidence"] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or(ErasureErrorV1::InvalidEncoding)?;
+        let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+        assert_eq!(
+            commit_fork_admission(&store, &gate, &prepared)?,
+            pos_core::ErasureCasOutcomeV1::Applied
+        );
+
+        let connection = rusqlite::Connection::open(path)?;
+        connection.execute_batch(&format!("DROP TABLE {table}"))?;
+        drop(connection);
+
+        assert_eq!(
+            commit_fork_admission(&store, &gate, &prepared),
+            Err(ErasureErrorV1::ReceiptCommitFailed),
+            "exact retry must preserve the storage error for {table}"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (store, request, child, prepared) = prepared_fork(SqliteStore::open_in_memory()?)?;
+    let (store, gate, request, child, prepared) = prepared_fork(SqliteStore::open_in_memory()?)?;
     store.borrow_mut().create_timeline("generation-change")?;
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared),
-        Err(ErasureErrorV1::PolicyConflict)
+        commit_fork_admission(&store, &gate, &prepared),
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert_eq!(store.borrow().scope_index_count(request)?, 0);
     assert!(!store
@@ -1963,9 +3899,22 @@ fn sqlite_fork_admission_rejects_stale_generation_without_partial_commit(
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_fork_admission_reports_stale_generation_before_missing_parent(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_rejects_a_deleted_parent_as_stale(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_fork_exact_retry_rejects_a_deleted_parent() -> Result<(), Box<dyn std::error::Error>> {
+    assert_fork_admission_exact_retry_rejects_a_deleted_parent(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_fork_admission_rejects_an_unreceipted_existing_successor(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (store, _, child, prepared) = prepared_fork(SqliteStore::open_in_memory()?)?;
+    let (store, gate, _, child, prepared) = prepared_fork(SqliteStore::open_in_memory()?)?;
     assert_eq!(
         store
             .borrow_mut()
@@ -1973,8 +3922,8 @@ fn sqlite_fork_admission_rejects_an_unreceipted_existing_successor(
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(
-        store.borrow_mut().commit_fork_admission(prepared),
-        Err(ErasureErrorV1::PolicyConflict)
+        commit_fork_admission(&store, &gate, &prepared),
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert!(!store
         .borrow_mut()
@@ -1993,7 +3942,7 @@ fn sqlite_fork_insert_failure_rolls_back_erasure_successor(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, _, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     drop(store);
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch(&format!(
@@ -2003,8 +3952,9 @@ fn sqlite_fork_insert_failure_rolls_back_erasure_successor(
     drop(connection);
 
     let mut reopened = SqliteStore::open(path)?;
+    let reopened_gate = bind_test_gate(&mut reopened)?;
     assert_eq!(
-        reopened.commit_fork_admission(prepared),
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     assert_eq!(reopened.scope_index_count(request)?, 0);
@@ -2024,7 +3974,7 @@ fn sqlite_fork_owner_failure_rolls_back_child_and_erasure_successor(
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, _, request, child, prepared) = prepared_fork(SqliteStore::open(path)?)?;
     drop(store);
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch(&format!(
@@ -2034,8 +3984,9 @@ fn sqlite_fork_owner_failure_rolls_back_child_and_erasure_successor(
     drop(connection);
 
     let mut reopened = SqliteStore::open(path)?;
+    let reopened_gate = bind_test_gate(&mut reopened)?;
     assert_eq!(
-        reopened.commit_fork_admission(prepared),
+        commit_fork_admission_direct(&mut reopened, &reopened_gate, &prepared),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     assert_eq!(reopened.scope_index_count(request)?, 0);
@@ -2068,6 +4019,7 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
         Host {
             store: Rc::new(RefCell::new(reopened)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -2112,6 +4064,7 @@ fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -2130,6 +4083,7 @@ fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -2176,6 +4130,7 @@ fn assert_sqlite_recovery_error_retention_failure(
         Host {
             store: Rc::new(RefCell::new(store)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: true,
             manifest_sequence: None,
@@ -2258,6 +4213,7 @@ fn sqlite_recovery_error_trigger_rollbacks_leave_no_partial_rows(
             Host {
                 store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
                 targets: vec![target()],
+                topology_override: None,
                 verify_exact_retry: false,
                 fail_read_object: true,
                 manifest_sequence: None,
@@ -2350,6 +4306,7 @@ fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dy
         Host {
             store: shared,
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -2392,6 +4349,7 @@ fn sqlite_recovery_rejects_a_missing_durable_attempt_effect(
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
@@ -2434,6 +4392,7 @@ fn sqlite_recovery_rejects_a_corrupted_durable_attempt_effect(
         Host {
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
+            topology_override: None,
             verify_exact_retry: false,
             fail_read_object: false,
             manifest_sequence: None,
