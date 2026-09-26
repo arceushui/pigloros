@@ -254,8 +254,9 @@ pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, Timeli
 pub use key_registry::{
     deletion_receipt, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionPortV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRecordV1, KeyRegistrationOutcomeV1,
-    KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1, KeyRegistryPortV1,
-    KeyRegistrySigningPortV1, KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
+    KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1,
+    KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
 };
 pub use manifest::{AdapterRecord, ReproManifest};
 pub use owntracks_enrollment::{
