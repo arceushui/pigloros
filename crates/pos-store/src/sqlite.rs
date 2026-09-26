@@ -156,6 +156,8 @@ pub struct SqliteStore {
     erasure_gate_bound: bool,
     /// `SQLite` revision observed with the last complete host inventory.
     erasure_inventory_data_version: i64,
+    /// Inventory generation captured by the last complete host snapshot.
+    erasure_inventory_generation: Option<ErasureReferenceV1>,
     /// Host-managed topology may only change through verified transitions.
     erasure_topology_requires_permit: bool,
     /// Opaque host-issued identity for this adapter's topology transitions.
@@ -807,6 +809,7 @@ impl SqliteStore {
             erasure_gate,
             erasure_gate_bound,
             erasure_inventory_data_version,
+            erasure_inventory_generation: None,
             erasure_topology_requires_permit: false,
             erasure_topology_store_binding: None,
             authority_persistence_binding: None,
@@ -2352,6 +2355,7 @@ impl SqliteStore {
         let Some(gate) = self.erasure_gate.clone() else {
             return Err(CoreError::ErasureContainmentUnavailable);
         };
+        self.validate_erasure_inventory_data_version()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
@@ -2415,6 +2419,18 @@ impl SqliteStore {
             &self.conn,
             self.erasure_gate_bound,
             self.erasure_inventory_data_version,
+        )?;
+        if !self.erasure_gate_bound {
+            return Ok(());
+        }
+        let gate = self
+            .erasure_gate
+            .as_deref()
+            .ok_or(CoreError::ErasureContainmentUnavailable)?;
+        crate::validate_bound_erasure_inventory_generation(
+            true,
+            gate,
+            self.erasure_inventory_generation,
         )
     }
 
@@ -3600,6 +3616,7 @@ impl SqliteStore {
     ) -> Result<(), CoreError> {
         let binding = crate::issue_erasure_topology_store_binding(self.erasure_gate_bound, &gate)?;
         self.erasure_topology_requires_permit = binding.requires_transition_permit();
+        self.erasure_inventory_generation = None;
         self.erasure_gate = Some(gate);
         self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
@@ -3999,7 +4016,11 @@ impl EventStore for SqliteStore {
         meta: TimelineMeta,
     ) -> Result<Timeline, CoreError> {
         self.ensure_host_transition_permit(permit)?;
-        self.create_timeline_with_meta_for_host_transition_unchecked(&meta)
+        let result = self.create_timeline_with_meta_for_host_transition_unchecked(&meta);
+        if result.is_ok() || matches!(&result, Err(CoreError::StorageOutcomeUnknown(_))) {
+            self.erasure_inventory_generation = None;
+        }
+        result
     }
 
     fn append(
@@ -4071,7 +4092,14 @@ impl EventStore for SqliteStore {
                     true,
                 )
             });
-        finish_immediate_scope(&self.conn, scope, result)
+        let result = finish_immediate_scope(&self.conn, scope, result);
+        if matches!(
+            &result,
+            Ok((_, true)) | Err(CoreError::StorageOutcomeUnknown(_))
+        ) {
+            self.erasure_inventory_generation = None;
+        }
+        result
     }
 
     fn append_signed_authorized(
@@ -4623,8 +4651,13 @@ impl EventStore for SqliteStore {
                     .to_owned(),
             ));
         }
-        self.ensure_generic_timeline_visibility(parent)
-            .and_then(|()| self.create_timeline_with_meta_for_host_transition_unchecked(&meta))
+        let result = self
+            .ensure_generic_timeline_visibility(parent)
+            .and_then(|()| self.create_timeline_with_meta_for_host_transition_unchecked(&meta));
+        if result.is_ok() || matches!(&result, Err(CoreError::StorageOutcomeUnknown(_))) {
+            self.erasure_inventory_generation = None;
+        }
+        result
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
@@ -5210,6 +5243,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         }
         transaction.commit().map_err(map_erasure_receipt_failure)?;
         self.erasure_inventory_data_version = version_after;
+        self.erasure_inventory_generation = Some(snapshot.generation());
         Ok(snapshot)
     }
 
@@ -5235,6 +5269,26 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
                 Ok(()) => Err(ErasureErrorV1::StaleGeneration),
                 Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
             };
+        }
+        if self.erasure_gate_bound {
+            let Some(gate) = self.erasure_gate.as_deref() else {
+                return match interval_connection.execute_batch("ROLLBACK") {
+                    Ok(()) => Err(ErasureErrorV1::StaleGeneration),
+                    Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
+                };
+            };
+            if crate::validate_bound_erasure_inventory_generation(
+                self.erasure_gate_bound,
+                gate,
+                self.erasure_inventory_generation,
+            )
+            .is_err()
+            {
+                return match interval_connection.execute_batch("ROLLBACK") {
+                    Ok(()) => Err(ErasureErrorV1::StaleGeneration),
+                    Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
+                };
+            }
         }
         Ok(ErasureProtectedEffectIntervalV1::Owned)
     }
@@ -5343,7 +5397,18 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
         permit: &ErasureTopologyTransitionPermitV1,
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
-        self.commit_fork_admission_unchecked(permit, &admission)
+        let result = self.commit_fork_admission_unchecked(permit, &admission);
+        match &result {
+            Ok(ErasureCasOutcomeV1::Applied) => {
+                self.erasure_inventory_generation =
+                    Some(admission.successor_inventory().generation());
+            }
+            Err(ErasureErrorV1::ReceiptCommitFailed) => {
+                self.erasure_inventory_generation = None;
+            }
+            Ok(ErasureCasOutcomeV1::ExactRetry) | Err(_) => {}
+        }
+        result
     }
 
     fn recover_fork_admission(
@@ -6101,7 +6166,14 @@ impl ErasurePersistencePortV1 for SqliteStore {
             .execute_batch(begin_immediate_sql())
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
         let result = apply_sqlite_erasure_cas(&self.conn, &mutation);
-        finish_erasure_transaction(&self.conn, result)
+        let result = finish_erasure_transaction(&self.conn, result);
+        match &result {
+            Ok(ErasureCasOutcomeV1::Applied) | Err(ErasureErrorV1::ReceiptCommitFailed) => {
+                self.erasure_inventory_generation = None;
+            }
+            Ok(ErasureCasOutcomeV1::ExactRetry) | Err(_) => {}
+        }
+        result
     }
 }
 

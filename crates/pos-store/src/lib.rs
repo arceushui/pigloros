@@ -184,6 +184,24 @@ pub(crate) fn issue_erasure_topology_store_binding(
         .map_err(|_| CoreError::ErasureContainmentUnavailable)
 }
 
+pub(crate) fn validate_bound_erasure_inventory_generation(
+    gate_bound: bool,
+    gate: &pos_core::ErasureContainmentGateV1,
+    inventory_generation: Option<pos_core::ErasureReferenceV1>,
+) -> Result<(), CoreError> {
+    if !gate_bound {
+        return Ok(());
+    }
+    match gate.inventory_generation() {
+        Ok(generation) if Some(generation) == inventory_generation => Ok(()),
+        Ok(_) => Err(CoreError::ErasureContainmentUnavailable),
+        // The open test fixture deliberately has no installed inventory. In
+        // production, the gate itself rejects protected effects until one is
+        // installed; this helper only checks consistency once it exists.
+        Err(_) => Ok(()),
+    }
+}
+
 /// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
 ///
 /// The adapter stores the proof's exact canonical bytes under its content

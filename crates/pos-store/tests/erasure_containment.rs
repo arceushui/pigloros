@@ -5,8 +5,8 @@ use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, EntityId, ErasureArtifactClassV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, EventDraft, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
-    SchemaVersion,
+    ErasureReplayClaimV1, EventDraft, KeyRegistryStateV1, Kind, RegisteredArtifactV1,
+    ReplayClaimEvaluatorV1, SchemaVersion,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -192,6 +192,13 @@ fn assert_gate_removal_cannot_rebind<S: RemoveGate>(
     assert_eq!(
         removed
             .append(timeline.id(), &[draft()])
+            .err()
+            .map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    assert_eq!(
+        removed
+            .save_key_registry(&KeyRegistryStateV1::new())
             .err()
             .map(|error| error.to_string()),
         Some("erasure containment boundary is unavailable".to_owned())

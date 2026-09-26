@@ -158,6 +158,73 @@ fn sqlite_host_managed_topology_requires_verified_transitions(
     assert_host_managed_topology_requires_verified_transitions(SqliteStore::open_in_memory()?)
 }
 
+fn assert_direct_erasure_cas_invalidates_bound_inventory<S>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+{
+    let timeline = store.create_timeline("direct-erasure-cas")?.id();
+    let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+
+    let limits = pos_core::ErasureRecoveryLimitsV1::compiled_maximum();
+    let snapshot = store.complete_erasure_inventory_snapshot_with_limits(limits)?;
+    let mut query = pos_core::ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+    let inventory = query.verified_inventory_with_limits(limits)?;
+    let generation = gate.install_verified_inventory(Arc::new(inventory), limits)?;
+    assert_eq!(
+        store.get_timeline(timeline)?.map(|head| head.id()),
+        Some(timeline)
+    );
+
+    let shared = Rc::new(RefCell::new(store));
+    let request = request()?;
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: Vec::new(),
+            topology_override: None,
+            verify_exact_retry: false,
+            fail_read_object: false,
+            manifest_sequence: None,
+        },
+        reference(30),
+    );
+    coordinator.submit(request.clone(), request.provenance())?;
+
+    assert_eq!(gate.inventory_generation(), Ok(generation));
+    assert_eq!(
+        shared.borrow_mut().append(timeline, &[]).err(),
+        Some(CoreError::ErasureContainmentUnavailable)
+    );
+    assert_eq!(
+        shared
+            .borrow_mut()
+            .save_key_registry(&pos_core::KeyRegistryStateV1::new())
+            .err(),
+        Some(CoreError::ErasureContainmentUnavailable)
+    );
+    assert_eq!(
+        shared.borrow().get_timeline(timeline).err(),
+        Some(CoreError::ErasureContainmentUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_direct_erasure_cas_invalidates_bound_inventory() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_direct_erasure_cas_invalidates_bound_inventory(MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_direct_erasure_cas_invalidates_bound_inventory() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_direct_erasure_cas_invalidates_bound_inventory(SqliteStore::open_in_memory()?)
+}
+
 fn recover_fork_admission<S: ErasureForkPersistencePortV1>(
     store: &mut S,
     operation: ErasureReferenceV1,
