@@ -16,6 +16,14 @@ const fn digest(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
+fn wait_for_worker(started_rx: &mpsc::Receiver<()>, release_tx: &mpsc::Sender<()>, worker: &str) {
+    let started = started_rx.recv_timeout(Duration::from_secs(5));
+    if started.is_err() {
+        assert!(release_tx.send(()).is_ok(), "callback must be released");
+    }
+    assert!(started.is_ok(), "{worker} did not start: {started:?}");
+}
+
 fn deny(
     store: &mut impl KeyRegistryHistoricalDecryptionPortV1,
     identity: KeyIdentityV1,
@@ -140,6 +148,7 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
         let mut mutating_store = SqliteStore::open(path)?;
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let (mutation_started_tx, mutation_started_rx) = mpsc::channel();
         let (mutation_tx, mutation_rx) = mpsc::channel();
         std::thread::scope(|scope| {
             let decryption = scope.spawn(move || {
@@ -152,19 +161,13 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
                     "plaintext"
                 })
             });
-            let entered = entered_rx.recv_timeout(Duration::from_secs(5));
-            if entered.is_err() {
-                assert!(
-                    release_tx.send(()).is_ok(),
-                    "decryption worker exited early"
-                );
-            }
-            assert!(
-                entered.is_ok(),
-                "decryption callback did not enter: {entered:?}"
-            );
+            wait_for_worker(&entered_rx, &release_tx, "decryption callback");
 
             let mutation = scope.spawn(move || {
+                assert!(
+                    mutation_started_tx.send(()).is_ok(),
+                    "mutation start must be observed"
+                );
                 let result = if rotate {
                     mutating_store.save_key_registry(&rotated)
                 } else {
@@ -177,6 +180,7 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
                     "mutation result must be observed"
                 );
             });
+            wait_for_worker(&mutation_started_rx, &release_tx, "mutation worker");
             let blocked = mutation_rx.recv_timeout(Duration::from_millis(100));
             assert!(release_tx.send(()).is_ok(), "callback must be released");
             assert!(matches!(blocked, Err(RecvTimeoutError::Timeout)));
