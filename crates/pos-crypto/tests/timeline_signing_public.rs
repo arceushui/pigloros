@@ -458,6 +458,99 @@ fn payload_erasure_and_context_loss_degrade_to_different_claims(
 }
 
 #[test]
+fn payload_erasure_classifies_each_missing_or_invalid_signed_context(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (event, registry, identity, public_key, _) = committed_fixture()?;
+    let payload = erasure_artifact(
+        108,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::RetainStructure,
+        ArtifactStateV1::TransitionApplied,
+    );
+    let context = erasure_artifact(
+        109,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let mut missing_identity = event.clone();
+    missing_identity.signature_identity = None;
+    let mut wrong_role = event.clone();
+    wrong_role.signature_identity = Some(KeyIdentityV1::new(
+        "timeline-owner",
+        KeyRoleV1::SubjectAttributionSigning,
+        1,
+    ));
+    let mut missing_signature = event.clone();
+    missing_signature.signature = None;
+    let mut missing_origin = event.clone();
+    missing_origin.origin = None;
+    let missing_registry = KeyRegistryStateV1::new();
+    let wrong_identity =
+        KeyIdentityV1::new("different-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+    let anchor = Some((identity, public_key));
+    for (candidate, candidate_registry, candidate_anchor, expected) in [
+        (
+            &missing_identity,
+            Some(&registry),
+            anchor,
+            TimelineEventVerificationV1::MissingRequiredContext,
+        ),
+        (
+            &wrong_role,
+            Some(&registry),
+            anchor,
+            TimelineEventVerificationV1::Invalid,
+        ),
+        (
+            &missing_signature,
+            Some(&registry),
+            anchor,
+            TimelineEventVerificationV1::MissingRequiredContext,
+        ),
+        (
+            &missing_origin,
+            Some(&registry),
+            anchor,
+            TimelineEventVerificationV1::MissingRequiredContext,
+        ),
+        (
+            &event,
+            None,
+            anchor,
+            TimelineEventVerificationV1::MissingRequiredContext,
+        ),
+        (
+            &event,
+            Some(&registry),
+            Some((wrong_identity, public_key)),
+            TimelineEventVerificationV1::Invalid,
+        ),
+        (
+            &event,
+            Some(&missing_registry),
+            anchor,
+            TimelineEventVerificationV1::MissingRequiredContext,
+        ),
+    ] {
+        let report = evaluate_timeline_event_erasure_v1(erasure_input(
+            Some(candidate),
+            candidate_registry,
+            candidate_anchor,
+            payload,
+            context,
+            ErasureReplayClaimV1::Exact,
+        ))?;
+        assert_eq!(report.verification(), expected);
+        assert_eq!(
+            report.replay_claim(),
+            ErasureReplayClaimV1::UnverifiableArtifactsMissing
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn optional_ids_distinguish_authenticated_null_from_erased_presence(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut event, mut registry, identity, public_key, key) = committed_fixture()?;
