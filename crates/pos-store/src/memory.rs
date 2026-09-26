@@ -10825,16 +10825,16 @@ mod coverage_entrypoints {
         assert!(store.save_key_registry(&invalid).is_err());
         let decryption_identity =
             KeyIdentityV1::new("corrupt-owner", KeyRoleV1::SubjectDataEncryption, 1);
-        let decryption_called = std::cell::Cell::new(false);
-        assert_eq!(
-            store.with_decryption_authorization(
+        let decryption_result: Result<(), KeyRegistryErrorV1> = store
+            .with_decryption_authorization(
                 decryption_identity,
                 Hash::from_bytes([11; 32]),
-                || decryption_called.set(true),
-            ),
+                Default::default,
+            );
+        assert_eq!(
+            decryption_result,
             Err(KeyRegistryErrorV1::RegistryUnavailable)
         );
-        assert!(!decryption_called.get());
         let identity = KeyIdentityV1::new("corrupt-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let request = pos_core::KeyDestructionRequestV1::new(
             identity,
