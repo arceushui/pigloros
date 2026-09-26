@@ -52,6 +52,7 @@ pub struct RecoveryEventHeader {
     seq: Seq,
     entity: EntityId,
     event_type: Kind,
+    causation_id: Option<EventId>,
 }
 
 impl RecoveryEventHeader {
@@ -73,6 +74,11 @@ impl RecoveryEventHeader {
     #[must_use]
     pub const fn event_type(&self) -> &Kind {
         &self.event_type
+    }
+
+    #[must_use]
+    pub const fn causation_id(&self) -> Option<EventId> {
+        self.causation_id
     }
 }
 
@@ -117,6 +123,7 @@ impl DriverRecoveryEvidence {
                     seq: event.seq,
                     entity: event.entity,
                     event_type: event.event_type.clone(),
+                    causation_id: event.causation_id,
                 };
                 let payload = wants_payload(&header).then(|| event.payload.clone());
                 RecoveryEvent { header, payload }

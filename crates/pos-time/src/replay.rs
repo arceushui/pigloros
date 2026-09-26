@@ -142,10 +142,10 @@ mod tests {
         CoreError, ErasureContainmentGateV1, Event, Reducer, State,
     };
     use pos_plugin_world::{
-        encode_actuator_pair_v1, ActionKindV1, Body, SimpleKinematicBackend, WorldActionV1,
-        WorldConfigV1, WorldDriver, WorldObservationV1, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
-        COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
-        SENSOR_MIN_RESOLUTION_MM,
+        encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, SimpleKinematicBackend,
+        WorldActionV1, WorldConfigV1, WorldDriver, WorldObservationV1, WorldReducer,
+        ACTION_SCOPE_SINGLE_BODY, COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1,
+        EVENT_TYPE_OBSERVATION_V1, SENSOR_MIN_RESOLUTION_MM,
     };
     use pos_runtime::{Driver, ObservationView};
     use pos_state::ProjectionRegistry;
@@ -333,6 +333,7 @@ mod tests {
             vec![
                 Body {
                     entity_id: bodies[1],
+                    rotation: BodyRotationV1::default(),
                     x: 10.0,
                     y: 0.0,
                     z: 0.0,
@@ -342,6 +343,7 @@ mod tests {
                 },
                 Body {
                     entity_id: bodies[0],
+                    rotation: BodyRotationV1::default(),
                     x: 0.0,
                     y: 0.0,
                     z: 0.0,

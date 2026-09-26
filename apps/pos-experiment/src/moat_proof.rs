@@ -27,8 +27,8 @@ use pos_core::{
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
 use pos_plugin_world::{
-    encode_actuator_pair_v1, ActionKindV1, Body, SimpleKinematicBackend, WorldActionV1,
-    WorldConfigV1, WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
+    encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, SimpleKinematicBackend,
+    WorldActionV1, WorldConfigV1, WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
     COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
     SENSOR_MIN_RESOLUTION_MM,
 };
@@ -535,6 +535,7 @@ fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityI
     WorldDriver::new(
         vec![Body {
             entity_id: body,
+            rotation: BodyRotationV1::default(),
             x: input.initial_position[0],
             y: 0.0,
             z: input.initial_position[1],
