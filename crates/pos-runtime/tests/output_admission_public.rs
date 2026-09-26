@@ -96,6 +96,50 @@ fn assert_artifact_shape_rejections(source: &FixtureBinding) {
             kind: "configuration"
         })
     ));
+    let mut truncated_length = b"CFG1".to_vec();
+    truncated_length.extend_from_slice(&[0; 7]);
+    let mut truncated_field = b"CFG1".to_vec();
+    truncated_field.extend_from_slice(&1_u64.to_le_bytes());
+    let mut overflowing_field = b"CFG1".to_vec();
+    overflowing_field.extend_from_slice(&u64::MAX.to_le_bytes());
+    for malformed in [
+        b"CFG1".to_vec(),
+        truncated_length,
+        truncated_field,
+        overflowing_field,
+        framed_configuration(&[&[0xff], b"1.0.0", b""]),
+        framed_configuration(&[b"rule-agent", &[0xff], b""]),
+        framed_configuration(&[b"rule-agent", b"1.0.0", &[0xff], b""]),
+    ] {
+        assert!(matches!(
+            validate_output_policy_artifacts_v1(
+                &source.output_policy_bytes,
+                &source.executable_budget_bytes,
+                &source.implementation_artifact,
+                &malformed,
+                &source.profile_artifact,
+                &source.retention_artifact,
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid {
+                kind: "configuration"
+            })
+        ));
+    }
+    let unordered_configuration =
+        framed_configuration(&[b"rule-agent", b"1.0.0", b"z.event", b"a.event", b"details"]);
+    assert!(matches!(
+        validate_output_policy_artifacts_v1(
+            &source.output_policy_bytes,
+            &source.executable_budget_bytes,
+            &source.implementation_artifact,
+            &unordered_configuration,
+            &source.profile_artifact,
+            &source.retention_artifact,
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration"
+        })
+    ));
     assert!(matches!(
         validate_output_policy_artifacts_v1(
             &source.output_policy_bytes,
@@ -118,6 +162,18 @@ fn assert_artifact_shape_rejections(source: &FixtureBinding) {
         ),
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })
     ));
+}
+
+fn framed_configuration(fields: &[&[u8]]) -> Vec<u8> {
+    let mut artifact = b"CFG1".to_vec();
+    for field in fields {
+        let Ok(length) = u64::try_from(field.len()) else {
+            return Vec::new();
+        };
+        artifact.extend_from_slice(&length.to_le_bytes());
+        artifact.extend_from_slice(field);
+    }
+    artifact
 }
 
 fn assert_artifact_size_rejections(source: &FixtureBinding) {
@@ -217,8 +273,15 @@ fn assert_artifact_identity_rejections(source: &FixtureBinding) -> TestResult {
             kind: "implementation"
         })
     ));
-    let mut configuration = source.configuration_artifact.clone();
-    configuration.push(0);
+    let configuration = framed_configuration(&[
+        b"rule-agent",
+        b"1.0.0",
+        b"plugin.l0",
+        b"plugin.l1",
+        b"plugin.l2",
+        b"plugin.output",
+        b"different-configuration-details",
+    ]);
     assert!(matches!(
         validate_output_policy_artifacts_v1(
             &source.output_policy_bytes,
@@ -233,7 +296,7 @@ fn assert_artifact_identity_rejections(source: &FixtureBinding) -> TestResult {
         })
     ));
     let alternate_profile =
-        pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-air-gapped-v1")?;
+        pos_conformance::draft_execution_profile_bytes_v1("deterministic-air-gapped-v1")?;
     assert!(matches!(
         validate_output_policy_artifacts_v1(
             &source.output_policy_bytes,

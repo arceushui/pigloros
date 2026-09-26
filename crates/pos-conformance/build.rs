@@ -2118,7 +2118,7 @@ fn emit_draft_execution_profiles(
             generated,
             "INSTALLED_EXECUTION_PROFILES",
             "InstalledExecutionProfileSource",
-            &declaration.execution_profiles,
+            &[],
             true,
         )?;
     }

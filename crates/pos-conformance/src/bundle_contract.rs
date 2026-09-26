@@ -198,6 +198,24 @@ pub fn host_verified_execution_profile_bytes_v1(
     Ok(bytes)
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{draft_execution_profile_bytes_v1, host_verified_execution_profile_bytes_v1};
+    use crate::BundleContractErrorV1;
+
+    #[test]
+    fn draft_profiles_do_not_become_host_verified_profiles() {
+        for profile_id in ["deterministic-air-gapped-v1", "deterministic-local-v1"] {
+            assert!(draft_execution_profile_bytes_v1(profile_id).is_ok());
+            assert_eq!(
+                host_verified_execution_profile_bytes_v1(profile_id),
+                Err(BundleContractErrorV1::ProfileInvalid)
+            );
+        }
+    }
+}
+
 fn text_array(values: &[&str]) -> Value {
     Value::Array(
         values

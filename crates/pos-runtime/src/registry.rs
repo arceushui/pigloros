@@ -2662,13 +2662,11 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
-        let profile_artifact = pos_conformance::host_verified_execution_profile_bytes_v1(
-            profile_id,
-        )
-        .map_err(|error| RuntimeError::CapabilityMismatch {
-            name: plugin.name().to_owned(),
-            reason: error.to_string(),
-        })?;
+        let profile_artifact = pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
         budget_input.execution_profile_hash =
             crate::execution_profile_artifact_hash_v1(&profile_artifact);
         let budget = pos_core::ExecutableBudgetPolicyV1::new(budget_input).map_err(|error| {

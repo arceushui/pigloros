@@ -226,6 +226,10 @@ impl InstalledOutputPolicySourceV1 {
                     "src/main.rs",
                     include_bytes!("../../../apps/piglor-gateway/src/main.rs"),
                 ),
+                (
+                    "plugins/world/src/lib.rs",
+                    include_bytes!("../../../plugins/world/src/lib.rs"),
+                ),
             ]),
             Self::World => source_artifact_bundle(&[(
                 "src/lib.rs",
@@ -488,9 +492,8 @@ impl OutputPolicyBindingV1 {
         .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
             kind: "configuration",
         })?;
-        let execution_profile_artifact =
-            pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
-                .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
+        let execution_profile_artifact = execution_profile_artifact_v1(profile_id)
+            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
         let configuration_hash = crate::reviewed_policy::host_artifact_hash_v1(
             b"pigloros.base-configuration.v1",
             &configuration_artifact,
@@ -528,9 +531,8 @@ impl OutputPolicyBindingV1 {
         .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
             kind: "configuration",
         })?;
-        let execution_profile_artifact =
-            pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
-                .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
+        let execution_profile_artifact = execution_profile_artifact_v1(profile_id)
+            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
         let implementation_artifact = source.implementation_artifact(plugin);
         let retention_policy_artifact =
             crate::reviewed_policy::reviewed_retention_policy_bytes_v1();
@@ -676,7 +678,7 @@ impl OutputPolicyClosureV1 {
         let executable_budget =
             ExecutableBudgetPolicyV1::from_canonical_cbor(executable_budget_bytes)
                 .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EBP1" })?;
-        if !configuration_artifact.starts_with(b"CFG1") {
+        if !crate::reviewed_policy::is_canonical_plugin_configuration_v1(configuration_artifact) {
             return Err(OutputAdmissionErrorV1::ArtifactInvalid {
                 kind: "configuration",
             });
@@ -967,6 +969,19 @@ const fn validate_leaf_lengths(
         return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" });
     }
     Ok(())
+}
+
+fn execution_profile_artifact_v1(
+    profile_id: &str,
+) -> Result<Vec<u8>, pos_conformance::BundleContractErrorV1> {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
+    }
 }
 
 /// Deterministic, host-side validation of one Plugin's complete output batch.
@@ -1392,9 +1407,8 @@ mod tests {
         plugin_id: PluginId,
         workload_profile: WorkloadProfileV1,
     ) -> OutputPolicyClosureV1 {
-        let profile =
-            pos_conformance::host_verified_execution_profile_bytes_v1("deterministic-local-v1")
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let profile = execution_profile_artifact_v1("deterministic-local-v1")
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let profile_hash = crate::reviewed_policy::execution_profile_artifact_hash_v1(&profile);
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -1437,7 +1451,7 @@ mod tests {
         })
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let implementation = b"fixture-implementation";
-        let configuration = b"CFG1fixture";
+        let configuration = fixture_configuration_artifact();
         let declarations = vec![
             OutputDeclarationV1::new(
                 "a.authoritative".to_owned(),
@@ -1475,7 +1489,7 @@ mod tests {
             ),
             base_configuration_digest: crate::reviewed_policy::host_artifact_hash_v1(
                 b"pigloros.base-configuration.v1",
-                configuration,
+                &configuration,
             ),
             executable_profile_hash: budget.digest(),
             retention_policy_hash: crate::reviewed_policy::reviewed_retention_policy_hash_v1(),
@@ -1487,11 +1501,24 @@ mod tests {
             &policy.to_canonical_cbor(),
             &budget.to_canonical_cbor(),
             implementation,
-            configuration,
+            &configuration,
             &profile,
             crate::reviewed_policy::reviewed_retention_policy_bytes_v1(),
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    }
+
+    fn fixture_configuration_artifact() -> Vec<u8> {
+        let mut artifact = b"CFG1".to_vec();
+        for field in [
+            b"fixture".as_slice(),
+            b"1.0.0".as_slice(),
+            b"fixture.output".as_slice(),
+            b"fixture".as_slice(),
+        ] {
+            hash_framed_bytes(&mut artifact, field);
+        }
+        artifact
     }
 
     #[test]
@@ -1682,7 +1709,10 @@ mod tests {
             assert!(!closure.output_policy_bytes().is_empty());
             assert!(!closure.executable_budget_bytes().is_empty());
             assert_eq!(closure.implementation_artifact(), b"fixture-implementation");
-            assert_eq!(closure.configuration_artifact(), b"CFG1fixture");
+            assert_eq!(
+                closure.configuration_artifact(),
+                fixture_configuration_artifact()
+            );
             assert!(!closure.execution_profile_artifact().is_empty());
             assert!(!closure.retention_policy_artifact().is_empty());
             assert!(!closure.to_canonical_bytes().is_empty());

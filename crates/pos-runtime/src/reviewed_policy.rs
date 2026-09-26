@@ -130,6 +130,52 @@ pub fn canonical_plugin_configuration_v1<P: Plugin + ?Sized>(
     Ok(artifact)
 }
 
+/// Check that a retained CFG1 artifact uses the canonical length framing and
+/// sorted event-type order emitted by [`canonical_plugin_configuration_v1`].
+pub(crate) fn is_canonical_plugin_configuration_v1(artifact: &[u8]) -> bool {
+    let Some(mut remaining) = artifact.strip_prefix(b"CFG1") else {
+        return false;
+    };
+    let mut fields = Vec::new();
+    while !remaining.is_empty() {
+        let Some(length_bytes) = remaining.get(..8) else {
+            return false;
+        };
+        let Ok(length_bytes) = <[u8; 8]>::try_from(length_bytes) else {
+            return false;
+        };
+        let Ok(length) = usize::try_from(u64::from_le_bytes(length_bytes)) else {
+            return false;
+        };
+        let Some(end) = 8usize.checked_add(length) else {
+            return false;
+        };
+        let Some(field) = remaining.get(8..end) else {
+            return false;
+        };
+        fields.push(field);
+        remaining = &remaining[end..];
+    }
+    if fields.len() < 3
+        || std::str::from_utf8(fields[0]).is_err()
+        || std::str::from_utf8(fields[1]).is_err()
+    {
+        return false;
+    }
+    let event_types = &fields[2..fields.len() - 1];
+    let mut previous = None;
+    for event_type in event_types {
+        let Ok(event_type) = std::str::from_utf8(event_type) else {
+            return false;
+        };
+        if previous.is_some_and(|previous| previous > event_type) {
+            return false;
+        }
+        previous = Some(event_type);
+    }
+    true
+}
+
 fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     output.extend_from_slice(bytes);

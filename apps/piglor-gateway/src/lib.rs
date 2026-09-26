@@ -89,18 +89,11 @@ fn gateway_output_binding<P: Plugin + ?Sized>(
 }
 
 #[cfg(test)]
-fn gateway_output_binding_with_inputs<P: Plugin + ?Sized>(
+fn gateway_output_binding_with_profile<P: Plugin + ?Sized>(
     plugin: &P,
     configuration_details: &[u8],
     profile_id: &str,
-    event_type: &str,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    if event_type != EVENT_TYPE_ACTION {
-        return Err(pos_runtime::RuntimeError::CapabilityMismatch {
-            name: plugin.name().to_owned(),
-            reason: "Gateway action kind does not match the installed output source".to_owned(),
-        });
-    }
     pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
         pos_runtime::InstalledOutputPolicySourceV1::Gateway,
@@ -163,7 +156,7 @@ mod coverage_tests {
     }
 
     use super::{
-        gateway_output_binding_with_inputs, Gateway, GatewayActionPlugin, OwnTracksOwnerKey,
+        gateway_output_binding_with_profile, Gateway, GatewayActionPlugin, OwnTracksOwnerKey,
     };
     use pos_core::{
         geo_admission::{
@@ -215,23 +208,12 @@ mod coverage_tests {
         let plugin = GatewayActionPlugin {
             id: PluginId::new(),
         };
-        assert!(gateway_output_binding_with_inputs(
-            &plugin,
-            &[],
-            "unknown-profile",
-            "world.action.v1",
-        )
-        .is_err());
-        assert!(
-            gateway_output_binding_with_inputs(&plugin, &[], "deterministic-local-v1", "",)
-                .is_err()
-        );
+        assert!(gateway_output_binding_with_profile(&plugin, &[], "unknown-profile",).is_err());
 
-        assert!(gateway_output_binding_with_inputs(
+        assert!(gateway_output_binding_with_profile(
             &InvalidVersionPlugin,
             &[],
             "deterministic-local-v1",
-            "world.action.v1",
         )
         .is_err());
     }
@@ -751,6 +733,18 @@ fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    let bodies = canonical_gateway_bodies(bodies)?;
+    let mut registry = PluginRegistry::new().without_erasure_gate();
+    register_gateway_world_action(&mut registry, bodies)?;
+    if let Some(authority) = authority {
+        registry = registry.with_consent_authority(authority);
+    }
+    Ok(registry)
+}
+
+fn canonical_gateway_bodies(
+    bodies: impl IntoIterator<Item = EntityId>,
+) -> Result<Vec<EntityId>, pos_runtime::RuntimeError> {
     let max_bodies = pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 / 16;
     let mut bodies = bodies.into_iter().take(max_bodies + 1).collect::<Vec<_>>();
     if bodies.len() > max_bodies {
@@ -759,12 +753,18 @@ fn gateway_action_registry_builder(
         }
         .into());
     }
-    let mut registry = PluginRegistry::new().without_erasure_gate();
+    bodies.sort_unstable();
+    bodies.dedup();
+    Ok(bodies)
+}
+
+fn register_gateway_world_action(
+    registry: &mut PluginRegistry,
+    bodies: Vec<EntityId>,
+) -> Result<(), pos_runtime::RuntimeError> {
     let descriptor = GatewayActionPlugin {
         id: PluginId::new(),
     };
-    bodies.sort_unstable();
-    bodies.dedup();
     let configuration_details = gateway_configuration_details(&bodies);
     let world_plugin = WorldPlugin::new().with_bodies(bodies);
     let binding = gateway_output_binding(&descriptor, &configuration_details)?;
@@ -776,10 +776,7 @@ fn gateway_action_registry_builder(
         Some(Box::new(world_plugin)),
         [Kind::new(EVENT_TYPE_ACTION)],
     )?;
-    if let Some(authority) = authority {
-        registry = registry.with_consent_authority(authority);
-    }
-    Ok(registry)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3345,25 +3342,19 @@ mod tests {
             id: PluginId::new(),
         };
         let configuration_details = gateway_configuration_details(&[]);
-        let invalid_profile = gateway_output_binding_with_inputs(
+        let binding = super::gateway_output_binding(&descriptor, &configuration_details).test_ok();
+        let world_source = include_bytes!("../../../plugins/world/src/lib.rs");
+        assert!(binding
+            .implementation_artifact()
+            .windows(world_source.len())
+            .any(|window| window == world_source));
+        let invalid_profile = gateway_output_binding_with_profile(
             &descriptor,
             &configuration_details,
             "unknown-profile",
-            EVENT_TYPE_ACTION,
         );
         assert!(matches!(
             invalid_profile,
-            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
-        ));
-
-        let invalid_event_type = gateway_output_binding_with_inputs(
-            &descriptor,
-            &configuration_details,
-            "deterministic-local-v1",
-            "world.unowned",
-        );
-        assert!(matches!(
-            invalid_event_type,
             Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
         ));
 
