@@ -2,7 +2,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-//! `pos-plugin-world` — spatial + embodiment plugin with a swappable backend.
+//! `pos-plugin-world` — spatial + embodiment plugin with an installed Live backend.
 //!
 //! Owns versioned World action, observation and configuration Events and entity kind `"world-body"`.
 //! The built-in backend integrates a 3D pose without a Rapier dependency.
@@ -14,12 +14,14 @@ use pos_core::{
     ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     state::{Reducer, State},
-    ActionApprover, ActionRejected, ProposedAction, WorldCoordinateV1, WorldTransformError,
-    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ActionApprover, ActionRejected, ProposedAction, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
+#[cfg(test)]
+use pos_core::{WorldCoordinateV1, WorldTransformError};
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEvent, RecoveryEventHeader,
-    RuntimeError, StepOutput,
+    CommittedForkHandoff, Driver, DriverRecoveryEvidence, HostWorldProfileV1,
+    MeasuredProcessImageV1, ObservationView, RecoveryEvent, RecoveryEventHeader, RuntimeError,
+    StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -788,9 +790,10 @@ impl WorldConfigV1 {
 // World backend trait (physics seam)
 // ---------------------------------------------------------------------------
 
-/// A swappable physics backend; the built-in adapter uses simple kinematics.
-pub trait WorldBackend: Send + Sync {
+/// Internal physics step seam used by the built-in backend and test fixtures.
+trait WorldBackend: Send + Sync {
     /// Human-readable name for this backend.
+    #[cfg(test)]
     fn name(&self) -> &'static str;
 
     /// Simulate one pinned-duration step and return body observations.
@@ -850,8 +853,9 @@ pub struct WorldObservation {
 }
 
 /// A world body represented by a core-owned named ENU coordinate.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq)]
-pub struct WorldCoordinateBody {
+struct WorldCoordinateBody {
     entity_id: EntityId,
     position: WorldCoordinateV1,
     east_velocity_metres_per_step: f64,
@@ -859,10 +863,11 @@ pub struct WorldCoordinateBody {
     up_velocity_metres_per_step: f64,
 }
 
+#[cfg(test)]
 impl WorldCoordinateBody {
     /// Construct a body with one-step East/North/Up velocity components.
     #[must_use]
-    pub const fn new(
+    const fn new(
         entity_id: EntityId,
         position: WorldCoordinateV1,
         east_velocity_metres_per_step: f64,
@@ -880,34 +885,36 @@ impl WorldCoordinateBody {
 
     /// Return the entity identifier.
     #[must_use]
-    pub const fn entity_id(self) -> EntityId {
+    const fn entity_id(self) -> EntityId {
         self.entity_id
     }
 
     /// Return the current named world coordinate.
     #[must_use]
-    pub const fn position(self) -> WorldCoordinateV1 {
+    const fn position(self) -> WorldCoordinateV1 {
         self.position
     }
 }
 
 /// A world-body observation represented by a named ENU coordinate.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq)]
-pub struct WorldCoordinateObservation {
+struct WorldCoordinateObservation {
     entity_id: EntityId,
     position: WorldCoordinateV1,
 }
 
+#[cfg(test)]
 impl WorldCoordinateObservation {
     /// Return the observed entity identifier.
     #[must_use]
-    pub const fn entity_id(self) -> EntityId {
+    const fn entity_id(self) -> EntityId {
         self.entity_id
     }
 
     /// Return the observed named world coordinate.
     #[must_use]
-    pub const fn position(self) -> WorldCoordinateV1 {
+    const fn position(self) -> WorldCoordinateV1 {
         self.position
     }
 }
@@ -918,11 +925,11 @@ impl WorldCoordinateObservation {
 
 /// Simple Euler integration of three-dimensional velocity over the pinned step.
 #[derive(Default)]
-pub struct SimpleKinematicBackend;
+struct SimpleKinematicBackend;
 
 impl SimpleKinematicBackend {
     #[must_use]
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self
     }
 
@@ -932,8 +939,8 @@ impl SimpleKinematicBackend {
     ///
     /// Returns [`WorldTransformError::NonFiniteCoordinate`] when a velocity
     /// component or translated coordinate is not finite.
-    pub fn step_coordinates(
-        &self,
+    #[cfg(test)]
+    fn step_coordinates(
         bodies: &[WorldCoordinateBody],
     ) -> Result<Vec<WorldCoordinateObservation>, WorldTransformError> {
         bodies
@@ -954,6 +961,7 @@ impl SimpleKinematicBackend {
 }
 
 impl WorldBackend for SimpleKinematicBackend {
+    #[cfg(test)]
     fn name(&self) -> &'static str {
         "simple-kinematic"
     }
@@ -1130,7 +1138,7 @@ impl ActionApprover for WorldPlugin {
 pub struct WorldDriver {
     initial_entities: Vec<Body>,
     entities: Vec<Body>,
-    backend: Box<dyn WorldBackend>,
+    backend: WorldDriverBackend,
     tick: u64,
     /// Counts simulation steps independently of timeline ticks (same value in V1).
     step_index: u64,
@@ -1141,6 +1149,43 @@ pub struct WorldDriver {
     config_entity: EntityId,
     staged_step: Option<WorldDriverState>,
     staged_restore: Option<WorldDriverState>,
+    installed_timeline: Option<TimelineId>,
+    staged_step_timeline: Option<TimelineId>,
+    staged_restore_timeline: Option<TimelineId>,
+}
+
+struct InstalledWorldBackendV1 {
+    image: MeasuredProcessImageV1,
+    sealed_config: CanonicalBytes,
+    backend: SimpleKinematicBackend,
+    #[cfg(test)]
+    test_backend: Option<Box<dyn WorldBackend>>,
+}
+
+impl InstalledWorldBackendV1 {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.test_backend {
+            return fixture.step(bodies, timestep_micros);
+        }
+        self.backend.step(bodies, timestep_micros)
+    }
+}
+
+enum WorldDriverBackend {
+    Installed(InstalledWorldBackendV1),
+    #[cfg(test)]
+    Fixture(Box<dyn WorldBackend>),
+}
+
+impl WorldDriverBackend {
+    fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+        match self {
+            Self::Installed(installed) => installed.step(bodies, timestep_micros),
+            #[cfg(test)]
+            Self::Fixture(backend) => backend.step(bodies, timestep_micros),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1160,11 +1205,54 @@ struct WorldRecoveryCursor {
 }
 
 impl WorldDriver {
-    /// Create a new world driver with the given backend and session config.
-    #[must_use]
-    pub fn new(
+    /// Create Live World stepping with the measured built-in backend and a fixed host profile.
+    ///
+    /// # Errors
+    /// Fails closed when the running process cannot be measured or the profile cannot be sealed.
+    pub fn new_live(
+        entities: Vec<Body>,
+        profile: HostWorldProfileV1,
+    ) -> Result<Self, RuntimeError> {
+        let image = MeasuredProcessImageV1::capture()?;
+        let [gravity_x, gravity_y, gravity_z] = profile.gravity();
+        let config = WorldConfigV1 {
+            timestep_micros: profile.timestep_micros(),
+            coord_convention: profile.coord_convention(),
+            gravity_x,
+            gravity_y,
+            gravity_z,
+            backend_id: "simple-kinematic".to_owned(),
+            backend_version: "1.0.0".to_owned(),
+            backend_content_hash: image.digest(),
+            action_schema_version: profile.action_schema_version(),
+            observation_schema_version: profile.observation_schema_version(),
+            sensor_min_resolution_mm: profile.sensor_min_resolution_mm(),
+            actuator_catalogue_version: profile.actuator_catalogue_version(),
+        };
+        let sealed_config = config
+            .encode()
+            .map_err(|_| WorldInstallationErrorV1::UnsupportedProfile)?;
+        Ok(Self::with_backend(
+            entities,
+            WorldDriverBackend::Installed(InstalledWorldBackendV1 {
+                image,
+                sealed_config,
+                backend: SimpleKinematicBackend::new(),
+                #[cfg(test)]
+                test_backend: None,
+            }),
+            config,
+        ))
+    }
+
+    #[cfg(test)]
+    fn new(entities: Vec<Body>, backend: Box<dyn WorldBackend>, config: WorldConfigV1) -> Self {
+        Self::with_backend(entities, WorldDriverBackend::Fixture(backend), config)
+    }
+
+    fn with_backend(
         mut entities: Vec<Body>,
-        backend: Box<dyn WorldBackend>,
+        backend: WorldDriverBackend,
         config: WorldConfigV1,
     ) -> Self {
         entities.sort_unstable_by_key(|body| body.entity_id);
@@ -1181,6 +1269,9 @@ impl WorldDriver {
             config_entity: EntityId::new(),
             staged_step: None,
             staged_restore: None,
+            installed_timeline: None,
+            staged_step_timeline: None,
+            staged_restore_timeline: None,
         }
     }
 
@@ -1209,6 +1300,106 @@ impl WorldDriver {
         self.config_emitted = state.config_emitted;
         self.applied_action_seqs = state.applied_action_seqs;
         self.causation_by_body = state.causation_by_body;
+    }
+
+    fn scan_retained_config<'a>(
+        events: impl Iterator<Item = (&'a str, Option<&'a CanonicalBytes>)>,
+    ) -> Result<Option<&'a CanonicalBytes>, WorldInstallationErrorV1> {
+        let mut retained = None;
+        let mut saw_observation = false;
+        for (event_type, payload) in events {
+            match event_type {
+                EVENT_TYPE_CONFIG_V1 => {
+                    if saw_observation {
+                        return Err(WorldInstallationErrorV1::RetainedConfigOutOfOrder);
+                    }
+                    if retained.is_some() {
+                        return Err(WorldInstallationErrorV1::RetainedConfigAmbiguous);
+                    }
+                    retained =
+                        Some(payload.ok_or(WorldInstallationErrorV1::RetainedConfigMalformed)?);
+                }
+                EVENT_TYPE_OBSERVATION_V1 => saw_observation = true,
+                _ => {}
+            }
+        }
+        if retained.is_none() && saw_observation {
+            return Err(WorldInstallationErrorV1::RetainedConfigMissing);
+        }
+        Ok(retained)
+    }
+
+    fn verify_retained_config(
+        &self,
+        installed: &InstalledWorldBackendV1,
+        retained: &CanonicalBytes,
+        digest: [u8; 32],
+    ) -> Result<(), RuntimeError> {
+        let decoded = WorldConfigV1::decode(retained)
+            .map_err(|_| WorldInstallationErrorV1::RetainedConfigMalformed)?;
+        if decoded.backend_id != self.config.backend_id {
+            return Err(WorldInstallationErrorV1::BackendIdMismatch.into());
+        }
+        if decoded.backend_version != self.config.backend_version {
+            return Err(WorldInstallationErrorV1::BackendVersionMismatch.into());
+        }
+        if decoded.backend_content_hash != digest {
+            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
+        }
+        if retained != &installed.sealed_config {
+            return Err(WorldInstallationErrorV1::ProfileMismatch.into());
+        }
+        Ok(())
+    }
+
+    fn preflight_installed_recovery(
+        &self,
+        evidence: &DriverRecoveryEvidence,
+    ) -> Result<(), RuntimeError> {
+        #[cfg(not(test))]
+        let WorldDriverBackend::Installed(installed) = &self.backend;
+        #[cfg(test)]
+        let installed = match &self.backend {
+            WorldDriverBackend::Installed(installed) => installed,
+            WorldDriverBackend::Fixture(_) => return Ok(()),
+        };
+        let fresh = MeasuredProcessImageV1::capture()?;
+        if fresh.digest() != installed.image.digest() {
+            return Err(WorldInstallationErrorV1::BackendDigestMismatch.into());
+        }
+        let retained = Self::scan_retained_config(
+            evidence
+                .events()
+                .iter()
+                .map(|event| (event.header().event_type().as_str(), event.payload())),
+        )?;
+        let Some(retained) = retained else {
+            return Ok(());
+        };
+        self.verify_retained_config(installed, retained, fresh.digest())
+    }
+
+    fn preflight_installed_step(&self, complete_events: &[Event]) -> Result<(), RuntimeError> {
+        #[cfg(not(test))]
+        let WorldDriverBackend::Installed(installed) = &self.backend;
+        #[cfg(test)]
+        let installed = match &self.backend {
+            WorldDriverBackend::Installed(installed) => installed,
+            WorldDriverBackend::Fixture(_) => return Ok(()),
+        };
+        let retained = Self::scan_retained_config(
+            complete_events
+                .iter()
+                .map(|event| (event.event_type.as_str(), Some(&event.payload))),
+        )?;
+        match (self.config_emitted, retained) {
+            (false, Some(_)) => Err(WorldInstallationErrorV1::RetainedConfigAmbiguous.into()),
+            (true, None) => Err(WorldInstallationErrorV1::RetainedConfigMissing.into()),
+            (_, Some(payload)) => {
+                self.verify_retained_config(installed, payload, installed.image.digest())
+            }
+            (false, None) => Ok(()),
+        }
     }
 
     fn apply_recovery_event(
@@ -1541,8 +1732,97 @@ impl WorldDriver {
             })
             .collect()
     }
+
+    fn preflight_live_step(
+        &mut self,
+        timeline: TimelineId,
+        observations: &ObservationView<'_>,
+    ) -> Result<(), RuntimeError> {
+        if matches!(&self.backend, WorldDriverBackend::Installed(_)) {
+            let anchor =
+                observations
+                    .anchor()
+                    .ok_or_else(|| RuntimeError::MissingSnapshotAnchor {
+                        driver: self.name().to_owned(),
+                    })?;
+            if anchor.timeline_id() != timeline {
+                return Err(RuntimeError::SnapshotTimelineMismatch {
+                    expected: timeline,
+                    actual: anchor.timeline_id(),
+                });
+            }
+            if let Some(installed_timeline) = self.installed_timeline {
+                if installed_timeline != timeline {
+                    return Err(RuntimeError::SnapshotTimelineMismatch {
+                        expected: installed_timeline,
+                        actual: timeline,
+                    });
+                }
+            }
+            let complete = observations
+                .verified_prefix_events()
+                .ok_or(WorldInstallationErrorV1::RetainedConfigMissing)?;
+            self.preflight_installed_step(complete)?;
+            self.staged_step_timeline = Some(timeline);
+        }
+        Ok(())
+    }
+
+    fn simulate_staged_step(
+        &mut self,
+        observations: &ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let mut drafts = Vec::new();
+        if let Some(config) = self.config_draft()? {
+            drafts.push(config);
+        }
+        self.apply_observed_actions(observations.events())?;
+
+        if self
+            .entities
+            .windows(2)
+            .any(|pair| pair[0].entity_id == pair[1].entity_id)
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "duplicate staged body identifiers".to_owned(),
+            });
+        }
+
+        let mut step_obs = self
+            .backend
+            .step(&self.entities, self.config.timestep_micros);
+        step_obs.sort_unstable_by_key(|observation| observation.entity_id);
+        if step_obs.len() != self.entities.len()
+            || step_obs
+                .iter()
+                .zip(&self.entities)
+                .any(|(observation, body)| observation.entity_id != body.entity_id)
+        {
+            return Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
+                reason: "backend observation body set differs from staged bodies".to_owned(),
+            });
+        }
+        let emitted = self.emit_observations(&step_obs)?;
+        for (body, (_, observation)) in self.entities.iter_mut().zip(&emitted) {
+            body.x = f64::from(observation.pos_x);
+            body.y = f64::from(observation.pos_y);
+            body.z = f64::from(observation.pos_z);
+            body.vx = f64::from(observation.vel_lin_x);
+            body.vy = f64::from(observation.vel_lin_y);
+            body.vz = f64::from(observation.vel_lin_z);
+            body.rotation = observation.rotation();
+        }
+
+        drafts.extend(emitted.into_iter().map(|(draft, _)| draft));
+        self.tick = self.tick.wrapping_add(1);
+        self.step_index = self.step_index.wrapping_add(1);
+        Ok(StepOutput::new(drafts))
+    }
 }
 
+#[cfg(test)]
 impl Default for WorldDriver {
     fn default() -> Self {
         Self::new(
@@ -1571,9 +1851,23 @@ impl Driver for WorldDriver {
         "world-driver"
     }
 
+    fn requires_snapshot_anchor(&self) -> bool {
+        matches!(&self.backend, WorldDriverBackend::Installed(_))
+    }
+
+    fn requires_verified_event_prefix(&self) -> bool {
+        matches!(&self.backend, WorldDriverBackend::Installed(_))
+    }
+
     fn event_subscriptions(&self) -> &[Kind] {
         static SUBSCRIPTIONS: std::sync::OnceLock<Vec<Kind>> = std::sync::OnceLock::new();
-        SUBSCRIPTIONS.get_or_init(|| vec![Kind::new(EVENT_TYPE_ACTION_V1)])
+        SUBSCRIPTIONS.get_or_init(|| {
+            vec![
+                Kind::new(EVENT_TYPE_ACTION_V1),
+                Kind::new(EVENT_TYPE_CONFIG_V1),
+                Kind::new(EVENT_TYPE_OBSERVATION_V1),
+            ]
+        })
     }
 
     fn needs_recovery_payload(&self, header: &RecoveryEventHeader) -> bool {
@@ -1587,6 +1881,7 @@ impl Driver for WorldDriver {
         &mut self,
         evidence: &DriverRecoveryEvidence,
     ) -> Result<(), RuntimeError> {
+        self.preflight_installed_recovery(evidence)?;
         let mut restored = WorldDriverState {
             entities: self.initial_entities.clone(),
             tick: 0,
@@ -1610,24 +1905,41 @@ impl Driver for WorldDriver {
             });
         }
         self.staged_restore = Some(restored);
+        self.staged_restore_timeline = evidence
+            .timeline_segments()
+            .last()
+            .map(|segment| segment.timeline_id());
         Ok(())
     }
 
     fn commit_restore_from_history(&mut self) {
         if let Some(restored) = self.staged_restore.take() {
             self.restore_state(restored);
+            self.installed_timeline = self.staged_restore_timeline.take();
         }
     }
 
     fn abort_restore_from_history(&mut self) {
         self.staged_restore = None;
+        self.staged_restore_timeline = None;
+    }
+
+    fn commit_fork_timeline(&mut self, handoff: &CommittedForkHandoff) {
+        if self.installed_timeline == Some(handoff.parent()) {
+            self.installed_timeline = Some(handoff.child());
+        }
     }
 
     fn commit_step(&mut self) {
-        self.staged_step = None;
+        self.installed_timeline = self
+            .staged_step
+            .take()
+            .and_then(|_| self.staged_step_timeline.take())
+            .or(self.installed_timeline);
     }
 
     fn abort_step(&mut self) {
+        self.staged_step_timeline = None;
         if let Some(previous) = self.staged_step.take() {
             self.restore_state(previous);
         }
@@ -1635,59 +1947,12 @@ impl Driver for WorldDriver {
 
     fn step(
         &mut self,
-        _timeline: TimelineId,
+        timeline: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
+        self.preflight_live_step(timeline, &observations)?;
         self.staged_step = Some(self.state());
-        let result = (|| {
-            let mut drafts = Vec::new();
-            if let Some(config) = self.config_draft()? {
-                drafts.push(config);
-            }
-            self.apply_observed_actions(observations.events())?;
-
-            if self
-                .entities
-                .windows(2)
-                .any(|pair| pair[0].entity_id == pair[1].entity_id)
-            {
-                return Err(RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                    reason: "duplicate staged body identifiers".to_owned(),
-                });
-            }
-
-            let mut step_obs = self
-                .backend
-                .step(&self.entities, self.config.timestep_micros);
-            step_obs.sort_unstable_by_key(|observation| observation.entity_id);
-            if step_obs.len() != self.entities.len()
-                || step_obs
-                    .iter()
-                    .zip(&self.entities)
-                    .any(|(observation, body)| observation.entity_id != body.entity_id)
-            {
-                return Err(RuntimeError::InvalidPayload {
-                    event_type: EVENT_TYPE_OBSERVATION_V1.to_owned(),
-                    reason: "backend observation body set differs from staged bodies".to_owned(),
-                });
-            }
-            let emitted = self.emit_observations(&step_obs)?;
-            for (body, (_, observation)) in self.entities.iter_mut().zip(&emitted) {
-                body.x = f64::from(observation.pos_x);
-                body.y = f64::from(observation.pos_y);
-                body.z = f64::from(observation.pos_z);
-                body.vx = f64::from(observation.vel_lin_x);
-                body.vy = f64::from(observation.vel_lin_y);
-                body.vz = f64::from(observation.vel_lin_z);
-                body.rotation = observation.rotation();
-            }
-
-            drafts.extend(emitted.into_iter().map(|(draft, _)| draft));
-            self.tick = self.tick.wrapping_add(1);
-            self.step_index = self.step_index.wrapping_add(1);
-            Ok(StepOutput::new(drafts))
-        })();
+        let result = self.simulate_staged_step(&observations);
         if result.is_err() {
             self.abort_step();
         }
@@ -1808,8 +2073,10 @@ mod tests {
         ids::{EntityId, EventId},
         CoreError, ErasureContainmentGateV1,
     };
-    use pos_runtime::{PluginRegistry, TimelineHistorySegment};
+    use pos_runtime::{PluginRegistry, SnapshotAnchor, TimelineHistorySegment};
     use pos_store::{open_store as open_unbound_store, StoreConfig};
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn open_store(config: StoreConfig) -> Result<Box<dyn pos_core::EventStore>, CoreError> {
@@ -3438,6 +3705,445 @@ mod tests {
             .test_ok();
     }
 
+    #[cfg(target_os = "linux")]
+    struct CountedInstalledBackend(Arc<AtomicUsize>);
+
+    #[cfg(target_os = "linux")]
+    impl WorldBackend for CountedInstalledBackend {
+        fn name(&self) -> &'static str {
+            "counted-installed-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            SimpleKinematicBackend::new().step(bodies, timestep_micros)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_body(body_id: EntityId) -> Body {
+        Body {
+            entity_id: body_id,
+            rotation: BodyRotationV1::default(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_history(body_id: EntityId, timeline: TimelineId) -> Vec<Event> {
+        let (mut registry, _) = installed_registry(body_id);
+        let drafts = registry
+            .step_all_anchored_with_events(timeline, Seq::ZERO, &[])
+            .test_ok();
+        drafts
+            .iter()
+            .enumerate()
+            .map(|(index, draft)| {
+                make_versioned_event(
+                    u64::try_from(index).test_ok() + 1,
+                    draft.entity,
+                    draft.event_type.as_str(),
+                    draft.payload.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_counted_driver(body_id: EntityId) -> (WorldDriver, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut driver = WorldDriver::new_live(
+            vec![installed_body(body_id)],
+            HostWorldProfileV1::standard(),
+        )
+        .test_ok();
+        if let WorldDriverBackend::Installed(installed) = &mut driver.backend {
+            installed.test_backend = Some(Box::new(CountedInstalledBackend(Arc::clone(&calls))));
+        }
+        (driver, calls)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_registry(body_id: EntityId) -> (PluginRegistry, Arc<AtomicUsize>) {
+        let (driver, calls) = installed_counted_driver(body_id);
+        let mut registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        registry
+            .register(
+                &WorldPlugin::new().with_bodies([body_id]),
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(driver)),
+            )
+            .test_ok();
+        (registry, calls)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_installed_recovery_rejected(
+        body_id: EntityId,
+        timeline: TimelineId,
+        events: &[Event],
+        expected: WorldInstallationErrorV1,
+    ) {
+        let (mut registry, calls) = installed_registry(body_id);
+        let head = Seq::from_u64(u64::try_from(events.len()).test_ok());
+        let error = registry
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, head)], events)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::WorldInstallation(actual) if actual == expected
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_resume_matches_retained_config_before_backend_step() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+        let config = WorldConfigV1::decode(&events[0].payload).test_ok();
+        assert_eq!(
+            config.backend_content_hash,
+            MeasuredProcessImageV1::capture().test_ok().digest()
+        );
+        let (mut registry, calls) = installed_registry(body_id);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_preflight_rejects_absent_or_payloadless_retained_config() {
+        let body_id = EntityId::new();
+        let (mut driver, _) = installed_counted_driver(body_id);
+        assert!(driver.requires_snapshot_anchor());
+        assert!(driver.requires_verified_event_prefix());
+        assert!(!WorldDriver::default().requires_snapshot_anchor());
+        assert!(!WorldDriver::default().requires_verified_event_prefix());
+        assert!(matches!(
+            WorldDriver::scan_retained_config(
+                [(EVENT_TYPE_CONFIG_V1, None::<&CanonicalBytes>)].into_iter()
+            ),
+            Err(WorldInstallationErrorV1::RetainedConfigMalformed)
+        ));
+        assert!(matches!(
+            WorldDriver::scan_retained_config(
+                [(EVENT_TYPE_ACTION_V1, None::<&CanonicalBytes>)].into_iter()
+            ),
+            Ok(None)
+        ));
+        driver.config_emitted = true;
+        assert!(matches!(
+            driver.preflight_installed_step(&[]),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+
+        let events = installed_history(body_id, TimelineId::new());
+        assert!(matches!(
+            driver.preflight_installed_step(&[events[0].clone(), events[0].clone()]),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigAmbiguous
+            ))
+        ));
+
+        let installed = WorldDriver::new_live(Vec::new(), HostWorldProfileV1::standard()).test_ok();
+        if let WorldDriverBackend::Installed(backend) = &installed.backend {
+            assert!(backend.step(&[], 16_667).is_empty());
+        }
+        assert!(WorldDriver::default().preflight_installed_step(&[]).is_ok());
+
+        let mut fixture_registry = PluginRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        fixture_registry
+            .register(
+                &WorldPlugin::new(),
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(WorldDriver::default())),
+            )
+            .test_ok();
+        fixture_registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO)],
+                &[],
+            )
+            .test_ok();
+
+        let mut fixture = WorldDriver::default();
+        fixture
+            .step(TimelineId::new(), ObservationView::empty())
+            .test_ok();
+        fixture.commit_step();
+        fixture.commit_step();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_fork_handoff_requires_the_restored_parent() {
+        let body_id = EntityId::new();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let parent = store.create_timeline("parent").test_ok();
+        let (mut initial, _) = installed_registry(body_id);
+        let drafts = initial
+            .step_all_anchored_with_events(parent.id(), Seq::ZERO, &[])
+            .test_ok();
+        let events = store.append(parent.id(), &drafts).test_ok();
+        assert_eq!(events.len(), 2);
+        let (mut registry, calls) = installed_registry(body_id);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(parent.id(), Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                TimelineId::new(),
+                Seq::from_u64(2),
+                "wrong-parent"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                parent.id(),
+                Seq::from_u64(1),
+                "earlier-cut"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert!(matches!(
+            registry.fork_restored_timeline(
+                store.as_mut(),
+                parent.id(),
+                Seq::from_u64(3),
+                "later-cut"
+            ),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
+        let child = registry
+            .fork_restored_timeline(store.as_mut(), parent.id(), Seq::from_u64(2), "child")
+            .test_ok();
+        assert_eq!(child.meta.fork_point, Some((parent.id(), Seq::from_u64(2))));
+
+        let unrelated = store.create_timeline("unrelated").test_ok();
+        assert!(matches!(
+            registry.step_all_anchored_with_events(unrelated.id(), Seq::from_u64(2), &events),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        registry
+            .step_all_anchored_with_events(child.id(), Seq::from_u64(2), &events)
+            .test_ok();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_step_requires_anchor_and_verified_retained_prefix() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let other_timeline = TimelineId::new();
+        let (mut driver, direct_calls) = installed_counted_driver(body_id);
+        assert!(matches!(
+            driver.step(timeline, ObservationView::empty()),
+            Err(RuntimeError::MissingSnapshotAnchor { .. })
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(other_timeline, Seq::ZERO)),
+            ),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::from_u64(1))),
+            ),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+        assert!(matches!(
+            driver.step(
+                timeline,
+                ObservationView::anchored_empty(SnapshotAnchor::new(timeline, Seq::ZERO)),
+            ),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            ))
+        ));
+        assert_eq!(direct_calls.load(Ordering::SeqCst), 0);
+
+        let events = installed_history(body_id, timeline);
+        let (mut registry, calls) = installed_registry(body_id);
+        let error = registry
+            .step_all_anchored_with_events(timeline, Seq::from_u64(2), &events)
+            .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::WorldInstallation(WorldInstallationErrorV1::RetainedConfigAmbiguous)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_step_rechecks_actual_timeline_and_retained_config() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let other_timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+
+        let (mut empty_restored, empty_calls) = installed_registry(body_id);
+        empty_restored
+            .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
+            .test_ok();
+        assert!(matches!(
+            empty_restored
+                .step_all_anchored_with_events(other_timeline, Seq::from_u64(2), &events,),
+            Err(RuntimeError::SnapshotTimelineMismatch { .. })
+        ));
+        assert_eq!(empty_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            empty_restored.step_all_anchored_with_events(timeline, Seq::from_u64(2), &events,),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigAmbiguous
+            ))
+        ));
+        assert_eq!(empty_calls.load(Ordering::SeqCst), 0);
+
+        let (mut restored, calls) = installed_registry(body_id);
+        restored
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
+                &events,
+            )
+            .test_ok();
+        let mut changed = events.clone();
+        let mut config = WorldConfigV1::decode(&changed[0].payload).test_ok();
+        config.backend_content_hash = [7; 32];
+        changed[0].payload = config.encode().test_ok();
+        assert!(matches!(
+            restored.step_all_anchored_with_events(timeline, Seq::from_u64(2), &changed),
+            Err(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::BackendDigestMismatch
+            ))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_live_resume_rejects_ambiguous_and_mismatched_config() {
+        let body_id = EntityId::new();
+        let timeline = TimelineId::new();
+        let events = installed_history(body_id, timeline);
+        let original = WorldConfigV1::decode(&events[0].payload).test_ok();
+        for (config, expected) in [
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_id = "other".to_owned();
+                    value
+                },
+                WorldInstallationErrorV1::BackendIdMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_version = "other".to_owned();
+                    value
+                },
+                WorldInstallationErrorV1::BackendVersionMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.backend_content_hash = [7; 32];
+                    value
+                },
+                WorldInstallationErrorV1::BackendDigestMismatch,
+            ),
+            (
+                {
+                    let mut value = original.clone();
+                    value.timestep_micros += 1;
+                    value
+                },
+                WorldInstallationErrorV1::ProfileMismatch,
+            ),
+            (
+                {
+                    let mut value = original;
+                    value.gravity_x = -0.0;
+                    value
+                },
+                WorldInstallationErrorV1::ProfileMismatch,
+            ),
+        ] {
+            let mut modified = events.clone();
+            modified[0].payload = config.encode().test_ok();
+            assert_installed_recovery_rejected(body_id, timeline, &modified, expected);
+        }
+        let mut malformed = events.clone();
+        malformed[0].payload = CanonicalBytes::from_static(b"bad WCF1");
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &malformed,
+            WorldInstallationErrorV1::RetainedConfigMalformed,
+        );
+        let mut missing = vec![events[1].clone()];
+        missing[0].seq = Seq::from_u64(1);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &missing,
+            WorldInstallationErrorV1::RetainedConfigMissing,
+        );
+        let mut duplicate = vec![events[0].clone(), events[0].clone(), events[1].clone()];
+        duplicate[1].seq = Seq::from_u64(2);
+        duplicate[2].seq = Seq::from_u64(3);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &duplicate,
+            WorldInstallationErrorV1::RetainedConfigAmbiguous,
+        );
+        let mut late = vec![events[1].clone(), events[0].clone()];
+        late[0].seq = Seq::from_u64(1);
+        late[1].seq = Seq::from_u64(2);
+        assert_installed_recovery_rejected(
+            body_id,
+            timeline,
+            &late,
+            WorldInstallationErrorV1::RetainedConfigOutOfOrder,
+        );
+    }
+
     fn assert_malformed_recovery_events(
         registry: &mut PluginRegistry,
         timeline: TimelineId,
@@ -3859,8 +4565,7 @@ mod tests {
         assert!((body.position().north_metres() - position.north_metres()).abs() < f64::EPSILON);
         assert!((body.position().up_metres() - position.up_metres()).abs() < f64::EPSILON);
 
-        let backend = SimpleKinematicBackend::new();
-        let observations = backend.step_coordinates(&[body]).test_ok();
+        let observations = SimpleKinematicBackend::step_coordinates(&[body]).test_ok();
 
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].entity_id(), body.entity_id());
@@ -3900,10 +4605,8 @@ mod tests {
             )
             .test_ok();
         let body = WorldCoordinateBody::new(EntityId::new(), position, f64::INFINITY, 0.0, 0.0);
-        let backend = SimpleKinematicBackend::new();
-
         assert!(matches!(
-            backend.step_coordinates(&[body]),
+            SimpleKinematicBackend::step_coordinates(&[body]),
             Err(WorldTransformError::NonFiniteCoordinate)
         ));
     }

@@ -45,6 +45,31 @@ impl TimelineHistorySegment {
     }
 }
 
+/// Proof that the host store has committed a child Fork from a restored parent.
+///
+/// Only the runtime's store-backed Fork path can create this value. A Driver
+/// may use it to transfer Timeline-bound recovered state to that child.
+pub struct CommittedForkHandoff {
+    parent: TimelineId,
+    child: TimelineId,
+}
+
+impl CommittedForkHandoff {
+    pub(crate) const fn new(parent: TimelineId, child: TimelineId) -> Self {
+        Self { parent, child }
+    }
+
+    #[must_use]
+    pub const fn parent(&self) -> TimelineId {
+        self.parent
+    }
+
+    #[must_use]
+    pub const fn child(&self) -> TimelineId {
+        self.child
+    }
+}
+
 /// Header-only view of one immutable Event supplied while constructing recovery evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryEventHeader {
@@ -297,6 +322,7 @@ impl ObservationSnapshot {
                         .collect(),
                 )
             },
+            verified_prefix_events: None,
         }
     }
 }
@@ -348,6 +374,7 @@ pub struct ObservationView<'a> {
     direct_anchor: Option<SnapshotAnchor>,
     len: usize,
     events: Cow<'a, [Event]>,
+    verified_prefix_events: Option<Vec<Event>>,
 }
 
 impl ObservationView<'_> {
@@ -360,6 +387,7 @@ impl ObservationView<'_> {
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(&[]),
+            verified_prefix_events: None,
         }
     }
 
@@ -376,6 +404,7 @@ impl ObservationView<'_> {
             direct_anchor: Some(anchor),
             len: 0,
             events: Cow::Borrowed(&[]),
+            verified_prefix_events: None,
         }
     }
 
@@ -412,7 +441,15 @@ impl ObservationView<'_> {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0 && self.events.is_empty()
+        self.len == 0 && self.has_no_events()
+    }
+
+    fn has_no_events(&self) -> bool {
+        self.events.is_empty()
+            && self
+                .verified_prefix_events
+                .as_ref()
+                .is_none_or(Vec::is_empty)
     }
 
     /// Committed events forwarded to this driver for the current tick, in
@@ -420,6 +457,17 @@ impl ObservationView<'_> {
     #[must_use]
     pub fn events(&self) -> &[Event] {
         self.events.as_ref()
+    }
+
+    /// Events from a host-validated complete prefix, filtered to this Driver's subscriptions.
+    #[must_use]
+    pub fn verified_prefix_events(&self) -> Option<&[Event]> {
+        self.verified_prefix_events.as_deref()
+    }
+
+    pub(crate) fn with_verified_prefix_events(mut self, events: Vec<Event>) -> Self {
+        self.verified_prefix_events = Some(events);
+        self
     }
 }
 
@@ -436,6 +484,7 @@ impl<'a> ObservationView<'a> {
             direct_anchor: None,
             len: 0,
             events: Cow::Borrowed(events),
+            verified_prefix_events: None,
         }
     }
     #[must_use]
@@ -453,6 +502,7 @@ impl<'a> ObservationView<'a> {
             )),
             len: snapshot.records().len(),
             events: Cow::Borrowed(&[]),
+            verified_prefix_events: None,
         }
     }
 }
@@ -518,6 +568,11 @@ pub trait Driver: Send + Sync {
         false
     }
 
+    /// Whether the host must validate a complete prefix and forward its subscribed visible Events.
+    fn requires_verified_event_prefix(&self) -> bool {
+        false
+    }
+
     /// Selects which recovery Event payloads this Driver needs.
     ///
     /// Every Driver receives source headers needed to verify ordering, but no
@@ -549,6 +604,13 @@ pub trait Driver: Send + Sync {
 
     /// Discards the preceding staged recovery after another Driver rejects it.
     fn abort_restore_from_history(&mut self) {}
+
+    /// Transfer a restored Driver to a child Timeline after the host commits a Fork.
+    ///
+    /// The host must first validate and restore the parent's complete prefix,
+    /// then create the child in the same store. Drivers that bind recovered
+    /// state to a Timeline can update that binding without replaying history.
+    fn commit_fork_timeline(&mut self, _handoff: &CommittedForkHandoff) {}
 
     /// Commit state staged by the preceding successful anchored step.
     fn commit_step(&mut self) {}
@@ -785,6 +847,16 @@ mod tests {
         assert_eq!(view.events().len(), 1);
         assert!(!view.is_empty());
         assert_eq!(view.events()[0].event_type, Kind::new("visible.event"));
+
+        let retained_only = snapshot
+            .view_for_events(&[], &events, &[])
+            .with_verified_prefix_events(vec![events[0].clone()]);
+        assert!(retained_only.events().is_empty());
+        assert!(!retained_only.is_empty());
+        assert_eq!(
+            retained_only.verified_prefix_events().map(<[Event]>::len),
+            Some(1)
+        );
     }
 
     #[test]

@@ -27,13 +27,13 @@ use pos_core::{
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
 use pos_plugin_world::{
-    encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, SimpleKinematicBackend,
-    WorldActionV1, WorldConfigV1, WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
-    COORD_CONVENTION_RIGHT_HANDED_Y_UP, EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
-    SENSOR_MIN_RESOLUTION_MM,
+    encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldConfigV1,
+    WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1,
+    EVENT_TYPE_CONFIG_V1, EVENT_TYPE_OBSERVATION_V1,
 };
 use pos_runtime::{
-    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, RuntimeError, StepOutput,
+    Driver, DriverRecoveryEvidence, HostWorldProfileV1, ObservationView, RecoveryEventHeader,
+    RuntimeError, StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -61,7 +61,6 @@ macro_rules! result_pipeline {
 const AGENT_EVENT_TYPE: &str = "proof.agent.reaction.v1";
 const AGENT_ENTITY_KIND: &str = "proof-agent";
 const SOCIETY_ENTITY_KIND: &str = "proof-society";
-const WORLD_BACKEND_CONTENT: &[u8] = b"PiglorOS.WorldBackend.simple-kinematic.v1";
 const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
@@ -472,14 +471,11 @@ fn register_plugins(
     topology: &ProofTopology,
 ) -> Result<(), RuntimeError> {
     result_pipeline! {
+        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
         experiment.register_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
-                &topology.input,
-                topology.body,
-                topology.config_entity,
-            ))),
+            Some(Box::new(driver)),
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
@@ -503,14 +499,11 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
     result_pipeline! {
+        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
         registry.register_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
-                &topology.input,
-                topology.body,
-                topology.config_entity,
-            ))),
+            Some(Box::new(driver)),
             Some(Box::new(topology.world_plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
@@ -531,8 +524,12 @@ fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistr
     }
 }
 
-fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityId) -> WorldDriver {
-    WorldDriver::new(
+fn world_driver(
+    input: &MoatProofInputV1,
+    body: EntityId,
+    config_entity: EntityId,
+) -> Result<WorldDriver, RuntimeError> {
+    WorldDriver::new_live(
         vec![Body {
             entity_id: body,
             rotation: BodyRotationV1::default(),
@@ -543,23 +540,9 @@ fn world_driver(input: &MoatProofInputV1, body: EntityId, config_entity: EntityI
             vy: 0.0,
             vz: input.initial_velocity[1],
         }],
-        Box::new(SimpleKinematicBackend::new()),
-        WorldConfigV1 {
-            timestep_micros: 1_000_000,
-            coord_convention: COORD_CONVENTION_RIGHT_HANDED_Y_UP,
-            gravity_x: 0.0,
-            gravity_y: 0.0,
-            gravity_z: 0.0,
-            backend_id: "simple-kinematic".to_owned(),
-            backend_version: "1.0.0".to_owned(),
-            backend_content_hash: *blake3::hash(WORLD_BACKEND_CONTENT).as_bytes(),
-            action_schema_version: 1,
-            observation_schema_version: 1,
-            sensor_min_resolution_mm: SENSOR_MIN_RESOLUTION_MM,
-            actuator_catalogue_version: 1,
-        },
+        HostWorldProfileV1::moat_proof(),
     )
-    .with_config_entity(config_entity)
+    .map(|driver| driver.with_config_entity(config_entity))
 }
 
 fn payload_digest(event: &Event) -> [u8; 32] {
@@ -661,6 +644,14 @@ struct EvidenceContext<'a> {
 }
 
 fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatProofError> {
+    let closure_digest = artifact_closure_digest(context.topology, context.factual_events)?;
+    evidence_with_closure_digest(context, closure_digest)
+}
+
+fn evidence_with_closure_digest(
+    context: &EvidenceContext<'_>,
+    artifact_closure_digest: [u8; 32],
+) -> Result<MoatProofEvidenceV1, MoatProofError> {
     let input = context.input;
     let mode = context.mode;
     let fork_cut_seq = context.fork_cut_seq;
@@ -717,7 +708,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
                 b"PiglorOS.TrustPolicySnapshot.v1",
                 TRUST_POLICY_CONTENT,
             ),
-            artifact_closure_digest: artifact_closure_digest(topology),
+            artifact_closure_digest,
             evaluator_digest: digest_domain(b"PiglorOS.Evaluator.v1", EVALUATOR_CONTENT),
             replay_claim: ReplayClaimV1::Exact,
             plugin_versions: plugin_versions.clone(),
@@ -847,24 +838,40 @@ fn profile_digest() -> [u8; 32] {
     digest_domain(EXECUTION_PROFILE_CONTENT, b"profile-v1")
 }
 
-fn artifact_closure_digest(topology: &ProofTopology) -> [u8; 32] {
-    let mut bytes = Vec::new();
-    for (name, version) in [
-        ("world", "1.0.0"),
-        ("proof-agent", "1.0.0"),
-        ("society", "1.0.0"),
-    ] {
-        bytes.extend_from_slice(name.as_bytes());
-        bytes.push(0);
-        bytes.extend_from_slice(version.as_bytes());
-        bytes.push(0);
-    }
-    bytes.extend_from_slice(&topology.input_digest);
-    bytes.extend_from_slice(blake3::hash(WORLD_BACKEND_CONTENT).as_bytes());
-    bytes.extend_from_slice(blake3::hash(EXECUTION_PROFILE_CONTENT).as_bytes());
-    bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
-    bytes.extend_from_slice(blake3::hash(EVALUATOR_CONTENT).as_bytes());
-    digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes)
+fn artifact_closure_digest(
+    topology: &ProofTopology,
+    factual_events: &[Event],
+) -> Result<[u8; 32], MoatProofError> {
+    retained_world_backend_hash(factual_events).map(|backend_content_hash| {
+        let mut bytes = Vec::new();
+        for (name, version) in [
+            ("world", "1.0.0"),
+            ("proof-agent", "1.0.0"),
+            ("society", "1.0.0"),
+        ] {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(version.as_bytes());
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&topology.input_digest);
+        bytes.extend_from_slice(&backend_content_hash);
+        bytes.extend_from_slice(blake3::hash(EXECUTION_PROFILE_CONTENT).as_bytes());
+        bytes.extend_from_slice(blake3::hash(TRUST_POLICY_CONTENT).as_bytes());
+        bytes.extend_from_slice(blake3::hash(EVALUATOR_CONTENT).as_bytes());
+        digest_domain(b"PiglorOS.ArtifactClosure.v1", &bytes)
+    })
+}
+
+fn retained_world_backend_hash(factual_events: &[Event]) -> Result<[u8; 32], MoatProofError> {
+    let config_event = factual_events
+        .iter()
+        .find(|event| event.event_type.as_str() == EVENT_TYPE_CONFIG_V1)
+        .ok_or(RuntimeError::WorldInstallation(
+            WorldInstallationErrorV1::RetainedConfigMissing,
+        ))?;
+    let world_config = WorldConfigV1::decode(&config_event.payload)?;
+    Ok(world_config.backend_content_hash)
 }
 
 fn scheduler_digest() -> [u8; 32] {
@@ -2547,11 +2554,14 @@ mod tests {
             .register(
                 &agent_duplicate.world_plugin,
                 Some(Box::new(WorldReducer)),
-                Some(Box::new(world_driver(
-                    &agent_duplicate.input,
-                    agent_duplicate.body,
-                    agent_duplicate.config_entity,
-                ))),
+                Some(Box::new(
+                    world_driver(
+                        &agent_duplicate.input,
+                        agent_duplicate.body,
+                        agent_duplicate.config_entity,
+                    )
+                    .test_ok(),
+                )),
             )
             .test_ok();
         assert!(register_plugins(&mut experiment, &agent_duplicate).is_err());
@@ -2594,21 +2604,24 @@ mod tests {
             closure_payload_digest: [0; 32],
             halted_at_tick_boundary: true,
         };
-        let evidence = evidence(&EvidenceContext {
-            input: &input,
-            mode: ExecutionModeV1::Local,
-            timeline_id: TimelineId::new(),
-            fork_cut_seq: None,
-            events: &[],
-            factual_events: &[],
-            projections: &projections,
-            topology: &topology,
-            plugin_versions: &versions,
-            failure_probes: &[],
-            host_closure: &host_closure,
-        })
-        .test_ok();
-        assert!(evidence.projections.is_empty());
+        assert!(matches!(
+            evidence(&EvidenceContext {
+                input: &input,
+                mode: ExecutionModeV1::Local,
+                timeline_id: TimelineId::new(),
+                fork_cut_seq: None,
+                events: &[],
+                factual_events: &[],
+                projections: &projections,
+                topology: &topology,
+                plugin_versions: &versions,
+                failure_probes: &[],
+                host_closure: &host_closure,
+            }),
+            Err(MoatProofError::Runtime(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            )))
+        ));
 
         assert_eq!(serialized_digest(&BrokenSerialize), [0; 32]);
         let custom = AuthoritativeEventV1 {
@@ -2767,9 +2780,27 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn empty_evidence_and_failed_gate_are_exercised() {
+    fn missing_config_evidence_and_failed_gate_are_exercised() {
         let input = input();
         let topology = test_ok(ProofTopology::new(input.clone()));
+        let malformed_config = Event {
+            id: EventId::new(),
+            entity: fixed_id(1),
+            event_type: Kind::new(EVENT_TYPE_CONFIG_V1),
+            payload: CanonicalBytes::from_static(b"malformed WCF1"),
+            wall_time: pos_core::clock::WallTime::from_micros(1),
+            seq: pos_core::clock::Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::event::SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: pos_core::crypto::Hash::from_bytes([0; 32]),
+        };
+        assert!(matches!(
+            artifact_closure_digest(&topology, &[malformed_config]),
+            Err(MoatProofError::WorldCodec(_))
+        ));
         let projections = pos_state::ProjectionRegistry::new();
         let plugin_versions = BTreeMap::new();
         let host_closure = HostClosureAuditV1 {
@@ -2781,20 +2812,26 @@ mod coverage_entrypoints {
             closure_payload_digest: [0; 32],
             halted_at_tick_boundary: true,
         };
-        let empty = test_ok(evidence(&EvidenceContext {
-            input: &input,
-            mode: ExecutionModeV1::Local,
-            timeline_id: TimelineId::new(),
-            fork_cut_seq: None,
-            events: &[],
-            factual_events: &[],
-            projections: &projections,
-            topology: &topology,
-            plugin_versions: &plugin_versions,
-            failure_probes: &[],
-            host_closure: &host_closure,
-        }));
-        assert!(empty.projections.is_empty());
+        assert!(matches!(
+            evidence(&EvidenceContext {
+                input: &input,
+                mode: ExecutionModeV1::Local,
+                timeline_id: TimelineId::new(),
+                fork_cut_seq: None,
+                events: &[],
+                factual_events: &[],
+                projections: &projections,
+                topology: &topology,
+                plugin_versions: &plugin_versions,
+                failure_probes: &[],
+                host_closure: &host_closure,
+            }),
+            Err(MoatProofError::Runtime(RuntimeError::WorldInstallation(
+                WorldInstallationErrorV1::RetainedConfigMissing
+            )))
+        ));
+        let empty =
+            test_ok(test_ok(MoatProofRun::new(input, ExecutionModeV1::Local)).run()).baseline;
 
         let mut failed = MoatProofReport {
             baseline: empty.clone(),
@@ -3015,11 +3052,11 @@ mod run_coverage_entrypoints {
         test_ok(experiment.register(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(world_driver(
+            Some(Box::new(test_ok(world_driver(
                 &topology.input,
                 topology.body,
                 topology.config_entity,
-            ))),
+            )))),
         ));
         assert!(register_plugins(&mut experiment, &topology).is_err());
 
