@@ -146,7 +146,7 @@ fn exact_native_plugin_and_governed_public_adapter_resolve_in_required_order() {
     );
     let mut registry = PluginRegistry::new();
     registry
-        .register_pinned(
+        .register_pinned_generated(
             &world,
             PluginRegistrationV1::new(world_pin.clone(), PluginAvailabilityV1::Available),
             None,
@@ -154,7 +154,7 @@ fn exact_native_plugin_and_governed_public_adapter_resolve_in_required_order() {
         )
         .test_ok();
     registry
-        .register_pinned(
+        .register_pinned_generated(
             &evaluation,
             PluginRegistrationV1::new(evaluation_pin.clone(), PluginAvailabilityV1::Available),
             None,
@@ -205,7 +205,7 @@ fn exact_native_plugin_and_governed_public_adapter_resolve_in_required_order() {
 
     let mut air_gapped_registry = PluginRegistry::new_air_gapped();
     air_gapped_registry
-        .register_pinned(
+        .register_pinned_generated(
             &world,
             PluginRegistrationV1::new(
                 air_gapped.plugins()[0].pin().clone(),
@@ -216,7 +216,7 @@ fn exact_native_plugin_and_governed_public_adapter_resolve_in_required_order() {
         )
         .test_ok();
     air_gapped_registry
-        .register_pinned(
+        .register_pinned_generated(
             &evaluation,
             PluginRegistrationV1::new(
                 air_gapped.plugins()[1].pin().clone(),
@@ -382,7 +382,7 @@ fn resolution_rejects_missing_unpinned_and_reordered_implementations_without_fal
     );
     let mut registry = PluginRegistry::new();
     registry
-        .register_pinned(
+        .register_pinned_generated(
             &registered,
             PluginRegistrationV1::new(world_pin.clone(), PluginAvailabilityV1::Available),
             None,
@@ -402,7 +402,7 @@ fn resolution_rejects_missing_unpinned_and_reordered_implementations_without_fal
     );
 
     let mut legacy = PluginRegistry::new();
-    legacy.register(&registered, None, None).test_ok();
+    legacy.register_generated(&registered, None, None).test_ok();
     let required = RequiredPluginCompositionV1::try_new(
         PluginExecutionModeV1::Local,
         vec![requirement(&registered, world_pin.clone())],
@@ -423,7 +423,7 @@ fn resolution_rejects_missing_unpinned_and_reordered_implementations_without_fal
         &["society"],
     );
     registry
-        .register_pinned(
+        .register_pinned_generated(
             &society,
             PluginRegistrationV1::new(society_pin.clone(), PluginAvailabilityV1::Available),
             None,
@@ -455,7 +455,7 @@ fn resolution_rejects_every_incompatible_pin_field() {
     );
     let mut registry = PluginRegistry::new();
     registry
-        .register_pinned(
+        .register_pinned_generated(
             &registered,
             PluginRegistrationV1::new(registered_pin.clone(), PluginAvailabilityV1::Available),
             None,
@@ -540,7 +540,7 @@ fn every_non_available_state_fails_closed_before_resolution() {
         );
         let mut registry = PluginRegistry::new();
         registry
-            .register_pinned(
+            .register_pinned_generated(
                 &registered,
                 PluginRegistrationV1::new(registered_pin.clone(), availability),
                 None,
@@ -568,7 +568,7 @@ fn registration_rejects_duplicate_role_ownership_before_mutation() {
     let second = plugin(PluginId::new(), "second-world");
     let mut registry = PluginRegistry::new();
     registry
-        .register_pinned(
+        .register_pinned_generated(
             &first,
             PluginRegistrationV1::new(
                 pin(
@@ -583,7 +583,7 @@ fn registration_rejects_duplicate_role_ownership_before_mutation() {
             None,
         )
         .test_ok();
-    let result = registry.register_pinned(
+    let result = registry.register_pinned_generated(
         &second,
         PluginRegistrationV1::new(
             pin(
@@ -622,7 +622,7 @@ fn pinned_action_policy_retains_the_single_approver_route() {
     let mut registry = PluginRegistry::new()
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     registry
-        .register_pinned_with_approver(
+        .register_pinned_generated_with_approver(
             &action,
             PluginRegistrationV1::new(action_pin.clone(), PluginAvailabilityV1::Available),
             None,
@@ -666,7 +666,7 @@ fn pinned_action_policy_rejects_an_oversized_approver_draft() {
     let mut registry = PluginRegistry::new()
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     registry
-        .register_pinned_with_approver(
+        .register_pinned_generated_with_approver(
             &action,
             PluginRegistrationV1::new(
                 pin(
@@ -734,7 +734,7 @@ fn replay_resolves_only_replay_evidence_and_never_invokes_live_drivers() {
     );
     let mut replay = PluginRegistry::new_replay();
     replay
-        .register_pinned(
+        .register_pinned_generated(
             &registered,
             PluginRegistrationV1::new(registered_pin.clone(), PluginAvailabilityV1::Available),
             None,

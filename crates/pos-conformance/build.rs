@@ -1981,14 +1981,13 @@ fn emit_draft_authority(
     Ok(generated)
 }
 
-fn emit_draft_execution_profiles(
+fn emit_execution_profile_source_definition(
     generated: &mut String,
-    declaration: &DraftAuthorityDeclaration,
     include_policy_constants: bool,
-) -> Result<(), std::fmt::Error> {
+) {
     if include_policy_constants {
         generated.push_str(
-            "struct DraftExecutionProfileSource {\n\
+            "struct InstalledExecutionProfileSource {\n\
                  profile_id: &'static str,\n\
                  semantic_version: &'static str,\n\
                  network_allowed: bool,\n\
@@ -2003,7 +2002,7 @@ fn emit_draft_execution_profiles(
                  deterministic_budgets: [u64; 8],\n\
                  allowed_operational_differences: &'static [&'static str],\n\
                  minimum_evaluator_version: &'static str,\n\
-                 maximum_evaluator_version: &'static str,\n\
+                 maximum_evaluator_version: &'static str,\
              }\n",
         );
     } else {
@@ -2013,62 +2012,116 @@ fn emit_draft_execution_profiles(
              }\n",
         );
     }
+}
+
+const fn execution_profile_source_type(include_policy_constants: bool) -> &'static str {
+    if include_policy_constants {
+        "InstalledExecutionProfileSource"
+    } else {
+        "DraftExecutionProfileSource"
+    }
+}
+
+fn rust_string_list(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn emit_execution_profile_record(
+    profile: &DraftExecutionProfile,
+    source_type: &str,
+    include_policy_constants: bool,
+) -> String {
+    if !include_policy_constants {
+        return format!(
+            "    {source_type} {{ profile_id: {:?} }},\n",
+            profile.profile_id
+        );
+    }
+    let classes = profile
+        .reproducibility_classes
+        .iter()
+        .copied()
+        .map(DraftReproducibilityClass::wire_code)
+        .map(|code| code.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let budgets = profile
+        .deterministic_budgets
+        .into_iter()
+        .map(rust_u64_literal)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "    {source_type} {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: [{}], allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},\n",
+        profile.profile_id,
+        profile.semantic_version,
+        profile.network_allowed,
+        rust_string_list(&profile.capability_ids),
+        classes,
+        rust_string_list(&profile.architecture_rules),
+        rust_string_list(&profile.numeric_rules),
+        rust_string_list(&profile.scheduler_driver_order),
+        profile.tick_policy,
+        rust_string_list(&profile.schemas_and_upcasters),
+        rust_string_list(&profile.artifact_rules),
+        budgets,
+        rust_string_list(&profile.allowed_operational_differences),
+        profile.minimum_evaluator_version,
+        profile.maximum_evaluator_version,
+    )
+}
+
+fn emit_execution_profile_table(
+    generated: &mut String,
+    name: &str,
+    source_type: &str,
+    profiles: &[DraftExecutionProfile],
+    include_policy_constants: bool,
+) -> Result<(), std::fmt::Error> {
     writeln!(
         generated,
-        "const DRAFT_EXECUTION_PROFILES: [DraftExecutionProfileSource; {}] = [",
-        declaration.execution_profiles.len()
+        "const {name}: [{source_type}; {}] = [",
+        profiles.len()
     )?;
-    for profile in &declaration.execution_profiles {
-        if !include_policy_constants {
-            writeln!(
-                generated,
-                "    DraftExecutionProfileSource {{ profile_id: {:?} }},",
-                profile.profile_id,
-            )?;
-            continue;
-        }
-        let classes = profile
-            .reproducibility_classes
-            .iter()
-            .copied()
-            .map(DraftReproducibilityClass::wire_code)
-            .map(|code| code.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let strings = |values: &[String]| {
-            values
-                .iter()
-                .map(|value| format!("{value:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let budgets = profile
-            .deterministic_budgets
-            .into_iter()
-            .map(rust_u64_literal)
-            .collect::<Vec<_>>()
-            .join(", ");
-        writeln!(
-            generated,
-            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: [{}], allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},",
-            profile.profile_id,
-            profile.semantic_version,
-            profile.network_allowed,
-            strings(&profile.capability_ids),
-            classes,
-            strings(&profile.architecture_rules),
-            strings(&profile.numeric_rules),
-            strings(&profile.scheduler_driver_order),
-            profile.tick_policy,
-            strings(&profile.schemas_and_upcasters),
-            strings(&profile.artifact_rules),
-            budgets,
-            strings(&profile.allowed_operational_differences),
-            profile.minimum_evaluator_version,
-            profile.maximum_evaluator_version,
-        )?;
+    for profile in profiles {
+        generated.push_str(&emit_execution_profile_record(
+            profile,
+            source_type,
+            include_policy_constants,
+        ));
     }
     generated.push_str("];\n");
+    Ok(())
+}
+
+fn emit_draft_execution_profiles(
+    generated: &mut String,
+    declaration: &DraftAuthorityDeclaration,
+    include_policy_constants: bool,
+) -> Result<(), std::fmt::Error> {
+    emit_execution_profile_source_definition(generated, include_policy_constants);
+    let source_type = execution_profile_source_type(include_policy_constants);
+
+    emit_execution_profile_table(
+        generated,
+        "DRAFT_EXECUTION_PROFILES",
+        source_type,
+        &declaration.execution_profiles,
+        include_policy_constants,
+    )?;
+    if include_policy_constants {
+        emit_execution_profile_table(
+            generated,
+            "INSTALLED_EXECUTION_PROFILES",
+            "InstalledExecutionProfileSource",
+            &[],
+            true,
+        )?;
+    }
     Ok(())
 }
 
@@ -2297,40 +2350,114 @@ fn emit_rerun_directives(root: &CatalogRoot, snapshots: &SourceSnapshots) {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+struct BuildInputs {
+    root: CatalogRoot,
+    snapshots: SourceSnapshots,
+    profiles: Vec<ProfilePaths>,
+    source_inventory_digest: [u8; 32],
+    draft_authority: DraftAuthorityDeclaration,
+    draft_authority_key: [u8; 32],
+}
+
+type DiscoveredBuildData = (SourceSnapshots, Vec<ProfilePaths>, [u8; 32]);
+
+fn manifest_catalog_root() -> Result<CatalogRoot, Box<dyn Error>> {
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR")
             .ok_or_else(|| invalid_data("CARGO_MANIFEST_DIR is unavailable"))?,
     );
-    let root = catalog_root(&manifest_dir)?;
-    let snapshots = source_snapshots(&root)?;
-    let profiles = discover_profiles(&root, &snapshots)?;
+    Ok(catalog_root(&manifest_dir)?)
+}
+
+fn discover_build_data(root: &CatalogRoot) -> Result<DiscoveredBuildData, Box<dyn Error>> {
+    let snapshots = source_snapshots(root)?;
+    let profiles = discover_profiles(root, &snapshots)?;
     let source_inventory_digest = verify_source_inventory(&snapshots, &profiles)?;
+    Ok((snapshots, profiles, source_inventory_digest))
+}
+
+fn build_inputs() -> Result<BuildInputs, Box<dyn Error>> {
+    let root = manifest_catalog_root()?;
+    let (snapshots, profiles, source_inventory_digest) = discover_build_data(&root)?;
     let (draft_authority, draft_authority_key) = draft_authority(&snapshots)?;
-    emit_rerun_directives(&root, &snapshots);
-    let out_dir = PathBuf::from(
+    Ok(BuildInputs {
+        root,
+        snapshots,
+        profiles,
+        source_inventory_digest,
+        draft_authority,
+        draft_authority_key,
+    })
+}
+
+fn output_directory() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(PathBuf::from(
         env::var_os("OUT_DIR").ok_or_else(|| invalid_data("OUT_DIR is unavailable"))?,
-    );
-    std::fs::write(
-        out_dir.join("conformance_fixture_catalog.rs"),
-        emit_catalog(&profiles)?,
-    )?;
-    std::fs::write(
-        out_dir.join("draft_authority.rs"),
-        emit_draft_authority(&draft_authority, draft_authority_key, true)?,
-    )?;
-    std::fs::write(
-        out_dir.join("bundle_contract_assets.rs"),
-        emit_bundle_contract_assets(&snapshots)?,
-    )?;
-    std::fs::write(
-        out_dir.join("materialization_assets.rs"),
-        emit_materialization_assets(
-            &snapshots,
-            &draft_authority,
-            draft_authority_key,
-            source_inventory_digest,
-        )?,
-    )?;
+    ))
+}
+
+fn write_catalog_file(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
+    let generated = emit_catalog(profiles)?;
+    std::fs::write(out_dir.join("conformance_fixture_catalog.rs"), generated)?;
     Ok(())
+}
+
+fn write_authority_file(
+    out_dir: &Path,
+    authority: &DraftAuthorityDeclaration,
+    key: [u8; 32],
+) -> Result<(), Box<dyn Error>> {
+    let generated = emit_draft_authority(authority, key, true)?;
+    std::fs::write(out_dir.join("draft_authority.rs"), generated)?;
+    Ok(())
+}
+
+fn write_catalog_and_authority(out_dir: &Path, inputs: &BuildInputs) -> Result<(), Box<dyn Error>> {
+    write_catalog_file(out_dir, &inputs.profiles)?;
+    write_authority_file(out_dir, &inputs.draft_authority, inputs.draft_authority_key)?;
+    Ok(())
+}
+
+fn write_bundle_file(out_dir: &Path, snapshots: &SourceSnapshots) -> Result<(), Box<dyn Error>> {
+    let generated = emit_bundle_contract_assets(snapshots)?;
+    std::fs::write(out_dir.join("bundle_contract_assets.rs"), generated)?;
+    Ok(())
+}
+
+fn write_materialization_file(out_dir: &Path, inputs: &BuildInputs) -> Result<(), Box<dyn Error>> {
+    let generated = emit_materialization_assets(
+        &inputs.snapshots,
+        &inputs.draft_authority,
+        inputs.draft_authority_key,
+        inputs.source_inventory_digest,
+    )?;
+    std::fs::write(out_dir.join("materialization_assets.rs"), generated)?;
+    Ok(())
+}
+
+fn write_bundle_and_materialization(
+    out_dir: &Path,
+    inputs: &BuildInputs,
+) -> Result<(), Box<dyn Error>> {
+    write_bundle_file(out_dir, &inputs.snapshots)?;
+    write_materialization_file(out_dir, inputs)?;
+    Ok(())
+}
+
+fn write_generated_files(out_dir: &Path, inputs: &BuildInputs) -> Result<(), Box<dyn Error>> {
+    write_catalog_and_authority(out_dir, inputs)?;
+    write_bundle_and_materialization(out_dir, inputs)?;
+    Ok(())
+}
+
+fn build() -> Result<(), Box<dyn Error>> {
+    let inputs = build_inputs()?;
+    emit_rerun_directives(&inputs.root, &inputs.snapshots);
+    let out_dir = output_directory()?;
+    write_generated_files(&out_dir, &inputs)?;
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    build()
 }

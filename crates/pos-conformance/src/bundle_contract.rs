@@ -19,7 +19,7 @@ use crate::{
     DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
     DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
     DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
-    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, INSTALLED_EXECUTION_PROFILES,
 };
 
 pub const CONFORMANCE_BUNDLE_MAGIC_V1: &str = "CFB1";
@@ -117,6 +117,103 @@ pub fn draft_execution_profile_bytes_v1(
         ));
         encode(&Value::Array(signed_fields))
     })
+}
+
+/// Resolve the EPF1 record owned by the installed execution-profile table.
+///
+/// This is the production composition boundary.  It does not consult the
+/// Draft authority builder; the native EPF1 decoder below remains the final
+/// verifier for the installed bytes.
+fn installed_execution_profile_bytes_v1(
+    profile_id: &str,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let declaration = INSTALLED_EXECUTION_PROFILES
+        .iter()
+        .find(|candidate| candidate.profile_id == profile_id)
+        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    let fields = vec![
+        Value::Text("EPF1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text(declaration.profile_id.to_owned()),
+        Value::Text(declaration.semantic_version.to_owned()),
+        Value::Array(
+            declaration
+                .reproducibility_classes
+                .iter()
+                .copied()
+                .map(|code| Value::Integer(code.into()))
+                .collect(),
+        ),
+        text_array(declaration.architecture_rules),
+        text_array(declaration.numeric_rules),
+        text_array(declaration.scheduler_driver_order),
+        Value::Text(declaration.tick_policy.to_owned()),
+        text_array(declaration.schemas_and_upcasters),
+        text_array(declaration.artifact_rules),
+        Value::Array(vec![
+            Value::Bool(declaration.network_allowed),
+            text_array(declaration.capability_ids),
+        ]),
+        Value::Array(
+            declaration
+                .deterministic_budgets
+                .into_iter()
+                .map(|limit| Value::Integer(limit.into()))
+                .collect(),
+        ),
+        text_array(declaration.allowed_operational_differences),
+        Value::Array(vec![
+            Value::Text(declaration.minimum_evaluator_version.to_owned()),
+            Value::Text(declaration.maximum_evaluator_version.to_owned()),
+        ]),
+        Value::Null,
+    ];
+    encode(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(
+            digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned).to_vec(),
+        ));
+        encode(&Value::Array(signed_fields))
+    })
+}
+
+/// Materialize and independently validate the immutable EPF1 authority member.
+///
+/// Callers that activate a profile must use this checked boundary rather than
+/// treating a draft byte builder as sufficient identity evidence.
+///
+/// # Errors
+/// Returns [`BundleContractErrorV1::ProfileInvalid`] when the profile is not
+/// declared, canonical, self-digesting, or named by the requested identity.
+pub fn host_verified_execution_profile_bytes_v1(
+    profile_id: &str,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let bytes = installed_execution_profile_bytes_v1(profile_id)?;
+    let _profile = crate::ExecutionProfileV1::from_canonical_cbor(&bytes)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    // `installed_execution_profile_bytes_v1` selects the record by this exact
+    // identifier, and the canonical decoder has already checked the complete
+    // record.  The table is immutable, so a second name comparison would add
+    // an unreachable defensive branch to the host boundary.
+    Ok(bytes)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{draft_execution_profile_bytes_v1, host_verified_execution_profile_bytes_v1};
+    use crate::BundleContractErrorV1;
+
+    #[test]
+    fn draft_profiles_do_not_become_host_verified_profiles() {
+        for profile_id in ["deterministic-air-gapped-v1", "deterministic-local-v1"] {
+            assert!(draft_execution_profile_bytes_v1(profile_id).is_ok());
+            assert_eq!(
+                host_verified_execution_profile_bytes_v1(profile_id),
+                Err(BundleContractErrorV1::ProfileInvalid)
+            );
+        }
+    }
 }
 
 fn text_array(values: &[&str]) -> Value {

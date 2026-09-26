@@ -20,14 +20,71 @@ macro_rules! output_stdout {
     }};
 }
 
+macro_rules! result_pipeline {
+    ($result:expr_2021 => |$binding:pat_param|; $($remaining:tt)+) => {
+        $result.and_then(|$binding| result_pipeline!($($remaining)+))
+    };
+    ($result:expr_2021 $(;)?) => {
+        $result
+    };
+}
+
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
+
+    struct InvalidVersionPlugin;
+
+    impl pos_core::Plugin for InvalidVersionPlugin {
+        fn id(&self) -> pos_core::ids::PluginId {
+            pos_core::ids::PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-cli-version"
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
 
     #[test]
     fn builtin_reference_runner_registers_both_reference_plugins() {
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 1).is_ok());
+    }
+
+    #[test]
+    fn builtin_output_binding_rejects_uninstalled_source_and_profile() {
+        let plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "unknown-profile",
+        )
+        .is_err());
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            &[],
+            "deterministic-local-v1",
+        )
+        .is_err());
+
+        assert!(builtin_output_binding(
+            &InvalidVersionPlugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "deterministic-local-v1",
+        )
+        .is_err());
     }
 }
 
@@ -44,6 +101,7 @@ use pos_core::{
     crypto::Hash,
     ids::{PluginId, TimelineId},
     manifest::AdapterRecord,
+    plugin::Plugin,
     store::SeqRange,
 };
 use pos_experiment::{
@@ -59,6 +117,21 @@ const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
+
+fn builtin_output_binding<P: Plugin + ?Sized>(
+    plugin: &P,
+    source: pos_runtime::InstalledOutputPolicySourceV1,
+    configuration_details: &[u8],
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        source,
+        configuration_details,
+        profile_id,
+    )
+    .map_err(Into::into)
+}
 
 struct OpenedCliStore {
     store: HostedCliStore,
@@ -118,6 +191,10 @@ struct StrictReproManifest {
     head_hash: Hash,
     created_at: WallTime,
     plugin_versions: std::collections::HashMap<String, String>,
+    output_policy_digests: std::collections::HashMap<String, Hash>,
+    replay_policy_identities: std::collections::HashMap<String, Hash>,
+    replay_policy_closures: std::collections::HashMap<String, Vec<u8>>,
+    replay_policy_closure_identities: std::collections::HashMap<String, Hash>,
     adapter_records: Vec<StrictAdapterRecord>,
     label: Option<String>,
 }
@@ -151,6 +228,10 @@ impl From<StrictReproManifest> for pos_core::ReproManifest {
             head_hash: manifest.head_hash,
             created_at: manifest.created_at,
             plugin_versions: manifest.plugin_versions,
+            output_policy_digests: manifest.output_policy_digests,
+            replay_policy_identities: manifest.replay_policy_identities,
+            replay_policy_closures: manifest.replay_policy_closures,
+            replay_policy_closure_identities: manifest.replay_policy_closure_identities,
             adapter_records: manifest
                 .adapter_records
                 .into_iter()
@@ -714,24 +795,40 @@ fn run_builtin_reference_experiment(
     // Register reference plugins
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
-    exp.register(
-        &agent_plugin,
-        Some(Box::new(RuleAgentReducer)),
-        Some(Box::new(RuleAgentDriver::new(
-            agent_entity,
-            agent_plugin.actions().to_vec(),
-        ))),
-    )?;
-
+    let agent_configuration = serde_json::to_vec(agent_plugin.actions())?;
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
-    exp.register(
-        &obs_plugin,
-        Some(Box::new(SyntheticReducer)),
-        Some(Box::new(SyntheticDriver::new(obs_entity))),
-    )?;
-
-    exp.run().map_err(Into::into)
+    let obs_configuration = 1.0_f64.to_be_bytes();
+    result_pipeline! {
+        builtin_output_binding(
+            &agent_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &agent_configuration,
+            "deterministic-local-v1",
+        ) => |agent_closure|;
+        exp.register_with_verified_output_policy(
+            &agent_plugin,
+            agent_closure,
+            Some(Box::new(RuleAgentReducer)),
+            Some(Box::new(RuleAgentDriver::new(
+                agent_entity,
+                agent_plugin.actions().to_vec(),
+            ))),
+        ).map_err(Into::into) => |()|;
+        builtin_output_binding(
+            &obs_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            &obs_configuration,
+            "deterministic-local-v1",
+        ) => |obs_closure|;
+        exp.register_with_verified_output_policy(
+            &obs_plugin,
+            obs_closure,
+            Some(Box::new(SyntheticReducer)),
+            Some(Box::new(SyntheticDriver::new(obs_entity))),
+        ).map_err(Into::into) => |()|;
+        exp.run().map_err(Into::into)
+    }
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
@@ -783,17 +880,8 @@ fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::erro
 fn reproduce_manifest(
     reproduction: ReproductionManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let recipe = reproduce_cli_recipe(reproduction.recipe)?;
-    run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
-        .and_then(|reproduced| {
-            if reproduced.manifest.head_hash == reproduction.manifest.head_hash {
-                output_stdout!("OK");
-                Ok(())
-            } else {
-                output_stdout!("MISMATCH");
-                Err("reproduced chain_head does not match manifest".into())
-            }
-        })
+    let _ = reproduce_cli_recipe(reproduction.recipe)?;
+    Err("reproduction requires an owner-verified policy closure".into())
 }
 
 fn reproduce_cli_recipe(
@@ -1235,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_matches_builtin_recipe() {
+    fn cmd_experiment_reproduce_requires_owner_verified_policy() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir
             .path()
@@ -1245,7 +1333,8 @@ mod tests {
             .to_owned();
         cmd_experiment_run(&path, 3).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        cmd_experiment_reproduce(&manifest_path).test_ok();
+        let error = cmd_experiment_reproduce(&manifest_path).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1268,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_reports_chain_head_mismatch() {
+    fn cmd_experiment_reproduce_requires_owner_verified_manifest() {
         let manifest = ReproductionManifest {
             manifest: pos_core::ReproManifest::new(
                 TimelineId::new(),
@@ -1279,7 +1368,8 @@ mod tests {
         };
         let file = tempfile::NamedTempFile::new().test_ok();
         std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
-        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
+        let error = cmd_experiment_reproduce(file.path().to_str().test_ok()).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1401,7 +1491,8 @@ mod tests {
         let path = dir.path().join("dispatch.db").to_str().test_ok().to_owned();
         cmd_experiment_run(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        assert!(handle_experiment(&args(&["reproduce", &manifest_path])).is_ok());
+        let error = handle_experiment(&args(&["reproduce", &manifest_path])).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
         assert!(handle_experiment(&args(&["reproduce"])).is_err());
     }
 

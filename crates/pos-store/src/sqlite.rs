@@ -7941,7 +7941,7 @@ mod tests {
                         usize::MAX,
                         2,
                         10,
-                        1_000,
+                        10_000,
                     ),
                 )
                 .test_err();

@@ -56,37 +56,57 @@ pub enum ActionSubmissionError {
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error(transparent)]
+    OutputAdmission(#[from] crate::OutputAdmissionErrorV1),
+    #[error(transparent)]
     WorldInstallation(#[from] WorldInstallationErrorV1),
 
     #[error(transparent)]
     Composition(#[from] crate::PluginCompositionErrorV1),
 
     #[error("plugin '{name}' (id={id}) is already registered")]
-    DuplicatePlugin { id: PluginId, name: String },
+    DuplicatePlugin {
+        id: PluginId,
+        name: String,
+    },
 
     #[error("unknown event type '{0}' — no plugin owns this schema")]
     UnknownEventType(String),
 
     #[error("payload validation failed for event type '{event_type}': {reason}")]
-    InvalidPayload { event_type: String, reason: String },
+    InvalidPayload {
+        event_type: String,
+        reason: String,
+    },
 
     #[error("plugin '{name}' has no driver but was asked to step")]
-    NoDriver { name: String },
+    NoDriver {
+        name: String,
+    },
 
     #[error("driver '{name}' panicked; its Tick Boundary was aborted")]
-    DriverPanicked { name: String },
+    DriverPanicked {
+        name: String,
+    },
 
     #[error("driver '{name}' panicked while aborting; its Tick Boundary was discarded")]
-    DriverAbortPanicked { name: String },
+    DriverAbortPanicked {
+        name: String,
+    },
 
     #[error("driver '{name}' panicked while committing; the runtime is faulted")]
-    DriverCommitPanicked { name: String },
+    DriverCommitPanicked {
+        name: String,
+    },
 
     #[error("driver '{name}' panicked while restoring; the runtime is faulted")]
-    DriverRestorePanicked { name: String },
+    DriverRestorePanicked {
+        name: String,
+    },
 
     #[error("driver '{name}' panicked during Fork handoff; the runtime is faulted")]
-    DriverForkPanicked { name: String },
+    DriverForkPanicked {
+        name: String,
+    },
 
     #[error("driver '{name}' panicked during Fork handoff and child rollback failed: {source}")]
     DriverForkRollbackFailed {
@@ -104,19 +124,32 @@ pub enum RuntimeError {
     },
 
     #[error("plugin '{name}' capability mismatch: {reason}")]
-    CapabilityMismatch { name: String, reason: String },
+    CapabilityMismatch {
+        name: String,
+        reason: String,
+    },
 
     #[error("plugin '{name}' cannot claim core-owned geographic event type '{event_type}'")]
-    ReservedGeographicEventType { name: String, event_type: String },
+    ReservedGeographicEventType {
+        name: String,
+        event_type: String,
+    },
 
     #[error("driver emitted core-owned geographic event type '{event_type}'")]
-    GeographicDraft { event_type: String },
+    GeographicDraft {
+        event_type: String,
+    },
 
     #[error("plugin '{name}' cannot claim Gateway-owned consent event type '{event_type}'")]
-    ReservedConsentEventType { name: String, event_type: String },
+    ReservedConsentEventType {
+        name: String,
+        event_type: String,
+    },
 
     #[error("driver emitted Gateway-owned consent event type '{event_type}'")]
-    ConsentDraft { event_type: String },
+    ConsentDraft {
+        event_type: String,
+    },
 
     #[error("protected operation requires a host-bound consent authority")]
     ConsentOperationUnavailable,
@@ -146,7 +179,9 @@ pub enum RuntimeError {
     },
 
     #[error("driver '{driver}' requires a snapshot anchor")]
-    MissingSnapshotAnchor { driver: String },
+    MissingSnapshotAnchor {
+        driver: String,
+    },
 
     #[error("snapshot Timeline mismatch: expected {expected}, got {actual}")]
     SnapshotTimelineMismatch {
@@ -158,19 +193,28 @@ pub enum RuntimeError {
     PendingDriverStep,
 
     #[error("driver '{driver}' must be fresh before recovery")]
-    DriverRecoveryNotFresh { driver: String },
+    DriverRecoveryNotFresh {
+        driver: String,
+    },
 
     #[error("driver '{driver}' committed tick exceeds the V1 range")]
-    DriverTickOverflow { driver: String },
+    DriverTickOverflow {
+        driver: String,
+    },
 
     #[error("invalid driver recovery evidence: {reason}")]
-    InvalidRecoveryEvidence { reason: &'static str },
+    InvalidRecoveryEvidence {
+        reason: &'static str,
+    },
 
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 
     #[error("recorder mode mismatch: expected {expected}, got {got}")]
-    ModeMismatch { expected: String, got: String },
+    ModeMismatch {
+        expected: String,
+        got: String,
+    },
 }
 
 #[cfg(test)]

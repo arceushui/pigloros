@@ -29,8 +29,10 @@ pub mod driver;
 pub mod erasure_host;
 pub mod error;
 pub mod measured_process_image;
+pub mod output_admission;
 pub mod recorder;
 pub mod registry;
+pub mod reviewed_policy;
 pub mod scheduler;
 pub mod schema;
 pub mod world_profile;
@@ -52,8 +54,20 @@ pub use erasure_host::{
 };
 pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
 pub use measured_process_image::MeasuredProcessImageV1;
+pub use output_admission::{
+    validate_output_policy_artifacts_v1, InstalledOutputPolicySourceV1, OutputAdmissionErrorV1,
+    OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1,
+    MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
+};
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
+pub use reviewed_policy::{
+    canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
+    implementation_artifact_hash_v1, reviewed_retention_policy_bytes_v1,
+    reviewed_retention_policy_hash_v1, ReviewedPolicyArtifactErrorV1,
+    MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1, MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1,
+    MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1,
+};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
 pub use world_profile::HostWorldProfileV1;

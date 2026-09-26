@@ -565,9 +565,10 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     let mut child = command.spawn()?;
 
     // Opening the FIFO synchronizes with the evaluator after exec and before
-    // the launcher path is replaced. The launcher is a symlink, so replacing
-    // it does not touch the live executable inode.
+    // the launcher path is replaced. Remove the symlink before installing the
+    // replacement so filesystems that reject an overwrite with ETXTBSY pass.
     let mut request_writer = open_fifo_writer_after_child_ready(&request_path, &mut child)?;
+    fs::remove_file(&executable)?;
     fs::rename(&replacement, &executable)?;
     assert_eq!(fs::read(&executable)?, b"replacement path contents");
     request_writer.write_all(&request)?;

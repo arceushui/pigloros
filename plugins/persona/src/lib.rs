@@ -15,7 +15,7 @@ use pos_core::{
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
-use pos_plugin_eval::{draft_outcome, draft_prediction};
+use pos_plugin_eval::{draft_outcome, draft_prediction, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION};
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +97,8 @@ impl Plugin for PersonaPlugin {
             owned_event_types: vec![
                 Kind::new(EVENT_TYPE_PREFERENCE),
                 Kind::new(EVENT_TYPE_DECISION),
+                Kind::new(EVENT_TYPE_PREDICTION),
+                Kind::new(EVENT_TYPE_OUTCOME),
             ],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
             has_driver: true,
@@ -382,7 +384,7 @@ mod tests {
     fn plugin_capability() {
         let plugin = PersonaPlugin::new();
         let cap = plugin.capability();
-        assert_eq!(cap.owned_event_types.len(), 2);
+        assert_eq!(cap.owned_event_types.len(), 4);
         assert!(cap
             .owned_event_types
             .iter()
@@ -391,6 +393,14 @@ mod tests {
             .owned_event_types
             .iter()
             .any(|k| k.as_str() == EVENT_TYPE_DECISION));
+        assert!(cap
+            .owned_event_types
+            .iter()
+            .any(|k| k.as_str() == EVENT_TYPE_PREDICTION));
+        assert!(cap
+            .owned_event_types
+            .iter()
+            .any(|k| k.as_str() == EVENT_TYPE_OUTCOME));
         assert_eq!(cap.owned_entity_kinds, vec![ENTITY_KIND.to_owned()]);
         assert!(cap.has_driver);
         assert!(cap.has_reducer);
@@ -918,7 +928,7 @@ mod tests {
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         let persona = PersonaPlugin::new();
         registry
-            .register(
+            .register_generated(
                 &persona,
                 Some(Box::new(PersonaReducer)),
                 Some(Box::new(PersonaEvalDriver::new(
@@ -930,7 +940,7 @@ mod tests {
             .test_ok();
         let eval = EvalPlugin::new();
         registry
-            .register(&eval, Some(Box::new(EvalReducer)), None)
+            .register_generated(&eval, Some(Box::new(EvalReducer)), None)
             .test_ok();
         for _ in 0..5 {
             let drafts = registry

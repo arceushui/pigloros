@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+test-support = ["pos-runtime/test-support"]
+
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
@@ -25,11 +28,16 @@ ulid = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 pos-plugin-agent = { path = "../../plugins/agent" }
 pos-plugin-rule-agent = { path = "../../plugins/entities/rule-agent" }
 pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
 rusqlite = { workspace = true }
 tempfile = "3"
+
+[[test]]
+name = "agent_provider_replay"
+required-features = ["test-support"]
 
 [lints]
 workspace = true

@@ -25,6 +25,14 @@ pub struct ReproManifest {
     pub head_hash: Hash,
     pub created_at: WallTime,
     pub plugin_versions: HashMap<String, String>,
+    /// Canonical EOP1 output-admission policy digests bound to each registered Plugin.
+    pub output_policy_digests: HashMap<String, Hash>,
+    /// Stable replay identities for comparing policies across fresh Plugin IDs.
+    pub replay_policy_identities: HashMap<String, Hash>,
+    /// Exact length-framed output-policy closures retained for Replay.
+    pub replay_policy_closures: HashMap<String, Vec<u8>>,
+    /// Stable identities for comparing retained closures across fresh Plugin IDs.
+    pub replay_policy_closure_identities: HashMap<String, Hash>,
     pub adapter_records: Vec<AdapterRecord>,
     /// Human-readable label for this experiment run.
     pub label: Option<String>,
@@ -38,6 +46,10 @@ impl ReproManifest {
             head_hash,
             created_at,
             plugin_versions: HashMap::new(),
+            output_policy_digests: HashMap::new(),
+            replay_policy_identities: HashMap::new(),
+            replay_policy_closures: HashMap::new(),
+            replay_policy_closure_identities: HashMap::new(),
             adapter_records: Vec::new(),
             label: None,
         }
@@ -50,6 +62,46 @@ impl ReproManifest {
         version: impl Into<String>,
     ) -> Self {
         self.plugin_versions.insert(plugin.into(), version.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_output_policy_digest(mut self, plugin: impl Into<String>, digest: Hash) -> Self {
+        self.output_policy_digests.insert(plugin.into(), digest);
+        self
+    }
+
+    #[must_use]
+    pub fn with_replay_policy_identity(
+        mut self,
+        plugin: impl Into<String>,
+        identity: Hash,
+    ) -> Self {
+        self.replay_policy_identities
+            .insert(plugin.into(), identity);
+        self
+    }
+
+    /// Retain the exact output-policy closure needed to verify Replay inputs.
+    #[must_use]
+    pub fn with_replay_policy_closure(
+        mut self,
+        plugin: impl Into<String>,
+        closure: Vec<u8>,
+    ) -> Self {
+        self.replay_policy_closures.insert(plugin.into(), closure);
+        self
+    }
+
+    /// Record the fresh-ID-independent identity of one retained closure.
+    #[must_use]
+    pub fn with_replay_policy_closure_identity(
+        mut self,
+        plugin: impl Into<String>,
+        identity: Hash,
+    ) -> Self {
+        self.replay_policy_closure_identities
+            .insert(plugin.into(), identity);
         self
     }
 

@@ -4,7 +4,7 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, PluginId, TimelineId},
-    ErasureContainmentGateV1,
+    Capability, ErasureContainmentGateV1, Plugin,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -15,8 +15,8 @@ use pos_plugin_agent::{
     ReplayCheckpoint, ReplayVerificationError, EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView, PluginRegistry,
-    RuntimeError, StepOutput, TimelineHistorySegment,
+    recorder::RECORDER_EVENT_TYPE, Driver, DriverRecoveryEvidence, ObservationView,
+    OutputPolicyBindingV1, PluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use std::sync::Arc;
 use ulid::Ulid;
@@ -29,6 +29,51 @@ const PROVIDER_HASH: [u8; 32] = [0x32; 32];
 
 fn gated_registry() -> PluginRegistry {
     PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+}
+
+struct BindingPlugin {
+    id: PluginId,
+    version: &'static str,
+    event_types: Vec<Kind>,
+}
+
+impl Plugin for BindingPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "agent"
+    }
+
+    fn version(&self) -> &'static str {
+        self.version
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: self.event_types.clone(),
+            ..Capability::default()
+        }
+    }
+}
+
+fn output_binding(
+    plugin_id: PluginId,
+    plugin_version: &'static str,
+    event_types: &[&str],
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+    let plugin = BindingPlugin {
+        id: plugin_id,
+        version: plugin_version,
+        event_types: event_types.iter().map(|kind| Kind::new(*kind)).collect(),
+    };
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        &plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    )?)
 }
 
 trait TestValueExt<T> {
@@ -437,7 +482,7 @@ fn registry_passes_recovery_evidence_to_the_driver_verifier() {
     )
     .test_ok();
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(AncestryCheckingDriver { verifier }));
+    registry.register_test_driver(Box::new(AncestryCheckingDriver { verifier }));
 
     assert!(matches!(
         registry.restore_driver_state(
@@ -1008,7 +1053,15 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
         Box::new(provider),
     );
     let mut registry = gated_registry();
-    registry.register_driver(Box::new(driver));
+    let binding = output_binding(
+        host.plugin,
+        PLUGIN_VERSION,
+        &[EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE],
+    )
+    .test_ok();
+    registry
+        .register_test_driver_with_verified_output_policy(host.plugin, binding, Box::new(driver))
+        .test_ok();
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
     registry.restore_driver_state(&segments, &events).test_ok();
@@ -1036,7 +1089,7 @@ fn provider_driver_recovery_rejects_unordered_evidence_before_provider_use() {
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
     let wrong_timeline = TimelineId::new();
     let wrong_segments = [
@@ -1128,7 +1181,7 @@ fn provider_driver_recovery_rejects_invalid_target_evidence_without_provider_use
             Box::new(provider),
         );
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(driver));
+        registry.register_test_driver(Box::new(driver));
         let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
         assert!(
@@ -1161,7 +1214,7 @@ fn provider_driver_recovery_accepts_no_action_and_unrelated_evidence_without_pro
             Box::new(provider),
         );
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(driver));
+        registry.register_test_driver(Box::new(driver));
         let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(1))];
 
         registry
@@ -1184,10 +1237,27 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
         Box::new(provider),
     );
     let mut registry = gated_registry();
-    registry.register_driver(Box::new(PrecedingDriver {
-        entity: host.other_agent,
-    }));
-    registry.register_driver(Box::new(driver));
+    let preceding_plugin = PluginId::new();
+    let preceding_binding =
+        output_binding(preceding_plugin, PLUGIN_VERSION, &["world.observation"]).test_ok();
+    registry
+        .register_test_driver_with_verified_output_policy(
+            preceding_plugin,
+            preceding_binding,
+            Box::new(PrecedingDriver {
+                entity: host.other_agent,
+            }),
+        )
+        .test_ok();
+    let binding = output_binding(
+        host.plugin,
+        PLUGIN_VERSION,
+        &[EVENT_TYPE_ACTION, RECORDER_EVENT_TYPE],
+    )
+    .test_ok();
+    registry
+        .register_test_driver_with_verified_output_policy(host.plugin, binding, Box::new(driver))
+        .test_ok();
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)
         .test_ok();
@@ -1260,7 +1330,7 @@ fn restore_driver_state_rejects_empty_timeline_ancestry() {
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     assert!(registry.restore_driver_state(&[], &[]).is_err());
 }
 
@@ -1276,7 +1346,7 @@ fn restore_driver_state_accepts_empty_history_when_bound_is_zero() {
         Box::new(provider),
     );
     let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(driver));
+    registry.register_test_driver(Box::new(driver));
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::ZERO)];
     assert!(registry.restore_driver_state(&segments, &[]).is_ok());
 }
