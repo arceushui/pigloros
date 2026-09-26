@@ -723,6 +723,23 @@ mod tests {
     }
 
     #[test]
+    fn committed_origin_rejects_logical_sequence_overflow() {
+        let mut store = open_fixture_store(StoreConfig::Memory);
+        let timeline = store.create_timeline("origin-overflow").test_ok();
+        let mut events = store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.origin"),
+                    CanonicalBytes::from_vec(vec![1]),
+                )],
+            )
+            .test_ok();
+        assert!(finalize_committed_origins(timeline.id(), u64::MAX, &mut events).is_err());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn consent_draft_guards_cover_revocation_and_owner_failures() {
         let timeline = pos_core::TimelineId::new();

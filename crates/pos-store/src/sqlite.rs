@@ -6176,6 +6176,143 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn sqlite_origin_schema_rejects_missing_columns() {
+        let store = tests::new_store();
+        store
+            .conn
+            .execute_batch(
+                "ALTER TABLE events RENAME TO events_real;
+                 CREATE VIEW events AS
+                 SELECT signature_owner_id, signature_role, signature_epoch
+                 FROM events_real",
+            )
+            .test_ok();
+        assert!(matches!(
+            store.validate_event_signature_schema(),
+            Err(CoreError::Storage(message))
+                if message == "SQLite events table is missing required origin context columns"
+        ));
+    }
+
+    #[test]
+    fn sqlite_committed_rows_reject_origin_beyond_integer_range() {
+        let mut store = tests::new_store();
+        let timeline = store.create_timeline("origin-integer-range").test_ok();
+        let mut event = store
+            .append(
+                timeline.id(),
+                &[tests::make_draft(EntityId::new(), b"seed")],
+            )
+            .test_ok()
+            .remove(0);
+        event.id = EventId::new();
+        event.seq = Seq::from_u64(2);
+        event.origin = Some(EventOriginV1 {
+            origin_timeline_id: timeline.id(),
+            origin_logical_seq: Seq::from_u64(i64::MAX.unsigned_abs() + 1),
+        });
+        assert!(matches!(
+            store.write_committed_rows(
+                timeline.id(),
+                Seq::from_u64(1),
+                pos_core::Hash::from_bytes([0; 32]),
+                &[event]
+            ),
+            Err(CoreError::Storage(message)) if message == "origin sequence exceeds SQLite range"
+        ));
+    }
+
+    #[test]
+    fn sqlite_origin_rejects_corrupt_fork_prefix_in_append_paths() {
+        let mut store = tests::new_store();
+        let timeline = store.create_timeline("corrupt-fork-prefix").test_ok();
+        let mut event = store
+            .append(
+                timeline.id(),
+                &[tests::make_draft(EntityId::new(), b"seed")],
+            )
+            .test_ok()
+            .remove(0);
+        event.id = EventId::new();
+        event.seq = Seq::from_u64(2);
+        event.origin = None;
+
+        for fork_seq in [-1, i64::MAX] {
+            store
+                .conn
+                .execute(
+                    "UPDATE timelines SET fork_seq = ?1 WHERE id = ?2",
+                    params![fork_seq, timeline.id().to_string()],
+                )
+                .test_ok();
+            let tx = store
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .test_ok();
+            assert!(SqliteStore::append_one_in_transaction(
+                &tx,
+                store.hasher.as_ref(),
+                timeline.id(),
+                tests::make_draft(EntityId::new(), b"draft"),
+            )
+            .is_err());
+            assert!(SqliteStore::append_geo_cell_in_transaction(
+                &tx,
+                store.hasher.as_ref(),
+                timeline.id(),
+                EntityId::new(),
+                EventId::new(),
+                CanonicalBytes::from_vec(vec![1]),
+                WallTime::now(),
+            )
+            .is_err());
+            tx.rollback().test_ok();
+            assert!(store.read_own(timeline.id(), SeqRange::all()).is_err());
+            assert!(store
+                .append_committed(timeline.id(), &[event.clone()])
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn sqlite_origin_append_rejects_malformed_timeline_column_types() {
+        for statement in [
+            "UPDATE timelines SET head_seq = 'invalid' WHERE id = ?1",
+            "UPDATE timelines SET chain_head = 'invalid' WHERE id = ?1",
+            "UPDATE timelines SET fork_seq = 'invalid' WHERE id = ?1",
+        ] {
+            let mut store = tests::new_store();
+            let timeline = store.create_timeline("malformed-timeline-row").test_ok();
+            store
+                .conn
+                .execute(statement, params![timeline.id().to_string()])
+                .test_ok();
+            let tx = store
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .test_ok();
+            assert!(SqliteStore::append_one_in_transaction(
+                &tx,
+                store.hasher.as_ref(),
+                timeline.id(),
+                tests::make_draft(EntityId::new(), b"draft"),
+            )
+            .is_err());
+            assert!(SqliteStore::append_geo_cell_in_transaction(
+                &tx,
+                store.hasher.as_ref(),
+                timeline.id(),
+                EntityId::new(),
+                EventId::new(),
+                CanonicalBytes::from_vec(vec![1]),
+                WallTime::now(),
+            )
+            .is_err());
+            tx.rollback().test_ok();
+        }
+    }
+
     fn authorized_export_timeline(
         store: &dyn EventStore,
         id: TimelineId,
