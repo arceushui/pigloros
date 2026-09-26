@@ -61,7 +61,9 @@ use pos_core::{
     ForkInterventionAdmissionV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
     PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1,
     PrincipalOwnerBindingV1, PublicKey, Signature, StoredErasureManifestV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRoleV1,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 use crate::fork_admission_authority::{
@@ -4469,6 +4471,32 @@ impl MemoryStore {
         self.erasure_topology_store_binding = Some(binding);
         self.erasure_gate_bound = true;
         Ok(())
+    }
+}
+
+impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
+    fn with_decryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        if identity.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
+        if identity.role != KeyRoleV1::SubjectDataEncryption {
+            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
+        }
+        // The mutable store owner is held through the callback, as it is for
+        // signing and destruction on this single-process adapter.
+        let mut registry = self
+            .load_key_registry()
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?
+            .ok_or(KeyRegistryErrorV1::RegistryUnavailable)?;
+        registry.with_decryption_authorization(identity, private_material_digest, operation)
     }
 }
 
@@ -10795,6 +10823,18 @@ mod coverage_entrypoints {
         store.key_registry = Some(invalid.clone());
         assert!(store.load_key_registry().is_err());
         assert!(store.save_key_registry(&invalid).is_err());
+        let decryption_identity =
+            KeyIdentityV1::new("corrupt-owner", KeyRoleV1::SubjectDataEncryption, 1);
+        let decryption_called = std::cell::Cell::new(false);
+        assert_eq!(
+            store.with_decryption_authorization(
+                decryption_identity,
+                Hash::from_bytes([11; 32]),
+                || decryption_called.set(true),
+            ),
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
+        );
+        assert!(!decryption_called.get());
         let identity = KeyIdentityV1::new("corrupt-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let request = pos_core::KeyDestructionRequestV1::new(
             identity,
