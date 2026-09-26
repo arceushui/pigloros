@@ -71,6 +71,9 @@ const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/s
 pub struct MoatProofReport {
     pub baseline: MoatProofEvidenceV1,
     pub counterfactual: MoatProofEvidenceV1,
+    // Profile comparisons use Timeline seq in place of run-local Event IDs.
+    comparable_baseline: MoatProofEvidenceV1,
+    comparable_counterfactual: MoatProofEvidenceV1,
     pub baseline_cbor: Vec<u8>,
     pub counterfactual_cbor: Vec<u8>,
     pub divergence: ComparisonV1,
@@ -230,18 +233,19 @@ impl MoatProofRun {
             compare(&baseline, &counterfactual).map_err(MoatProofError::from) => |divergence|;
             verify_independent_fixture_reproduction(&baseline, &counterfactual, &divergence) => |()|;
             compare_with_reference(&baseline, &counterfactual, &divergence) => |()|;
-            let physical_reaction = projection_changed(&baseline, &counterfactual, "world");
-            let agent_reaction = projection_changed(&baseline, &counterfactual, "proof-agent");
-            let society_signal_changed = projection_changed(&baseline, &counterfactual, "society");
+            comparable_pair(&baseline, &baseline_events, &counterfactual, &counterfactual_events)
+                => |(comparable_baseline, comparable_counterfactual)|;
             let report = MoatProofReport {
+                physical_reaction: projection_changed(&baseline, &counterfactual, "world").into(),
+                agent_reaction: projection_changed(&baseline, &counterfactual, "proof-agent").into(),
+                society_signal_changed: projection_changed(&baseline, &counterfactual, "society").into(),
                 baseline,
                 counterfactual,
+                comparable_baseline,
+                comparable_counterfactual,
                 baseline_cbor,
                 counterfactual_cbor,
                 divergence,
-                physical_reaction: physical_reaction.into(),
-                agent_reaction: agent_reaction.into(),
-                society_signal_changed: society_signal_changed.into(),
                 prefix_identical_through_fork: prefix_identical_through_fork.into(),
                 suffix_recomputed: suffix_recomputed.into(),
                 failure_probes,
@@ -273,13 +277,16 @@ pub fn run_local_and_air_gapped(
         MoatProofRun::new(input, ExecutionModeV1::AirGapped)
             .map_err(MoatProofError::from) => |air_gapped_run|;
         air_gapped_run.run() => |air_gapped|;
-        compare_authoritative_outputs(&local.baseline, &air_gapped.baseline)
+        compare_authoritative_outputs(&local.comparable_baseline, &air_gapped.comparable_baseline)
             .map_err(MoatProofError::from) => |comparison|;
         let left_digest = comparison.left_digest;
         let right_digest = comparison.right_digest;
         comparison.equal.then_some(())
             .ok_or(MoatProofError::ExecutionModesDiverged(comparison)) => |()|;
-        compare_authoritative_outputs(&local.counterfactual, &air_gapped.counterfactual)
+        compare_authoritative_outputs(
+            &local.comparable_counterfactual,
+            &air_gapped.comparable_counterfactual,
+        )
             .map_err(MoatProofError::from) => |counterfactual_comparison|;
         counterfactual_comparison.equal.then_some(())
             .ok_or(MoatProofError::ExecutionModesDiverged(counterfactual_comparison)) => |()|;
@@ -320,6 +327,8 @@ pub enum MoatProofError {
     ReferenceDivergenceMismatch,
     #[error("Local and Air-Gapped proof artifacts diverged: {0:?}")]
     ExecutionModesDiverged(ComparisonV1),
+    #[error("World proof projection has invalid or unresolvable {0} provenance")]
+    ProjectionProvenance(&'static str),
     #[error("Wave 8 reaction and atomicity conformance gates failed")]
     ReactionGatesFailed,
     #[error("consent-revoked session accepted a post-revocation append")]
@@ -572,6 +581,68 @@ fn authoritative_events(events: &[Event]) -> Vec<AuthoritativeEventV1> {
             causation_seq: event.causation_id.and_then(|id| ids.get(&id).copied()),
         })
         .collect()
+}
+
+// Independent proof runs assign fresh Event IDs. Keep their actual State in
+// each artifact, but compare private copies with those IDs mapped to the
+// corresponding Timeline sequence numbers, just as authoritative_events does.
+fn comparable_proof_evidence(
+    evidence: &MoatProofEvidenceV1,
+    events: &[Event],
+) -> Result<MoatProofEvidenceV1, MoatProofError> {
+    let id_to_seq = events
+        .iter()
+        .map(|event| (event.id.to_string(), event.seq.as_u64()))
+        .collect::<HashMap<_, _>>();
+    let mut comparable = evidence.clone();
+    for projection in &mut comparable.projections {
+        if projection.reducer == "world" {
+            normalize_world_provenance(&mut projection.state, &id_to_seq)?;
+        }
+    }
+    Ok(comparable)
+}
+
+fn comparable_pair(
+    baseline: &MoatProofEvidenceV1,
+    baseline_events: &[Event],
+    counterfactual: &MoatProofEvidenceV1,
+    counterfactual_events: &[Event],
+) -> Result<(MoatProofEvidenceV1, MoatProofEvidenceV1), MoatProofError> {
+    let baseline = comparable_proof_evidence(baseline, baseline_events)?;
+    let counterfactual = comparable_proof_evidence(counterfactual, counterfactual_events)?;
+    Ok((baseline, counterfactual))
+}
+
+fn normalize_world_provenance(
+    state: &mut serde_json::Value,
+    id_to_seq: &HashMap<String, u64>,
+) -> Result<(), MoatProofError> {
+    let fields = state
+        .get_mut("fields")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or(MoatProofError::ProjectionProvenance("State fields"))?;
+    let observation_seq = fields
+        .get("observation_seq")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(MoatProofError::ProjectionProvenance("observation_seq"))?;
+    for field in ["observation_id", "causation_id"] {
+        match fields.get_mut(field) {
+            Some(serde_json::Value::String(id)) => {
+                let seq = id_to_seq
+                    .get(id)
+                    .copied()
+                    .ok_or(MoatProofError::ProjectionProvenance(field))?;
+                if field == "observation_id" && seq != observation_seq {
+                    return Err(MoatProofError::ProjectionProvenance(field));
+                }
+                *id = format!("seq:{seq}");
+            }
+            Some(serde_json::Value::Null) if field == "causation_id" => {}
+            _ => return Err(MoatProofError::ProjectionProvenance(field)),
+        }
+    }
+    Ok(())
 }
 
 struct EvidenceContext<'a> {
@@ -2123,6 +2194,86 @@ mod tests {
         assert!(comparison.equal);
         assert!(local.passes_reaction_gates());
         assert!(air_gapped.passes_reaction_gates());
+        assert_ne!(
+            local.baseline.projections, air_gapped.baseline.projections,
+            "actual Event IDs remain distinct across independent runs"
+        );
+        assert_eq!(
+            local.comparable_baseline.projections, air_gapped.comparable_baseline.projections,
+            "profile comparison retains sequence-equivalent causal links"
+        );
+    }
+
+    #[test]
+    fn proof_comparison_normalizes_only_resolved_world_provenance() {
+        let ids = HashMap::from([("observation".to_owned(), 7), ("cause".to_owned(), 3)]);
+        let mut state = serde_json::json!({"fields": {
+            "observation_id": "observation", "observation_seq": 7,
+            "causation_id": "cause", "pos_x": 1.0
+        }});
+        normalize_world_provenance(&mut state, &ids).test_ok();
+        assert_eq!(state["fields"]["observation_id"], "seq:7");
+        assert_eq!(state["fields"]["causation_id"], "seq:3");
+        assert_eq!(state["fields"]["pos_x"], 1.0);
+
+        let mut no_cause = serde_json::json!({"fields": {
+            "observation_id": "observation", "observation_seq": 7,
+            "causation_id": null
+        }});
+        normalize_world_provenance(&mut no_cause, &ids).test_ok();
+        assert!(no_cause["fields"]["causation_id"].is_null());
+
+        for mut invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"fields": {"observation_id": "observation"}}),
+            serde_json::json!({"fields": {"observation_id": "missing", "observation_seq": 7, "causation_id": null}}),
+            serde_json::json!({"fields": {"observation_id": "observation", "observation_seq": 8, "causation_id": null}}),
+            serde_json::json!({"fields": {"observation_id": null, "observation_seq": 7, "causation_id": null}}),
+            serde_json::json!({"fields": {"observation_id": "observation", "observation_seq": 7, "causation_id": "missing"}}),
+        ] {
+            assert!(matches!(
+                normalize_world_provenance(&mut invalid, &ids),
+                Err(MoatProofError::ProjectionProvenance(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn profile_comparison_fails_closed_on_invalid_provenance_in_either_run() {
+        let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
+            .test_ok()
+            .run()
+            .test_ok();
+        let mut invalid = report.baseline.clone();
+        let world = invalid
+            .projections
+            .iter_mut()
+            .find(|projection| projection.reducer == "world")
+            .test_ok();
+        world.state["fields"]["observation_id"] = serde_json::json!("missing");
+
+        let mut without_world = report.baseline;
+        without_world
+            .projections
+            .retain(|projection| projection.reducer != "world");
+        assert_eq!(
+            comparable_proof_evidence(&without_world, &[])
+                .test_ok()
+                .projections,
+            without_world.projections
+        );
+        assert!(matches!(
+            comparable_proof_evidence(&invalid, &[]),
+            Err(MoatProofError::ProjectionProvenance("observation_id"))
+        ));
+        assert!(matches!(
+            comparable_pair(&invalid, &[], &without_world, &[]),
+            Err(MoatProofError::ProjectionProvenance("observation_id"))
+        ));
+        assert!(matches!(
+            comparable_pair(&without_world, &[], &invalid, &[]),
+            Err(MoatProofError::ProjectionProvenance("observation_id"))
+        ));
     }
 
     #[test]
@@ -2646,7 +2797,9 @@ mod coverage_entrypoints {
 
         let mut failed = MoatProofReport {
             baseline: empty.clone(),
-            counterfactual: empty,
+            counterfactual: empty.clone(),
+            comparable_baseline: empty.clone(),
+            comparable_counterfactual: empty,
             baseline_cbor: Vec::new(),
             counterfactual_cbor: Vec::new(),
             divergence: ComparisonV1 {

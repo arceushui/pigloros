@@ -105,6 +105,10 @@ pub enum WorldCodecError {
     WrongFieldType,
     #[error("non-finite float value")]
     NonFiniteFloat,
+    #[error("world observation orientation must be a unit quaternion")]
+    NonUnitOrientation,
+    #[error("unknown v1 sensor kind")]
+    UnknownSensorKind,
     #[error("payload too large: {size} bytes (max {max})")]
     PayloadTooLarge { size: usize, max: usize },
     #[error("unknown action kind (not in v1 allow-list)")]
@@ -361,6 +365,23 @@ const fn decode_finite_f32(val: &ciborium::Value) -> Result<f32, WorldCodecError
     }
 }
 
+fn decode_exact_f32(val: &ciborium::Value) -> Result<f32, WorldCodecError> {
+    match val {
+        ciborium::Value::Float(source) if source.is_finite() => {
+            let normalized = source.to_f32().unwrap_or(f32::NAN);
+            if !normalized.is_finite() {
+                return Err(WorldCodecError::NonFiniteFloat);
+            }
+            if f64::from(normalized).to_bits() != source.to_bits() {
+                return Err(WorldCodecError::NonCanonicalRecord);
+            }
+            Ok(normalized)
+        }
+        ciborium::Value::Float(_) => Err(WorldCodecError::NonFiniteFloat),
+        _ => Err(WorldCodecError::WrongFieldType),
+    }
+}
+
 fn cbor_tstr(s: &str) -> ciborium::Value {
     ciborium::Value::Text(s.to_owned())
 }
@@ -512,6 +533,8 @@ impl WorldObservationV1 {
     /// # Errors
     /// Returns [`WorldCodecError::NonFiniteFloat`] if any float is non-finite.
     /// Returns [`WorldCodecError::PayloadTooLarge`] if `sensor_value` exceeds `MAX_SENSOR_VALUE_BYTES`.
+    /// Returns [`WorldCodecError::NonUnitOrientation`] for an invalid quaternion
+    /// and [`WorldCodecError::UnknownSensorKind`] for an unsupported sensor.
     pub fn encode(&self) -> Result<CanonicalBytes, WorldCodecError> {
         self.validate_encoding().map(|()| self.encode_validated())
     }
@@ -542,6 +565,22 @@ impl WorldObservationV1 {
         .any(|component| !component.is_finite())
         {
             return Err(WorldCodecError::NonFiniteFloat);
+        }
+        self.validate_shape()
+    }
+
+    fn validate_shape(&self) -> Result<(), WorldCodecError> {
+        if self.sensor_kind != SensorKindV1::Proximity.as_u8()
+            && self.sensor_kind != SensorKindV1::ContactCount.as_u8()
+        {
+            return Err(WorldCodecError::UnknownSensorKind);
+        }
+        let norm_squared = [self.orient_w, self.orient_x, self.orient_y, self.orient_z]
+            .into_iter()
+            .map(|component| f64::from(component).powi(2))
+            .sum::<f64>();
+        if (norm_squared - 1.0).abs() > 1.0e-5 {
+            return Err(WorldCodecError::NonUnitOrientation);
         }
         Ok(())
     }
@@ -585,22 +624,22 @@ impl WorldObservationV1 {
         let body_entity_id = decode_id(&items[2])?;
         let tick = decode_u64(&items[3])?;
         let step_index = decode_u64(&items[4])?;
-        let pos_x = decode_finite_f32(&items[5])?;
-        let pos_y = decode_finite_f32(&items[6])?;
-        let pos_z = decode_finite_f32(&items[7])?;
-        let orient_w = decode_finite_f32(&items[8])?;
-        let orient_x = decode_finite_f32(&items[9])?;
-        let orient_y = decode_finite_f32(&items[10])?;
-        let orient_z = decode_finite_f32(&items[11])?;
-        let vel_lin_x = decode_finite_f32(&items[12])?;
-        let vel_lin_y = decode_finite_f32(&items[13])?;
-        let vel_lin_z = decode_finite_f32(&items[14])?;
-        let vel_ang_x = decode_finite_f32(&items[15])?;
-        let vel_ang_y = decode_finite_f32(&items[16])?;
-        let vel_ang_z = decode_finite_f32(&items[17])?;
+        let pos_x = decode_exact_f32(&items[5])?;
+        let pos_y = decode_exact_f32(&items[6])?;
+        let pos_z = decode_exact_f32(&items[7])?;
+        let orient_w = decode_exact_f32(&items[8])?;
+        let orient_x = decode_exact_f32(&items[9])?;
+        let orient_y = decode_exact_f32(&items[10])?;
+        let orient_z = decode_exact_f32(&items[11])?;
+        let vel_lin_x = decode_exact_f32(&items[12])?;
+        let vel_lin_y = decode_exact_f32(&items[13])?;
+        let vel_lin_z = decode_exact_f32(&items[14])?;
+        let vel_ang_x = decode_exact_f32(&items[15])?;
+        let vel_ang_y = decode_exact_f32(&items[16])?;
+        let vel_ang_z = decode_exact_f32(&items[17])?;
         let sensor_kind = decode_u8(&items[18])?;
         let sensor_value = decode_bytes_max(&items[19], MAX_SENSOR_VALUE_BYTES)?;
-        Ok(Self {
+        let observation = Self {
             body_entity_id,
             tick,
             step_index,
@@ -619,7 +658,8 @@ impl WorldObservationV1 {
             vel_ang_z,
             sensor_kind,
             sensor_value,
-        })
+        };
+        observation.validate_shape().map(|()| observation)
     }
 }
 
@@ -1529,33 +1569,61 @@ impl Driver for WorldDriver {
 // Reducer
 // ---------------------------------------------------------------------------
 
-/// Tracks `observation_count` and `body_count` in State.
+/// Projects the latest accepted WOB1 body observation without a physics backend.
 pub struct WorldReducer;
+
+impl WorldReducer {
+    fn accepted_observation(event: &Event) -> Option<WorldObservationV1> {
+        if event.event_type.as_str() != EVENT_TYPE_OBSERVATION_V1 {
+            return None;
+        }
+        let observation = WorldObservationV1::decode(&event.payload).ok()?;
+        (observation.body_entity_id == event.entity).then_some(observation)
+    }
+}
 
 impl Reducer for WorldReducer {
     fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("observation_count", serde_json::Value::Number(0.into()));
-        s.set("body_count", serde_json::Value::Number(0.into()));
-        s
+        State::new()
+    }
+
+    fn projects_event(&self, event: &Event) -> bool {
+        Self::accepted_observation(event).is_some()
     }
 
     fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1 {
-            let Ok(observation) = WorldObservationV1::decode(&event.payload) else {
-                return;
-            };
-            let observation_count = state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            state.set(
-                "observation_count",
-                serde_json::Value::Number((observation_count + 1).into()),
-            );
-            state.set("last_x", serde_json::json!(observation.pos_x));
-            state.set("last_y", serde_json::json!(observation.pos_y));
-        }
+        let Some(observation) = Self::accepted_observation(event) else {
+            return;
+        };
+        let mut projected = State::new();
+        projected.set(
+            "body_entity_id",
+            serde_json::json!(observation.body_entity_id.to_string()),
+        );
+        projected.set("tick", serde_json::json!(observation.tick));
+        projected.set("step_index", serde_json::json!(observation.step_index));
+        projected.set("pos_x", serde_json::json!(observation.pos_x));
+        projected.set("pos_y", serde_json::json!(observation.pos_y));
+        projected.set("pos_z", serde_json::json!(observation.pos_z));
+        projected.set("orient_w", serde_json::json!(observation.orient_w));
+        projected.set("orient_x", serde_json::json!(observation.orient_x));
+        projected.set("orient_y", serde_json::json!(observation.orient_y));
+        projected.set("orient_z", serde_json::json!(observation.orient_z));
+        projected.set("vel_lin_x", serde_json::json!(observation.vel_lin_x));
+        projected.set("vel_lin_y", serde_json::json!(observation.vel_lin_y));
+        projected.set("vel_lin_z", serde_json::json!(observation.vel_lin_z));
+        projected.set("vel_ang_x", serde_json::json!(observation.vel_ang_x));
+        projected.set("vel_ang_y", serde_json::json!(observation.vel_ang_y));
+        projected.set("vel_ang_z", serde_json::json!(observation.vel_ang_z));
+        projected.set("sensor_kind", serde_json::json!(observation.sensor_kind));
+        projected.set("sensor_value", serde_json::json!(observation.sensor_value));
+        projected.set("observation_id", serde_json::json!(event.id.to_string()));
+        projected.set("observation_seq", serde_json::json!(event.seq.as_u64()));
+        projected.set(
+            "causation_id",
+            serde_json::json!(event.causation_id.as_ref().map(ToString::to_string)),
+        );
+        *state = projected;
     }
 }
 
@@ -2389,6 +2457,77 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_requires_exact_binary32_wire_floats() {
+        let encoded = sample_observation().encode().test_ok();
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                5,
+                ciborium::Value::Float(0.1_f64),
+            )),
+            Err(WorldCodecError::NonCanonicalRecord)
+        );
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                5,
+                ciborium::Value::Float(f64::MAX),
+            )),
+            Err(WorldCodecError::NonFiniteFloat)
+        );
+
+        let mut signed_zero = sample_observation();
+        signed_zero.pos_x = -0.0;
+        let decoded = WorldObservationV1::decode(&signed_zero.encode().test_ok()).test_ok();
+        assert_eq!(decoded.pos_x.to_bits(), (-0.0_f32).to_bits());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_observation_v1_requires_unit_orientation_and_known_sensor() {
+        let mut observation = sample_observation();
+        let encoded = observation.encode().test_ok();
+        observation.orient_w = 2.0;
+        assert_eq!(
+            observation.encode(),
+            Err(WorldCodecError::NonUnitOrientation)
+        );
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                8,
+                ciborium::Value::Float(2.0),
+            )),
+            Err(WorldCodecError::NonUnitOrientation)
+        );
+
+        observation = sample_observation();
+        observation.sensor_kind = 2;
+        assert_eq!(
+            observation.encode(),
+            Err(WorldCodecError::UnknownSensorKind)
+        );
+        assert_eq!(
+            WorldObservationV1::decode(&rewrite_array_field(
+                &encoded,
+                18,
+                ciborium::Value::Integer(2.into()),
+            )),
+            Err(WorldCodecError::UnknownSensorKind)
+        );
+
+        let mut rotated = sample_observation();
+        rotated.orient_w = std::f32::consts::FRAC_1_SQRT_2;
+        rotated.orient_x = std::f32::consts::FRAC_1_SQRT_2;
+        rotated.sensor_kind = SensorKindV1::ContactCount.as_u8();
+        assert_eq!(
+            WorldObservationV1::decode(&rotated.encode().test_ok()).test_ok(),
+            rotated
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn world_observation_v1_payload_too_large_rejected_on_encode() {
         let mut observation = sample_observation();
         observation.sensor_value = vec![0; MAX_SENSOR_VALUE_BYTES + 1];
@@ -2593,6 +2732,19 @@ mod tests {
             )),
             Err(WorldCodecError::WrongFieldType)
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn world_config_v1_rejects_nonfinite_gravity_on_decode() {
+        let encoded = sample_config().encode().test_ok();
+        for gravity in [f64::NAN, f64::INFINITY, f64::MAX] {
+            let invalid = rewrite_array_field(&encoded, 4, ciborium::Value::Float(gravity));
+            assert!(matches!(
+                WorldConfigV1::decode(&invalid),
+                Err(WorldCodecError::NonFiniteFloat)
+            ));
+        }
     }
 
     #[test]
@@ -2889,7 +3041,7 @@ mod tests {
             .test_ok();
         let mut reduced = WorldReducer.initial();
         WorldReducer.apply(&mut reduced, &events[2]);
-        assert_eq!(reduced.get("last_x"), Some(&serde_json::json!(1.0)));
+        assert_eq!(reduced.get("pos_x"), Some(&serde_json::json!(1.0)));
         registry.commit_step_at(Seq::ZERO, 0).test_ok();
     }
 
@@ -3643,64 +3795,113 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reducer_initial_state_has_correct_fields() {
-        let reducer = WorldReducer;
-        let state = reducer.initial();
-        assert!(state.get("observation_count").is_some());
-        assert!(state.get("body_count").is_some());
+    fn reducer_initial_state_has_no_authoritative_body() {
+        assert!(WorldReducer.initial().fields.is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reducer_tracks_observation_count() {
-        let reducer = WorldReducer;
-        let entity = EntityId::new();
-        let mut state = reducer.initial();
-
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(0)
+    fn reducer_projects_complete_body_state_and_event_provenance() {
+        let mut observation = sample_observation();
+        observation.orient_w = std::f32::consts::FRAC_1_SQRT_2;
+        observation.orient_x = std::f32::consts::FRAC_1_SQRT_2;
+        observation.vel_ang_x = 0.25;
+        observation.vel_ang_y = -0.5;
+        observation.vel_ang_z = 0.75;
+        observation.sensor_kind = SensorKindV1::ContactCount.as_u8();
+        observation.sensor_value = vec![1, 255];
+        let mut event = make_versioned_event(
+            5,
+            observation.body_entity_id,
+            EVENT_TYPE_OBSERVATION_V1,
+            observation.encode().test_ok(),
         );
+        event.causation_id = Some(EventId::new());
 
-        for _ in 0..5 {
-            let event = make_observation_event(entity);
-            reducer.apply(&mut state, &event);
+        let mut state = WorldReducer.initial();
+        WorldReducer.apply(&mut state, &event);
+        let expected = serde_json::json!({
+            "body_entity_id": observation.body_entity_id.to_string(),
+            "tick": observation.tick,
+            "step_index": observation.step_index,
+            "pos_x": observation.pos_x,
+            "pos_y": observation.pos_y,
+            "pos_z": observation.pos_z,
+            "orient_w": observation.orient_w,
+            "orient_x": observation.orient_x,
+            "orient_y": observation.orient_y,
+            "orient_z": observation.orient_z,
+            "vel_lin_x": observation.vel_lin_x,
+            "vel_lin_y": observation.vel_lin_y,
+            "vel_lin_z": observation.vel_lin_z,
+            "vel_ang_x": observation.vel_ang_x,
+            "vel_ang_y": observation.vel_ang_y,
+            "vel_ang_z": observation.vel_ang_z,
+            "sensor_kind": observation.sensor_kind,
+            "sensor_value": observation.sensor_value,
+            "observation_id": event.id.to_string(),
+            "observation_seq": event.seq.as_u64(),
+            "causation_id": event.causation_id.as_ref().map(ToString::to_string),
+        });
+        let expected_fields = expected.as_object().test_ok();
+        assert_eq!(state.fields.len(), expected_fields.len());
+        for (key, value) in expected_fields {
+            assert_eq!(state.get(key), Some(value), "projection field {key}");
         }
-
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(5)
-        );
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reducer_ignores_other_event_types() {
+    fn reducer_replaces_body_at_later_timeline_observation() {
         let reducer = WorldReducer;
         let entity = EntityId::new();
         let mut state = reducer.initial();
+        let first = make_observation_event(entity);
+        reducer.apply(&mut state, &first);
+        let mut next_observation = sample_observation();
+        next_observation.body_entity_id = entity;
+        next_observation.tick = 20;
+        next_observation.step_index = 8;
+        next_observation.pos_x = 4.5;
+        let next = make_versioned_event(
+            9,
+            entity,
+            EVENT_TYPE_OBSERVATION_V1,
+            next_observation.encode().test_ok(),
+        );
+        reducer.apply(&mut state, &next);
+
+        assert_eq!(state.get("tick"), Some(&serde_json::json!(20)));
+        assert_eq!(state.get("step_index"), Some(&serde_json::json!(8)));
+        assert_eq!(state.get("pos_x"), Some(&serde_json::json!(4.5)));
+        assert_eq!(state.get("observation_seq"), Some(&serde_json::json!(9)));
+        assert_eq!(
+            state.get("observation_id"),
+            Some(&serde_json::json!(next.id.to_string()))
+        );
+        assert_eq!(state.get("causation_id"), Some(&serde_json::Value::Null));
+        assert!(state.get("observation_count").is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_ignores_other_event_types_and_invalid_observations() {
+        let reducer = WorldReducer;
+        let entity = EntityId::new();
+        let mut state = reducer.initial();
+        let canonical = make_observation_event(entity);
+        reducer.apply(&mut state, &canonical);
+        let accepted = state.clone();
 
         let other = make_other_event(entity);
         reducer.apply(&mut state, &other);
+        assert_eq!(state, accepted);
 
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(0)
-        );
-
-        let legacy = make_versioned_event(
-            1,
-            entity,
-            "world.observation",
-            make_observation_event(entity).payload,
-        );
+        let legacy =
+            make_versioned_event(1, entity, "world.observation", canonical.payload.clone());
         reducer.apply(&mut state, &legacy);
+        assert_eq!(state, accepted);
+
         let malformed = make_versioned_event(
             2,
             entity,
@@ -3708,13 +3909,16 @@ mod tests {
             CanonicalBytes::from_vec(vec![0xff]),
         );
         reducer.apply(&mut state, &malformed);
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(0)
+        assert_eq!(state, accepted);
+
+        let mismatched_body = make_versioned_event(
+            3,
+            entity,
+            EVENT_TYPE_OBSERVATION_V1,
+            sample_observation().encode().test_ok(),
         );
-        assert!(state.get("last_x").is_none());
+        reducer.apply(&mut state, &mismatched_body);
+        assert_eq!(state, accepted);
     }
 
     #[test]
@@ -3731,25 +3935,10 @@ mod tests {
             overlong_version(&canonical.payload),
         );
         reducer.apply(&mut state, &noncanonical);
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(0)
-        );
-        assert!(state.get("last_x").is_none());
+        assert!(state.fields.is_empty());
 
         reducer.apply(&mut state, &canonical);
-        assert_eq!(
-            state
-                .get("observation_count")
-                .and_then(serde_json::Value::as_u64),
-            Some(1)
-        );
-        assert_eq!(
-            state.get("last_x").and_then(serde_json::Value::as_f64),
-            Some(1.0)
-        );
+        assert_eq!(state.get("pos_x"), Some(&serde_json::json!(1.0)));
     }
 
     #[test]
