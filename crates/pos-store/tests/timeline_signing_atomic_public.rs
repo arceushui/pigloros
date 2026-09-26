@@ -3,13 +3,17 @@
 use std::sync::Arc;
 
 use pos_core::{
-    CanonicalBytes, CoreError, EntityId, ErasureContainmentGateV1, Event, EventDraft, EventStore,
-    Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
-    Kind, Seq, SeqRange, Signature, TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, CanonicalBytes, CoreError, EntityId, ErasureArtifactClassV1,
+    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft,
+    EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
+    KeyRegistryStateV1, KeyRoleV1, Kind, RegisteredArtifactV1, Seq, SeqRange, Signature,
+    TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1, TimelineEventVerificationV1,
 };
 use pos_crypto::{
     key_roles::{sign_timeline_event_for_registered_role, SigningKeyMaterial},
     signing::{generate_keypair, verifying_key_from_public_key},
+    timeline_erasure::{evaluate_timeline_event_erasure_v1, TimelineEventErasureInputV1},
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -59,6 +63,92 @@ fn append_signed(
         material.public_verification_key(),
         &mut sign,
     )
+}
+
+const fn timeline_artifact(
+    digest: u8,
+    data_class: ArtifactDataClassV1,
+    transition_rule: ArtifactTransitionRuleV1,
+    state: ArtifactStateV1,
+) -> ArtifactClaimInputV1 {
+    ArtifactClaimInputV1 {
+        registration: RegisteredArtifactV1::new(
+            ErasureArtifactClassV1::TimelineReplay,
+            ErasureReferenceV1::from_digest([digest; 32]),
+            data_class,
+            None,
+            ErasureReferenceV1::from_digest([113; 32]),
+            ArtifactOptionalityV1::Required,
+            transition_rule,
+        ),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state,
+    }
+}
+
+fn exercise_public_read_erasure_report(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (material, identity, registry) = signing_fixture()?;
+    store.save_key_registry(&registry)?;
+    let timeline = store.create_timeline("erasure-report")?;
+    append_signed(
+        store,
+        timeline.id(),
+        &registry,
+        identity,
+        &material,
+        b"retained",
+    )?;
+    let event = store.read(timeline.id(), SeqRange::all())?.remove(0);
+    let registry = store.load_key_registry()?.ok_or("missing key registry")?;
+    let payload = timeline_artifact(
+        111,
+        ArtifactDataClassV1::PrivateSubjectData,
+        ArtifactTransitionRuleV1::RetainStructure,
+        ArtifactStateV1::Retained,
+    );
+    let context = timeline_artifact(
+        112,
+        ArtifactDataClassV1::StructuralAuditMetadata,
+        ArtifactTransitionRuleV1::PreserveExact,
+        ArtifactStateV1::Retained,
+    );
+    let report = evaluate_timeline_event_erasure_v1(TimelineEventErasureInputV1 {
+        event: Some(&event),
+        registry: Some(&registry),
+        trust_anchor: Some((identity, material.public_verification_key())),
+        enclosing_claim: ErasureReplayClaimV1::Exact,
+        payload_artifact: payload,
+        signed_context_artifact: context,
+    })?;
+    assert_eq!(report.verification(), TimelineEventVerificationV1::Verified);
+    assert_eq!(report.replay_claim(), ErasureReplayClaimV1::Exact);
+
+    let mut erased_payload = payload;
+    erased_payload.state = ArtifactStateV1::TransitionApplied;
+    let report = evaluate_timeline_event_erasure_v1(TimelineEventErasureInputV1 {
+        event: Some(&event),
+        registry: Some(&registry),
+        trust_anchor: Some((identity, material.public_verification_key())),
+        enclosing_claim: ErasureReplayClaimV1::Exact,
+        payload_artifact: erased_payload,
+        signed_context_artifact: context,
+    })?;
+    assert_eq!(
+        report.verification(),
+        TimelineEventVerificationV1::MissingRequiredContext
+    );
+    assert_eq!(report.replay_claim(), ErasureReplayClaimV1::StructuralOnly);
+    Ok(())
+}
+
+#[test]
+fn public_store_reads_feed_erasure_aware_verification() -> Result<(), Box<dyn std::error::Error>> {
+    exercise_public_read_erasure_report(&mut MemoryStore::new())?;
+    exercise_public_read_erasure_report(&mut SqliteStore::open_in_memory()?)?;
+    Ok(())
 }
 
 fn exercise_signed_fork(store: &mut dyn EventStore) -> Result<(), Box<dyn std::error::Error>> {
