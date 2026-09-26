@@ -22,12 +22,26 @@
 //! use pos_plugin_society::{
 //!     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 //! };
-//! use pos_runtime::registry::PluginRegistry;
+//! use pos_runtime::{
+//!     registry::PluginRegistry, InstalledOutputPolicySourceV1, OutputPolicyBindingV1,
+//! };
 //!
 //! let mut registry = PluginRegistry::new();
 //! let plugin = SocietyPlugin::new();
+//! let binding = OutputPolicyBindingV1::from_installed_source(
+//!     &plugin,
+//!     InstalledOutputPolicySourceV1::Society,
+//!     &[],
+//!     "deterministic-local-v1",
+//! )
+//! .expect("the installed Society source has a valid output policy");
 //! assert!(registry
-//!     .register_generated(&plugin, Some(Box::new(SocietyReducer)), None)
+//!     .register_with_verified_output_policy(
+//!         &plugin,
+//!         binding,
+//!         Some(Box::new(SocietyReducer)),
+//!         None,
+//!     )
 //!     .is_ok());
 //!
 //! let draft = draft_signal(
