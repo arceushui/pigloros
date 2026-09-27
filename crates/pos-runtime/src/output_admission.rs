@@ -12,9 +12,8 @@ use std::sync::Mutex;
 
 const MAX_EXECUTION_PROFILE_BYTES_V1: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
-const _: () = assert!(
-    MAX_EXECUTION_PROFILE_BYTES_V1 == pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1
-);
+const _: () =
+    assert!(MAX_EXECUTION_PROFILE_BYTES_V1 == pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1);
 
 /// Maximum aggregate bytes retained by one output-policy closure envelope.
 pub const MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1: usize = 2 * 65_536
