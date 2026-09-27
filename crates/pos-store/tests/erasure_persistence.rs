@@ -194,21 +194,20 @@ where
     coordinator.submit(request.clone(), request.provenance())?;
 
     assert_eq!(gate.inventory_generation(), Ok(generation));
-    assert_eq!(
-        shared.borrow_mut().append(timeline, &[]).err(),
-        Some(CoreError::ErasureContainmentUnavailable)
-    );
-    assert_eq!(
+    assert!(matches!(
+        shared.borrow_mut().append(timeline, &[]),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
         shared
             .borrow_mut()
-            .save_key_registry(&pos_core::KeyRegistryStateV1::new())
-            .err(),
-        Some(CoreError::ErasureContainmentUnavailable)
-    );
-    assert_eq!(
-        shared.borrow().get_timeline(timeline).err(),
-        Some(CoreError::ErasureContainmentUnavailable)
-    );
+            .save_key_registry(&pos_core::KeyRegistryStateV1::new()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        shared.borrow().get_timeline(timeline),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
     Ok(())
 }
 
