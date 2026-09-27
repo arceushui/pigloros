@@ -775,20 +775,7 @@ impl SqliteStore {
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-        let erasure_effect_lock_connection = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
-            )
-            .ok()
-            .and_then(|connection| {
-                Self::configure_busy_timeout(&connection)
-                    .ok()
-                    .map(|()| connection)
-            })
-        } else {
-            None
-        };
+        let erasure_effect_lock_connection = Self::open_erasure_effect_lock_connection(path, flags);
 
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
@@ -816,14 +803,36 @@ impl SqliteStore {
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
-        store.prepare_schema(initialize_schema)?;
-        store.validate_event_signature_schema()?;
-        store.validate_event_sequence_invariant()?;
+        store.finish_open(initialize_schema)?;
+        Ok(store)
+    }
+
+    fn open_erasure_effect_lock_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
+        if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+            )
+            .ok()
+            .and_then(|connection| {
+                Self::configure_busy_timeout(&connection)
+                    .ok()
+                    .map(|()| connection)
+            })
+        } else {
+            None
+        }
+    }
+
+    fn finish_open(&mut self, initialize_schema: bool) -> Result<(), CoreError> {
+        self.prepare_schema(initialize_schema)?;
+        self.validate_event_signature_schema()?;
+        self.validate_event_sequence_invariant()?;
         // WAL initialization may advance this connection's data_version. The
         // bound inventory baseline must describe the fully opened store.
-        store.erasure_inventory_data_version = sqlite_data_version(&store.conn)
+        self.erasure_inventory_data_version = sqlite_data_version(&self.conn)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(store)
+        Ok(())
     }
 
     fn prepare_schema(&self, initialize: bool) -> Result<(), CoreError> {
@@ -2364,10 +2373,7 @@ impl SqliteStore {
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
-        let Some(gate) = self.erasure_gate.clone() else {
-            return Err(CoreError::ErasureContainmentUnavailable);
-        };
-        self.validate_erasure_inventory_data_version()?;
+        let gate = self.validated_erasure_gate()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
@@ -2385,10 +2391,7 @@ impl SqliteStore {
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
-        let Some(gate) = self.erasure_gate.clone() else {
-            return Err(CoreError::ErasureContainmentUnavailable);
-        };
-        self.validate_erasure_inventory_data_version()?;
+        let gate = self.validated_erasure_gate()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
@@ -2396,9 +2399,7 @@ impl SqliteStore {
             result = effect(self);
         };
         let fenced = gate.with_fence(timeline, operation, &mut run);
-        self.validate_erasure_inventory_data_version()?;
-        fenced.map_err(pos_core::store::erasure_containment_error)?;
-        result
+        self.complete_erasure_read_fence(fenced, result)
     }
 
     fn with_erasure_read_filter<T>(
@@ -2407,10 +2408,7 @@ impl SqliteStore {
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<Option<T>, CoreError> {
-        let Some(gate) = self.erasure_gate.clone() else {
-            return Err(CoreError::ErasureContainmentUnavailable);
-        };
-        self.validate_erasure_inventory_data_version()?;
+        let gate = self.validated_erasure_gate()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
@@ -2418,6 +2416,33 @@ impl SqliteStore {
             result = effect(self);
         };
         let fenced = gate.with_fence(timeline, operation, &mut run);
+        self.complete_erasure_read_filter(fenced, result)
+    }
+
+    fn validated_erasure_gate(&self) -> Result<Arc<ErasureContainmentGateV1>, CoreError> {
+        let gate = self
+            .erasure_gate
+            .clone()
+            .ok_or(CoreError::ErasureContainmentUnavailable)?;
+        self.validate_erasure_inventory_data_version()?;
+        Ok(gate)
+    }
+
+    fn complete_erasure_read_fence<T>(
+        &self,
+        fenced: Result<(), pos_core::ErasureContainmentErrorV1>,
+        result: Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        self.validate_erasure_inventory_data_version()?;
+        fenced.map_err(pos_core::store::erasure_containment_error)?;
+        result
+    }
+
+    fn complete_erasure_read_filter<T>(
+        &self,
+        fenced: Result<(), pos_core::ErasureContainmentErrorV1>,
+        result: Result<T, CoreError>,
+    ) -> Result<Option<T>, CoreError> {
         self.validate_erasure_inventory_data_version()?;
         match fenced {
             Ok(()) => result.map(Some),
