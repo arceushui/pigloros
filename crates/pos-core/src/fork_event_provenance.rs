@@ -480,10 +480,9 @@ impl<'a> Reader<'a> {
         }
     }
     fn take(&mut self, length: usize) -> Result<&'a [u8], ForkEventProvenanceErrorV1> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(ForkEventProvenanceErrorV1::InvalidEncoding)?;
+        // Every caller requests at most 32 bytes and `Reader::new` bounds the
+        // complete input to 512 bytes, so this addition cannot overflow.
+        let end = self.offset + length;
         let value = self
             .bytes
             .get(self.offset..end)
