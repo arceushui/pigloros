@@ -3607,6 +3607,13 @@ pub use registration::{
     ArtifactRegistrationV1, MAX_ARTIFACT_REGISTRATION_BYTES_V1,
     MAX_ARTIFACT_REGISTRATION_CHILDREN_V1, MAX_ARTIFACT_REGISTRATION_KEYS_V1,
 };
+mod registration_graph;
+pub use registration_graph::{
+    inspect_artifact_registration_graph_v1, ArtifactRegistrationGraphErrorV1,
+    ArtifactRegistrationGraphNodeV1, ArtifactRegistrationGraphSummaryV1,
+    MAX_ARTIFACT_GRAPH_DEPTH_V1, MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
+};
 mod rejoin;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
