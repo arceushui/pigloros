@@ -3870,7 +3870,7 @@ mod tests {
     }
 
     struct InterleavingDriver {
-        path: String,
+        store: Arc<Mutex<Option<SharedEventStore>>>,
         entity: EntityId,
         subscriptions: Vec<ProjectionKey>,
         seen_counts: Arc<Mutex<Vec<u64>>>,
@@ -3902,9 +3902,8 @@ mod tests {
                 return Ok(StepOutput::empty());
             }
             self.injected = true;
-            let mut gateway_store =
-                pos_store::sqlite::SqliteStore::open(&self.path).map_err(RuntimeError::Store)?;
-            bind_test_store_gate(&mut gateway_store).map_err(RuntimeError::Store)?;
+            let shared_store = self.store.lock().test_ok().clone().test_ok();
+            let mut gateway_store = lock_store(&shared_store).test_ok();
             let mut human = EventDraft::new(
                 self.entity,
                 Kind::new("world.action"),
@@ -4358,6 +4357,7 @@ mod tests {
         let path = database.path().to_str().test_ok().to_owned();
         let entity = EntityId::new();
         let seen_counts = Arc::new(Mutex::new(Vec::new()));
+        let driver_store: Arc<Mutex<Option<SharedEventStore>>> = Arc::new(Mutex::new(None));
         let plugin = make_plugin_with_reducer("interleaving", &["world.action", "agent.decision"]);
         let mut experiment = Experiment::new(ExperimentConfig {
             name: "interleaved-action".to_owned(),
@@ -4369,7 +4369,7 @@ mod tests {
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(InterleavingDriver {
-                    path,
+                    store: Arc::clone(&driver_store),
                     entity,
                     subscriptions: vec![ProjectionKey::new(entity)],
                     seen_counts: Arc::clone(&seen_counts),
@@ -4378,6 +4378,7 @@ mod tests {
             )
             .test_ok();
         let mut session = protect_session(experiment.start().test_ok(), entity);
+        *driver_store.lock().test_ok() = Some(Arc::clone(&session.store));
         assert_eq!(
             session.step_tick().test_ok(),
             TickOutcome::Advanced {
@@ -7346,6 +7347,8 @@ mod coverage_entrypoints {
         let child = ok(result.branch("coverage-result-child"));
         assert_eq!(child.meta.name.as_deref(), Some("coverage-result-child"));
 
+        drop(store);
+        let mut store = ok(open_store(store_config.clone()));
         ok(store.append(
             timeline.id(),
             &[EventDraft::new(
@@ -9240,8 +9243,7 @@ mod fault_injection_tests {
                 })),
             )
             .test_ok();
-        let mut session = experiment.start().test_ok();
-        assert_eq!(session.append_events(&[]).test_ok(), 0);
+        drop(pos_store::sqlite::SqliteStore::open(&path).test_ok());
         Connection::open(&path)
             .test_ok()
             .execute_batch(
@@ -9252,6 +9254,8 @@ mod fault_injection_tests {
                  END;",
             )
             .test_ok();
+        let mut session = experiment.start().test_ok();
+        assert_eq!(session.append_events(&[]).test_ok(), 0);
 
         assert!(matches!(session.step(), Err(ExperimentError::Store(_))));
         assert!(matches!(
@@ -9374,7 +9378,7 @@ mod fault_injection_tests {
                 })),
             )
             .test_ok();
-        let mut session = experiment.start().test_ok();
+        drop(pos_store::sqlite::SqliteStore::open(&path).test_ok());
         Connection::open(&path)
             .test_ok()
             .execute_batch(
@@ -9385,6 +9389,7 @@ mod fault_injection_tests {
                  END;",
             )
             .test_ok();
+        let mut session = experiment.start().test_ok();
 
         assert!(matches!(
             session.append_events(&[EventDraft::new(
