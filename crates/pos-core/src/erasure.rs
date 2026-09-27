@@ -5893,12 +5893,12 @@ use evidence::{
     acknowledgements_are_closure_subset, bytes32, cas_effect_from_fields, cas_effect_value,
     decode_limited, digest, domain_digest, encode_canonical, encode_limited, exact_array,
     freeze_is_monotonic, has_duplicate, has_duplicate_acknowledgement_identity, header,
-    invalid_owner_sets,
-    inventories_are_within_closure, inventories_exceed_bound, inventories_have_duplicate_targets,
-    inventory_categories_match, inventory_transitions_preserve_or_weaken, optional_bytes32,
-    optional_digest, receipt_core_value, receipt_from_fields, receipt_value, reference_zero,
-    request_from_fields, request_value, sort_inventories, state_core_value, state_from_fields,
-    state_value, strictly_increasing, text, uint, unsigned,
+    invalid_owner_sets, inventories_are_within_closure, inventories_exceed_bound,
+    inventories_have_duplicate_targets, inventory_categories_match,
+    inventory_transitions_preserve_or_weaken, optional_bytes32, optional_digest,
+    receipt_core_value, receipt_from_fields, receipt_value, reference_zero, request_from_fields,
+    request_value, sort_inventories, state_core_value, state_from_fields, state_value,
+    strictly_increasing, text, uint, unsigned,
 };
 
 #[cfg(test)]
