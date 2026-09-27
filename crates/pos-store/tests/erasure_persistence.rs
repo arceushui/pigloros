@@ -387,7 +387,7 @@ impl<S: ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1> ErasureCoo
         let request_topology = request_heads
             .iter()
             .map(|(request, manifest)| {
-                let resolver = Host {
+                let resolver = Self {
                     store: Rc::clone(&self.store),
                     targets: self.targets.clone(),
                     topology_override: self.topology_override,
@@ -1046,10 +1046,8 @@ where
         admission_provenance: reference(110),
     })?;
     let admission = coordinator.prepare_fork_admission(request, extension, input.clone())?;
-    assert_eq!(
-        inventory.prepare_fork_batch(input, vec![admission]),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
+    let duplicate = inventory.prepare_fork_batch(input, vec![admission]);
+    assert_eq!(duplicate, Err(ErasureErrorV1::PolicyConflict));
 
     let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
     let base_member_child_scope = reference(9);
@@ -1080,10 +1078,8 @@ where
         base_member_extension,
         base_member_input.clone(),
     )?;
-    assert_eq!(
-        inventory.prepare_fork_batch(base_member_input, vec![base_member_admission]),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
+    let base_member = inventory.prepare_fork_batch(base_member_input, vec![base_member_admission]);
+    assert_eq!(base_member, Err(ErasureErrorV1::PolicyConflict));
     assert_eq!(shared.borrow().scope_index_count(request)?, 1);
     assert_eq!(
         shared

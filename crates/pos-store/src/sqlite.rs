@@ -7691,7 +7691,7 @@ mod tests {
 
     #[test]
     fn host_transition_timeline_creation_rejects_missing_corrupt_and_duplicate_rows() {
-        let mut missing_parent = new_store();
+        let missing_parent = new_store();
         let missing_parent_meta = TimelineMeta::forked_from(
             TimelineId::new(),
             Seq::ZERO,
@@ -7739,7 +7739,7 @@ mod tests {
             .create_timeline_with_meta_for_host_transition_unchecked(&duplicate_meta)
             .is_err());
 
-        let mut denied_begin = new_store();
+        let denied_begin = new_store();
         denied_begin
             .conn
             .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
