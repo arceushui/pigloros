@@ -2,17 +2,16 @@ use ed25519_dalek::SigningKey;
 use std::sync::{Arc, Mutex};
 
 use pos_core::{
-    clock::{Seq, WallTime},
-    event::{CanonicalBytes, Event, Kind, SchemaVersion},
+    event::{CanonicalBytes, EventDraft, Kind},
     hasher::Hasher,
-    ids::{EntityId, EventId},
+    ids::EntityId,
     store::{EventStore, SeqRange},
     CoreError, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
 };
 use pos_crypto::key_roles::{
-    destroy_registered_signing_key, sign_for_registered_role, KeyDestructionPersistence,
-    KeyMaterialDestructionError, SigningKeyMaterial,
+    destroy_registered_signing_key, sign_timeline_event_for_registered_role,
+    KeyDestructionPersistence, KeyMaterialDestructionError, SigningKeyMaterial,
 };
 
 use crate::{
@@ -176,7 +175,7 @@ impl EventLedgerStore {
 
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn head_seq(&self) -> Result<Seq, LedgerError> {
+    fn head_seq(&self) -> Result<pos_core::Seq, LedgerError> {
         self.store
             .get_timeline(self.timeline_id)
             .ok()
@@ -190,7 +189,7 @@ impl EventLedgerStore {
         payload: CanonicalBytes,
         event_type: Kind,
     ) -> Result<(), LedgerError> {
-        let payload_hash = self.hasher.hash_payload(&payload);
+        let expected_payload_hash = self.hasher.hash_payload(&payload);
         let key_registry = self
             .key_registry
             .lock()
@@ -202,33 +201,30 @@ impl EventLedgerStore {
         }
         let signing_key = &self.signing_key;
         let signing_identity = self.signing_identity;
-        let entity = self.entity;
-        let mut create_event = move |registry: &KeyRegistryStateV1, seq: Seq| {
-            let mut registry = registry.clone();
-            let signature =
-                sign_for_registered_role(&mut registry, signing_key, signing_identity, &payload)
-                    .map_err(|error| {
-                        CoreError::Storage(format!("ledger signing authorization: {error}"))
-                    })?;
-            Ok(Event {
-                id: EventId::new(),
-                entity,
-                event_type: event_type.clone(),
-                payload: payload.clone(),
-                wall_time: WallTime::now(),
-                seq,
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: Some(signature),
-                signature_identity: Some(signing_identity),
-                origin: None,
-                payload_hash,
-            })
+        let draft = EventDraft::new(self.entity, event_type, payload);
+        let mut sign = |registry: &mut KeyRegistryStateV1,
+                        envelope: &pos_core::TimelineEventEnvelopeV1,
+                        payload: &CanonicalBytes| {
+            if envelope.payload_hash() != expected_payload_hash {
+                return Err(CoreError::Storage(
+                    "ledger payload hash differs from Timeline envelope".to_owned(),
+                ));
+            }
+            sign_timeline_event_for_registered_role(registry, signing_key, envelope, payload)
+                .map_err(|error| CoreError::Storage(format!("ledger Timeline signing: {error}")))
         };
 
         self.store
-            .append_signed_authorized(self.timeline_id, &key_registry, &mut create_event)
+            .append_timeline_signed_authorized(
+                self.timeline_id,
+                &key_registry,
+                draft,
+                signing_identity,
+                signing_key.material_digest(),
+                signing_key.public_verification_key(),
+                &mut sign,
+            )
+            .map(|_| ())
             .map_err(LedgerError::from)
     }
 }
@@ -326,13 +322,15 @@ mod tests {
     use super::*;
     use crate::contract;
     use pos_core::{
-        event::EventDraft,
+        clock::{Seq, WallTime},
+        event::{Event, EventDraft, SchemaVersion},
+        ids::EventId,
         timeline::{Timeline, TimelineMeta},
-        ErasureContainmentGateV1, KeyRegistrationV1, KeyRoleV1, SeqRange,
+        ErasureContainmentGateV1, KeyRegistrationV1, KeyRoleV1, SeqRange, TimelineEventEnvelopeV1,
     };
     use pos_crypto::{
         chain::{hash_payload, Blake3Hasher},
-        key_roles::{key_material_digest, verify_for_role},
+        key_roles::{key_material_digest, verify_timeline_event_for_role},
         signing::public_key_from_verifying_key,
     };
     use pos_store::memory::MemoryStore;
@@ -365,6 +363,27 @@ mod tests {
             identity,
             Box::new(Blake3Hasher),
         )?)
+    }
+
+    struct ZeroPayloadHasher;
+
+    impl Hasher for ZeroPayloadHasher {
+        fn genesis_hash(&self) -> Hash {
+            Blake3Hasher.genesis_hash()
+        }
+
+        fn hash_payload(&self, _: &CanonicalBytes) -> Hash {
+            Hash::zero()
+        }
+
+        fn hash_event(
+            &self,
+            previous_hash: &Hash,
+            event_id_bytes: &[u8],
+            payload: &CanonicalBytes,
+        ) -> Hash {
+            Blake3Hasher.hash_event(previous_hash, event_id_bytes, payload)
+        }
     }
 
     type SigningRegistry = (Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1);
@@ -789,9 +808,8 @@ mod tests {
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
             .ok_or("expected signing authorization error")?;
-        assert!(authorization_error
-            .to_string()
-            .contains("ledger signing authorization"));
+        assert!(matches!(authorization_error, LedgerError::Store(_)));
+        assert_eq!(authorization_store.head_seq()?, pos_core::Seq::ZERO);
 
         let (registry, identity) = registry_for(&signing_key)?;
         let mut memory = gated_memory_store();
@@ -952,7 +970,14 @@ mod tests {
         let event = events.first().ok_or("expected signed prediction event")?;
         let signature = event.signature.as_ref().ok_or("expected signature")?;
         assert_eq!(event.signature_identity, Some(identity));
-        verify_for_role(&retained_verifying_key, identity, &event.payload, signature)?;
+        let envelope = TimelineEventEnvelopeV1::from_committed_event(event)?;
+        verify_timeline_event_for_role(
+            &retained_verifying_key,
+            identity,
+            &envelope,
+            &event.payload,
+            signature,
+        )?;
         Ok(())
     }
 
@@ -1055,12 +1080,42 @@ mod tests {
         let signature = events[0].signature.as_ref().ok_or("missing signature")?;
         let public_key = store.signing_key.public_verification_key();
         let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&public_key)?;
-        verify_for_role(
+        let envelope = TimelineEventEnvelopeV1::from_committed_event(&events[0])?;
+        verify_timeline_event_for_role(
             &verifying_key,
             store.signing_identity,
+            &envelope,
             &events[0].payload,
             signature,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_rejects_a_payload_hasher_that_disagrees_with_the_atomic_envelope(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let mut backing = gated_memory_store();
+        let timeline = backing.create_timeline("ledger-hash-mismatch")?;
+        let mut ledger = EventLedgerStore::new(
+            Box::new(backing),
+            timeline.id(),
+            EntityId::new(),
+            signing_key,
+            registry,
+            identity,
+            Box::new(ZeroPayloadHasher),
+        )?;
+        let error = ledger
+            .register(contract::sample_new_prediction("2026-08-01"))
+            .err()
+            .ok_or("expected payload hash mismatch")?;
+        assert!(error.to_string().contains("payload hash differs"));
+        assert!(ledger
+            .store
+            .read_own(timeline.id(), SeqRange::all())?
+            .is_empty());
         Ok(())
     }
 

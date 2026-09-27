@@ -84,6 +84,88 @@ fn finalize_committed_origins(
     Ok(())
 }
 
+/// Finalize the exact Event fields while its store adapter owns the append
+/// boundary, before the signing callback can run.
+fn prepare_timeline_signing_event(
+    timeline: TimelineId,
+    local_head: pos_core::Seq,
+    inherited_prefix: u64,
+    draft: EventDraft,
+    identity: pos_core::KeyIdentityV1,
+    hasher: &dyn pos_core::hasher::Hasher,
+) -> Result<(Event, pos_core::TimelineEventEnvelopeV1), CoreError> {
+    let local_seq = local_head
+        .as_u64()
+        .checked_add(1)
+        .ok_or_else(|| CoreError::Storage("local Timeline sequence overflow".to_owned()))?;
+    let origin_seq = inherited_prefix
+        .checked_add(local_seq)
+        .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
+    let event_id = EventId::new();
+    let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
+    let envelope = pos_core::TimelineEventEnvelopeV1::new(
+        pos_core::TimelineEventEnvelopeInputV1 {
+            identity,
+            origin_timeline_id: timeline,
+            event_id,
+            origin_logical_seq: pos_core::Seq::from_u64(origin_seq),
+            entity_id: draft.entity,
+            event_type: draft.event_type.clone(),
+            schema_version: draft.schema_version.as_u32(),
+            wall_time,
+            causation_id: draft.causation_id,
+            correlation_id: draft.correlation_id,
+        },
+        &draft.payload,
+    )
+    .map_err(|error| CoreError::Storage(format!("Timeline envelope validation: {error}")))?;
+    let payload_hash = envelope.payload_hash();
+    if hasher.hash_payload(&draft.payload) != payload_hash {
+        return Err(CoreError::Storage(
+            "store payload hash differs from Timeline envelope BLAKE3 digest".to_owned(),
+        ));
+    }
+    let event = Event {
+        id: event_id,
+        entity: draft.entity,
+        event_type: draft.event_type,
+        payload: draft.payload,
+        wall_time,
+        seq: pos_core::Seq::from_u64(local_seq),
+        causation_id: draft.causation_id,
+        correlation_id: draft.correlation_id,
+        schema_version: draft.schema_version,
+        signature: None,
+        signature_identity: None,
+        origin: Some(pos_core::EventOriginV1 {
+            origin_timeline_id: timeline,
+            origin_logical_seq: pos_core::Seq::from_u64(origin_seq),
+        }),
+        payload_hash,
+    };
+    Ok((event, envelope))
+}
+
+/// Reject a callback result that is not a signature over the finalized
+/// envelope under the exact authorized public key.
+fn verify_new_timeline_signature(
+    public_key: pos_core::PublicKey,
+    identity: pos_core::KeyIdentityV1,
+    envelope: &pos_core::TimelineEventEnvelopeV1,
+    payload: &CanonicalBytes,
+    signature: &pos_core::Signature,
+) -> Result<(), CoreError> {
+    let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&public_key)?;
+    pos_crypto::key_roles::verify_timeline_event_for_role(
+        &verifying_key,
+        identity,
+        envelope,
+        payload,
+        signature,
+    )
+    .map_err(|error| CoreError::Storage(format!("Timeline signature validation: {error}")))
+}
+
 /// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
 ///
 /// The adapter stores the proof's exact canonical bytes under its content
@@ -737,6 +819,62 @@ mod tests {
             )
             .test_ok();
         assert!(finalize_committed_origins(timeline.id(), u64::MAX, &mut events).is_err());
+    }
+
+    #[test]
+    fn finalized_timeline_signing_rejects_sequence_overflow_and_invalid_key() {
+        let identity = pos_core::KeyIdentityV1::new(
+            "test-owner",
+            pos_core::KeyRoleV1::TimelineIntegritySigning,
+            1,
+        );
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("test.timeline"),
+            CanonicalBytes::from_static(b"signed"),
+        );
+        let hasher = pos_crypto::chain::Blake3Hasher;
+        let timeline = TimelineId::new();
+        assert!(prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::from_u64(u64::MAX),
+            0,
+            draft.clone(),
+            identity,
+            &hasher,
+        )
+        .is_err());
+        assert!(prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::ZERO,
+            u64::MAX,
+            draft.clone(),
+            identity,
+            &hasher,
+        )
+        .is_err());
+
+        let (event, envelope) = prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::ZERO,
+            0,
+            draft,
+            identity,
+            &hasher,
+        )
+        .test_ok();
+        let invalid_key = (0..=u8::MAX)
+            .map(|byte| pos_core::PublicKey::from_bytes([byte; 32]))
+            .find(|key| pos_crypto::signing::verifying_key_from_public_key(key).is_err())
+            .test_ok();
+        assert!(verify_new_timeline_signature(
+            invalid_key,
+            identity,
+            &envelope,
+            &event.payload,
+            &pos_core::Signature::from_bytes([0; 64]),
+        )
+        .is_err());
     }
 
     #[test]

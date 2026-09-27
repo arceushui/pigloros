@@ -3751,9 +3751,101 @@ impl EventStore for SqliteStore {
                 .get_timeline(timeline)?
                 .ok_or(CoreError::TimelineNotFound(timeline))?;
             let event = create_event(&persisted, head.head.next())?;
+            if event
+                .signature_identity
+                .is_some_and(|identity| identity.role == KeyRoleV1::TimelineIntegritySigning)
+            {
+                return Err(CoreError::Storage(
+                    "Timeline signatures require the atomic envelope append seam".to_owned(),
+                ));
+            }
             self.append_committed(timeline, &[event])
         })();
         finish_immediate_transaction(&self.conn, result)
+    }
+
+    fn append_timeline_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        identity: KeyIdentityV1,
+        material_digest: Hash,
+        public_verification_key: pos_core::PublicKey,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let prepared = (|| {
+            let persisted = self.load_key_registry().and_then(|registry| {
+                registry.ok_or_else(|| {
+                    CoreError::Storage("durable key registry is unavailable".to_owned())
+                })
+            })?;
+            if persisted != *expected_registry {
+                return Err(CoreError::Storage(
+                    "durable key registry changed during signing".to_owned(),
+                ));
+            }
+            let owning_timeline = self
+                .get_timeline(timeline)
+                .and_then(|head| head.ok_or(CoreError::TimelineNotFound(timeline)))?;
+            let inherited_prefix = owning_timeline
+                .meta
+                .fork_point
+                .map_or(0, |(_, at)| at.as_u64());
+            let (event, envelope) = crate::prepare_timeline_signing_event(
+                timeline,
+                owning_timeline.head,
+                inherited_prefix,
+                draft,
+                identity,
+                self.hasher.as_ref(),
+            )?;
+            Ok((persisted, event, envelope))
+        })();
+        let (mut persisted, mut event, envelope) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return finish_immediate_transaction(&self.conn, Err(error)),
+        };
+        let mut signing_registry = persisted.clone();
+        let authorization = persisted.with_signing_authorization(
+            identity,
+            material_digest,
+            public_verification_key,
+            || {
+                let signed = (|| {
+                    let signature = sign(&mut signing_registry, &envelope, &event.payload)?;
+                    crate::verify_new_timeline_signature(
+                        public_verification_key,
+                        identity,
+                        &envelope,
+                        &event.payload,
+                        &signature,
+                    )?;
+                    event.signature = Some(signature);
+                    event.signature_identity = Some(identity);
+                    self.append_committed(timeline, std::slice::from_ref(&event))?;
+                    Ok(event)
+                })();
+                finish_immediate_transaction(&self.conn, signed)
+            },
+        );
+        let committed = match authorization {
+            Ok(committed) => committed,
+            Err(error) => finish_immediate_transaction(
+                &self.conn,
+                Err(CoreError::Storage(format!(
+                    "Timeline signing authorization: {error}"
+                ))),
+            ),
+        };
+        committed
     }
 
     fn begin_key_registry_destruction(
@@ -12329,6 +12421,57 @@ mod tests {
     }
 
     #[test]
+    fn timeline_envelope_commit_failure_discards_signature_and_event() {
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok();
+        let (key, _) = pos_crypto::signing::generate_keypair();
+        let material = pos_crypto::key_roles::SigningKeyMaterial::new(key);
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                material.material_digest(),
+                Some(material.public_verification_key()),
+            ))
+            .test_ok();
+        let mut store = open_store_at(path);
+        store.save_key_registry(&registry).test_ok();
+        let timeline = store.create_timeline("atomic-signed-commit").test_ok();
+        let mut callback_called = false;
+        let mut sign = |authorized: &mut KeyRegistryStateV1,
+                        envelope: &pos_core::TimelineEventEnvelopeV1,
+                        payload: &CanonicalBytes| {
+            callback_called = true;
+            pos_crypto::key_roles::sign_timeline_event_for_registered_role(
+                authorized, &material, envelope, payload,
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))
+        };
+        store.conn.commit_hook(Some(|| true)).test_ok();
+        let error = store
+            .append_timeline_signed_authorized(
+                timeline.id(),
+                &registry,
+                make_draft(EntityId::new(), b"signed"),
+                identity,
+                material.material_digest(),
+                material.public_verification_key(),
+                &mut sign,
+            )
+            .test_err();
+        assert!(callback_called);
+        assert!(error.to_string().contains("transaction commit failed"));
+        drop(store);
+        let reopened = open_store_at(path);
+        assert!(reopened
+            .read(timeline.id(), SeqRange::all())
+            .test_ok()
+            .is_empty());
+        assert_eq!(reopened.load_key_registry().test_ok(), Some(registry));
+    }
+
+    #[test]
     fn signed_append_holds_registry_lock_until_commit_before_rotation() {
         let database = tempfile::NamedTempFile::new().test_ok();
         let path = database.path().to_str().test_ok();
@@ -14969,6 +15112,39 @@ pub(super) mod key_registry_coverage {
         )?;
         assert!(destroyed.key_record(identity).is_some());
         sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn atomic_timeline_signing_rejects_a_failed_transaction_begin(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = open_store()?;
+        let timeline = store.create_timeline("failed-atomic-begin")?;
+        store.save_key_registry(&registry)?;
+        let mut sign = |_: &mut KeyRegistryStateV1,
+                        _: &pos_core::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            Err::<pos_core::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let result = store.append_timeline_signed_authorized(
+            timeline.id(),
+            &registry,
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("timeline.failed-begin"),
+                CanonicalBytes::from_static(b"uncommitted"),
+            ),
+            identity,
+            material_digest,
+            pos_core::PublicKey::from_bytes([4; 32]),
+            &mut sign,
+        );
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
         Ok(())
     }
 

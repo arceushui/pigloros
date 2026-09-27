@@ -6,8 +6,8 @@ use thiserror::Error;
 use ulid::Ulid;
 
 use crate::{
-    CanonicalBytes, CorrelationId, EntityId, EventId, Hash, KeyIdentityV1, KeyRoleV1, Kind, Seq,
-    TimelineId, WallTime,
+    CanonicalBytes, CorrelationId, EntityId, Event, EventId, Hash, KeyIdentityV1, KeyRoleV1, Kind,
+    Seq, TimelineId, WallTime,
 };
 
 /// Whole-input bound for the deterministic CBOR envelope.
@@ -57,6 +57,40 @@ pub struct TimelineEventEnvelopeV1 {
 }
 
 impl TimelineEventEnvelopeV1 {
+    /// Reconstruct the exact signed envelope from a committed Event's
+    /// retained first-commit context and signing identity.
+    ///
+    /// # Errors
+    /// Rejects missing or invalid origin/identity context and a payload hash
+    /// that differs from the exact payload bytes.
+    pub fn from_committed_event(event: &Event) -> Result<Self, TimelineEventEnvelopeErrorV1> {
+        let identity = event
+            .signature_identity
+            .ok_or(TimelineEventEnvelopeErrorV1::InvalidIdentity)?;
+        let origin = event
+            .origin
+            .ok_or(TimelineEventEnvelopeErrorV1::FieldOutOfBounds)?;
+        let envelope = Self::new(
+            TimelineEventEnvelopeInputV1 {
+                identity,
+                origin_timeline_id: origin.origin_timeline_id,
+                event_id: event.id,
+                origin_logical_seq: origin.origin_logical_seq,
+                entity_id: event.entity,
+                event_type: event.event_type.clone(),
+                schema_version: event.schema_version.as_u32(),
+                wall_time: event.wall_time,
+                causation_id: event.causation_id,
+                correlation_id: event.correlation_id,
+            },
+            &event.payload,
+        )?;
+        if envelope.payload_hash != event.payload_hash {
+            return Err(TimelineEventEnvelopeErrorV1::PayloadHashMismatch);
+        }
+        Ok(envelope)
+    }
+
     /// Bind finalized context to the exact payload before signing.
     ///
     /// # Errors
