@@ -10,6 +10,7 @@
 //! those protected domain concepts.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+pub mod adapter_admission;
 pub mod authority;
 #[cfg(test)]
 extern crate self as pos_core;
@@ -59,6 +60,12 @@ pub mod world_replay;
 pub mod world_replay_handle;
 pub mod world_transform;
 
+pub use adapter_admission::{
+    adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
+    AdapterAdmissionErrorV1, AdapterAdmissionInputV1, AdapterAdmissionV1,
+    MAX_ADAPTER_ADMISSION_BYTES_V1, MAX_ADAPTER_ADMISSION_ENTRIES_V1,
+    MAX_ADAPTER_CONFIGURATION_BYTES_V1,
+};
 pub use local_cut_seal::{
     local_cut_tree_scope_v1, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,
     LocalCutManifestBindingPageV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
