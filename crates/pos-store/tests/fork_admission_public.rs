@@ -142,6 +142,9 @@ fn committed_admission_remains_readable_after_child_events() -> TestResult {
         &request(parent.id(), authenticated),
         WallTime::from_micros(20),
     )?;
+    // #451 will close generic append for admitted children. This proves the
+    // durable admission read remains valid when a later authorized child Event
+    // advances the child segment.
     store.append(
         receipt.child_id,
         &[pos_core::EventDraft::new(
@@ -156,6 +159,34 @@ fn committed_admission_remains_readable_after_child_events() -> TestResult {
             .expect("FAR1")
             .digest(),
         receipt.admission_digest
+    );
+    Ok(())
+}
+
+#[test]
+fn far1_rejects_reserved_import_origin_code_two() -> TestResult {
+    let mut store = MemoryStore::new();
+    let parent = store.create_timeline("parent")?;
+    let authenticated = authenticated()?;
+    store.bind_principal_owner_trust(trust(&authenticated)?)?;
+    store.commit_local_binding(
+        Hash::from_bytes([1; 32]),
+        &authenticated,
+        OwnerIdV1::new("creator")?,
+        WallTime::from_micros(20),
+    )?;
+    let receipt = store.create_fork_admitted(
+        &request(parent.id(), authenticated),
+        WallTime::from_micros(20),
+    )?;
+    let mut bytes = store
+        .read_fork_admission(receipt.child_id)?
+        .expect("FAR1")
+        .to_canonical_cbor();
+    *bytes.last_mut().expect("origin") = 2;
+    assert_eq!(
+        pos_core::ForkAdmissionRecordV1::from_canonical_cbor(&bytes),
+        Err(pos_core::ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable)
     );
     Ok(())
 }
