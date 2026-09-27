@@ -28,6 +28,9 @@ thread_local! {
     static RECIPIENT_FSYNC_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static RECIPIENT_UNLINK_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
 }
 
 #[cfg(test)]
@@ -50,6 +53,29 @@ fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
 #[cfg(not(test))]
 fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
     fsync(fd)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_unlinkat(
+    directory: impl rustix::fd::AsFd,
+    name: impl rustix::path::Arg,
+    flags: AtFlags,
+) -> Result<(), rustix::io::Errno> {
+    if RECIPIENT_UNLINK_FAILURE.with(std::cell::Cell::get) {
+        Err(rustix::io::Errno::IO)
+    } else {
+        unlinkat(directory, name, flags)
+    }
+}
+
+#[cfg(not(test))]
+fn recipient_unlinkat(
+    directory: impl rustix::fd::AsFd,
+    name: impl rustix::path::Arg,
+    flags: AtFlags,
+) -> Result<(), rustix::io::Errno> {
+    unlinkat(directory, name, flags)
 }
 
 /// An owner-managed Unix directory for one consent grantee's role-4 keys.
@@ -765,7 +791,7 @@ fn delete_bound_private_key(
     }
     recipient_fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
     verify_bound_entry(owner, name, expected)?;
-    unlinkat(&owner.directory_file, name, AtFlags::empty())
+    recipient_unlinkat(&owner.directory_file, name, AtFlags::empty())
         .map_err(|error| CoreError::Storage(error.to_string()))?;
     recipient_fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))
 }
@@ -848,6 +874,10 @@ mod tests {
         RECIPIENT_FSYNC_CALLS.with(|calls| calls.set(0));
     }
 
+    fn set_unlink_failure(enabled: bool) {
+        RECIPIENT_UNLINK_FAILURE.with(|failure| failure.set(enabled));
+    }
+
     #[test]
     fn recipient_custody_sync_failures_leave_enrollment_and_destruction_unfinalized(
     ) -> Result<(), CoreError> {
@@ -878,6 +908,26 @@ mod tests {
                     .is_err());
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_unlink_failure_leaves_destruction_pending() -> Result<(), CoreError> {
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        let authorization = pos_core::Hash::from_bytes([48; 32]);
+        set_unlink_failure(true);
+        assert!(store
+            .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
+            .is_err());
+        set_unlink_failure(false);
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        assert!(registry.tombstone(descriptor.identity()).is_none());
+        assert!(registry
+            .pending_destruction_requests()
+            .any(|request| request.identity == descriptor.identity()));
         Ok(())
     }
 }
