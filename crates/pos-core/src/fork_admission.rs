@@ -415,6 +415,8 @@ fn fork_admission_operation_commitment_v1(
 }
 
 /// Recompute an immutable operation commitment from durable admission records.
+/// POB1 provisioning and FAR1 creation have distinct operation identifiers;
+/// this computation uses the FAR1 identifier and the POB1 Principal digest.
 ///
 /// # Errors
 /// Returns CorruptAuthority when FAR1 and POB1 disagree.
@@ -425,10 +427,7 @@ pub fn fork_admission_operation_commitment_from_records_v1(
 ) -> Result<Hash, ForkAdmissionErrorV1> {
     let record = admission.input();
     let pob1 = binding.input();
-    if record.operation_id != pob1.operation_id
-        || record.principal_owner_binding_digest != binding.digest()
-        || record.creator != pob1.owner
-    {
+    if record.principal_owner_binding_digest != binding.digest() || record.creator != pob1.owner {
         return Err(ForkAdmissionErrorV1::CorruptAuthority);
     }
     let intent = ForkAdmissionIntentV1::new(
