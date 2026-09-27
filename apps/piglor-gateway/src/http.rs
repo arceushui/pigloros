@@ -1466,8 +1466,8 @@ osf_link = \"https://osf.io/example\"\n";
     #[tokio::test]
     async fn host_cursor_tracks_the_response_byte_limit() {
         let (gateway, app, id, actor) = host_cursor_fixture("cursor-byte-limit").await;
-        let payload = "x".repeat(180 * 1024);
-        for _ in 0..3 {
+        let payload = "x".repeat(240 * 1024);
+        for _ in 0..5 {
             gateway
                 .append_action(
                     &id,
@@ -1499,7 +1499,7 @@ osf_link = \"https://osf.io/example\"\n";
                 entity: actor.clone(),
                 event_type: crate::EVENT_TYPE_ACTION.to_owned(),
                 seq: u64::MAX,
-                payload: payload.clone(),
+                payload: Some(payload.clone()),
                 payload_hex: crate::hex_encode(bytes.as_slice()),
             };
             let worst_page = json!({

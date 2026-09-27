@@ -1943,7 +1943,7 @@ impl Gateway {
             MAX_EVENT_TYPE_BYTES,
             MAX_FORK_DEPTH,
             limit + 1,
-            MAX_EVENTS_RESPONSE_BYTES,
+            (limit + 1) * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES),
             MAX_EVENTS_READ_TIME_MICROS,
         );
         let page = match self
