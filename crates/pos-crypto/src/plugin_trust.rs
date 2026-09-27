@@ -2010,19 +2010,19 @@ mod tests {
         )?;
         let alias_digest = *blake3::hash(&alias_root).as_bytes();
         let alias_anchor = TrustedPluginRootAnchorV1::new("scope", alias_digest)?;
-        let alias_revocation = revocation(&signer, alias_digest, 1, None, Vec::new())?;
+        let alias_revocation = self::revocation(&signer, alias_digest, 1, None, Vec::new())?;
         assert!(matches!(
             verify_plugin_trust_v1(&alias_anchor, &[&alias_root], &[&alias_revocation], 50, 5),
             Err(PluginTrustErrorV1::ChainDiscontinuity)
         ));
 
-        let bad_initial_previous = revocation(&signer, digest, 1, Some([0; 32]), Vec::new())?;
+        let bad_initial_previous = self::revocation(&signer, digest, 1, Some([0; 32]), Vec::new())?;
         assert!(matches!(
             verify_plugin_trust_v1(&anchor, &[&root], &[&bad_initial_previous], 50, 5),
             Err(PluginTrustErrorV1::ChainDiscontinuity)
         ));
 
-        let repeated_epoch = revocation(
+        let repeated_epoch = self::revocation(
             &signer,
             digest,
             1,
