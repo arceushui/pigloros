@@ -8,6 +8,8 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod authorization;
+#[cfg(test)]
+mod e2e_determinism;
 pub mod executor;
 mod http;
 pub mod ledger_config;
@@ -312,11 +314,8 @@ mod coverage_tests {
 
     #[test]
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
-        let registry = super::gateway_fixture_action_registry_builder(
-            std::iter::empty(),
-            None,
-        )
-        .test_ok();
+        let registry =
+            super::gateway_fixture_action_registry_builder(std::iter::empty(), None).test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
         assert!(matches!(
             super::gateway_action_registry_builder(std::iter::empty(), None),
@@ -1734,14 +1733,13 @@ impl Gateway {
             host,
             consent_authority.append_permit(),
         )?;
-        let action_registry = gateway_fixture_action_registry_builder(
-            bodies,
-            Some(consent_authority.clone()),
-        )
-        .map(|mut registry| {
-            registry.bind_erasure_gate(gate);
-            Arc::new(registry)
-        });
+        let action_registry =
+            gateway_fixture_action_registry_builder(bodies, Some(consent_authority.clone())).map(
+                |mut registry| {
+                    registry.bind_erasure_gate(gate);
+                    Arc::new(registry)
+                },
+            );
         Self::from_host_components(
             store,
             broadcast::channel(EVENT_BUS_CAPACITY).0,
@@ -4227,12 +4225,9 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host_and_authorization_fixture(
-            host,
-            [body],
-            authorization,
-        )
-        .test_ok();
+        let gateway =
+            Gateway::new_with_erasure_host_and_authorization_fixture(host, [body], authorization)
+                .test_ok();
         let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
@@ -4353,12 +4348,9 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway = Gateway::new_with_erasure_host_and_authorization_fixture(
-            host,
-            [body],
-            authorization,
-        )
-        .test_ok();
+        let gateway =
+            Gateway::new_with_erasure_host_and_authorization_fixture(host, [body], authorization)
+                .test_ok();
         let timeline = gateway
             .create_timeline("host-authority-commit-recheck")
             .await

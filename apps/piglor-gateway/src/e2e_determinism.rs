@@ -1,4 +1,4 @@
-use piglor_gateway::{
+use crate::{
     router, AppState, Gateway, GatewayAuthorization, GatewayError, LedgerWriteMode,
     LocalAuthenticationAdapter,
 };
@@ -533,7 +533,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         timeline.id()
     };
     let state = AppState {
-        gateway: Gateway::new_with_erasure_host_and_authorization(
+        gateway: Gateway::new_with_erasure_host_and_authorization_fixture(
             host,
             [human_body],
             gateway_authorization_for(human_entity)?,
