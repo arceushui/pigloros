@@ -77,6 +77,36 @@ macro_rules! evidence_roundtrip {
     };
 }
 
+#[test]
+fn correction_evidence_keeps_its_v1_bytes_and_content_address() -> Result<(), ErasureErrorV1> {
+    let record =
+        ErasureCorrectionProvenanceV1::new(pos_core::ErasureCorrectionProvenanceInputV1 {
+            rejected_request: reference(1),
+            rejected_terminal_state: reference(2),
+            correction_reason: reference(3),
+            authorization_provenance: reference(4),
+        })?;
+    let mut expected = b"\x86\x65ERCP1\x01".to_vec();
+    for value in 1..=4 {
+        expected.extend_from_slice(&[0x58, 0x20]);
+        expected.extend_from_slice(&[value; 32]);
+    }
+    assert_eq!(record.to_canonical_cbor()?, expected);
+    assert_eq!(
+        record.reference(),
+        pos_core::ErasureReferenceV1::from_digest([
+            0xd0, 0x6f, 0xfd, 0xe4, 0x10, 0xf2, 0x5f, 0xf1, 0x8b, 0xba, 0x98, 0x38, 0x97, 0xd6,
+            0xe7, 0x41, 0x5c, 0x43, 0x4c, 0x50, 0x56, 0x7e, 0xb6, 0xd5, 0xeb, 0xab, 0xa7, 0x30,
+            0x0a, 0xd2, 0xf9, 0x52,
+        ])
+    );
+    assert_eq!(
+        ErasureCorrectionProvenanceV1::from_canonical_cbor(&expected)?,
+        record
+    );
+    Ok(())
+}
+
 evidence_roundtrip!(
     correction_evidence_roundtrips,
     ErasureCorrectionProvenanceV1,
