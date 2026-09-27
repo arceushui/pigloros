@@ -1452,11 +1452,11 @@ mod tests {
                 PublicationFaultPointV1::OwnerSync
                 | PublicationFaultPointV1::BlobSync
                 | PublicationFaultPointV1::DirectorySync
-                | PublicationFaultPointV1::ReadySync => LocalOciPublicationErrorV1::Sync,
+                | PublicationFaultPointV1::ReadySync
+                | PublicationFaultPointV1::FinalRename => LocalOciPublicationErrorV1::Sync,
                 PublicationFaultPointV1::BlobWrite | PublicationFaultPointV1::ReadyWrite => {
                     LocalOciPublicationErrorV1::Io
                 }
-                PublicationFaultPointV1::FinalRename => LocalOciPublicationErrorV1::Sync,
                 PublicationFaultPointV1::FinalCollision => LocalOciPublicationErrorV1::Collision,
                 _ => LocalOciPublicationErrorV1::RecoveryRequired,
             };

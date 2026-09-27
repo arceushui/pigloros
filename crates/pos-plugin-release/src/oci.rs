@@ -755,6 +755,14 @@ mod tests {
             verify_value(&changed, blobs.clone()),
             Err(ReleaseSourceErrorV1::InvalidDescriptor)
         );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_duplicate_or_disordered_layers() -> Result<(), Box<dyn std::error::Error>> {
+        let (_, manifest, blobs) = closure()?;
+        let valid: serde_json::Value = serde_json::from_slice(&manifest)?;
         let mut changed = valid.clone();
         let duplicate_digest = changed["layers"][0]["digest"].clone();
         changed["layers"][1]["digest"] = duplicate_digest;
