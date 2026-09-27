@@ -31,6 +31,9 @@ thread_local! {
     static RECIPIENT_UNLINK_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static RECIPIENT_OPEN_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
 }
 
 #[cfg(test)]
@@ -53,6 +56,33 @@ fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
 #[cfg(not(test))]
 fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
     fsync(fd)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_openat2(
+    directory: impl rustix::fd::AsFd,
+    path: impl rustix::path::Arg,
+    flags: OFlags,
+    mode: Mode,
+    resolve: ResolveFlags,
+) -> Result<rustix::fd::OwnedFd, rustix::io::Errno> {
+    if RECIPIENT_OPEN_FAILURE.with(std::cell::Cell::get) {
+        Err(rustix::io::Errno::IO)
+    } else {
+        openat2(directory, path, flags, mode, resolve)
+    }
+}
+
+#[cfg(not(test))]
+fn recipient_openat2(
+    directory: impl rustix::fd::AsFd,
+    path: impl rustix::path::Arg,
+    flags: OFlags,
+    mode: Mode,
+    resolve: ResolveFlags,
+) -> Result<rustix::fd::OwnedFd, rustix::io::Errno> {
+    openat2(directory, path, flags, mode, resolve)
 }
 
 #[cfg(test)]
@@ -155,7 +185,7 @@ impl RecipientKeyOwnerV1 {
                     "recipient key directory is not private".to_owned(),
                 ));
             }
-            let directory_file = openat2(
+            let directory_file = recipient_openat2(
                 rustix::fs::CWD,
                 &directory,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
@@ -733,7 +763,7 @@ fn read_bound_private_key(
 ) -> Result<Zeroizing<[u8; 32]>, CoreError> {
     validate_owner_directory(owner)?;
     let name = bound_name(path)?;
-    let mut file = openat2(
+    let mut file = recipient_openat2(
         &owner.directory_file,
         name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
@@ -765,7 +795,7 @@ fn delete_bound_private_key(
 ) -> Result<(), CoreError> {
     validate_owner_directory(owner)?;
     let name = bound_name(path)?;
-    let mut file = openat2(
+    let mut file = recipient_openat2(
         &owner.directory_file,
         name,
         OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
@@ -804,7 +834,7 @@ fn write_private_key(
 ) -> Result<RecipientPrivateFileIdentityV1, CoreError> {
     validate_owner_directory(owner)?;
     let name = bound_name(path)?;
-    let mut file = openat2(
+    let mut file = recipient_openat2(
         &owner.directory_file,
         name,
         OFlags::WRONLY
@@ -879,6 +909,10 @@ mod tests {
         RECIPIENT_UNLINK_FAILURE.with(|failure| failure.set(enabled));
     }
 
+    fn set_open_failure(enabled: bool) {
+        RECIPIENT_OPEN_FAILURE.with(|failure| failure.set(enabled));
+    }
+
     #[test]
     fn recipient_custody_sync_failures_leave_enrollment_and_destruction_unfinalized(
     ) -> Result<(), CoreError> {
@@ -918,6 +952,42 @@ mod tests {
                     .is_err());
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_open_failures_preserve_closed_lifecycle() -> Result<(), CoreError> {
+        let temporary =
+            tempfile::tempdir().map_err(|error| CoreError::Storage(error.to_string()))?;
+        let directory = temporary.path().join("recipient-private");
+        std::fs::create_dir(&directory).map_err(|error| CoreError::Storage(error.to_string()))?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        set_open_failure(true);
+        assert!(RecipientKeyOwnerV1::open(&directory, EntityId::new()).is_err());
+        set_open_failure(false);
+
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        set_open_failure(true);
+        assert!(store.enroll_recipient_key(&owner).is_err());
+        set_open_failure(false);
+        assert!(store.load_key_registry()?.is_none());
+
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        set_open_failure(true);
+        assert!(store.recover_recipient_keys(&owner).is_err());
+        assert!(store
+            .destroy_recipient_key(
+                &owner,
+                descriptor.identity().epoch,
+                pos_core::Hash::from_bytes([50; 32]),
+            )
+            .is_err());
+        set_open_failure(false);
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        assert!(registry.tombstone(descriptor.identity()).is_none());
         Ok(())
     }
 
