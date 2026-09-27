@@ -264,9 +264,7 @@ impl SqliteStore {
         validate_owner_directory(owner)?;
         let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let registry = self
-            .load_key_registry()?
-            .ok_or_else(|| CoreError::Storage("recipient registry is unavailable".to_owned()))?;
+        ensure_recipient_custody_tables(&self.conn)?;
         let mut statement = self.conn.prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let rows = statement
@@ -285,6 +283,9 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         quarantine_unregistered_staged_material(owner, &inventories)?;
+        let registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is unavailable".to_owned()))?;
         let expected_identities = registry
             .key_records()
             .filter(|record| {
@@ -888,6 +889,14 @@ mod tests {
             clear_fsync_fault();
             assert!(store.load_key_registry()?.is_none());
             assert!(store.recover_recipient_keys(&owner).is_err());
+            let names = std::fs::read_dir(&owner.directory)
+                .map_err(|error| CoreError::Storage(error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| CoreError::Storage(error.to_string()))?
+                .into_iter()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert!(names.iter().any(|name| name.ends_with(".orphan")));
         }
 
         for failure in [0, 1] {
