@@ -14,6 +14,8 @@ pub const MAX_WORLD_EVENT_PAGE_BYTES_V1: usize = 65_536;
 pub const MAX_WORLD_EVENT_PAGE_ROWS_V1: usize = 64;
 /// Maximum UTF-8 byte length of one source-event type.
 pub const MAX_WORLD_EVENT_TYPE_BYTES_V1: usize = 128;
+/// Maximum canonical WOR1 source-Event occurrence size.
+pub const MAX_WORLD_EVENT_OCCURRENCE_BYTES_V1: usize = 1024;
 /// Maximum canonical WHB1 record size.
 pub const MAX_WORLD_HISTORY_BRANCH_BYTES_V1: usize = 65_536;
 /// Maximum child references in one WHB1 branch.
@@ -22,12 +24,14 @@ pub const MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1: usize = 256;
 pub const MAX_WORLD_HISTORY_HEIGHT_V1: u8 = 8;
 
 const WEP1_MAGIC: &[u8; 4] = b"WEP1";
+const WOR1_MAGIC: &[u8; 4] = b"WOR1";
 const WHB1_MAGIC: &[u8; 4] = b"WHB1";
 const VERSION: u64 = 1;
 const EVENT_PAGE_DOMAIN: &[u8] = b"pigloros.world-evidence.event-page.v1\0";
+const EVENT_OCCURRENCE_DOMAIN: &[u8] = b"pigloros.world-evidence.event-occurrence.v1\0";
 const HISTORY_BRANCH_DOMAIN: &[u8] = b"pigloros.world-evidence.history-branch.v1\0";
 
-/// Closed structural WEP1/WHB1 codec errors.
+/// Closed structural WEP1/WHB1/WOR1 codec errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorldHistoryErrorV1 {
     /// A record is malformed or has an unexpected CBOR type or field width.
@@ -121,6 +125,80 @@ impl WorldEventRowV1 {
     #[must_use]
     pub const fn as_input(&self) -> &WorldEventRowInputV1 {
         &self.0
+    }
+}
+
+/// One immutable occurrence of a source Event in a queried Timeline.
+///
+/// This structural record does not authenticate the source Event, its owner,
+/// or its required native dependencies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldEventOccurrenceV1 {
+    queried_timeline_id: TimelineId,
+    row: WorldEventRowV1,
+}
+
+impl WorldEventOccurrenceV1 {
+    /// Bind one validated source row to the queried Timeline.
+    #[must_use]
+    pub const fn new(queried_timeline_id: TimelineId, row: WorldEventRowV1) -> Self {
+        Self {
+            queried_timeline_id,
+            row,
+        }
+    }
+
+    /// Decode and validate exact preferred WOR1 bytes.
+    ///
+    /// # Errors
+    /// Rejects malformed, oversized, noncanonical, or invalid source rows.
+    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldHistoryErrorV1> {
+        if bytes.len() > MAX_WORLD_EVENT_OCCURRENCE_BYTES_V1 {
+            return Err(WorldHistoryErrorV1::FieldOutOfBounds);
+        }
+        let mut parser = Parser::new(bytes.as_slice());
+        parser.event_occurrence().and_then(|occurrence| {
+            ensure_finished(&parser).and_then(|()| {
+                if occurrence.encode().as_slice() == bytes.as_slice() {
+                    Ok(occurrence)
+                } else {
+                    Err(WorldHistoryErrorV1::NonCanonicalEncoding)
+                }
+            })
+        })
+    }
+
+    /// Encode the exact four-field preferred WOR1 record.
+    #[must_use]
+    pub fn encode(&self) -> CanonicalBytes {
+        let mut output = Vec::new();
+        encode_array(&mut output, 4);
+        encode_bytes(&mut output, WOR1_MAGIC);
+        encode_unsigned(&mut output, VERSION);
+        encode_id(&mut output, self.queried_timeline_id.inner());
+        encode_event_row(&mut output, self.row.as_input());
+        CanonicalBytes::from_vec(output)
+    }
+
+    /// ADR-081 occurrence digest over raw queried Timeline ID and exact row.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&u128::from(self.queried_timeline_id.inner()).to_be_bytes());
+        encode_event_row(&mut preimage, self.row.as_input());
+        digest(EVENT_OCCURRENCE_DOMAIN, &preimage)
+    }
+
+    /// Queried Timeline in which this source Event occurs.
+    #[must_use]
+    pub const fn queried_timeline_id(&self) -> TimelineId {
+        self.queried_timeline_id
+    }
+
+    /// The exact source Event row carried by this occurrence.
+    #[must_use]
+    pub const fn row(&self) -> &WorldEventRowV1 {
+        &self.row
     }
 }
 
@@ -733,6 +811,17 @@ impl<'a> Parser<'a> {
 
     const fn finished(&self) -> bool {
         self.position == self.bytes.len()
+    }
+
+    fn event_occurrence(&mut self) -> Result<WorldEventOccurrenceV1, WorldHistoryErrorV1> {
+        self.array_exact(4)
+            .and_then(|()| self.magic(*WOR1_MAGIC))
+            .and_then(|()| self.version())
+            .and_then(|()| self.fixed::<16>(2, 16).map(timeline_id_from_bytes))
+            .and_then(|queried_timeline_id| {
+                self.event_row()
+                    .map(|row| WorldEventOccurrenceV1::new(queried_timeline_id, row))
+            })
     }
 
     fn event_page(&mut self) -> Result<WorldEventPageV1, WorldHistoryErrorV1> {
