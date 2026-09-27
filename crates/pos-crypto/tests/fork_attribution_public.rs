@@ -5,7 +5,9 @@ use pos_core::{
 };
 use pos_crypto::{
     fork_attribution::{
+        sign_local_fork_manifest_from_admission_signature_only,
         sign_local_fork_manifest_signature_only, verify_local_fork_manifest_signature_only,
+        ForkAttributionSigningErrorV1,
     },
     key_roles::SigningKeyMaterial,
     signing::{generate_keypair, public_key_from_verifying_key, verifying_key_from_public_key},
@@ -35,19 +37,7 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
         attribution_required: true,
         origin: ForkAttributionOriginV1::Local,
     })?;
-    let manifest = ForkReproManifestV1::new(ForkReproManifestInputV1 {
-        parent_timeline_id: parent,
-        fork_timeline_id: child,
-        admission_digest: admission.digest(),
-        room_revision_descriptor_hash: hash(3),
-        parent_logical_head: 0,
-        parent_chain_head_hash: hash(4),
-        post_fold_tick_boundary: 0,
-        plugin_composition_hash: hash(5),
-        intervention_sequences: vec![],
-        final_fork_logical_head: 0,
-        final_fork_chain_head_hash: hash(6),
-    })?;
+    let manifest = ForkReproManifestV1::from_admission(&admission, vec![], 0, hash(6))?;
     let (private, public) = generate_keypair();
     let private = SigningKeyMaterial::new(private);
     let identity = KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1);
@@ -57,8 +47,48 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
         private.material_digest(),
         Some(public_key_from_verifying_key(&public)),
     ))?;
-    let signed =
-        sign_local_fork_manifest_signature_only(&mut registry, &private, identity, manifest)?;
+    let signed = sign_local_fork_manifest_from_admission_signature_only(
+        &mut registry,
+        &private,
+        &admission,
+        identity.epoch,
+        manifest,
+    )?;
+    assert_eq!(signed.identity(), identity);
+    let zero_epoch = sign_local_fork_manifest_from_admission_signature_only(
+        &mut registry,
+        &private,
+        &admission,
+        0,
+        ForkReproManifestV1::from_admission(&admission, vec![], 0, hash(6))?,
+    )
+    .unwrap_err();
+    let ForkAttributionSigningErrorV1::Codec(zero_epoch) = zero_epoch else {
+        return Err("zero epoch unexpectedly reached the registry".into());
+    };
+    assert_eq!(
+        zero_epoch,
+        pos_core::ForkAttributionCodecErrorV1::FieldOutOfBounds
+    );
+
+    let mut admission_b_input = admission.input().clone();
+    admission_b_input.child_timeline_id = TimelineId::new();
+    let admission_b = ForkAdmissionRecordV1::new(admission_b_input)?;
+    let mismatch = sign_local_fork_manifest_from_admission_signature_only(
+        &mut registry,
+        &private,
+        &admission_b,
+        identity.epoch,
+        ForkReproManifestV1::from_admission(&admission, vec![], 0, hash(6))?,
+    )
+    .unwrap_err();
+    let ForkAttributionSigningErrorV1::Codec(mismatch) = mismatch else {
+        return Err("FAR1 mismatch unexpectedly reached the registry".into());
+    };
+    assert_eq!(
+        mismatch,
+        pos_core::ForkAttributionCodecErrorV1::FieldMismatch
+    );
     verify_local_fork_manifest_signature_only(&signed, public_key_from_verifying_key(&public))?;
     assert!(verify_local_fork_manifest_signature_only(
         &signed,

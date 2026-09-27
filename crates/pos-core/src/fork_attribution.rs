@@ -194,6 +194,37 @@ pub struct ForkReproManifestInputV1 {
 pub struct ForkReproManifestV1(ForkReproManifestInputV1);
 
 impl ForkReproManifestV1 {
+    /// Construct `FRM1` from the duplicated coordinates in local `FAR1`.
+    ///
+    /// This constructor establishes only byte agreement with supplied local
+    /// admission data. It does not establish that the supplied `FAR1` was
+    /// durably committed or authorized for publication.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid final Fork coordinates or intervention sequences.
+    pub fn from_admission(
+        admission: &ForkAdmissionRecordV1,
+        intervention_sequences: Vec<u64>,
+        final_fork_logical_head: u64,
+        final_fork_chain_head_hash: Hash,
+    ) -> Result<Self, ForkAttributionCodecErrorV1> {
+        let record = admission.input();
+        Self::new(ForkReproManifestInputV1 {
+            parent_timeline_id: record.parent_timeline_id,
+            fork_timeline_id: record.child_timeline_id,
+            admission_digest: admission.digest(),
+            room_revision_descriptor_hash: record.room_revision_descriptor_hash,
+            parent_logical_head: record.parent_logical_head,
+            parent_chain_head_hash: record.parent_chain_head_hash,
+            post_fold_tick_boundary: record.post_fold_tick_boundary,
+            plugin_composition_hash: record.plugin_composition_hash,
+            intervention_sequences,
+            final_fork_logical_head,
+            final_fork_chain_head_hash,
+        })
+    }
+
     /// Validate exact structural coordinate bounds.
     ///
     /// # Errors
@@ -332,6 +363,49 @@ pub struct SignedForkReproManifestV1 {
 }
 
 impl SignedForkReproManifestV1 {
+    /// Construct a signature-only wrapper bound to supplied local `FAR1`.
+    ///
+    /// The creator is derived from `FAR1`, and the `FRM1` duplicated fields
+    /// must agree with it. This does not treat caller-supplied `FAR1` as
+    /// trusted admission or publication authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero epoch or any creator or manifest mismatch.
+    pub fn new_from_admission(
+        admission: &ForkAdmissionRecordV1,
+        epoch: u64,
+        manifest: ForkReproManifestV1,
+        signature: Signature,
+    ) -> Result<Self, ForkAttributionCodecErrorV1> {
+        let record = Self::new(
+            KeyIdentityV1::from_parts(
+                admission.input().creator,
+                KeyRoleV1::SubjectAttributionSigning,
+                epoch,
+            ),
+            manifest,
+            signature,
+        )?;
+        record.validate_against_admission(admission)?;
+        Ok(record)
+    }
+
+    /// Require the wrapper creator and manifest fields to agree with local `FAR1`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different creator or any mismatched duplicated manifest field.
+    pub fn validate_against_admission(
+        &self,
+        admission: &ForkAdmissionRecordV1,
+    ) -> Result<(), ForkAttributionCodecErrorV1> {
+        if self.identity.owner_id != admission.input().creator {
+            return Err(ForkAttributionCodecErrorV1::FieldMismatch);
+        }
+        self.manifest.validate_against_admission(admission)
+    }
+
     /// Construct a signature-only wrapper for the exact inner canonical bytes.
     ///
     /// # Errors

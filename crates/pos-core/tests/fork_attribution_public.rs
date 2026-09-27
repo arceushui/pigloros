@@ -29,20 +29,7 @@ fn admission() -> Result<ForkAdmissionRecordV1, ForkAttributionCodecErrorV1> {
 fn manifest(
     admission: &ForkAdmissionRecordV1,
 ) -> Result<ForkReproManifestV1, ForkAttributionCodecErrorV1> {
-    let input = admission.input();
-    ForkReproManifestV1::new(ForkReproManifestInputV1 {
-        parent_timeline_id: input.parent_timeline_id,
-        fork_timeline_id: input.child_timeline_id,
-        admission_digest: admission.digest(),
-        room_revision_descriptor_hash: input.room_revision_descriptor_hash,
-        parent_logical_head: input.parent_logical_head,
-        parent_chain_head_hash: input.parent_chain_head_hash,
-        post_fold_tick_boundary: input.post_fold_tick_boundary,
-        plugin_composition_hash: input.plugin_composition_hash,
-        intervention_sequences: vec![5, 7],
-        final_fork_logical_head: 7,
-        final_fork_chain_head_hash: hash(6),
-    })
+    ForkReproManifestV1::from_admission(admission, vec![5, 7], 7, hash(6))
 }
 
 #[test]
@@ -68,6 +55,45 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() -> Result<(), Box<dyn st
     assert_eq!(
         SignedForkReproManifestV1::from_canonical_cbor(&outer.to_canonical_cbor()),
         Ok(outer)
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_bound_construction_derives_creator_and_rejects_creator_b_or_admission_b(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission_a = admission()?;
+    let manifest_a = manifest(&admission_a)?;
+    let derived = SignedForkReproManifestV1::new_from_admission(
+        &admission_a,
+        1,
+        manifest_a.clone(),
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    assert_eq!(derived.identity().owner_id, admission_a.input().creator);
+    assert_eq!(derived.validate_against_admission(&admission_a), Ok(()));
+
+    let creator_b = SignedForkReproManifestV1::new(
+        KeyIdentityV1::new("creator-b", KeyRoleV1::SubjectAttributionSigning, 1),
+        manifest_a.clone(),
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    assert_eq!(
+        creator_b.validate_against_admission(&admission_a),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+
+    let mut admission_b_input = admission_a.input().clone();
+    admission_b_input.child_timeline_id = TimelineId::new();
+    let admission_b = ForkAdmissionRecordV1::new(admission_b_input)?;
+    assert_eq!(
+        SignedForkReproManifestV1::new_from_admission(
+            &admission_b,
+            1,
+            manifest_a,
+            pos_core::Signature::from_bytes([9; 64]),
+        ),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
     );
     Ok(())
 }
