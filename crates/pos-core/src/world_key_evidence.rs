@@ -184,17 +184,17 @@ fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     let bytes = value.to_be_bytes();
     match value {
         0..=23 => out.push(prefix | bytes[7]),
-        24..=0xff => out.extend_from_slice(&[prefix | 24, bytes[7]]),
+        24..=0xff => out.extend_from_slice(&[prefix | 0x18, bytes[7]]),
         0x100..=0xffff => {
-            out.push(prefix | 25);
+            out.push(prefix | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
         0x1_0000..=0xffff_ffff => {
-            out.push(prefix | 26);
+            out.push(prefix | 0x1a);
             out.extend_from_slice(&bytes[4..]);
         }
         _ => {
-            out.push(prefix | 27);
+            out.push(prefix | 0x1b);
             out.extend_from_slice(&bytes);
         }
     }
@@ -207,13 +207,14 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn take(&mut self, len: usize) -> Result<&[u8], WorldKeyEvidenceErrorV1> {
-        self.bytes
-            .get(self.offset..self.offset.saturating_add(len))
-            .ok_or(WorldKeyEvidenceErrorV1::InvalidEncoding)
-            .map(|part| {
-                self.offset += len;
-                part
-            })
+        let end = self.offset.saturating_add(len);
+        match self.bytes.get(self.offset..end) {
+            Some(part) => {
+                self.offset = end;
+                Ok(part)
+            }
+            None => Err(WorldKeyEvidenceErrorV1::InvalidEncoding),
+        }
     }
 
     fn fixed(&mut self, expected: &[u8]) -> Result<(), WorldKeyEvidenceErrorV1> {
@@ -257,9 +258,7 @@ impl Reader<'_> {
 
     fn owner(&mut self) -> Result<OwnerIdV1, WorldKeyEvidenceErrorV1> {
         self.head(3).and_then(|length| {
-            if !(1..=128).contains(&length) {
-                Err(WorldKeyEvidenceErrorV1::FieldOutOfBounds)
-            } else {
+            if (1..=128).contains(&length) {
                 self.take(usize::from(length.to_be_bytes()[7]))
                     .and_then(|part| {
                         std::str::from_utf8(part)
@@ -268,6 +267,8 @@ impl Reader<'_> {
                     .and_then(|owner| {
                         OwnerIdV1::new(owner).map_err(|_| WorldKeyEvidenceErrorV1::FieldOutOfBounds)
                     })
+            } else {
+                Err(WorldKeyEvidenceErrorV1::FieldOutOfBounds)
             }
         })
     }
@@ -284,14 +285,14 @@ impl Reader<'_> {
 
     fn hash(&mut self) -> Result<Hash, WorldKeyEvidenceErrorV1> {
         self.head(2).and_then(|length| {
-            if length != 32 {
-                Err(WorldKeyEvidenceErrorV1::InvalidEncoding)
-            } else {
+            if length == 32 {
                 self.take(32).map(|part| {
                     let mut bytes = [0; 32];
                     bytes.copy_from_slice(part);
                     Hash::from_bytes(bytes)
                 })
+            } else {
+                Err(WorldKeyEvidenceErrorV1::InvalidEncoding)
             }
         })
     }
