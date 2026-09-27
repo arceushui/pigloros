@@ -56,5 +56,10 @@ pub fn verify_local_fork_manifest_signature_only(
     let verifying_key: VerifyingKey = verifying_key_from_public_key(&public_key)
         .map_err(|_| CoreError::SignatureVerificationFailed)?;
     let payload = CanonicalBytes::from_vec(manifest.manifest_bytes());
-    verify_for_role(&verifying_key, manifest.identity(), &payload, &manifest.signature())
+    verify_for_role(
+        &verifying_key,
+        manifest.identity(),
+        &payload,
+        &manifest.signature(),
+    )
 }
