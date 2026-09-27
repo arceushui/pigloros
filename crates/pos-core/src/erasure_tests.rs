@@ -417,19 +417,21 @@ fn scope_commitment_binds_canonical_initial_timeline_ids() -> Result<(), Erasure
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
-    let scope_members = (0..ERASURE_MAX_SCOPE_EXTENSIONS)
+    let scope_members: Vec<_> = (0_u64..4_096)
         .map(|index| {
             let mut digest = [0; 32];
-            digest[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_be_bytes());
+            digest[..8].copy_from_slice(&index.to_be_bytes());
             ErasureReferenceV1::from_digest(digest)
         })
         .collect();
-    let scope_timeline_ids = (1..=ERASURE_MAX_INVENTORY_TIMELINES - ERASURE_MAX_SCOPE_EXTENSIONS
-        + 1)
-        .map(|index| {
-            TimelineId::from_ulid(ulid::Ulid::from(u128::try_from(index).unwrap_or(u128::MAX)))
-        })
+    let scope_timeline_ids: Vec<_> = (1_u128..=61_441)
+        .map(|index| TimelineId::from_ulid(ulid::Ulid::from(index)))
         .collect();
+    assert_eq!(scope_members.len(), ERASURE_MAX_SCOPE_EXTENSIONS);
+    assert_eq!(
+        scope_members.len() + scope_timeline_ids.len(),
+        ERASURE_MAX_INVENTORY_TIMELINES + 1
+    );
     assert_eq!(
         ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: reference(1),
