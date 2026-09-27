@@ -1244,6 +1244,16 @@ mod tests {
     }
 
     #[test]
+    fn root_threshold_exceeding_key_count_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, _, _) = fixture()?;
+        let mut fields = root_fields(&signer, publisher, 1, None);
+        fields[7] = unsigned(2);
+        let encoded = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(PluginTrustRootRecordV1::decode(&encoded).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn malformed_anchor_expiry_and_signature_fail_closed() -> Result<(), Box<dyn std::error::Error>>
     {
         let (_, _, root, revocation) = fixture()?;
