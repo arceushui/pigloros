@@ -123,9 +123,18 @@ fn sqlite_historical_decryption_uses_persisted_registry() -> Result<(), Box<dyn 
 #[test]
 fn sqlite_historical_decryption_serializes_rotation_and_destruction(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(Clone, Copy)]
+    enum CompetingMutation {
+        Rotate,
+        BeginDestruction,
+    }
+
     let old = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
     let current = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2);
-    for rotate in [true, false] {
+    for mutation in [
+        CompetingMutation::Rotate,
+        CompetingMutation::BeginDestruction,
+    ] {
         let database = tempfile::NamedTempFile::new()?;
         let path = database
             .path()
@@ -171,25 +180,29 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
         });
 
         let mut mutating_store = SqliteStore::open(path)?;
-        if rotate {
-            mutating_store.save_key_registry(&rotated)?;
-        } else {
-            mutating_store.begin_key_registry_destruction(request)?;
+        match mutation {
+            CompetingMutation::Rotate => mutating_store.save_key_registry(&rotated)?,
+            CompetingMutation::BeginDestruction => {
+                mutating_store.begin_key_registry_destruction(request)?;
+            }
         }
 
         let mut verify = SqliteStore::open(path)?;
-        if rotate {
-            assert_eq!(
-                verify.with_decryption_authorization(old, digest(1), || "old plaintext")?,
-                "old plaintext"
-            );
-        } else {
-            deny(
-                &mut verify,
-                old,
-                digest(1),
-                KeyRegistryErrorV1::DestructionPending,
-            );
+        match mutation {
+            CompetingMutation::Rotate => {
+                assert_eq!(
+                    verify.with_decryption_authorization(old, digest(1), || "old plaintext")?,
+                    "old plaintext"
+                );
+            }
+            CompetingMutation::BeginDestruction => {
+                deny(
+                    &mut verify,
+                    old,
+                    digest(1),
+                    KeyRegistryErrorV1::DestructionPending,
+                );
+            }
         }
     }
     Ok(())
