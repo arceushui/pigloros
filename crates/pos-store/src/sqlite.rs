@@ -2202,6 +2202,18 @@ fn timeline_fields_to_timeline(
 }
 
 impl SqliteStore {
+    fn check_key_destruction_inventory_version(&mut self) -> Result<(), CoreError> {
+        let version_check = self.validate_erasure_inventory_data_version();
+        #[cfg(test)]
+        if version_check.is_ok() {
+            if let Some((started, release)) = self.destruction_transaction_hook.take() {
+                assert!(started.send(()).is_ok());
+                assert!(release.recv().is_ok());
+            }
+        }
+        version_check
+    }
+
     const fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
         if self.erasure_topology_requires_permit {
             Err(CoreError::ErasureContainmentUnavailable)
@@ -4289,18 +4301,6 @@ impl EventStore for SqliteStore {
             })()
         });
         finish_immediate_scope(&self.conn, scope, result)
-    }
-
-    fn check_key_destruction_inventory_version(&mut self) -> Result<(), CoreError> {
-        let version_check = self.validate_erasure_inventory_data_version();
-        #[cfg(test)]
-        if version_check.is_ok() {
-            if let Some((started, release)) = self.destruction_transaction_hook.take() {
-                assert!(started.send(()).is_ok());
-                assert!(release.recv().is_ok());
-            }
-        }
-        version_check
     }
 
     fn complete_key_registry_destruction(
