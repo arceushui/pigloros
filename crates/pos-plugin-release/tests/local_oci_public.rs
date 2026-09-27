@@ -32,7 +32,7 @@ impl PrivateRoot {
 
 impl Drop for PrivateRoot {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        drop(fs::remove_dir_all(&self.0));
     }
 }
 
