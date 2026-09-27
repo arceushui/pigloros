@@ -37,6 +37,7 @@ enum PublicationFaultPointV1 {
     ReadyWrite,
     ReadySync,
     FinalRename,
+    FinalCollision,
     ReleasesSync,
     NextIndexCreate,
     NextIndexWrite,
@@ -66,6 +67,28 @@ fn injected_fault(point: PublicationFaultPointV1) -> Result<(), LocalOciPublicat
             Ok(())
         }
     })
+}
+
+#[cfg(test)]
+fn fault_selected(point: PublicationFaultPointV1) -> bool {
+    PUBLICATION_FAULT.with(|fault| fault.get() == Some(point))
+}
+
+macro_rules! faulted_io {
+    ($selected:expr, $error:expr, $operation:expr) => {{
+        #[cfg(test)]
+        {
+            if $selected {
+                Err($error)
+            } else {
+                $operation
+            }
+        }
+        #[cfg(not(test))]
+        {
+            $operation
+        }
+    }};
 }
 
 fn random_nonce_hex() -> Result<String, LocalOciPublicationErrorV1> {
@@ -472,8 +495,6 @@ impl LocalOciPublisherV1 {
         fs::mkdirat(&releases, &staging_name, PRIVATE_DIRECTORY_MODE)
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         let staging = open_directory(&releases, &staging_name)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::OwnerWrite)?;
         write_private_file(
             &staging,
             "OWNER",
@@ -494,32 +515,49 @@ impl LocalOciPublisherV1 {
         }
         let index = format!("{{\"manifests\":[{{\"digest\":\"{}\",\"mediaType\":\"{}\",\"size\":{}}}],\"schemaVersion\":2}}", address.digest(), address.media_type(), address.size());
         write_private_file(&staging, "index.json", index.as_bytes())?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::DirectorySync)?;
-        fs::fsync(&sha256).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::DirectorySync),
+            rustix::io::Errno::IO,
+            fs::fsync(&sha256)
+        )
+        .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         fs::fsync(&blobs).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         let ready = format!(
             "pigloros-local-oci-ready-v1\n{}\n{}\n",
             address.digest(),
             address.size()
         );
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::ReadyWrite)?;
         write_private_file(&staging, "READY", ready.as_bytes())?;
         fs::fsync(&staging).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::FinalRename)?;
-        fs::renameat_with(
-            &releases,
-            &staging_name,
-            &releases,
-            &address.digest()[7..],
-            RenameFlags::NOREPLACE,
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::FinalRename)
+                || fault_selected(PublicationFaultPointV1::FinalCollision),
+            if fault_selected(PublicationFaultPointV1::FinalCollision) {
+                rustix::io::Errno::EXIST
+            } else {
+                rustix::io::Errno::IO
+            },
+            fs::renameat_with(
+                &releases,
+                &staging_name,
+                &releases,
+                &address.digest()[7..],
+                RenameFlags::NOREPLACE,
+            )
         )
-        .map_err(|_| LocalOciPublicationErrorV1::Collision)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::ReleasesSync)?;
-        fs::fsync(&releases).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
+                LocalOciPublicationErrorV1::Collision
+            } else {
+                LocalOciPublicationErrorV1::Sync
+            }
+        })?;
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::ReleasesSync),
+            rustix::io::Errno::IO,
+            fs::fsync(&releases)
+        )
+        .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         self.publish_index(address)?;
         Ok(PublishOutcomeV1::Published(address.clone()))
     }
@@ -539,25 +577,36 @@ impl LocalOciPublisherV1 {
             "{kind}.{}",
             random_nonce_hex().map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?
         );
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::QuarantineRename)?;
-        fs::renameat_with(
-            source,
-            name,
-            &quarantine,
-            &destination,
-            RenameFlags::NOREPLACE,
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::QuarantineRename),
+            rustix::io::Errno::IO,
+            fs::renameat_with(
+                source,
+                name,
+                &quarantine,
+                &destination,
+                RenameFlags::NOREPLACE,
+            )
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::QuarantineSourceSync)?;
-        fs::fsync(source).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::QuarantineDirectorySync)?;
-        fs::fsync(&quarantine).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::QuarantineRootSync)?;
-        fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::QuarantineSourceSync),
+            rustix::io::Errno::IO,
+            fs::fsync(source)
+        )
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::QuarantineDirectorySync),
+            rustix::io::Errno::IO,
+            fs::fsync(&quarantine)
+        )
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::QuarantineRootSync),
+            rustix::io::Errno::IO,
+            fs::fsync(&self.root)
+        )
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
     }
 
     fn publish_index(&self, address: &BundleAddressV1) -> Result<(), LocalOciPublicationErrorV1> {
@@ -587,24 +636,25 @@ impl LocalOciPublisherV1 {
         let bytes =
             serde_json::to_vec(&value).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let next = format!(".published.{}.next", &address.digest()[7..39]);
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::NextIndexCreate)?;
         write_private_file(&self.root, &next, &bytes)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::IndexRename)?;
-        fs::renameat_with(
-            &self.root,
-            &next,
-            &self.root,
-            INDEX_NAME,
-            RenameFlags::empty(),
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::IndexRename),
+            rustix::io::Errno::IO,
+            fs::renameat_with(
+                &self.root,
+                &next,
+                &self.root,
+                INDEX_NAME,
+                RenameFlags::empty(),
+            )
         )
         .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::RootSync)
-            .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))?;
-        fs::fsync(&self.root)
-            .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::RootSync),
+            rustix::io::Errno::IO,
+            fs::fsync(&self.root)
+        )
+        .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))
     }
 }
 
@@ -1034,34 +1084,40 @@ fn write_private_file(
     name: &str,
     bytes: &[u8],
 ) -> Result<(), LocalOciPublicationErrorV1> {
-    let mut file = fs::openat2(
-        root,
-        name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        PRIVATE_FILE_MODE,
-        resolution(),
+    let mut file = faulted_io!(
+        (name == "OWNER" && fault_selected(PublicationFaultPointV1::OwnerWrite))
+            || (name == "READY" && fault_selected(PublicationFaultPointV1::ReadyWrite))
+            || (name.starts_with(".published.")
+                && fault_selected(PublicationFaultPointV1::NextIndexCreate)),
+        rustix::io::Errno::IO,
+        fs::openat2(
+            root,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            PRIVATE_FILE_MODE,
+            resolution(),
+        )
     )
     .map(File::from)
     .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    #[cfg(test)]
-    if name.starts_with(".published.") {
-        injected_fault(PublicationFaultPointV1::NextIndexWrite)?;
-    } else if lowercase_hex(name, 64) {
-        injected_fault(PublicationFaultPointV1::BlobWrite)?;
-    }
-    file.write_all(bytes)
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    #[cfg(test)]
-    if name == "OWNER" {
-        injected_fault(PublicationFaultPointV1::OwnerSync)?;
-    } else if name == "READY" {
-        injected_fault(PublicationFaultPointV1::ReadySync)?;
-    } else if name.starts_with(".published.") {
-        injected_fault(PublicationFaultPointV1::NextIndexSync)?;
-    } else if lowercase_hex(name, 64) {
-        injected_fault(PublicationFaultPointV1::BlobSync)?;
-    }
-    fs::fsync(&file).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+    faulted_io!(
+        (name.starts_with(".published.")
+            && fault_selected(PublicationFaultPointV1::NextIndexWrite))
+            || (lowercase_hex(name, 64) && fault_selected(PublicationFaultPointV1::BlobWrite)),
+        std::io::Error::other("injected local OCI write fault"),
+        file.write_all(bytes)
+    )
+    .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    faulted_io!(
+        (name == "OWNER" && fault_selected(PublicationFaultPointV1::OwnerSync))
+            || (name == "READY" && fault_selected(PublicationFaultPointV1::ReadySync))
+            || (name.starts_with(".published.")
+                && fault_selected(PublicationFaultPointV1::NextIndexSync))
+            || (lowercase_hex(name, 64) && fault_selected(PublicationFaultPointV1::BlobSync)),
+        rustix::io::Errno::IO,
+        fs::fsync(&file)
+    )
+    .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
     fs::fsync(root).map_err(|_| LocalOciPublicationErrorV1::Sync)
 }
 
@@ -1333,7 +1389,7 @@ mod tests {
         let address = bundle.address().clone();
         assert_eq!(
             publish_with_fault(&publisher, &bundle, PublicationFaultPointV1::ReadyWrite),
-            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+            Err(LocalOciPublicationErrorV1::Io)
         );
         PUBLICATION_FAULT
             .with(|fault| fault.set(Some(PublicationFaultPointV1::RecoveryCleanupSync)));
@@ -1365,14 +1421,27 @@ mod tests {
             PublicationFaultPointV1::ReadyWrite,
             PublicationFaultPointV1::ReadySync,
             PublicationFaultPointV1::FinalRename,
+            PublicationFaultPointV1::FinalCollision,
         ] {
             let root = private_root("pre-final")?;
             let publisher = LocalOciPublisherV1::open(&root)?;
             let bundle = bundle()?;
             let address = bundle.address().clone();
+            let expected = match point {
+                PublicationFaultPointV1::OwnerSync
+                | PublicationFaultPointV1::BlobSync
+                | PublicationFaultPointV1::DirectorySync
+                | PublicationFaultPointV1::ReadySync => LocalOciPublicationErrorV1::Sync,
+                PublicationFaultPointV1::BlobWrite | PublicationFaultPointV1::ReadyWrite => {
+                    LocalOciPublicationErrorV1::Io
+                }
+                PublicationFaultPointV1::FinalRename => LocalOciPublicationErrorV1::Sync,
+                PublicationFaultPointV1::FinalCollision => LocalOciPublicationErrorV1::Collision,
+                _ => LocalOciPublicationErrorV1::RecoveryRequired,
+            };
             assert_eq!(
                 publish_with_fault(&publisher, &bundle, point),
-                Err(LocalOciPublicationErrorV1::RecoveryRequired)
+                Err(expected)
             );
             assert_eq!(
                 publisher.read_verified(&address),
@@ -1399,7 +1468,7 @@ mod tests {
         let address = bundle.address().clone();
         assert_eq!(
             publish_with_fault(&publisher, &bundle, PublicationFaultPointV1::OwnerWrite),
-            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+            Err(LocalOciPublicationErrorV1::Io)
         );
         assert_eq!(
             publisher.read_verified(&address),
@@ -1436,9 +1505,14 @@ mod tests {
             let publisher = LocalOciPublisherV1::open(&root)?;
             let bundle = bundle()?;
             let address = bundle.address().clone();
+            let expected = match point {
+                PublicationFaultPointV1::NextIndexCreate
+                | PublicationFaultPointV1::NextIndexWrite => LocalOciPublicationErrorV1::Io,
+                _ => LocalOciPublicationErrorV1::Sync,
+            };
             assert_eq!(
                 publish_with_fault(&publisher, &bundle, point),
-                Err(LocalOciPublicationErrorV1::RecoveryRequired)
+                Err(expected)
             );
             assert_eq!(
                 publisher.read_verified(&address),
@@ -1497,7 +1571,7 @@ mod tests {
         PUBLICATION_FAULT.with(|fault| fault.set(Some(PublicationFaultPointV1::ReadyWrite)));
         let failed = publisher.publish(&bundle);
         PUBLICATION_FAULT.with(|fault| fault.set(None));
-        assert_eq!(failed, Err(LocalOciPublicationErrorV1::RecoveryRequired));
+        assert_eq!(failed, Err(LocalOciPublicationErrorV1::Io));
         assert_eq!(
             publisher.read_verified(&address),
             Err(ReleaseSourceErrorV1::NotFound)
