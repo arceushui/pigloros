@@ -84,7 +84,12 @@ impl RecipientTimelineExportV1 {
         if encoded.len() > MAX_ENVELOPE_BYTES {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
-        preflight_cbor(encoded, MAX_CHUNKS + 32)?;
+        preflight_cbor(
+            encoded,
+            MAX_CHUNKS + 32,
+            MAX_CHUNKS,
+            CHUNK_BYTES + TAG_BYTES,
+        )?;
         let value: Value =
             ciborium::from_reader(encoded).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
         let Value::Array(fields) = value else {
@@ -359,7 +364,12 @@ fn decode_payload(bytes: &[u8]) -> Result<TimelineExport, RecipientExportErrorV1
     if bytes.is_empty() || bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
-    preflight_cbor(bytes, MAX_EVENTS.saturating_mul(13))?;
+    preflight_cbor(
+        bytes,
+        MAX_EVENTS.saturating_mul(13),
+        MAX_EVENTS,
+        MAX_EVENT_PAYLOAD_BYTES,
+    )?;
     let value: Value =
         ciborium::from_reader(bytes).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
     let Value::Array(fields) = value else {
@@ -775,10 +785,23 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
 ///
 /// The structural decoders below enforce the fixed schemas. This pass only
 /// permits the primitive forms used by TEP1/TRX1 and caps depth and items.
-fn preflight_cbor(bytes: &[u8], max_items: usize) -> Result<(), RecipientExportErrorV1> {
+fn preflight_cbor(
+    bytes: &[u8],
+    max_items: usize,
+    max_array_items: usize,
+    max_string_bytes: usize,
+) -> Result<(), RecipientExportErrorV1> {
     let mut position = 0;
     let mut items = 0;
-    scan_cbor_item(bytes, &mut position, 0, &mut items, max_items)?;
+    scan_cbor_item(
+        bytes,
+        &mut position,
+        0,
+        &mut items,
+        max_items,
+        max_array_items,
+        max_string_bytes,
+    )?;
     if position == bytes.len() {
         Ok(())
     } else {
@@ -792,6 +815,8 @@ fn scan_cbor_item(
     depth: usize,
     items: &mut usize,
     max_items: usize,
+    max_array_items: usize,
+    max_string_bytes: usize,
 ) -> Result<(), RecipientExportErrorV1> {
     if depth > MAX_NESTING || *items >= max_items {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
@@ -808,6 +833,9 @@ fn scan_cbor_item(
         2 | 3 => {
             let length =
                 usize::try_from(length).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+            if length > max_string_bytes {
+                return Err(RecipientExportErrorV1::FieldOutOfBounds);
+            }
             let end = position
                 .checked_add(length)
                 .ok_or(RecipientExportErrorV1::FieldOutOfBounds)?;
@@ -820,8 +848,19 @@ fn scan_cbor_item(
         4 => {
             let length =
                 usize::try_from(length).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+            if length > max_array_items || length > max_items.saturating_sub(*items) {
+                return Err(RecipientExportErrorV1::FieldOutOfBounds);
+            }
             for _ in 0..length {
-                scan_cbor_item(bytes, position, depth + 1, items, max_items)?;
+                scan_cbor_item(
+                    bytes,
+                    position,
+                    depth + 1,
+                    items,
+                    max_items,
+                    max_array_items,
+                    max_string_bytes,
+                )?;
             }
             Ok(())
         }
