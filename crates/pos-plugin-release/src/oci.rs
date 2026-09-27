@@ -455,7 +455,7 @@ fn verify_descriptor_bytes(
     Ok(())
 }
 
-pub fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
+pub(crate) fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
     if bytes.is_empty() || bytes.len() > MAX_MANIFEST_BYTES || has_duplicate_object_keys(bytes) {
         return Err(ReleaseSourceErrorV1::InvalidDescriptor);
     }

@@ -47,7 +47,7 @@ fn staging_name_parts(name: &str) -> Option<(&str, &str)> {
 }
 
 /// Closed failures for the Linux-local OCI publisher.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LocalOciPublicationErrorV1 {
     #[error("release address is invalid")]
     InvalidAddress,
@@ -65,6 +65,8 @@ pub enum LocalOciPublicationErrorV1 {
     LockUnavailable,
     #[error("local OCI recovery is required")]
     RecoveryRequired,
+    #[error("local OCI publication outcome is unknown")]
+    OutcomeUnknown(BundleAddressV1),
 }
 
 /// The result of an immutable local publication attempt.
@@ -74,6 +76,15 @@ pub enum PublishOutcomeV1 {
     Published(BundleAddressV1),
     /// An equivalent committed release already existed.
     AlreadyPublished(BundleAddressV1),
+}
+
+/// Address-scoped result after global recovery and full release validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecoveryOutcomeV1 {
+    /// The supplied address is durably indexed and fully revalidated.
+    Committed(BundleAddressV1),
+    /// The supplied address is absent from both index and final directory.
+    Unpublished(BundleAddressV1),
 }
 
 /// Bounded cleanup facts from global recovery.
@@ -146,7 +157,7 @@ impl LocalOciPublisherV1 {
             .recover_locked()
             .and_then(|_| self.publish_locked(bundle));
         fs::flock(&lock, FlockOperation::Unlock)
-            .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
+            .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(bundle.address().clone()))?;
         result
     }
 
@@ -162,6 +173,40 @@ impl LocalOciPublisherV1 {
         let result = self.recover_locked();
         fs::flock(&lock, FlockOperation::Unlock)
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
+        result
+    }
+
+    /// Resolve one uncertain publication outcome under the exclusive lock.
+    ///
+    /// # Errors
+    /// Returns a closed recovery error if global state, the indexed release,
+    /// or durable root synchronization cannot be validated.
+    pub fn recover(
+        &self,
+        address: BundleAddressV1,
+    ) -> Result<RecoveryOutcomeV1, LocalOciPublicationErrorV1> {
+        self.verify_root()?;
+        let lock = open_private_file(&self.root, LOCK_NAME)?;
+        fs::flock(&lock, FlockOperation::LockExclusive)
+            .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
+        let result = self.recover_locked().and_then(|_| {
+            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            match self.read_locked(&address) {
+                Ok(_) => Ok(RecoveryOutcomeV1::Committed(address.clone())),
+                Err(ReleaseSourceErrorV1::NotFound) => {
+                    let releases = open_directory(&self.root, RELEASES_NAME)?;
+                    match fs::statat(&releases, &address.digest()[7..], AtFlags::SYMLINK_NOFOLLOW) {
+                        Err(rustix::io::Errno::NOENT) => {
+                            Ok(RecoveryOutcomeV1::Unpublished(address.clone()))
+                        }
+                        _ => Err(LocalOciPublicationErrorV1::RecoveryRequired),
+                    }
+                }
+                Err(_) => Err(LocalOciPublicationErrorV1::RecoveryRequired),
+            }
+        });
+        fs::flock(&lock, FlockOperation::Unlock)
+            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         result
     }
 
@@ -226,7 +271,12 @@ impl LocalOciPublisherV1 {
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             Self::read_release(&final_directory, &address)
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            self.publish_index(&address)?;
+            self.publish_index(&address).map_err(|error| match error {
+                LocalOciPublicationErrorV1::OutcomeUnknown(_) => {
+                    LocalOciPublicationErrorV1::RecoveryRequired
+                }
+                other => other,
+            })?;
             committed.push(address);
         }
         Ok(RecoveryReportV1 {
@@ -337,14 +387,14 @@ impl LocalOciPublisherV1 {
         }
         let releases = open_directory(&self.root, RELEASES_NAME)?;
         let staging_nonce = random_nonce_hex()?;
-        let staging_name = format!(".{}.staging.{staging_nonce}", &address.digest()[7..],);
+        let staging_name = format!(".{}.staging.{staging_nonce}", &address.digest()[7..]);
         fs::mkdirat(&releases, &staging_name, PRIVATE_DIRECTORY_MODE)
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         let staging = open_directory(&releases, &staging_name)?;
         write_private_file(
             &staging,
             "OWNER",
-            format!("pigloros-local-oci-staging-v1\n{staging_nonce}\n",).as_bytes(),
+            format!("pigloros-local-oci-staging-v1\n{staging_nonce}\n").as_bytes(),
         )?;
         write_private_file(
             &staging,
@@ -441,7 +491,8 @@ impl LocalOciPublisherV1 {
             RenameFlags::empty(),
         )
         .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::Sync)
+        fs::fsync(&self.root)
+            .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))
     }
 }
 
@@ -657,6 +708,13 @@ impl LocalOciPublisherV1 {
         if ready != expected_ready.as_bytes() {
             return Err(ReleaseSourceErrorV1::Uncommitted);
         }
+        Self::read_release_blobs(release, address)
+    }
+
+    fn read_release_blobs(
+        release: &File,
+        address: &BundleAddressV1,
+    ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let blobs = open_directory(release, "blobs").map_err(map_publication_to_source)?;
         let blob_directories = directory_entries(&blobs)
             .map_err(map_publication_to_source)?
@@ -795,7 +853,7 @@ fn read_limited(mut file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceEr
     }
 }
 
-const fn map_publication_to_source(error: LocalOciPublicationErrorV1) -> ReleaseSourceErrorV1 {
+fn map_publication_to_source(error: LocalOciPublicationErrorV1) -> ReleaseSourceErrorV1 {
     match error {
         LocalOciPublicationErrorV1::InvalidLayout => ReleaseSourceErrorV1::InvalidLayout,
         LocalOciPublicationErrorV1::Sync | LocalOciPublicationErrorV1::Io => {

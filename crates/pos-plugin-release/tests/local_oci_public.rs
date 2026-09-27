@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pos_plugin_release::{
     verify_oci_closure_v1, BundleAddressV1, LocalOciPublicationErrorV1, LocalOciPublisherV1,
-    PublishOutcomeV1, ReleaseSourceErrorV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
+    PublishOutcomeV1, RecoveryOutcomeV1, ReleaseSourceErrorV1, ReleaseSourceV1,
+    VerifiedReleaseBundleV1,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -134,10 +135,18 @@ fn local_publication_roundtrip_and_index_shape() -> Result<(), Box<dyn std::erro
         Err(ReleaseSourceErrorV1::NotFound)
     );
     assert_eq!(
+        publisher.recover(address.clone())?,
+        RecoveryOutcomeV1::Unpublished(address.clone())
+    );
+    assert_eq!(
         publisher.publish(&bundle)?,
         PublishOutcomeV1::Published(address.clone())
     );
     assert_eq!(publisher.read_verified(&address)?, bundle);
+    assert_eq!(
+        publisher.recover(address.clone())?,
+        RecoveryOutcomeV1::Committed(address.clone())
+    );
     assert_eq!(
         publisher.publish(&bundle)?,
         PublishOutcomeV1::AlreadyPublished(address.clone())
@@ -200,6 +209,10 @@ fn recovery_revalidates_indexed_and_unindexed_finals() -> Result<(), Box<dyn std
     );
     assert_eq!(
         publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_eq!(
+        publisher.recover(address.clone()),
         Err(LocalOciPublicationErrorV1::RecoveryRequired)
     );
     fs::write(&layout, b"{\"imageLayoutVersion\":\"1.0.0\"}\n")?;

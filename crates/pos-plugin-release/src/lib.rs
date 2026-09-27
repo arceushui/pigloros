@@ -16,6 +16,8 @@ mod oci;
 #[cfg(target_os = "linux")]
 pub use local::PublishOutcomeV1;
 #[cfg(target_os = "linux")]
+pub use local::RecoveryOutcomeV1;
+#[cfg(target_os = "linux")]
 pub use local::RecoveryReportV1;
 #[cfg(target_os = "linux")]
 pub use local::{LocalOciPublicationErrorV1, LocalOciPublisherV1};
