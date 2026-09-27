@@ -2811,9 +2811,6 @@ impl ErasureVerifiedInventoryV1 {
                     .zip(classifications)
                     .filter_map(|((state, _), classification)| {
                         let request = state.request().reference();
-                        if classification.request != request {
-                            return Some(Err(ErasureErrorV1::ProvenanceMissing));
-                        }
                         classification.membership.included_scope()?;
                         let Some(scope) = state.scope() else {
                             return Some(Err(ErasureErrorV1::ProvenanceMissing));
