@@ -1565,7 +1565,7 @@ mod tests {
         };
         artifact[1] = Value::Text("tick".to_owned());
         let invalid_artifact =
-            revocation(&signer, root_digest, 1, None, vec![Value::Array(artifact)])?;
+            self::revocation(&signer, root_digest, 1, None, vec![Value::Array(artifact)])?;
         assert!(PluginRevocationRecordV1::decode(&invalid_artifact).is_err());
 
         let invalid_artifact = signed_record(
