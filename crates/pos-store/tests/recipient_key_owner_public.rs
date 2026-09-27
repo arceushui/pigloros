@@ -77,6 +77,7 @@ fn recipient_owner_public_contract_recovers_and_destroys_the_bound_file(
         )
         .is_none());
     assert!(registry.tombstone(descriptor.identity()).is_some());
+    assert!(store.recover_recipient_keys(&owner).is_err());
     Ok(())
 }
 
