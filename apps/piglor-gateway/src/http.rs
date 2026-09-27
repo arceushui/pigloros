@@ -1375,6 +1375,7 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(second["events"][0]["seq"], 2);
 
         let other = gateway.create_timeline("cursor-other").await.test_ok();
+        drop(gateway);
         let (status, _) = json_request(
             app.clone(),
             "GET",
