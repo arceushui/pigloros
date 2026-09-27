@@ -3094,11 +3094,8 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            InstalledCallbacksV1 {
-                driver,
-                approver,
-                approver_event_types: approver_event_types.into_iter().collect(),
-            },
+            (driver, approver),
+            approver_event_types,
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
@@ -3179,11 +3176,8 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            InstalledCallbacksV1 {
-                driver,
-                approver,
-                approver_event_types: approver_event_types.into_iter().collect(),
-            },
+            (driver, approver),
+            approver_event_types,
             RegistrationOptions {
                 registration: None,
                 output_admission: None,
@@ -3250,12 +3244,17 @@ impl PluginRegistry {
             return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
         }
         self.validate_installed_registration_details(plugin, &binding, &registration)?;
-        let callbacks = binding.take_callbacks();
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,
             reducer,
-            callbacks,
+            (driver, approver),
+            approver_event_types,
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
@@ -3313,7 +3312,8 @@ impl PluginRegistry {
         plugin: &dyn Plugin,
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
-        callbacks: InstalledCallbacksV1,
+        callbacks: (Option<Box<dyn Driver>>, Option<Box<dyn ActionApprover>>),
+        approver_event_types: impl IntoIterator<Item = Kind>,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         match (
@@ -3395,11 +3395,8 @@ impl PluginRegistry {
         self.validate_manifest_candidate(plugin, &admission, &options)?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
-        let InstalledCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = callbacks;
+        let (driver, approver) = callbacks;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
             reducer,
