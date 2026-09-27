@@ -1544,6 +1544,7 @@ impl OutputAdmissionV1 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use pos_conformance::BundleContractErrorV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         output_policy::{
@@ -1581,17 +1582,13 @@ mod tests {
     }
 
     #[test]
-    fn draft_epf1_is_available_only_to_generated_fixture_source() {
+    fn draft_epf1_requires_generated_source() -> Result<(), BundleContractErrorV1> {
         let profile_id = "deterministic-local-v1";
-        let generated = execution_profile_artifact_v1(
-            profile_id,
-            InstalledOutputPolicySourceV1::Generated,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let generated =
+            execution_profile_artifact_v1(profile_id, InstalledOutputPolicySourceV1::Generated)?;
         assert_eq!(
             generated,
-            pos_conformance::draft_execution_profile_bytes_v1(profile_id)
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+            pos_conformance::draft_execution_profile_bytes_v1(profile_id)?
         );
         for source in [
             InstalledOutputPolicySourceV1::Gateway,
@@ -1604,9 +1601,10 @@ mod tests {
         ] {
             assert_eq!(
                 execution_profile_artifact_v1(profile_id, source),
-                Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+                Err(BundleContractErrorV1::ProfileInvalid)
             );
         }
+        Ok(())
     }
 
     #[test]
