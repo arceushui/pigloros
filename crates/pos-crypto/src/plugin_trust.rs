@@ -92,6 +92,7 @@ struct RootSignature {
 }
 
 #[derive(Clone, Debug)]
+/// One exact canonical PTR1 record. The stateless verifier authenticates its chain.
 pub struct PluginTrustRootRecordV1 {
     scope: String,
     version: u64,
@@ -124,6 +125,7 @@ struct RevokedArtifact {
 }
 
 #[derive(Clone, Debug)]
+/// One exact canonical PRV1 record. The stateless verifier authenticates its chain.
 pub struct PluginRevocationRecordV1 {
     scope: String,
     epoch: u64,
@@ -284,7 +286,7 @@ impl<'a> Reader<'a> {
                         .try_into()
                         .map_err(|_| PluginTrustErrorV1::InvalidEncoding)?,
                 ));
-                if value <= u64::from(u8::MAX) {
+                if u8::try_from(value).is_ok() {
                     return Err(PluginTrustErrorV1::InvalidEncoding);
                 }
                 value
@@ -295,7 +297,7 @@ impl<'a> Reader<'a> {
                         .try_into()
                         .map_err(|_| PluginTrustErrorV1::InvalidEncoding)?,
                 ));
-                if value <= u64::from(u16::MAX) {
+                if u16::try_from(value).is_ok() {
                     return Err(PluginTrustErrorV1::InvalidEncoding);
                 }
                 value
@@ -306,7 +308,7 @@ impl<'a> Reader<'a> {
                         .try_into()
                         .map_err(|_| PluginTrustErrorV1::InvalidEncoding)?,
                 );
-                if value <= u64::from(u32::MAX) {
+                if u32::try_from(value).is_ok() {
                     return Err(PluginTrustErrorV1::InvalidEncoding);
                 }
                 value
@@ -380,7 +382,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn finish(&self) -> Result<(), PluginTrustErrorV1> {
+    const fn finish(&self) -> Result<(), PluginTrustErrorV1> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
@@ -405,10 +407,12 @@ fn read_publisher(reader: &mut Reader<'_>) -> Result<PublisherKey, PluginTrustEr
     if epoch == 0 {
         return Err(PluginTrustErrorV1::InvalidEncoding);
     }
+    let public = reader.bytes()?;
+    VerifyingKey::from_bytes(&public).map_err(|_| PluginTrustErrorV1::InvalidEncoding)?;
     Ok(PublisherKey {
         owner,
         epoch,
-        public: reader.bytes()?,
+        public,
     })
 }
 
@@ -506,6 +510,7 @@ impl PluginTrustRootRecordV1 {
             }
             let id = reader.bytes()?;
             let public = reader.bytes()?;
+            VerifyingKey::from_bytes(&public).map_err(|_| PluginTrustErrorV1::InvalidEncoding)?;
             if id != root_key_id(public)
                 || keys.last().is_some_and(|old: &RootKey| old.id >= id)
                 || !root_publics.insert(public)
@@ -794,35 +799,20 @@ fn validate_cumulative_artifacts(
     Ok(())
 }
 
-/// Verify complete genesis-anchored PTR1 and PRV1 histories at explicit coordinates.
-///
-/// # Errors
-/// Returns no evidence when any bound, anchor, signature, chain, or expiry check fails.
-pub fn verify_plugin_trust_v1(
+fn verify_root_history(
     anchor: &TrustedPluginRootAnchorV1,
     root_bytes: &[&[u8]],
-    revocation_bytes: &[&[u8]],
     evaluation_utc_second: i64,
-    evaluation_tick: u64,
-) -> Result<VerifiedPluginTrustEvidenceV1, PluginTrustErrorV1> {
-    if root_bytes.len() > 64 {
-        return Err(PluginTrustErrorV1::RootHistoryCapacityExceeded);
-    }
-    if revocation_bytes.len() > 256 {
-        return Err(PluginTrustErrorV1::RevocationHistoryCapacityExceeded);
-    }
-    if root_bytes.is_empty() || revocation_bytes.is_empty() {
-        return Err(PluginTrustErrorV1::ChainDiscontinuity);
-    }
+) -> Result<Vec<PluginTrustRootRecordV1>, PluginTrustErrorV1> {
     let roots = root_bytes
         .iter()
         .map(|bytes| PluginTrustRootRecordV1::decode(bytes))
         .collect::<Result<Vec<_>, _>>()?;
     let genesis = &roots[0];
-    if genesis.digest != anchor.genesis_digest
-        || genesis.scope != anchor.scope
-        || genesis.previous.is_some()
-    {
+    if genesis.digest != anchor.genesis_digest {
+        return Err(PluginTrustErrorV1::AnchorMismatch);
+    }
+    if genesis.scope != anchor.scope || genesis.previous.is_some() {
         return Err(PluginTrustErrorV1::AnchorMismatch);
     }
     let mut root_publics = BTreeSet::new();
@@ -855,12 +845,19 @@ pub fn verify_plugin_trust_v1(
     if !root_publics.is_disjoint(&publisher_publics) {
         return Err(PluginTrustErrorV1::ChainDiscontinuity);
     }
-    let terminal_root = roots.last().ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
-    if evaluation_utc_second < terminal_root.not_before
-        || evaluation_utc_second >= terminal_root.expires
-    {
+    let terminal = roots.last().ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
+    if evaluation_utc_second < terminal.not_before || evaluation_utc_second >= terminal.expires {
         return Err(PluginTrustErrorV1::Expired);
     }
+    Ok(roots)
+}
+
+fn verify_revocation_history(
+    scope: &str,
+    roots: &[PluginTrustRootRecordV1],
+    revocation_bytes: &[&[u8]],
+    evaluation_utc_second: i64,
+) -> Result<Vec<PluginRevocationRecordV1>, PluginTrustErrorV1> {
     let revocations = revocation_bytes
         .iter()
         .map(|bytes| PluginRevocationRecordV1::decode(bytes))
@@ -871,7 +868,7 @@ pub fn verify_plugin_trust_v1(
         .flat_map(|root| root.publishers.iter().copied())
         .collect();
     for (index, revocation) in revocations.iter().enumerate() {
-        if revocation.scope != anchor.scope {
+        if revocation.scope != scope {
             return Err(PluginTrustErrorV1::ChainDiscontinuity);
         }
         let root_index = roots
@@ -923,17 +920,50 @@ pub fn verify_plugin_trust_v1(
             return Err(PluginTrustErrorV1::ChainDiscontinuity);
         }
     }
+    let terminal = revocations
+        .last()
+        .ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
+    let terminal_root = roots.last().ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
+    if terminal.root_digest != terminal_root.digest {
+        return Err(PluginTrustErrorV1::ChainDiscontinuity);
+    }
+    if evaluation_utc_second < terminal.not_before || evaluation_utc_second >= terminal.expires {
+        return Err(PluginTrustErrorV1::Expired);
+    }
+    Ok(revocations)
+}
+
+/// Verify complete genesis-anchored PTR1 and PRV1 histories at explicit coordinates.
+///
+/// # Errors
+/// Returns no evidence when any bound, anchor, signature, chain, or expiry check fails.
+pub fn verify_plugin_trust_v1(
+    anchor: &TrustedPluginRootAnchorV1,
+    root_bytes: &[&[u8]],
+    revocation_bytes: &[&[u8]],
+    evaluation_utc_second: i64,
+    evaluation_tick: u64,
+) -> Result<VerifiedPluginTrustEvidenceV1, PluginTrustErrorV1> {
+    if root_bytes.len() > 64 {
+        return Err(PluginTrustErrorV1::RootHistoryCapacityExceeded);
+    }
+    if revocation_bytes.len() > 256 {
+        return Err(PluginTrustErrorV1::RevocationHistoryCapacityExceeded);
+    }
+    if root_bytes.is_empty() || revocation_bytes.is_empty() {
+        return Err(PluginTrustErrorV1::ChainDiscontinuity);
+    }
+    let roots = verify_root_history(anchor, root_bytes, evaluation_utc_second)?;
+    let revocations = verify_revocation_history(
+        &anchor.scope,
+        &roots,
+        revocation_bytes,
+        evaluation_utc_second,
+    )?;
+    let terminal_root = roots.last().ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
     let terminal_revocation = revocations
         .last()
         .ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
-    if terminal_revocation.root_digest != terminal_root.digest {
-        return Err(PluginTrustErrorV1::ChainDiscontinuity);
-    }
-    if evaluation_utc_second < terminal_revocation.not_before
-        || evaluation_utc_second >= terminal_revocation.expires
-    {
-        return Err(PluginTrustErrorV1::Expired);
-    }
     Ok(VerifiedPluginTrustEvidenceV1 {
         scope: anchor.scope.clone(),
         root_version: terminal_root.version,
@@ -1088,6 +1118,52 @@ mod tests {
         Ok((signer, publisher, root, revocation))
     }
 
+    fn revoked_artifact(digest: [u8; 32], tick: u64) -> Value {
+        Value::Array(vec![
+            bytes(digest),
+            unsigned(tick),
+            unsigned(1),
+            Value::Null,
+        ])
+    }
+
+    fn rotated_root(
+        current: &SigningKey,
+        publisher: [u8; 32],
+        previous: [u8; 32],
+        signers: &[&SigningKey],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let public = current.verifying_key().to_bytes();
+        signed_record(
+            vec![
+                Value::Text("PTR1".to_owned()),
+                unsigned(1),
+                Value::Text("scope".to_owned()),
+                unsigned(2),
+                signed(0),
+                signed(100),
+                bytes(previous),
+                unsigned(1),
+                Value::Array(vec![Value::Array(vec![
+                    bytes(root_key_id(public)),
+                    bytes(public),
+                ])]),
+                Value::Array(vec![Value::Array(vec![
+                    Value::Text("publisher".to_owned()),
+                    unsigned(3),
+                    unsigned(1),
+                    bytes(publisher),
+                ])]),
+                Value::Array(vec![Value::Array(vec![
+                    Value::Text("plugin-a".to_owned()),
+                    Value::Text("publisher".to_owned()),
+                ])]),
+            ],
+            ROOT_SIGNATURE_DOMAIN,
+            signers,
+        )
+    }
+
     #[test]
     fn pinned_genesis_and_empty_revocation_produce_bound_facts(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1191,6 +1267,205 @@ mod tests {
             verify_plugin_trust_v1(&anchor, &root_refs[1..64], &revocation_refs[..256], 50, 5),
             Err(PluginTrustErrorV1::AnchorMismatch)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn cumulative_revocation_is_set_inclusion_and_tick_bound(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, _, root, _) = fixture()?;
+        let root_digest = *blake3::hash(&root).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
+        let first = revocation(
+            &signer,
+            root_digest,
+            1,
+            None,
+            vec![revoked_artifact([2; 32], 5)],
+        )?;
+        let first_digest = *blake3::hash(&first).as_bytes();
+        let second = revocation(
+            &signer,
+            root_digest,
+            2,
+            Some(first_digest),
+            vec![revoked_artifact([1; 32], 5), revoked_artifact([2; 32], 5)],
+        )?;
+        let before = verify_plugin_trust_v1(&anchor, &[&root], &[&first, &second], 50, 4)?;
+        assert_eq!(before.effective_artifact_revocations().count(), 0);
+        let effective = verify_plugin_trust_v1(&anchor, &[&root], &[&first, &second], 50, 5)?;
+        assert_eq!(
+            effective
+                .effective_artifact_revocations()
+                .collect::<Vec<_>>(),
+            vec![[1; 32], [2; 32]]
+        );
+        let missing_old = revocation(
+            &signer,
+            root_digest,
+            2,
+            Some(first_digest),
+            vec![revoked_artifact([1; 32], 5)],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&first, &missing_old], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        let changed_old = revocation(
+            &signer,
+            root_digest,
+            2,
+            Some(first_digest),
+            vec![revoked_artifact([2; 32], 4)],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&first, &changed_old], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_collection_and_capacity_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, _, root, _) = fixture()?;
+        let root_digest = *blake3::hash(&root).as_bytes();
+        let unsorted = revocation(
+            &signer,
+            root_digest,
+            1,
+            None,
+            vec![revoked_artifact([2; 32], 5), revoked_artifact([1; 32], 5)],
+        )?;
+        assert!(matches!(
+            PluginRevocationRecordV1::decode(&unsorted),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+        let over_capacity = (0..=4096_u32)
+            .map(|index| {
+                let mut digest = [0_u8; 32];
+                digest[..4].copy_from_slice(&index.to_be_bytes());
+                revoked_artifact(digest, 5)
+            })
+            .collect();
+        let over_capacity = revocation(&signer, root_digest, 1, None, over_capacity)?;
+        assert!(matches!(
+            PluginRevocationRecordV1::decode(&over_capacity),
+            Err(PluginTrustErrorV1::RevocationCapacityExhausted)
+        ));
+        let mut noncanonical = root.clone();
+        assert_eq!(
+            &noncanonical[..7],
+            &[0x8c, 0x64, b'P', b'T', b'R', b'1', 0x01]
+        );
+        noncanonical.splice(6..7, [0x18, 0x01]);
+        assert!(matches!(
+            PluginTrustRootRecordV1::decode(&noncanonical),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_requires_old_and_new_thresholds_and_revocation_moves_forward(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (old, publisher, genesis, _) = fixture()?;
+        let new = SigningKey::from_bytes(&[9; 32]);
+        let genesis_digest = *blake3::hash(&genesis).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", genesis_digest)?;
+        let rotated = rotated_root(&new, publisher, genesis_digest, &[&old, &new])?;
+        let rotated_digest = *blake3::hash(&rotated).as_bytes();
+        let first = revocation(&old, genesis_digest, 1, None, Vec::new())?;
+        let second = revocation(
+            &new,
+            rotated_digest,
+            2,
+            Some(*blake3::hash(&first).as_bytes()),
+            Vec::new(),
+        )?;
+        let evidence =
+            verify_plugin_trust_v1(&anchor, &[&genesis, &rotated], &[&first, &second], 50, 5)?;
+        assert_eq!(evidence.terminal_root(), (2, rotated_digest));
+        for signers in [&[&old][..], &[&new][..]] {
+            let invalid = rotated_root(&new, publisher, genesis_digest, signers)?;
+            let invalid_revocation = revocation(
+                &new,
+                *blake3::hash(&invalid).as_bytes(),
+                1,
+                None,
+                Vec::new(),
+            )?;
+            assert!(matches!(
+                verify_plugin_trust_v1(
+                    &anchor,
+                    &[&genesis, &invalid],
+                    &[&invalid_revocation],
+                    50,
+                    5
+                ),
+                Err(PluginTrustErrorV1::ThresholdNotMet)
+            ));
+        }
+        let backward = revocation(
+            &old,
+            genesis_digest,
+            3,
+            Some(*blake3::hash(&second).as_bytes()),
+            Vec::new(),
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(
+                &anchor,
+                &[&genesis, &rotated],
+                &[&first, &second, &backward],
+                50,
+                5
+            ),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn every_truncation_and_selected_single_byte_tamper_fails_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_, _, root, revocation) = fixture()?;
+        let anchor = TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&root).as_bytes())?;
+        for length in 0..root.len() {
+            assert!(PluginTrustRootRecordV1::decode(&root[..length]).is_err());
+        }
+        for length in 0..revocation.len() {
+            assert!(PluginRevocationRecordV1::decode(&revocation[..length]).is_err());
+        }
+        let replacements = [
+            0x00, 0x01, 0x18, 0x19, 0x1a, 0x1b, 0x38, 0x39, 0x3a, 0x3b, 0x58, 0x59, 0x5a,
+            0x5b, 0x78, 0x79, 0x7a, 0x7b, 0x98, 0x99, 0x9a, 0x9b, 0x9f, 0xff,
+        ];
+        for offset in 0..root.len() {
+            for replacement in replacements {
+                if root[offset] == replacement {
+                    continue;
+                }
+                let mut changed = root.clone();
+                changed[offset] = replacement;
+                assert!(
+                    verify_plugin_trust_v1(&anchor, &[&changed], &[&revocation], 50, 5).is_err(),
+                    "PTR1 byte {offset} accepted after replacement {replacement:02x}"
+                );
+            }
+        }
+        for offset in 0..revocation.len() {
+            for replacement in replacements {
+                if revocation[offset] == replacement {
+                    continue;
+                }
+                let mut changed = revocation.clone();
+                changed[offset] = replacement;
+                assert!(
+                    verify_plugin_trust_v1(&anchor, &[&root], &[&changed], 50, 5).is_err(),
+                    "PRV1 byte {offset} accepted after replacement {replacement:02x}"
+                );
+            }
+        }
         Ok(())
     }
 }
