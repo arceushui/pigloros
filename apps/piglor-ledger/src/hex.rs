@@ -8,13 +8,13 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     if !s.len().is_multiple_of(2) {
         return Err("odd-length hex string".to_owned());
     }
-    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(s.len() / 2));
     let mut chars = s.chars();
     while let (Some(h), Some(l)) = (chars.next(), chars.next()) {
         let byte = (nib(h)? << 4) | nib(l)?;
         out.push(byte);
     }
-    Ok(out)
+    Ok(std::mem::take(&mut *out))
 }
 
 /// Convert a single hex character to its nibble value (0–15).
