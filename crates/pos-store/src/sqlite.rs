@@ -4758,12 +4758,7 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
     where
         F: FnOnce() -> T,
     {
-        if identity.epoch == 0 {
-            return Err(KeyRegistryErrorV1::InvalidEpoch);
-        }
-        if identity.role != KeyRoleV1::SubjectDataEncryption {
-            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
-        }
+        identity.validate_historical_subject_decryption()?;
         // A read-only decryption still takes the writer lock: rotation and
         // destruction must serialize before or after the held callback.
         self.conn

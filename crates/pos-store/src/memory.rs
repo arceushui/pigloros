@@ -4411,12 +4411,7 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
     where
         F: FnOnce() -> T,
     {
-        if identity.epoch == 0 {
-            return Err(KeyRegistryErrorV1::InvalidEpoch);
-        }
-        if identity.role != KeyRoleV1::SubjectDataEncryption {
-            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
-        }
+        identity.validate_historical_subject_decryption()?;
         // The mutable store owner is held through the callback, as it is for
         // signing and destruction on this single-process adapter.
         let mut registry = self

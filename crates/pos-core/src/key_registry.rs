@@ -180,6 +180,23 @@ impl KeyIdentityV1 {
     pub fn new(owner_id: impl Into<OwnerIdV1>, role: KeyRoleV1, epoch: u64) -> Self {
         Self::from_parts(owner_id.into(), role, epoch)
     }
+
+    /// Check the role and epoch admitted for retained subject-data decryption.
+    ///
+    /// Adapters call this before reading the registry or taking the SQLite
+    /// writer reservation, preserving error precedence at every boundary.
+    ///
+    /// # Errors
+    /// Rejects epoch zero or a role other than `SubjectDataEncryption`.
+    pub fn validate_historical_subject_decryption(self) -> Result<(), KeyRegistryErrorV1> {
+        if self.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
+        if self.role != KeyRoleV1::SubjectDataEncryption {
+            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
+        }
+        Ok(())
+    }
 }
 
 /// A registry input.  `private_material_digest` is a fingerprint, never the
@@ -969,12 +986,7 @@ impl KeyRegistryStateV1 {
     where
         F: FnOnce() -> T,
     {
-        if identity.epoch == 0 {
-            return Err(KeyRegistryErrorV1::InvalidEpoch);
-        }
-        if identity.role != KeyRoleV1::SubjectDataEncryption {
-            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
-        }
+        identity.validate_historical_subject_decryption()?;
         self.validate()
             .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
         let record = self
