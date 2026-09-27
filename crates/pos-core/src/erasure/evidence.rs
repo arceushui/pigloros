@@ -2037,7 +2037,8 @@ impl ErasureFreezeAuthorizationEvidenceV1 {
     /// Verify that this evidence names the exact supplied admission body.
     ///
     /// This verifies the canonical digest binding only. The host-owned
-    /// [`ErasureFreezeAuthorizationVerifierV1`] remains responsible for
+    /// [`ErasureFreezeAuthorizationVerifierV1`][super::ErasureFreezeAuthorizationVerifierV1]
+    /// remains responsible for
     /// interpreting the retained policy, trust, and proof material.
     ///
     /// # Errors
