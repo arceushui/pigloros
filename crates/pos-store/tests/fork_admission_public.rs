@@ -92,14 +92,14 @@ fn assert_contract<S: ForkAdmissionAuthorityPortV1 + EventStore>(
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
     store.bind_fork_admission_host(host.host_binding())?;
-    let binding_permit = binding_permit(
+    let creator_permit = binding_permit(
         &host,
         &authenticated,
         Hash::from_bytes([1; 32]),
         OwnerIdV1::new("creator")?,
     )?;
-    let binding = store.commit_local_binding(&binding_permit)?;
-    assert_eq!(store.commit_local_binding(&binding_permit)?, binding);
+    let binding = store.commit_local_binding(&creator_permit)?;
+    assert_eq!(store.commit_local_binding(&creator_permit)?, binding);
 
     let admission = request(&host, parent, &authenticated)?;
     let receipt = store.create_fork_admitted(&admission)?;
