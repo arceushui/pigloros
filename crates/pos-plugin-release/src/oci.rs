@@ -423,7 +423,7 @@ fn validate_layer_order_and_counts(
     Ok(())
 }
 
-const fn rank(role: &str) -> u8 {
+fn rank(role: &str) -> u8 {
     match role {
         "pmf1" => 0,
         "component" => 1,

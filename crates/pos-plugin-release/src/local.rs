@@ -186,11 +186,8 @@ impl LocalOciPublisherV1 {
         if finals.len() > 256 {
             return Err(LocalOciPublicationErrorV1::BoundsExceeded);
         }
-        let index = read_limited(
-            open_private_file(&self.root, INDEX_NAME).map_err(map_publication_to_source)?,
-            64 * 1024,
-        )
-        .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        let index = read_limited(open_private_file(&self.root, INDEX_NAME)?, 64 * 1024)
+            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let index = crate::oci::parse_jcs_object(&index)
             .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let indexed = index
@@ -334,11 +331,8 @@ impl LocalOciPublisherV1 {
     }
 
     fn publish_index(&self, address: &BundleAddressV1) -> Result<(), LocalOciPublicationErrorV1> {
-        let index = read_limited(
-            open_private_file(&self.root, INDEX_NAME).map_err(map_publication_to_source)?,
-            64 * 1024,
-        )
-        .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        let index = read_limited(open_private_file(&self.root, INDEX_NAME)?, 64 * 1024)
+            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let mut value = crate::oci::parse_jcs_object(&index)
             .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let addresses = value
@@ -377,10 +371,17 @@ fn directory_entries(
         .map_err(|_| LocalOciPublicationErrorV1::Io)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    Ok(entries
+    let names = entries
         .into_iter()
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-        .filter(|name| name != "." && name != ".."))
+        .map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names.into_iter().filter(|name| name != "." && name != ".."))
 }
 
 impl ReleaseSourceV1 for LocalOciPublisherV1 {
@@ -468,13 +469,11 @@ impl LocalOciPublisherV1 {
             let hex = digest
                 .strip_prefix("sha256:")
                 .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
-            bytes.insert(
-                digest,
-                read_limited(
-                    open_private_file(&sha256, hex).map_err(map_publication_to_source)?,
-                    32 * 1024 * 1024,
-                )?,
-            );
+            let blob = read_limited(
+                open_private_file(&sha256, hex).map_err(map_publication_to_source)?,
+                32 * 1024 * 1024,
+            )?;
+            bytes.insert(digest, blob);
         }
         verify_oci_closure_v1(address.clone(), manifest, bytes)
     }
