@@ -120,6 +120,8 @@ impl SqliteStore {
         &self,
         owner: &RecipientKeyOwnerV1,
     ) -> Result<Vec<RecipientKeyDescriptorV1>, CoreError> {
+        use std::os::unix::ffi::OsStringExt;
+
         let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let mut statement = self.conn.prepare("SELECT descriptor, material_digest, private_path FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
