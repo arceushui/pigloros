@@ -290,7 +290,7 @@ impl BoundAttemptCgroup {
         verify(self)?;
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptLimitEventSnapshot {
-            identity: self.identity(),
+            identity: self.identity.clone(),
             raw,
             counters,
             monotonic_seconds: observed.tv_sec,
@@ -589,19 +589,19 @@ mod tests {
     fn bound_path_replacement_and_invalid_identity_reject_capture() -> Result<(), Box<dyn Error>> {
         let temporary = tempfile::tempdir()?;
         let (mut bound, directory) = fixture(temporary.path())?;
-        let original_device = bound.device;
-        bound.device = original_device.wrapping_add(1);
+        let original_device = bound.identity.device;
+        bound.identity.device = original_device.wrapping_add(1);
         assert!(matches!(
             bound.capture_limit_events(),
             Err(AttemptCgroupError::PathReused)
         ));
-        bound.device = original_device;
-        bound.control_group = "/".to_owned();
+        bound.identity.device = original_device;
+        bound.identity.control_group = "/".to_owned();
         assert!(matches!(
             bound.capture_limit_events(),
             Err(AttemptCgroupError::InvalidPath)
         ));
-        bound.control_group = "/system.slice/test.service".to_owned();
+        bound.identity.control_group = "/system.slice/test.service".to_owned();
         let moved = directory.with_file_name("moved.service");
         fs::rename(&directory, &moved)?;
         fs::create_dir(&directory)?;

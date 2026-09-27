@@ -222,11 +222,7 @@ pub struct BoundAttemptCgroup {
     root: CgroupRoot,
     directory: File,
     events: File,
-    unit_name: TransientServiceUnitName,
-    unit_path: OwnedObjectPath,
-    control_group: String,
-    device: u64,
-    inode: u64,
+    identity: BoundCgroupIdentity,
 }
 
 impl BoundAttemptCgroup {
@@ -270,11 +266,13 @@ impl BoundAttemptCgroup {
             root,
             directory,
             events,
-            unit_name,
-            unit_path,
-            control_group,
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            identity: BoundCgroupIdentity {
+                unit_name,
+                unit_path,
+                control_group,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
         };
         let initial = bound.read_events()?;
         parse_populated(&initial)?;
@@ -284,17 +282,7 @@ impl BoundAttemptCgroup {
     /// Return the exact manager-reported cgroup path retained before termination.
     #[must_use]
     pub fn control_group(&self) -> &str {
-        &self.control_group
-    }
-
-    fn identity(&self) -> BoundCgroupIdentity {
-        BoundCgroupIdentity {
-            unit_name: self.unit_name.clone(),
-            unit_path: self.unit_path.clone(),
-            control_group: self.control_group.clone(),
-            device: self.device,
-            inode: self.inode,
-        }
+        &self.identity.control_group
     }
 
     fn inspect_path_with_metadata(
@@ -302,10 +290,10 @@ impl BoundAttemptCgroup {
         mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
     ) -> Result<BoundCgroupPath, AttemptCgroupError> {
         let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
-        if retained.dev() != self.device || retained.ino() != self.inode {
+        if retained.dev() != self.identity.device || retained.ino() != self.identity.inode {
             return Err(AttemptCgroupError::PathReused);
         }
-        let relative = relative_cgroup_path(&self.control_group)?;
+        let relative = relative_cgroup_path(&self.identity.control_group)?;
         match openat2(
             &self.root.0,
             relative,
@@ -320,7 +308,7 @@ impl BoundAttemptCgroup {
             Ok(current) => {
                 let metadata =
                     read_metadata(&File::from(current)).map_err(AttemptCgroupError::Metadata)?;
-                if metadata.dev() != self.device || metadata.ino() != self.inode {
+                if metadata.dev() != self.identity.device || metadata.ino() != self.identity.inode {
                     return Err(AttemptCgroupError::PathReused);
                 }
                 Ok(BoundCgroupPath::Present)
@@ -360,7 +348,7 @@ impl BoundAttemptCgroup {
         };
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptCgroupEmptyObservation {
-            identity: self.identity(),
+            identity: self.identity.clone(),
             basis: basis_and_raw.0,
             raw_events: basis_and_raw.1,
             monotonic_seconds: observed.tv_sec,
@@ -563,19 +551,19 @@ mod tests {
             OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
             "/system.slice/test.service".to_owned(),
         )?;
-        let original_device = bound.device;
-        bound.device = original_device.wrapping_add(1);
+        let original_device = bound.identity.device;
+        bound.identity.device = original_device.wrapping_add(1);
         assert!(matches!(
             bound.observe_empty(),
             Err(AttemptCgroupError::PathReused)
         ));
-        bound.device = original_device;
-        bound.control_group = "/".to_owned();
+        bound.identity.device = original_device;
+        bound.identity.control_group = "/".to_owned();
         assert!(matches!(
             bound.observe_empty(),
             Err(AttemptCgroupError::InvalidPath)
         ));
-        bound.control_group = "/system.slice/test.service".to_owned();
+        bound.identity.control_group = "/system.slice/test.service".to_owned();
         fs::rename(&directory, parent.join("moved.service"))?;
         assert!(matches!(
             bound.observe_empty(),
