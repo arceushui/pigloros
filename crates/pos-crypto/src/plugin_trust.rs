@@ -1835,13 +1835,13 @@ mod tests {
     #[test]
     fn decoder_bounds_and_structural_edges_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let (signer, publisher, root, revocation) = fixture()?;
-        for replacement in [[0x1a, 0, 0, 0, 1], [0x1b, 0, 0, 0, 0, 0, 0, 0, 1]] {
+        for replacement in [&[0x1a, 0, 0, 0, 1][..], &[0x1b, 0, 0, 0, 0, 0, 0, 0, 1][..]] {
             let mut noncanonical = root.clone();
-            noncanonical.splice(6..7, replacement);
-            assert_eq!(
+            noncanonical.splice(6..7, replacement.iter().copied());
+            assert!(matches!(
                 PluginTrustRootRecordV1::decode(&noncanonical),
                 Err(PluginTrustErrorV1::InvalidEncoding)
-            );
+            ));
         }
         for record in [&root, &revocation] {
             let oversized = vec![0; 1024 * 1024 + 1];
@@ -1863,10 +1863,10 @@ mod tests {
             let mut fields = root_fields(&signer, publisher, 1, None);
             fields[field] = entry;
             let encoded = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
-            assert_eq!(
+            assert!(matches!(
                 PluginTrustRootRecordV1::decode(&encoded),
                 Err(PluginTrustErrorV1::InvalidEncoding)
-            );
+            ));
         }
         Ok(())
     }
@@ -1899,10 +1899,10 @@ mod tests {
             let mut fields = root_fields(&signer, publisher, 1, None);
             fields.push(Value::Array(signatures));
             let encoded = encode(&Value::Array(fields))?;
-            assert_eq!(
+            assert!(matches!(
                 PluginTrustRootRecordV1::decode(&encoded),
                 Err(PluginTrustErrorV1::InvalidEncoding)
-            );
+            ));
         }
         Ok(())
     }
