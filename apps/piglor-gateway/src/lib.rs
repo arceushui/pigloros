@@ -5769,29 +5769,48 @@ mod tests {
         drop(second);
     }
 
+    fn checked_sqlite_ceiling_result<T, E: std::fmt::Debug>(
+        result: Result<T, E>,
+        stage: &str,
+    ) -> T {
+        assert!(result.is_ok(), "{stage}: {:?}", result.as_ref().err());
+        result.test_ok()
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn sqlite_gateways_enforce_one_atomic_event_ceiling() {
         let database = TemporarySqliteFile::new("atomic-ceiling");
         let path = database.path.clone();
-        let mut seed = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let mut seed = checked_sqlite_ceiling_result(
+            open_store(StoreConfig::Sqlite { path: path.clone() }),
+            "open seed",
+        );
         Gateway::bind_test_erasure_gate(seed.as_mut());
-        let timeline = seed.create_timeline("sqlite").test_ok();
+        let timeline = checked_sqlite_ceiling_result(seed.create_timeline("sqlite"), "create root");
         let entity = EntityId::new();
         let prefill = EventDraft::new(
             entity,
             Kind::new(EVENT_TYPE_ACTION),
             json_to_cbor(&serde_json::json!({"writer": "prefill"})),
         );
-        seed.append(
-            timeline.id(),
-            &vec![prefill; usize::try_from(MAX_EVENTS_PER_TIMELINE - 1).test_ok()],
-        )
-        .test_ok();
+        checked_sqlite_ceiling_result(
+            seed.append(
+                timeline.id(),
+                &vec![prefill; usize::try_from(MAX_EVENTS_PER_TIMELINE - 1).test_ok()],
+            ),
+            "prefill",
+        );
         drop(seed);
 
-        let first = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok());
-        let second = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok());
+        let first = Gateway::new(checked_sqlite_ceiling_result(
+            open_store(StoreConfig::Sqlite { path: path.clone() }),
+            "open first",
+        ));
+        let second = Gateway::new(checked_sqlite_ceiling_result(
+            open_store(StoreConfig::Sqlite { path: path.clone() }),
+            "open second",
+        ));
         let timeline_id = timeline.id().to_string();
         let entity_id = entity.to_string();
         let payload_a = serde_json::json!({"writer": "a"});
@@ -5821,9 +5840,13 @@ mod tests {
         };
         barrier.wait().await;
         let (a, b) = tokio::join!(first_task, second_task);
-        let a = a.test_ok();
-        let b = b.test_ok();
-        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let a = checked_sqlite_ceiling_result(a, "join first");
+        let b = checked_sqlite_ceiling_result(b, "join second");
+        assert_eq!(
+            usize::from(a.is_ok()) + usize::from(b.is_ok()),
+            1,
+            "first: {a:?}; second: {b:?}"
+        );
         let rejected = if let Err(error) = a {
             error
         } else {
@@ -5836,17 +5859,23 @@ mod tests {
             } | GatewayError::Store(CoreError::ErasureContainmentUnavailable)
         );
         assert!(expected_rejection, "unexpected rejection: {rejected:?}");
-        let mut fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let mut fresh = checked_sqlite_ceiling_result(
+            open_store(StoreConfig::Sqlite { path: path.clone() }),
+            "open fresh",
+        );
         Gateway::bind_test_erasure_gate(fresh.as_mut());
         assert_eq!(
-            fresh.get_timeline(timeline.id()).test_ok().test_ok().head,
+            checked_sqlite_ceiling_result(fresh.get_timeline(timeline.id()), "read root")
+                .test_ok()
+                .head,
             Seq::from_u64(MAX_EVENTS_PER_TIMELINE)
         );
         assert_eq!(
-            fresh
-                .read_own(timeline.id(), SeqRange::all())
-                .test_ok()
-                .len(),
+            checked_sqlite_ceiling_result(
+                fresh.read_own(timeline.id(), SeqRange::all()),
+                "read events",
+            )
+            .len(),
             usize::try_from(MAX_EVENTS_PER_TIMELINE).test_ok()
         );
     }
