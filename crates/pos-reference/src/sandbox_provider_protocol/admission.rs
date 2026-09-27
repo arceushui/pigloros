@@ -1,5 +1,8 @@
 //! Fail-closed provider and image admission for the root-owned selector.
 
+mod network;
+pub use network::{LocalNetworkAdmission, NetworkProxyLimits};
+
 use std::ops::Deref;
 
 use ciborium::value::Value;
