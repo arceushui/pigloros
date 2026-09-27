@@ -3204,6 +3204,45 @@ impl PluginRegistry {
         })
     }
 
+    fn validate_installed_reducer_name(
+        name: &str,
+        installed: bool,
+        has_reducer: bool,
+    ) -> Result<(), RuntimeError> {
+        if installed
+            && has_reducer
+            && (name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES)
+        {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: name.to_owned(),
+                reason: "installed reducer name is outside the canonical text bound".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn install_reducer(
+        &mut self,
+        id: PluginId,
+        name: &str,
+        reducer: Option<Box<dyn Reducer>>,
+        installed: bool,
+    ) -> Result<(), RuntimeError> {
+        if let Some(reducer) = reducer {
+            if installed {
+                self.projections
+                    .register_installed_reducer(id, name, reducer)
+                    .map_err(|error| RuntimeError::CapabilityMismatch {
+                        name: name.to_owned(),
+                        reason: format!("installed projection slot rejected: {error:?}"),
+                    })?;
+            } else {
+                self.projections.register(name, reducer);
+            }
+        }
+        Ok(())
+    }
+
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -3285,15 +3324,15 @@ impl PluginRegistry {
         }
 
         // All fallible installed-slot checks precede the first registry mutation.
-        if options.registration.is_some()
-            && reducer.is_some()
-            && (name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES)
-        {
-            return Err(RuntimeError::CapabilityMismatch {
-                name,
-                reason: "installed reducer name is outside the canonical text bound".to_owned(),
-            });
-        }
+        Self::validate_installed_reducer_name(
+            &name,
+            options.registration.is_some(),
+            reducer.is_some(),
+        )?;
+        let version = plugin.version().to_owned();
+
+        // The only fallible commit action runs before schemas or routes mutate.
+        self.install_reducer(id, &name, reducer, options.registration.is_some())?;
 
         // Register event type schemas
         for kind in &cap.owned_event_types {
@@ -3302,20 +3341,6 @@ impl PluginRegistry {
                 description: format!("owned by plugin '{name}'"),
                 json_schema: None,
             });
-        }
-
-        // Wire reducer into projection registry
-        if let Some(r) = reducer {
-            if options.registration.is_some() {
-                self.projections
-                    .register_installed_reducer(id, &name, r)
-                    .map_err(|error| RuntimeError::CapabilityMismatch {
-                        name: name.clone(),
-                        reason: format!("installed projection slot rejected: {error:?}"),
-                    })?;
-            } else {
-                self.projections.register(&name, r);
-            }
         }
 
         // Index action approver if present
@@ -3329,7 +3354,7 @@ impl PluginRegistry {
             id,
             PluginEntry {
                 name,
-                version: plugin.version().to_owned(),
+                version,
                 owned_event_types: cap.owned_event_types,
                 driver,
                 approver,
