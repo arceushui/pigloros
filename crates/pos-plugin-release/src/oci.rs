@@ -749,10 +749,10 @@ mod tests {
             verify_value(&changed, blobs.clone()),
             Err(ReleaseSourceErrorV1::InvalidDescriptor)
         );
-        let mut changed = valid.clone();
+        let mut changed = valid;
         changed["layers"][0]["extra"] = serde_json::json!(true);
         assert_eq!(
-            verify_value(&changed, blobs.clone()),
+            verify_value(&changed, blobs),
             Err(ReleaseSourceErrorV1::InvalidDescriptor)
         );
         Ok(())
