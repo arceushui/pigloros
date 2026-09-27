@@ -58,17 +58,45 @@ pub(crate) fn bind_owned_secret_key(
     material_digest: pos_core::Hash,
 ) -> Result<(), pos_core::CoreError> {
     use rusqlite::{params, Connection, OpenFlags};
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let absolute = absolute_output(path).map_err(binding_error)?;
     let parent = absolute
         .parent()
         .ok_or_else(|| binding_error("key path has no parent"))?;
     validate_ancestors(&absolute, parent).map_err(binding_error)?;
-    let metadata = std::fs::symlink_metadata(&absolute).map_err(binding_error)?;
-    if !metadata.is_file() {
-        return Err(binding_error("owned key is not a regular file"));
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&absolute)
+        .map_err(binding_error)?;
+    let metadata = file.metadata().map_err(binding_error)?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+        return Err(binding_error(
+            "owned key is not a private single-link regular file",
+        ));
+    }
+    if metadata.len() > 128 {
+        return Err(binding_error("owned key exceeds the supported size"));
+    }
+    let mut encoded = zeroize::Zeroizing::new(Vec::new());
+    file.read_to_end(&mut encoded).map_err(binding_error)?;
+    let text = std::str::from_utf8(&encoded).map_err(binding_error)?;
+    let decoded =
+        zeroize::Zeroizing::new(crate::hex::hex_decode(text.trim()).map_err(binding_error)?);
+    let seed =
+        zeroize::Zeroizing::new(<[u8; 32]>::try_from(decoded.as_slice()).map_err(binding_error)?);
+    if pos_crypto::key_roles::key_material_digest(&seed) != material_digest {
+        return Err(binding_error(
+            "owned key bytes differ from the loaded signing key",
+        ));
     }
     let file_identity = BoundFileIdentity::from_metadata(&metadata);
+    let current = std::fs::symlink_metadata(&absolute).map_err(binding_error)?;
+    if BoundFileIdentity::from_metadata(&current) != file_identity {
+        return Err(binding_error("owned key changed before binding"));
+    }
     let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(binding_error)?;
     connection
@@ -108,6 +136,10 @@ pub(crate) fn bind_owned_secret_key(
         return Err(binding_error(
             "owned key file identity differs from durable binding",
         ));
+    }
+    let current = std::fs::symlink_metadata(&absolute).map_err(binding_error)?;
+    if BoundFileIdentity::from_metadata(&current) != file_identity {
+        return Err(binding_error("owned key changed during binding"));
     }
     Ok(())
 }
@@ -837,8 +869,21 @@ mod binding_tests {
         KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, epoch)
     }
 
-    const fn digest() -> Hash {
-        Hash::from_bytes([9; 32])
+    fn digest() -> Hash {
+        pos_crypto::key_roles::key_material_digest(&[9; 32])
+    }
+
+    fn owned_key(path: &Path, seed: u8) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(format!("{seed:02x}").repeat(32).as_bytes())?;
+        Ok(())
     }
 
     fn request(epoch: u64, material_digest: Hash) -> KeyDestructionRequestV1 {
@@ -851,7 +896,7 @@ mod binding_tests {
         let directory = tempfile::TempDir::new()?;
         let database = directory.path().join("ledger.db");
         let key = directory.path().join("secret.key");
-        std::fs::write(&key, b"owned")?;
+        owned_key(&key, 9)?;
         drop(rusqlite::Connection::open(&database)?);
 
         assert!(bind_owned_secret_key(&database, Path::new("/"), identity(1), digest()).is_err());
@@ -888,12 +933,38 @@ mod binding_tests {
     }
 
     #[test]
+    fn binding_rejects_key_replaced_after_its_material_was_loaded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let database = directory.path().join("ledger.db");
+        let key = directory.path().join("secret.key");
+        let moved = directory.path().join("original.key");
+        owned_key(&key, 9)?;
+        let loaded_digest = digest();
+        drop(rusqlite::Connection::open(&database)?);
+
+        std::fs::rename(&key, &moved)?;
+        owned_key(&key, 8)?;
+        assert!(bind_owned_secret_key(&database, &key, identity(1), loaded_digest).is_err());
+        let connection = rusqlite::Connection::open(&database)?;
+        let bindings: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'ledger_owned_key_binding_v1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(bindings, 0);
+        assert!(moved.exists());
+        assert!(key.exists());
+        Ok(())
+    }
+
+    #[test]
     fn binding_rejects_conflicts_missing_rows_and_malformed_storage(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::TempDir::new()?;
         let database = directory.path().join("ledger.db");
         let key = directory.path().join("secret.key");
-        std::fs::write(&key, b"owned")?;
+        owned_key(&key, 9)?;
         drop(rusqlite::Connection::open(&database)?);
         bind_owned_secret_key(&database, &key, identity(1), digest())?;
         require_owned_secret_key_binding(&database, &key, request(1, digest()))?;
@@ -901,7 +972,7 @@ mod binding_tests {
         let bound = require_owned_secret_key_binding(&database, &key, request(1, digest()))?;
         let moved = directory.path().join("moved.key");
         std::fs::rename(&key, &moved)?;
-        std::fs::write(&key, b"owned")?;
+        owned_key(&key, 9)?;
         assert!(
             delete_owned_secret_key_with_identity(&key, request(1, digest()), Some(bound)).is_err()
         );
