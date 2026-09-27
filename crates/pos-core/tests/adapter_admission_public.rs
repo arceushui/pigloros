@@ -290,7 +290,7 @@ fn malformed_noncanonical_and_oversized_maa1_reject() -> TestResult<()> {
     cases.push((trailing, AdapterAdmissionErrorV1::NonCanonical));
     let mut excessive_count = good;
     excessive_count.truncate(76);
-    excessive_count.extend_from_slice(&[0x19, 0x04, 0x01]);
+    excessive_count.extend_from_slice(&[0x99, 0x04, 0x01]);
     cases.push((excessive_count, AdapterAdmissionErrorV1::FieldOutOfBounds));
     for (bytes, expected) in cases {
         assert_eq!(
