@@ -119,8 +119,8 @@ fn agent_output_binding(
     )?)
 }
 
-fn owned_event_type_binding(
-    plugin: &dyn Plugin,
+fn owned_event_type_binding<P: Plugin>(
+    plugin: &P,
 ) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
     Ok(OutputPolicyBindingV1::from_installed_source(
         plugin,

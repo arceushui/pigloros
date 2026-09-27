@@ -94,6 +94,52 @@ impl PluginOwnerTokenV1 {
             && self.type_name == type_name::<P>()
             && self.instance_address == std::ptr::from_ref(plugin).cast::<()>() as usize
     }
+
+    /// Verify a type-erased Plugin instance against a source type selected by
+    /// the host rather than an overridable Plugin method.
+    #[must_use]
+    pub fn verifies_erased_instance(&self, plugin: &dyn Plugin, expected_type_name: &str) -> bool {
+        self.type_name == expected_type_name
+            && self.instance_address == std::ptr::from_ref(plugin).cast::<()>() as usize
+    }
+}
+
+#[cfg(test)]
+mod owner_token_tests {
+    use super::{Capability, Plugin, PluginId};
+
+    struct TokenFixture {
+        _marker: u8,
+    }
+
+    impl Plugin for TokenFixture {
+        fn id(&self) -> PluginId {
+            PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "token-fixture"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+    }
+
+    #[test]
+    fn erased_owner_token_verifies_the_selected_instance() {
+        let plugin = TokenFixture { _marker: 0 };
+        let _id = plugin.id();
+        assert_eq!(plugin.name(), "token-fixture");
+        assert_eq!(plugin.capability(), Capability::default());
+        let owner = plugin.installed_owner_token();
+        let erased: &dyn Plugin = &plugin;
+        let foreign = TokenFixture { _marker: 1 };
+
+        assert!(owner.verifies_erased_instance(erased, std::any::type_name::<TokenFixture>()));
+        assert!(!owner.verifies_erased_instance(&foreign, std::any::type_name::<TokenFixture>()));
+        assert!(!owner.verifies_erased_instance(erased, "foreign::Plugin"));
+    }
 }
 
 /// A proposed action submitted through the capability-checked envelope (ADR-057).

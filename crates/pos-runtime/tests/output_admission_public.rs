@@ -43,6 +43,30 @@ fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Er
         binding,
     })
 }
+
+fn register_verified_fixture_driver<D: Driver + 'static>(
+    registry: &mut PluginRegistry,
+    plugin: &FixturePlugin,
+    driver: D,
+) -> TestResult {
+    let binding = verified_binding(plugin)?
+        .binding
+        .with_installed_driver(driver)?;
+    let pin = pos_runtime::PluginPinV1::try_new(
+        pos_runtime::DomainImplementationKindV1::Plugin,
+        pos_runtime::PluginIsolationV1::OperatorTrustedNative,
+        binding.policy().digest(),
+        vec![pos_runtime::installed_plugin_role_v1(plugin)],
+    )?;
+    registry.register_installed_output(
+        plugin,
+        binding,
+        pos_runtime::PluginRegistrationV1::new(pin, pos_runtime::PluginAvailabilityV1::Available),
+        None,
+    )?;
+    Ok(())
+}
+
 fn canonical_fixture_closure_bytes(source: &FixtureBinding) -> Vec<u8> {
     let members = [
         source.output_policy_bytes.as_slice(),
@@ -592,11 +616,11 @@ fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult
     let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
-    registry.register_generated(&first, None, Some(Box::new(CadencedFixtureDriver)))?;
-    registry.register_generated(
+    register_verified_fixture_driver(&mut registry, &first, CadencedFixtureDriver)?;
+    register_verified_fixture_driver(
+        &mut registry,
         &second,
-        None,
-        Some(Box::new(RejectOnceDriver { reject_next: true })),
+        RejectOnceDriver { reject_next: true },
     )?;
     let timeline = pos_core::TimelineId::new();
     let mut scheduler = TickScheduler::new(registry);
