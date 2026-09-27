@@ -6154,10 +6154,6 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
         {
             return Err(ForkAdmissionErrorV1::InvalidRequest);
         }
-        self.principal_owner_trust
-            .as_ref()
-            .ok_or(ForkAdmissionErrorV1::Unauthenticated)?
-            .validate(&request.authenticated, now)?;
         let request_digest = pos_core::fork_admission_request_digest_v1(request)?;
         let tx = self
             .conn
@@ -6201,6 +6197,10 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                 Err(ForkAdmissionErrorV1::CorruptAuthority)
             };
         }
+        self.principal_owner_trust
+            .as_ref()
+            .ok_or(ForkAdmissionErrorV1::Unauthenticated)?
+            .validate(&request.authenticated, now)?;
         let (child, admission) = prepare_admitted_local_fork(&tx, request)?;
         let head = admission.input().parent_logical_head;
         let chain = admission.input().parent_chain_head_hash;

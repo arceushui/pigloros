@@ -64,6 +64,10 @@ fn assert_contract(store: &mut dyn ForkAdmissionAuthorityPortV1, parent: Timelin
         receipt
     );
     assert_eq!(
+        store.create_fork_admitted(&admission, WallTime::from_micros(101))?,
+        receipt
+    );
+    assert_eq!(
         store
             .read_fork_admission(receipt.child_id)?
             .ok_or("missing FAR1")?
