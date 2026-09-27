@@ -359,6 +359,27 @@ fn eor1_decoder_rejects_each_structural_failure_class() -> Result<(), Box<dyn st
             Err(ForkEventProvenanceErrorV1::InvalidEncoding)
         );
     }
+    for (offset, value) in [
+        (0, 0x00),
+        (1, 0x43),
+        (6, 0x20),
+        (42, 0x20),
+        (43, 0x20),
+        (44, 0x50),
+    ] {
+        let mut invalid = eor.clone();
+        invalid[offset] = value;
+        assert_eq!(
+            EventOriginRecordV1::from_canonical_cbor(&invalid),
+            Err(ForkEventProvenanceErrorV1::InvalidEncoding)
+        );
+    }
+    for truncated in [&[][..], &[0x98][..]] {
+        assert_eq!(
+            EventOriginRecordV1::from_canonical_cbor(truncated),
+            Err(ForkEventProvenanceErrorV1::InvalidEncoding)
+        );
+    }
     let mut unsupported = eor.clone();
     unsupported[6] = 2;
     assert_eq!(
@@ -429,6 +450,20 @@ fn fia1_decoder_rejects_each_structural_failure_class() -> Result<(), Box<dyn st
             Err(ForkEventProvenanceErrorV1::InvalidEncoding)
         );
     }
+    for (offset, value) in [(58, 0x20), (76, 0x50), (110, 0x50), (144, 0x50)] {
+        let mut invalid = fia.clone();
+        invalid[offset] = value;
+        assert_eq!(
+            ForkInterventionAdmissionV1::from_canonical_cbor(&invalid),
+            Err(ForkEventProvenanceErrorV1::InvalidEncoding)
+        );
+    }
+    let mut noncanonical_seq = fia.clone();
+    noncanonical_seq.splice(58..59, [0x18, 9]);
+    assert_eq!(
+        ForkInterventionAdmissionV1::from_canonical_cbor(&noncanonical_seq),
+        Err(ForkEventProvenanceErrorV1::NonCanonical)
+    );
     let mut unsupported = fia.clone();
     unsupported[6] = 2;
     assert_eq!(
