@@ -18,21 +18,25 @@ cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080 /tmp/piglor-gw.db
 
 The Gateway remains an ingress/store façade; it does not run simulation drivers. For the
 ADR-019 two-process demonstration, start the Gateway with an explicit SQLite file, create a
-Timeline through `POST /v1/timelines`, then run `pos-experiment` against that exact file and
-returned ID:
+Timeline through `POST /v1/timelines`, then stop the Gateway before running `pos-experiment`
+against that exact file and returned ID. Restart the Gateway after the experiment exits:
 
 ```bash
 cargo run -p piglor-gateway --locked -- \
   serve 127.0.0.1:8080 /tmp/piglor-126.db
 
+# Record the Timeline ID from POST /v1/timelines, then stop Gateway (Ctrl-C).
 cargo run -p pos-experiment --locked -- \
   multi-rate-demo /tmp/piglor-126.db <timeline-id> \
   --ticks 20 --quantum-ms 100 --pace-ms 100
+
+cargo run -p piglor-gateway --locked -- \
+  serve 127.0.0.1:8080 /tmp/piglor-126.db
 ```
 
 The experiment is finite and uses caller-supplied simulation time for deterministic driver
-cadence; wall-clock sleep only paces output. Human actions and society signals may be posted
-through this Gateway while it runs. See the
+cadence; wall-clock sleep only paces output. After the restart, a host-configured Gateway can
+accept human actions and society signals; the default action route remains fail-closed. See the
 [`pos-experiment` demo guide](../pos-experiment/README.md) for exact requests, overrides,
 restart guidance, and the same-file requirement. Arbitrary raw-SQL writers remain outside
 the supported multi-process boundary.

@@ -2486,7 +2486,7 @@ impl BacktestRunner {
             .and_then(|()| self.run_on_store_with_gate_bindings(&mut store, host_gate))
     }
 
-    fn ensure_no_external_erasure_gate(&self) -> Result<(), ExperimentError> {
+    const fn ensure_no_external_erasure_gate(&self) -> Result<(), ExperimentError> {
         if self.erasure_gate.is_some() {
             return Err(ExperimentError::Store(
                 pos_core::CoreError::ErasureContainmentUnavailable,
