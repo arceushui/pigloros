@@ -80,13 +80,13 @@ pub struct RecipientTimelineExportV1 {
 
 impl RecipientTimelineExportV1 {
     /// Decode an exact canonical TRX1 envelope without accessing private material.
-    pub fn decode(bytes: &[u8]) -> Result<Self, RecipientExportErrorV1> {
-        if bytes.len() > MAX_ENVELOPE_BYTES {
+    pub fn decode(encoded: &[u8]) -> Result<Self, RecipientExportErrorV1> {
+        if encoded.len() > MAX_ENVELOPE_BYTES {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
-        preflight_cbor(bytes, MAX_CHUNKS + 32)?;
+        preflight_cbor(encoded, MAX_CHUNKS + 32)?;
         let value: Value =
-            ciborium::from_reader(bytes).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
+            ciborium::from_reader(encoded).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
         let Value::Array(fields) = value else {
             return Err(RecipientExportErrorV1::InvalidEncoding);
         };
@@ -117,7 +117,7 @@ impl RecipientTimelineExportV1 {
             ciphertext_chunks,
         };
         envelope.validate_shape()?;
-        if envelope.encode() != bytes {
+        if envelope.encode() != encoded {
             return Err(RecipientExportErrorV1::NonCanonical);
         }
         Ok(envelope)
@@ -215,7 +215,7 @@ pub fn encrypt_timeline_export_v1(
         setup_sender_with_rng::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
             &OpModeS::Base,
             &public_key,
-            &header_digest,
+            header_digest.as_bytes(),
             rng,
         )
         .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
@@ -262,7 +262,7 @@ pub fn decrypt_timeline_export_v1(
         &OpModeR::Base,
         &private_key,
         &enc,
-        &header_digest,
+        header_digest.as_bytes(),
     )
     .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?;
     let mut plaintext = Zeroizing::new(Vec::with_capacity(
