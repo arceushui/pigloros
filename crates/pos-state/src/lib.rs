@@ -167,7 +167,6 @@ impl AuthorizationCacheV1 {
             AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
         let digest_matches = decision.request_digest() == request.binding_digest();
         let request_matches = digest_matches
-            && decision == current_decision
             && decision.grant_chain_bindings() == chain_bindings.as_slice()
             && decision.authority_timeline() == request.authority_timeline()
             && decision.at_position() == request.at_position()
@@ -175,6 +174,7 @@ impl AuthorizationCacheV1 {
             && decision.consent_policy_revision() == request.consent_policy_revision()
             && authority.revocation_epoch() == request.revocation_epoch();
         if !decision.is_allowed()
+            || decision != current_decision
             || !request_matches
             || request.at_time() >= expires_at
             || valid_until_position <= decision.at_position()
@@ -214,17 +214,17 @@ impl AuthorizationCacheV1 {
         registry: &AuthorityRegistrySnapshotV1,
         inventory_generation: ErasureReferenceV1,
     ) -> Option<&AuthorizationDecisionV1> {
-        let expired = self.entries.get(key).is_some_and(|entry| {
+        let should_evict = self.entries.get(key).is_some_and(|entry| {
             let current_decision =
                 AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
             key.inventory_generation() != inventory_generation
                 || !entry.is_current(at_time, at_position, inventory_generation)
                 || authority.revocation_epoch() != key.revocation_epoch()
                 || request.revocation_epoch() != key.revocation_epoch()
-                || current_decision != entry.decision
                 || !current_decision.is_allowed()
+                || current_decision != entry.decision
         });
-        if expired {
+        if should_evict {
             self.entries.remove(key);
             None
         } else {
@@ -1816,6 +1816,27 @@ mod tests {
                 &fixture.request,
                 &changed.authority,
                 &fixture.registry,
+                cache_generation(1),
+            )
+            .is_none());
+        assert!(cache.is_empty());
+        let key = cache
+            .insert_active(
+                fixture.decision.clone(),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+                cache_generation(1),
+            )
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+        assert!(cache
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(79),
+                &fixture.request,
+                &fixture.authority,
+                &denied.registry,
                 cache_generation(1),
             )
             .is_none());
