@@ -472,7 +472,7 @@ fn manifest_decoder_rejects_count_coordinates_and_noncanonical_sequence(
     );
 
     let mut too_many = canonical.clone();
-    too_many.splice(sequences_at..=sequences_at, [0x19, 0x04, 0x01]);
+    too_many.splice(sequences_at..=sequences_at, [0x99, 0x04, 0x01]);
     assert_eq!(
         ForkReproManifestV1::from_canonical_cbor(&too_many),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
