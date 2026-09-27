@@ -1102,7 +1102,9 @@ mod tests {
             // A registry-free recovery deliberately stops before it can classify
             // the staged file. It must leave that material unavailable rather
             // than move an entry that could belong to a live registry.
-            assert!(names.iter().any(|name| name.ends_with(".key")));
+            assert!(names.iter().any(|name| {
+                std::path::Path::new(name).extension() == Some(std::ffi::OsStr::new("key"))
+            }));
         }
 
         for failure in [0, 1] {
