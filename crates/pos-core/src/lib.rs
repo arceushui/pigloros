@@ -215,7 +215,8 @@ pub use store::{
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
 pub use timeline_envelope::{
     TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeInputV1, TimelineEventEnvelopeV1,
-    MAX_TIMELINE_EVENT_ENVELOPE_BYTES_V1, MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
+    TimelineEventVerificationV1, MAX_TIMELINE_EVENT_ENVELOPE_BYTES_V1,
+    MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
 };
 pub use world_consumer_set::{
     WorldConsumerSetErrorV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,

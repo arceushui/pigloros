@@ -20,11 +20,11 @@
 //! |--------|--------|--------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
-//! | Verified identity | [`export_timeline_own`] | Pending `TimelineEventEnvelopeV1` verifier (#202) |
+//! | Verified identity | [`export_timeline_own`] | [`import_timeline_verified_v1`] |
 //!
 //! [`resolve_timeline_import_public_keys_v1`] checks exact owner/role/epoch
-//! trust anchors without importing Events. Verified identity import remains
-//! unavailable until #202 adds the normative Timeline envelope verifier.
+//! trust anchors without importing Events. [`import_timeline_verified_v1`]
+//! additionally verifies every exact Timeline envelope before atomic import.
 //!
 //! # Backend features
 //!
@@ -646,9 +646,7 @@ pub fn open_store_with_hasher(
 ///
 /// This checks identity and trust resolution only. It does not verify any
 /// signature or import any Event. A host must not treat the result as Timeline
-/// integrity evidence. Verified identity import remains unavailable until
-/// #202 adds the normative `TimelineEventEnvelopeV1` verifier; payload-only
-/// `verify_for_role` is not valid for Timeline Events.
+/// integrity evidence; use [`import_timeline_verified_v1`] for verified import.
 ///
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if any Event is unsigned,
@@ -658,6 +656,20 @@ pub fn resolve_timeline_import_public_keys_v1(
     export: &TimelineExport,
     trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
 ) -> Result<Vec<pos_core::PublicKey>, CoreError> {
+    resolve_import_trust_context(store, export, trust_anchors).map(|(public_keys, _)| public_keys)
+}
+
+fn resolve_import_trust_context(
+    store: &dyn EventStore,
+    export: &TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<
+    (
+        Vec<pos_core::PublicKey>,
+        Option<pos_core::KeyRegistryStateV1>,
+    ),
+    CoreError,
+> {
     let mut anchors = std::collections::BTreeMap::new();
     for (identity, public_key) in trust_anchors {
         if identity.epoch == 0
@@ -677,7 +689,58 @@ pub fn resolve_timeline_import_public_keys_v1(
             registry.as_ref(),
         )?);
     }
-    Ok(public_keys)
+    Ok((public_keys, registry))
+}
+
+/// Verify every exact V1 Timeline envelope before identity-preserving import.
+///
+/// The destination registry and caller-supplied trust set must agree on each
+/// Event's owner/role/epoch public key using one registry snapshot. An Event's
+/// retained first-commit origin must describe its own exported segment,
+/// including the Fork's inherited Timeline Order prefix. The store's
+/// `import_committed` operation then applies
+/// the validated batch atomically or rolls it back. This makes no signed-range
+/// completeness claim or ADR-060 `ReplayClaim`.
+///
+/// # Errors
+/// Rejects missing or mismatched trust context, invalid envelopes or
+/// signatures, origin transplants, and any atomic import failure.
+pub fn import_timeline_verified_v1(
+    store: &mut dyn EventStore,
+    export: TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<pos_core::Timeline, CoreError> {
+    let (public_keys, registry) = resolve_import_trust_context(store, &export, trust_anchors)?;
+    let inherited_prefix = export
+        .timeline
+        .meta
+        .fork_point
+        .map_or(0, |(_, at)| at.as_u64());
+    for (event, public_key) in export.events.iter().zip(public_keys) {
+        let origin_logical_seq = inherited_prefix
+            .checked_add(event.seq.as_u64())
+            .ok_or(CoreError::SignatureVerificationFailed)?;
+        if event.origin
+            != Some(pos_core::EventOriginV1 {
+                origin_timeline_id: export.timeline.id(),
+                origin_logical_seq: pos_core::Seq::from_u64(origin_logical_seq),
+            })
+        {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        let trust_anchor = event
+            .signature_identity
+            .map(|identity| (identity, public_key));
+        if pos_crypto::key_roles::verify_committed_timeline_event_v1(
+            event,
+            registry.as_ref(),
+            trust_anchor,
+        ) != pos_core::TimelineEventVerificationV1::Verified
+        {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+    }
+    pos_core::store::import_timeline_with_id(store, export)
 }
 
 fn load_import_registry(
@@ -1489,8 +1552,8 @@ mod tests {
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
-            // Anchor resolution treats signature bytes as opaque. #202 owns
-            // TimelineEventEnvelopeV1 signature verification.
+            // Anchor resolution treats signature bytes as opaque; the verified
+            // import boundary checks the full Timeline envelope separately.
             signature: Some(pos_core::Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
             origin: None,
