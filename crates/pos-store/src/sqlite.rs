@@ -7482,6 +7482,67 @@ mod tests {
             .test_ok();
     }
 
+    #[test]
+    fn protected_effect_intervals_close_and_reject_stale_or_missing_gate_state() {
+        let mut store = new_store();
+        let interval = store.begin_protected_effect_interval().test_ok();
+        assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
+        store
+            .finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Commit)
+            .test_ok();
+
+        let interval = store.begin_protected_effect_interval().test_ok();
+        store
+            .finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )
+            .test_ok();
+        store.conn.execute_batch("BEGIN").test_ok();
+        let nested = store.begin_protected_effect_interval().test_ok();
+        assert_eq!(nested, ErasureProtectedEffectIntervalV1::Unowned);
+        store
+            .finish_protected_effect_interval(nested, ErasureProtectedEffectDispositionV1::Commit)
+            .test_ok();
+        store.conn.execute_batch("ROLLBACK").test_ok();
+
+        store.erasure_inventory_data_version = -1;
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::StaleGeneration)
+        );
+        store.erasure_inventory_data_version = sqlite_data_version(&store.conn).test_ok();
+        store.erasure_gate = None;
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            store.finish_protected_effect_interval(
+                ErasureProtectedEffectIntervalV1::Owned,
+                ErasureProtectedEffectDispositionV1::Commit,
+            ),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+    }
+
+    #[test]
+    fn read_only_store_uses_a_separate_protected_effect_interval() {
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok();
+        drop(open_store_at(path));
+        let store = fixture_store(SqliteStore::open_read_only(path).test_ok());
+        assert!(store.erasure_effect_lock_connection.is_some());
+        let interval = store.begin_protected_effect_interval().test_ok();
+        assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
+        store
+            .finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )
+            .test_ok();
+    }
+
     fn cover_sqlite_host_transition_success(
         store: &mut SqliteStore,
         gate: &ErasureContainmentGateV1,

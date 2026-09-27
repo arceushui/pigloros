@@ -6035,6 +6035,70 @@ mod coverage_paths {
         ))
     }
 
+    #[test]
+    fn frozen_membership_successor_rejects_missing_or_changed_classifications(
+    ) -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        let state = inventory_state_with_timelines(
+            reference(201),
+            reference(202),
+            reference(203),
+            ErasureLifecycleV1::AccessFrozen,
+            vec![timeline],
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(timeline, reference(203))],
+            Vec::new(),
+        );
+        let current = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(state, proof)],
+            vec![timeline],
+            4,
+        )?;
+        assert_eq!(
+            current.validate_frozen_membership_successor(&current),
+            Ok(())
+        );
+
+        let mut missing_timeline = current.clone();
+        missing_timeline.classifications.clear();
+        assert_eq!(
+            current.validate_frozen_membership_successor(&missing_timeline),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut missing_request = current.clone();
+        missing_request.classifications[0].1.clear();
+        assert_eq!(
+            current.validate_frozen_membership_successor(&missing_request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut unfrozen = current.clone();
+        unfrozen.classifications[0].1[0].frozen = false;
+        assert_eq!(
+            current.validate_frozen_membership_successor(&unfrozen),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        unfrozen.classifications.clear();
+        let mut unfrozen_current = current.clone();
+        unfrozen_current.classifications[0].1[0].frozen = false;
+        assert_eq!(
+            unfrozen_current.validate_frozen_membership_successor(&unfrozen),
+            Ok(())
+        );
+
+        let mut changed_membership = current.clone();
+        changed_membership.classifications[0].1[0].membership =
+            ErasureInventoryMembershipV1::Excluded;
+        assert_eq!(
+            current.validate_frozen_membership_successor(&changed_membership),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
     struct InventoryQuery(Option<ErasureVerifiedInventoryV1>);
 
     impl ErasureVerifiedInventoryQueryV1 for InventoryQuery {

@@ -444,6 +444,45 @@ fn scope_commitment_binds_canonical_initial_timeline_ids() -> Result<(), Erasure
     );
     Ok(())
 }
+
+#[test]
+fn scope_codec_rejects_malformed_affected_scope_entry_types() -> Result<(), ErasureErrorV1> {
+    let valid = scope()?.to_canonical_cbor()?;
+    let member = Value::Array(vec![
+        Value::Integer(0_u64.into()),
+        Value::Bytes(reference(7).digest().to_vec()),
+    ]);
+    for entries in [
+        vec![Value::Array(vec![
+            Value::Integer(0_u64.into()),
+            Value::Null,
+        ])],
+        vec![
+            member.clone(),
+            Value::Array(vec![Value::Integer(1_u64.into()), Value::Bytes(vec![1])]),
+        ],
+        vec![
+            member.clone(),
+            Value::Array(vec![
+                Value::Integer(1_u64.into()),
+                Value::Text("invalid".to_owned()),
+            ]),
+        ],
+        vec![Value::Array(vec![Value::Integer(0_u64.into())])],
+        vec![Value::Array(vec![Value::Bool(true), Value::Null])],
+    ] {
+        let mut malformed = decode_value(&valid)?;
+        let Value::Array(fields) = &mut malformed else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        fields[3] = Value::Array(entries);
+        assert_eq!(
+            ErasureScopeCommitmentV1::from_canonical_cbor(&encode_value(&malformed)?),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
 roundtrip!(
     freeze_provenance_codec_roundtrips,
     ErasureFreezeProvenanceV1,
