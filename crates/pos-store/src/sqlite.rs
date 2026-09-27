@@ -15741,7 +15741,7 @@ mod tests {
             .test_ok();
         assert_eq!(
             sqlite_recovery_proof_subject_is_exact(&malformed.conn, mutation),
-            Err(ErasureErrorV1::InvalidEncoding)
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
 
