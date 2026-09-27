@@ -326,3 +326,46 @@ fn recipient_owner_public_contract_fails_closed_for_corrupt_durable_inventory(
     }
     Ok(())
 }
+
+#[test]
+fn recipient_owner_public_contract_rejects_file_and_symlink_owner_paths(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let file = temporary.path().join("file");
+    std::fs::write(&file, b"not a directory")?;
+    assert!(RecipientKeyOwnerV1::open(&file, EntityId::new()).is_err());
+    let directory = private_directory(temporary.path())?;
+    let link = temporary.path().join("link");
+    std::os::unix::fs::symlink(&directory, &link)?;
+    assert!(RecipientKeyOwnerV1::open(&link, EntityId::new()).is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_fails_closed_for_registry_and_inventory_schema_loss(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for statement in [
+        "DROP TABLE key_registry",
+        "UPDATE key_registry SET state_cbor = X'01'",
+        "DROP TABLE recipient_key_inventory_v1",
+    ] {
+        let (temporary, store, owner, _) = enrolled_owner()?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+        connection.execute_batch(statement)?;
+        assert!(store.recover_recipient_keys(&owner).is_err(), "{statement}");
+    }
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_private_material_size_and_bytes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for material in [vec![0; 31], vec![0; 33], vec![0; 32]] {
+        let (temporary, store, owner, _) = enrolled_owner()?;
+        let path = only_private_file(&temporary.path().join("recipient-private"))?;
+        std::fs::write(&path, material)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        assert!(store.recover_recipient_keys(&owner).is_err());
+    }
+    Ok(())
+}
