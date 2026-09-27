@@ -426,7 +426,7 @@ impl ReplayClaimEvaluatorV1 {
     ///
     /// # Errors
     /// Returns [`ErasureErrorV1::ScopeInvalid`] for an oversized input, or
-    /// [`ErasureErrorV1::PolicyConflict`] for a missing legacy key dependency,
+    /// [`ErasureErrorV1::PolicyConflict`] when a registered role lacks a dependency,
     /// duplicate identity/fact, or mismatched material digest.
     pub fn evaluate_artifact_destruction(
         input: ArtifactClaimInputV1,
