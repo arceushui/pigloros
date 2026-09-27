@@ -53,6 +53,56 @@ fn intervention_record(
     })
 }
 
+fn hex_bytes(value: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if !value.len().is_multiple_of(2) {
+        return Err("odd golden hex length".into());
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        bytes.push(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?);
+    }
+    Ok(bytes)
+}
+
+#[test]
+fn eor1_and_fia1_match_fixed_public_bytes_and_digests() -> Result<(), Box<dyn std::error::Error>> {
+    let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
+        fork_timeline_id: TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes([0x11; 16]))),
+        logical_seq: 9,
+        event_id: EventId::from_ulid(ulid::Ulid::from(u128::from_be_bytes([0x22; 16]))),
+        classification: ForkEventClassificationV1::new(ForkEventOriginKindV1::ExternalInput, true)?,
+        classifier_revision_digest: hash(4),
+        fork_admission_digest: hash(5),
+    })?;
+    let intervention = intervention_record(&origin)?;
+    const EOR1_HEX: &str = concat!(
+        "8944454f52310150111111111111111111111111111111110950222222222222",
+        "2222222222222222222201015820040404040404040404040404040404040404",
+        "0404040404040404040404040404582005050505050505050505050505050505",
+        "05050505050505050505050505050505",
+    );
+    const FIA1_HEX: &str = concat!(
+        "8a44464941310158200606060606060606060606060606060606060606060606",
+        "0606060606060606065011111111111111111111111111111111095022222222",
+        "2222222222222222222222225820070707070707070707070707070707070707",
+        "0707070707070707070707070707582008080808080808080808080808080808",
+        "0808080808080808080808080808080858200404040404040404040404040404",
+        "0404040404040404040404040404040404045820050505050505050505050505",
+        "0505050505050505050505050505050505050505",
+    );
+    assert_eq!(origin.to_canonical_cbor(), hex_bytes(EOR1_HEX)?);
+    assert_eq!(intervention.to_canonical_cbor(), hex_bytes(FIA1_HEX)?);
+    assert_eq!(
+        origin.digest().as_bytes().to_vec(),
+        hex_bytes("a786d528859cd46b43577c4bfeba6ac29681ae326ddb185ce11beedb2be82b31")?
+    );
+    assert_eq!(
+        intervention.digest().as_bytes().to_vec(),
+        hex_bytes("4a98f9d3afe615e35d6a5bb3c488083b6a13699898611377d4ddb076ca2988f1")?
+    );
+    Ok(())
+}
+
 #[test]
 fn eor1_and_fia1_round_trip_at_public_seam() -> Result<(), Box<dyn std::error::Error>> {
     let origin = origin_record()?;
