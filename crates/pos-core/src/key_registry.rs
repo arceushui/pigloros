@@ -986,24 +986,30 @@ impl KeyRegistryStateV1 {
     where
         F: FnOnce() -> T,
     {
-        identity.validate_historical_subject_decryption()?;
-        self.validate()
-            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
-        let record = self
-            .records
-            .get(&identity)
-            .copied()
-            .ok_or(KeyRegistryErrorV1::NotFound)?;
-        if self.tombstones.contains_key(&identity) {
-            return Err(KeyRegistryErrorV1::Destroyed);
-        }
-        if self.pending_destructions.contains_key(&identity) {
-            return Err(KeyRegistryErrorV1::DestructionPending);
-        }
-        if record.private_material_digest != Some(private_material_digest) {
-            return Err(KeyRegistryErrorV1::EncryptionKeyMismatch);
-        }
-        Ok(operation())
+        identity
+            .validate_historical_subject_decryption()
+            .and_then(|()| {
+                self.validate()
+                    .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+            })
+            .and_then(|()| {
+                self.records
+                    .get(&identity)
+                    .copied()
+                    .ok_or(KeyRegistryErrorV1::NotFound)
+            })
+            .and_then(|record| {
+                if self.tombstones.contains_key(&identity) {
+                    Err(KeyRegistryErrorV1::Destroyed)
+                } else if self.pending_destructions.contains_key(&identity) {
+                    Err(KeyRegistryErrorV1::DestructionPending)
+                } else if record.private_material_digest != Some(private_material_digest) {
+                    Err(KeyRegistryErrorV1::EncryptionKeyMismatch)
+                } else {
+                    Ok(())
+                }
+            })
+            .map(|()| operation())
     }
 
     /// Record a destruction request and revoke active authorization.
