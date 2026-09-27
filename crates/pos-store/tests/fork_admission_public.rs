@@ -247,3 +247,29 @@ fn sqlite_corrupt_far1_bytes_fail_closed_at_the_public_read_port() -> TestResult
     );
     Ok(())
 }
+
+#[test]
+fn sqlite_rolls_back_child_metadata_when_far1_insert_fails() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission.db");
+    let mut store = SqliteStore::open(&path)?;
+    let parent = store.create_timeline("parent")?;
+    let authenticated = authenticated()?;
+    store.bind_principal_owner_trust(trust(&authenticated)?)?;
+    store.commit_local_binding(
+        Hash::from_bytes([1; 32]),
+        &authenticated,
+        OwnerIdV1::new("creator")?,
+        WallTime::from_micros(20),
+    )?;
+    rusqlite::Connection::open(&path)?.execute_batch("CREATE TRIGGER reject_far1 BEFORE INSERT ON fork_admissions BEGIN SELECT RAISE(ABORT, 'reject'); END;")?;
+    assert_eq!(
+        store.create_fork_admitted(
+            &request(parent.id(), authenticated),
+            WallTime::from_micros(20)
+        ),
+        Err(ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    assert_eq!(store.list_timelines()?.len(), 1);
+    Ok(())
+}
