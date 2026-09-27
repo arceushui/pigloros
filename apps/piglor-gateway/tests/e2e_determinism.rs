@@ -223,7 +223,6 @@ impl AgentPolicy for BarrierPolicy {
 
 struct HttpResponse {
     status: u16,
-    body: Value,
 }
 
 async fn request_http(
@@ -293,8 +292,8 @@ fn request_http_blocking_with_actor(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .test_ok()?;
-    let body = serde_json::from_slice(&response[header_end + 4..]).test_ok()?;
-    Ok(HttpResponse { status, body })
+    let _: Value = serde_json::from_slice(&response[header_end + 4..]).test_ok()?;
+    Ok(HttpResponse { status })
 }
 
 struct FixtureGuard {
