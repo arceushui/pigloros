@@ -385,6 +385,20 @@ jobs:
             "secure conformance fixture snapshot generation requires Linux openat2" \
             "${RUNNER_TEMP}/conformance-non-linux.log"
 
+  ledger-windows:
+    name: ledger-windows
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - name: Exercise the unsupported owned-key signing boundary
+        run: cargo test -p piglor-ledger --all-features --locked -- --include-ignored
+
   clippy:
     name: clippy
     needs: [ci_change_scope, preflight-gate]
@@ -960,6 +974,7 @@ jobs:
       - audit
       - geiger
       - codeql
+      - ledger-windows
       - docker-build
       - world-client-wasm
       - world-client-browser-parity
@@ -977,6 +992,7 @@ jobs:
           DEPENDENCY_RESULT: ${{ needs.audit.result }}
           GEIGER_RESULT: ${{ needs.geiger.result }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
+          LEDGER_WINDOWS_RESULT: ${{ needs.ledger-windows.result }}
           DOCKER_RESULT: ${{ needs.docker-build.result }}
           WASM_RESULT: ${{ needs.world-client-wasm.result }}
           BROWSER_RESULT: ${{ needs.world-client-browser-parity.result }}
@@ -990,7 +1006,8 @@ jobs:
           for result in \
             "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
             "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" "${GEIGER_RESULT}" \
-            "${CODEQL_RESULT}" "${DOCKER_RESULT}" "${WASM_RESULT}" "${BROWSER_RESULT}"; do
+            "${CODEQL_RESULT}" "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
+            "${WASM_RESULT}" "${BROWSER_RESULT}"; do
             test "${result}" = "${expected}"
           done
 
