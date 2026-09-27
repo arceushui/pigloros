@@ -418,3 +418,39 @@ fn every_truncated_attribution_record_fails_closed() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+#[test]
+fn public_attribution_decoders_reject_forbidden_cbor_shapes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let manifest = manifest(&admission)?;
+    let signed = SignedForkReproManifestV1::new(
+        KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
+        manifest.clone(),
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    let invalid_prefixes: [&[u8]; 9] = [
+        &[],
+        &[0x9f],
+        &[0xbf],
+        &[0x5f],
+        &[0x7f],
+        &[0xff],
+        &[0x98, 15],
+        &[0x8f, 0x44, b'F', b'A', b'R', b'1', 0x18, 1],
+        &[0x8f, 0x44, b'F', b'A', b'R', b'1', 0x01, 0x78, 0x80],
+    ];
+    for bytes in invalid_prefixes {
+        assert!(ForkAdmissionRecordV1::from_canonical_cbor(bytes).is_err());
+        assert!(ForkReproManifestV1::from_canonical_cbor(bytes).is_err());
+        assert!(SignedForkReproManifestV1::from_canonical_cbor(bytes).is_err());
+    }
+    let mut bad_bool = admission.to_canonical_cbor();
+    let bool_at = bad_bool.len() - 3;
+    bad_bool[bool_at] = 2;
+    assert!(ForkAdmissionRecordV1::from_canonical_cbor(&bad_bool).is_err());
+    let mut bad_signature = signed.to_canonical_cbor();
+    bad_signature.pop();
+    assert!(SignedForkReproManifestV1::from_canonical_cbor(&bad_signature).is_err());
+    Ok(())
+}
