@@ -11,6 +11,7 @@ const ROLE_CODE: u8 = 4;
 const KEM_CODE: u16 = 0x0020;
 const OWNER_PREFIX: &[u8; 10] = b"recipient:";
 const OWNER_LENGTH: usize = 42;
+const OWNER_LENGTH_U8: u8 = 42;
 const FINGERPRINT_DOMAIN: &[u8] = b"pigloros/recipient-key-descriptor/v1\0";
 
 /// Closed failures for the RKP1 public descriptor.
@@ -129,11 +130,11 @@ impl RecipientKeyDescriptorV1 {
         bytes.push(0x44);
         bytes.extend_from_slice(&MAGIC);
         bytes.push(VERSION);
-        bytes.extend_from_slice(&[0x78, OWNER_LENGTH as u8]);
+        bytes.extend_from_slice(&[0x78, OWNER_LENGTH_U8]);
         bytes.extend_from_slice(self.identity.owner_id.as_str().as_bytes());
         bytes.push(ROLE_CODE);
         encode_unsigned(self.identity.epoch, &mut bytes);
-        bytes.extend_from_slice(&[0x18, KEM_CODE as u8]);
+        bytes.extend_from_slice(&[0x18, KEM_CODE.to_be_bytes()[1]]);
         bytes.extend_from_slice(&[0x58, 32]);
         bytes.extend_from_slice(&self.public_key);
         bytes
@@ -202,15 +203,26 @@ fn is_recipient_owner(owner: &OwnerIdV1) -> bool {
 
 fn encode_unsigned(value: u64, bytes: &mut Vec<u8>) {
     match value {
-        0..=23 => bytes.push(value as u8),
-        24..=0xff => bytes.extend_from_slice(&[0x18, value as u8]),
+        0..=23 => bytes.push(u8::try_from(value).expect("CBOR immediate fits in u8")),
+        24..=0xff => bytes.extend_from_slice(&[
+            0x18,
+            u8::try_from(value).expect("CBOR one-byte unsigned integer fits in u8"),
+        ]),
         0x100..=0xffff => {
             bytes.push(0x19);
-            bytes.extend_from_slice(&(value as u16).to_be_bytes());
+            bytes.extend_from_slice(
+                &u16::try_from(value)
+                    .expect("CBOR two-byte unsigned integer fits in u16")
+                    .to_be_bytes(),
+            );
         }
         0x1_0000..=0xffff_ffff => {
             bytes.push(0x1a);
-            bytes.extend_from_slice(&(value as u32).to_be_bytes());
+            bytes.extend_from_slice(
+                &u32::try_from(value)
+                    .expect("CBOR four-byte unsigned integer fits in u32")
+                    .to_be_bytes(),
+            );
         }
         _ => {
             bytes.push(0x1b);
@@ -258,13 +270,13 @@ impl<'a> Rkp1Cursor<'a> {
         error: RecipientKeyDescriptorErrorV1,
     ) -> Result<(), RecipientKeyDescriptorErrorV1> {
         self.exact_byte(0x18)
-            .and_then(|()| self.exact_byte(expected as u8))
+            .and_then(|()| self.exact_byte(expected.to_be_bytes()[1]))
             .map_err(|_| error)
     }
 
     fn owner(&mut self) -> Result<OwnerIdV1, RecipientKeyDescriptorErrorV1> {
         self.exact_byte(0x78)?;
-        self.exact_byte(OWNER_LENGTH as u8)?;
+        self.exact_byte(OWNER_LENGTH_U8)?;
         self.take(OWNER_LENGTH)
             .and_then(|bytes| {
                 std::str::from_utf8(bytes).map_err(|_| RecipientKeyDescriptorErrorV1::InvalidOwner)
