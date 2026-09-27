@@ -4,7 +4,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use pos_core::{EntityId, EventStore, Hash, KeyRoleV1};
+use pos_core::{EntityId, EventStore, Hash, KeyDestructionRequestV1, KeyRoleV1};
 use pos_store::sqlite::{RecipientKeyOwnerV1, SqliteStore};
 
 fn private_directory(
@@ -178,6 +178,76 @@ fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
         .collect::<Result<Vec<_>, _>>()?;
     assert!(names.iter().any(|name| name.ends_with(".orphan")));
     assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_recovers_retained_epoch_after_rotation_and_restart(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let grantee = EntityId::new();
+    let database = temporary.path().join("recipient.sqlite");
+    let mut store = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    let owner = RecipientKeyOwnerV1::open(directory.clone(), grantee)?;
+    let first = store.enroll_recipient_key(&owner)?;
+    let second = store.enroll_recipient_key(&owner)?;
+    drop(store);
+    drop(owner);
+
+    let reopened = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    let reopened_owner = RecipientKeyOwnerV1::open(directory, grantee)?;
+    assert_eq!(
+        reopened.recover_recipient_keys(&reopened_owner)?,
+        vec![first, second]
+    );
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_never_finalizes_a_pending_missing_file_without_receipt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    let digest = registry
+        .key_record(descriptor.identity())
+        .and_then(|record| record.private_material_digest)
+        .ok_or("recipient material digest is absent")?;
+    let request =
+        KeyDestructionRequestV1::new(descriptor.identity(), digest, Hash::from_bytes([11; 32]));
+    store.begin_key_registry_destruction(request)?;
+    std::fs::remove_file(only_private_file(
+        &temporary.path().join("recipient-private"),
+    )?)?;
+    drop(store);
+
+    let mut resumed = SqliteStore::open(
+        temporary
+            .path()
+            .join("recipient.sqlite")
+            .to_str()
+            .ok_or("database path is not UTF-8")?,
+    )?;
+    assert!(resumed
+        .destroy_recipient_key(
+            &owner,
+            descriptor.identity().epoch,
+            Hash::from_bytes([11; 32])
+        )
+        .is_err());
+    let resumed_registry = resumed
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    assert!(resumed_registry.tombstone(descriptor.identity()).is_none());
+    let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
+        .query_row(
+            "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+    assert_eq!(receipt_count, 0);
     Ok(())
 }
 
