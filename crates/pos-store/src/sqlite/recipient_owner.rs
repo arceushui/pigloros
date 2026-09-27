@@ -10,7 +10,7 @@ use std::{
 
 use pos_core::{
     recipient_owner_id_from_grantee, EntityId, EventStore, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, RecipientKeyDescriptorV1,
+    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, RecipientKeyDescriptorV1,
 };
 use rand::{rngs::SysRng, TryRng};
 use rusqlite::OptionalExtension;
@@ -519,7 +519,7 @@ impl SqliteStore {
 
 fn validate_recipient_key_inventory(
     owner: &RecipientKeyOwnerV1,
-    owner_id: &EntityId,
+    owner_id: &OwnerIdV1,
     registry: &KeyRegistryStateV1,
     inventories: &[StoredRecipientKeyInventoryV1],
 ) -> Result<Vec<RecipientKeyDescriptorV1>, CoreError> {
