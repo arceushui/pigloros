@@ -1,6 +1,6 @@
 use piglor_gateway::{
-    router, AppState, Gateway, GatewayAuthorization, GatewayError, LedgerWriteMode,
-    LocalAuthenticationAdapter,
+    router, AppState, Gateway, GatewayAuthorization, GatewayAuthorizationRequest, GatewayError,
+    LedgerWriteMode, LocalAuthenticationAdapter,
 };
 use piglor_ledger::LedgerView;
 use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
@@ -20,6 +20,7 @@ use pos_plugin_agent::{
 use pos_plugin_society::{
     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 };
+use pos_plugin_world::{encode_actuator_pair_v1, ActionKindV1, WorldActionV1};
 use pos_runtime::{
     Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
 };
@@ -145,6 +146,7 @@ impl Driver for ObservationProbeDriver {
 
 struct HumanActionDriver {
     entity: EntityId,
+    payload: CanonicalBytes,
     steps: u8,
 }
 
@@ -164,7 +166,7 @@ impl Driver for HumanActionDriver {
             Ok(StepOutput::new(vec![EventDraft::new(
                 self.entity,
                 Kind::new("world.action.v1"),
-                CanonicalBytes::from_static(b"\xa0"),
+                self.payload.clone(),
             )]))
         } else {
             Ok(StepOutput::empty())
@@ -568,6 +570,17 @@ fn register_experiment(
     let society = SocietyPlugin::new();
     let human = FixturePlugin::new("human-action", true, false)
         .with_owned_event_type(Kind::new("world.action.v1"));
+    let human_action = WorldActionV1 {
+        actor_entity_id: scenario.human_entity,
+        body_entity_id: scenario.human_body,
+        action_kind: ActionKindV1::Impulse,
+        params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok()?,
+        action_scope: 0,
+        catalogue_version: 1,
+        tick: 1,
+    }
+    .encode()
+    .test_ok()?;
     let fast = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
     let slow = AgentPlugin::new();
@@ -590,6 +603,7 @@ fn register_experiment(
             None,
             Some(Box::new(HumanActionDriver {
                 entity: scenario.human_entity,
+                payload: human_action,
                 steps: 0,
             })),
         )
@@ -1035,6 +1049,44 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
     scenario.guard.shutdown().await.map_err(
         |error| -> Box<dyn std::error::Error + Send + Sync> { format!("shutdown: {error}").into() },
     )?;
+    let recovered_host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Sqlite {
+            path: scenario.path.clone(),
+        },
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+    )
+    .test_ok()?;
+    let recovered_gateway = Gateway::new_with_erasure_host_and_authorization(
+        recovered_host,
+        [scenario.human_body],
+        gateway_authorization_for(scenario.human_entity)?,
+    )?;
+    let page = recovered_gateway
+        .read_events_page_authorized(
+            &scenario.timeline.to_string(),
+            0,
+            10,
+            GatewayAuthorizationRequest::read(
+                scenario.human_entity,
+                scenario.timeline,
+                0,
+                10,
+                WallTime::now(),
+            ),
+        )
+        .await
+        .test_ok()?;
+    assert_eq!(page.events.len(), events.len());
+    assert_eq!(page.next_from_seq, None);
+    for (actual, expected) in page.events.iter().zip(&events) {
+        assert_eq!(Some(actual.seq.as_u64()), expected["seq"].as_u64());
+        assert_eq!(
+            Some(actual.event_type.as_str()),
+            expected["event_type"].as_str()
+        );
+        let actual_entity = actual.entity.to_string();
+        assert_eq!(Some(actual_entity.as_str()), expected["entity"].as_str());
+    }
     Ok(())
 }
 

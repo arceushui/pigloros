@@ -102,14 +102,18 @@ HTTP (axum) → Gateway → EventStore (Memory | SQLite)
 
 This crate is a **store façade**, not a full `pos-runtime` host. Poll returns Events already appended to a bundled memory or SQLite store, including imported Events. Count, payload, metadata, Fork-depth, and response bounds apply regardless of Event origin. Custom `EventStore` adapters must implement the bounded-read and bounded root-count capabilities; safe defaults refuse Gateway operations instead of falling back to allocating reads or lists. When a `GatewayAuthorization` is configured, timeline reads require the host-provided actor context and are rechecked under the same authority fence used by action appends; no adapter credential or bearer value enters the Timeline.
 
-### Supported SQLite write boundary
+### SQLite and host ownership
 
-The supported multi-process boundary permits PiglorOS Gateway and experiment-host
-processes to open the same SQLite Timeline through `EventStore`. Immediate writer
-transactions and a bounded busy timeout serialize their appends, and Gateway
-ceilings are enforced atomically by the adapter. Arbitrary SQL mutation by tools
-that bypass `EventStore` remains unsupported while the file is open. Imported
-Events remain safely bounded on read.
+One erasure host owns the verified inventory generation used by its Gateway
+routes. Its `EventStore` adapter serializes writes with immediate SQLite
+transactions and a bounded busy timeout, and enforces Gateway ceilings
+atomically. A separate process can advance the same SQLite file, but an
+already-open host then rejects protected reads and writes rather than using a
+stale inventory. Stop and restart that host to recover the complete committed
+inventory before serving routes again. Concurrent Gateway and experiment
+commands require the same host command stream, not two independently opened
+hosts. Arbitrary SQL mutation that bypasses `EventStore` remains unsupported.
+Imported Events remain safely bounded on read.
 
 An external client does not reuse the 10,000-owned-Event ceiling as
 a logical read limit: Forks may expose inherited plus owned Events beyond that

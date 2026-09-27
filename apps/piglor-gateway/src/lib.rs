@@ -5779,7 +5779,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn sqlite_gateways_enforce_one_atomic_event_ceiling() {
+    async fn sqlite_gateway_enforces_full_event_ceiling_under_one_host() {
         let database = TemporarySqliteFile::new("atomic-ceiling");
         let path = database.path.clone();
         let open = || open_store(StoreConfig::Sqlite { path: path.clone() });
@@ -5804,8 +5804,9 @@ mod tests {
         );
         drop(seed);
 
-        let first = Gateway::new(checked_sqlite_ceiling_result(open(), "open first"));
-        let second = Gateway::new(checked_sqlite_ceiling_result(open(), "open second"));
+        let gateway = Gateway::new(checked_sqlite_ceiling_result(open(), "open gateway"));
+        let first = gateway.clone();
+        let second = gateway.clone();
         let timeline_id = timeline.id().to_string();
         let entity_id = entity.to_string();
         let payload_a = serde_json::json!({"writer": "a"});
@@ -5847,13 +5848,13 @@ mod tests {
         } else {
             b.test_err()
         };
-        let expected_rejection = matches!(
-            &rejected,
+        assert!(matches!(
+            rejected,
             GatewayError::EventLimitReached {
                 maximum: MAX_EVENTS_PER_TIMELINE
-            } | GatewayError::Store(CoreError::ErasureContainmentUnavailable)
-        );
-        assert!(expected_rejection, "unexpected rejection: {rejected:?}");
+            }
+        ));
+        drop(gateway);
         let mut fresh = checked_sqlite_ceiling_result(open(), "open fresh");
         Gateway::bind_test_erasure_gate(fresh.as_mut());
         assert_eq!(
