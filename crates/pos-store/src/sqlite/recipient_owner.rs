@@ -237,17 +237,9 @@ impl SqliteStore {
                     "recipient key inventory is invalid".to_owned(),
                 ));
             }
-            let inventory_digest = pos_core::Hash::from_bytes(
-                inventory
-                    .material_digest
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| {
-                        CoreError::Storage(
-                            "recipient key inventory material digest is invalid".to_owned(),
-                        )
-                    })?,
-            );
+            let mut inventory_digest = [0_u8; 32];
+            inventory_digest.copy_from_slice(&inventory.material_digest);
+            let inventory_digest = pos_core::Hash::from_bytes(inventory_digest);
             let identity = descriptor.identity();
             if registry.key_record(identity).is_none_or(|record| {
                 record.private_material_digest != Some(inventory_digest)
