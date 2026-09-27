@@ -81,7 +81,7 @@ fn recipient_owner_public_contract_recovers_and_destroys_the_bound_file(
         .query_row(
             "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
             [],
-            |row| row.get::<_, u64>(0),
+            |row| row.get::<_, i64>(0),
         )?;
     assert_eq!(receipt_count, 1);
     assert!(store.recover_recipient_keys(&owner).is_err());
@@ -134,7 +134,7 @@ fn recipient_owner_public_contract_rejects_replaced_file_and_keeps_pending(
         .query_row(
             "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
             [],
-            |row| row.get::<_, u64>(0),
+            |row| row.get::<_, i64>(0),
         )?;
     assert_eq!(receipt_count, 0);
     Ok(())
@@ -172,7 +172,7 @@ fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
 
     assert!(store.enroll_recipient_key(&owner).is_err());
     assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
-    let names = std::fs::read_dir(temporary.path().join("recipient-private"))
+    let names = std::fs::read_dir(temporary.path().join("recipient-private"))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|entry| entry.file_name().into_string())
@@ -245,7 +245,7 @@ fn recipient_owner_public_contract_never_finalizes_a_pending_missing_file_withou
         .query_row(
             "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
             [],
-            |row| row.get::<_, u64>(0),
+            |row| row.get::<_, i64>(0),
         )?;
     assert_eq!(receipt_count, 0);
     Ok(())

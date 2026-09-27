@@ -15,6 +15,11 @@ pub enum RecipientKeyErrorV1 {
 ///
 /// The caller must zeroize `ikm` after this call and retain the returned
 /// private bytes only in the owner-managed durable boundary.
+///
+/// # Errors
+///
+/// Returns a closed error if the selected HPKE KEM does not return
+/// X25519-sized private or public key bytes.
 pub fn derive_recipient_keypair_v1(
     ikm: &[u8; 32],
 ) -> Result<([u8; 32], [u8; 32]), RecipientKeyErrorV1> {
