@@ -400,6 +400,8 @@ fn malformed_mat1_reject_before_authority() -> TestResult<()> {
         (43, 0x88),
         (205, 0x57),
         (239, 0x57),
+        (273, 0x00),
+        (273, 0x9c),
         (273, 0x81),
     ] {
         let mut bytes = good.clone();
