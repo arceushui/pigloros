@@ -4125,12 +4125,12 @@ impl EventStore for SqliteStore {
                         .get_timeline(timeline)?
                         .ok_or(CoreError::TimelineNotFound(timeline))?;
                     let event = create_event(&persisted, head.head.next())?;
-                    if event
-                        .signature_identity
-                        .is_some_and(|identity| identity.role == KeyRoleV1::TimelineIntegritySigning)
-                    {
+                    if event.signature_identity.is_some_and(|identity| {
+                        identity.role == KeyRoleV1::TimelineIntegritySigning
+                    }) {
                         return Err(CoreError::Storage(
-                            "Timeline signatures require the atomic envelope append seam".to_owned(),
+                            "Timeline signatures require the atomic envelope append seam"
+                                .to_owned(),
                         ));
                     }
                     self.append_committed(timeline, &[event])
