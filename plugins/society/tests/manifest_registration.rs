@@ -19,16 +19,16 @@ use pos_runtime::{
 };
 
 struct InstalledFixture {
-    plugin: SocietyPlugin,
+    plugin: Box<SocietyPlugin>,
     binding: OutputPolicyBindingV1,
     registration: PluginRegistrationV1,
     row: ManifestAdmissionCatalogRowV1,
 }
 
 fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn Error>> {
-    let plugin = SocietyPlugin::new();
+    let plugin = Box::new(SocietyPlugin::new());
     let binding = OutputPolicyBindingV1::from_installed_source(
-        &plugin,
+        plugin.as_ref(),
         InstalledOutputPolicySourceV1::Society,
         configuration,
         "deterministic-local-v1",
@@ -37,7 +37,7 @@ fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,
         binding.policy().digest(),
-        vec![installed_plugin_role_v1(&plugin)],
+        vec![installed_plugin_role_v1(plugin.as_ref())],
     )?;
     let registration = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
     let closure_hash = binding.manifest_closure_hash()?;
@@ -76,7 +76,7 @@ fn register(registry: &mut PluginRegistry, fixture: InstalledFixture) -> Result<
         row,
     } = fixture;
     registry.register_installed_output_in_manifest_slot(
-        &plugin,
+        plugin.as_ref(),
         binding,
         registration,
         Some(Box::new(SocietyReducer)),
@@ -230,7 +230,7 @@ fn wrong_pin_and_unavailable_plugin_reject_before_mutation() -> Result<(), Box<d
                     DomainImplementationKindV1::Plugin,
                     PluginIsolationV1::OperatorTrustedNative,
                     Hash::from_bytes([0x74; 32]),
-                    vec![installed_plugin_role_v1(&actual.plugin)],
+                    vec![installed_plugin_role_v1(actual.plugin.as_ref())],
                 )?,
                 PluginAvailabilityV1::Available,
             )
@@ -238,7 +238,7 @@ fn wrong_pin_and_unavailable_plugin_reject_before_mutation() -> Result<(), Box<d
         let mut registry = PluginRegistry::new();
         registry.prepare_manifest_registration(catalog(vec![actual.row.clone()])?)?;
         let result = registry.register_installed_output_in_manifest_slot(
-            &actual.plugin,
+            actual.plugin.as_ref(),
             actual.binding,
             registration,
             Some(Box::new(SocietyReducer)),
