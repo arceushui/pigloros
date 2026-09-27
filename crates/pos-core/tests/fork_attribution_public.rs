@@ -394,3 +394,27 @@ fn fsm1_rejects_non_attribution_identities_and_outer_limits(
     );
     Ok(())
 }
+
+#[test]
+fn every_truncated_attribution_record_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let manifest = manifest(&admission)?;
+    let signed = SignedForkReproManifestV1::new(
+        KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
+        manifest.clone(),
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    let far1 = admission.to_canonical_cbor();
+    let frm1 = manifest.to_canonical_cbor();
+    let fsm1 = signed.to_canonical_cbor();
+    for length in 0..far1.len() {
+        assert!(ForkAdmissionRecordV1::from_canonical_cbor(&far1[..length]).is_err());
+    }
+    for length in 0..frm1.len() {
+        assert!(ForkReproManifestV1::from_canonical_cbor(&frm1[..length]).is_err());
+    }
+    for length in 0..fsm1.len() {
+        assert!(SignedForkReproManifestV1::from_canonical_cbor(&fsm1[..length]).is_err());
+    }
+    Ok(())
+}
