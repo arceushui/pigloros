@@ -1,6 +1,6 @@
 use super::super::codec::{
-    array, bounded_text, bytes, decode, digest, digest_with_domain, encode, fixed, sign, text,
-    uint, validate_magic, value_bytes, value_text, value_uint, verify,
+    array, bounded_text, decode, digest, digest_with_domain, encode, fixed, sign, text, uint,
+    validate_magic, value_bytes, value_text, value_uint, verify,
 };
 use super::super::{
     SandboxContractErrorV1, MAX_SANDBOX_IDENTIFIER_BYTES_V1, MAX_SANDBOX_PAYLOAD_BYTES_V1,
