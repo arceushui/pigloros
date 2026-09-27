@@ -3887,6 +3887,9 @@ mod tests {
                     TimelineMeta::root("host-root"),
                 )
                 .test_ok();
+            assert!(store
+                .create_timeline_for_host_transition_with_meta(permit, root.meta.clone())
+                .is_err());
             let meta_root = store
                 .create_timeline_for_host_transition_with_meta(
                     permit,
@@ -3938,6 +3941,14 @@ mod tests {
                 .fork_for_host_transition_with_meta(permit, root.id(), Seq::ZERO, child_meta)
                 .test_ok();
             assert_eq!(child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+            assert!(store
+                .fork_for_host_transition_with_meta(
+                    permit,
+                    root.id(),
+                    Seq::ZERO,
+                    child.meta.clone()
+                )
+                .is_err());
             let ordinary_child = store
                 .fork_for_host_transition_with_meta(
                     permit,
@@ -3947,6 +3958,22 @@ mod tests {
                 )
                 .test_ok();
             assert_eq!(ordinary_child.meta.fork_point, Some((root.id(), Seq::ZERO)));
+
+            let adopted = store
+                .create_timeline_for_host_transition_with_meta(
+                    permit,
+                    TimelineMeta::root("host-ledger-adopted"),
+                )
+                .test_ok();
+            let (reused_adopted, created) = store
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("host-ledger-adopted"),
+                    &KeyRegistryStateV1::new(),
+                )
+                .test_ok();
+            assert_eq!(reused_adopted.id(), adopted.id());
+            assert!(!created);
 
             let ledger_meta = TimelineMeta::root("host-ledger-existing");
             let existing = store
@@ -4104,6 +4131,18 @@ mod tests {
                 .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing rollback gate"))),
         );
         let mut rollback_transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let error = rollback
+                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                    permit,
+                    &TimelineMeta::root("rollback-host-ledger-clean"),
+                    &super::coverage_entrypoints::invalid_registry(),
+                )
+                .test_err();
+            assert!(matches!(error, CoreError::Serialization(_)));
+            assert!(rollback
+                .find_timeline_by_name_for_host_transition(permit, "rollback-host-ledger-clean")
+                .test_ok()
+                .is_none());
             fail_next_visible_delete_for_test();
             let error = rollback
                 .initialize_timeline_with_key_registry_for_host_transition_with_meta(
@@ -7649,7 +7688,17 @@ mod coverage_entrypoints {
         );
         assert_eq!(
             ok(store.recover_fork_admission(operation, &candidate)),
-            Some(expected)
+            Some(expected.clone())
+        );
+        fail_next_chain_hash_at_for_test();
+        assert_eq!(
+            store.recover_fork_admission(operation, &candidate),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        store.timelines.remove(&expected.child().id);
+        assert_eq!(
+            store.recover_fork_admission(operation, &candidate),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
 
