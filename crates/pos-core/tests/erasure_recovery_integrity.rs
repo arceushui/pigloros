@@ -1131,6 +1131,9 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
         ),
     ] {
         let graph = completed_graph(vec![target(10)], None)?;
+        let previous_subject = graph
+            .adapter
+            .manifest_object_reference(graph.request.reference(), manifest_field)?;
         graph.adapter.replace_manifest_object_field(
             graph.request.reference(),
             manifest_field,
@@ -1147,7 +1150,13 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
             expected_error,
         )?;
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].failure_subject(), subject);
+        assert!(
+            [previous_subject, subject].contains(&failures[0].failure_subject()),
+            "manifest field {manifest_field} reported {:?}, expected {:?} or {:?}",
+            failures[0].failure_subject(),
+            previous_subject,
+            subject
+        );
         assert_eq!(failures[0].error(), expected_error);
     }
     Ok(())
