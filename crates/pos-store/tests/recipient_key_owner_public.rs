@@ -175,8 +175,8 @@ fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
     let names = std::fs::read_dir(temporary.path().join("recipient-private"))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|entry| entry.file_name().into_string())
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     assert!(names.iter().any(|name| name.ends_with(".orphan")));
     Ok(())
 }
