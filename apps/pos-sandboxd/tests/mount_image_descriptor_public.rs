@@ -9,6 +9,7 @@ use rustix::{
     fs::fstat,
     io::{fcntl_getfd, fcntl_setfd, FdFlags},
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::UnixStream;
 use zlink::{tokio::unix::Stream, Connection, Reply};
@@ -20,7 +21,16 @@ trait MountImageProxy {
         &mut self,
         #[zlink(rename = "imageFileDescriptor")] image_file_descriptor: u32,
         #[zlink(fds)] fds: Vec<OwnedFd>,
-    ) -> zlink::Result<(Result<Value, Value>, Vec<OwnedFd>)>;
+    ) -> zlink::Result<(Result<Value, MountImageError>, Vec<OwnedFd>)>;
+}
+
+// zlink tries the error envelope before the successful reply. Requiring the
+// Varlink error discriminator keeps successful parameters out of this branch.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "error")]
+enum MountImageError {
+    #[serde(other)]
+    Rejected,
 }
 
 #[tokio::test]
@@ -77,8 +87,8 @@ async fn descriptor_round_trip() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (reply, ()) = tokio::try_join!(send, receive)?;
     let (parameters, mut root_descriptors) = reply;
     assert_eq!(
-        parameters.map_err(|_| "unexpected peer error")?,
-        json!({"partitions": [{"designator": "root", "mountFileDescriptor": 0}]})
+        parameters,
+        Ok(json!({"partitions": [{"designator": "root", "mountFileDescriptor": 0}]}))
     );
     assert_eq!(root_descriptors.len(), 1);
     let received_root = root_descriptors.pop().ok_or("missing root descriptor")?;
