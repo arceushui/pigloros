@@ -78,23 +78,83 @@ fn fault_selected(point: PublicationFaultPointV1) -> bool {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn faulted_io_test<T, E>(
-    selected: bool,
-    error: E,
-    operation: impl FnOnce() -> Result<T, E>,
-) -> Result<T, E> {
-    if selected {
-        Err(error)
-    } else {
-        operation()
+fn fault_error<E>(point: PublicationFaultPointV1, error: E) -> Option<E> {
+    fault_selected(point).then_some(error)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn final_rename_fault() -> Option<rustix::io::Errno> {
+    fault_error(
+        PublicationFaultPointV1::FinalCollision,
+        rustix::io::Errno::EXIST,
+    )
+    .or_else(|| fault_error(PublicationFaultPointV1::FinalRename, rustix::io::Errno::IO))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn private_file_create_fault(name: &str) -> Option<rustix::io::Errno> {
+    match name {
+        "OWNER" => fault_error(PublicationFaultPointV1::OwnerWrite, rustix::io::Errno::IO),
+        "READY" => fault_error(PublicationFaultPointV1::ReadyWrite, rustix::io::Errno::IO),
+        _ if name.starts_with(".published.") => fault_error(
+            PublicationFaultPointV1::NextIndexCreate,
+            rustix::io::Errno::IO,
+        ),
+        _ => None,
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn private_file_write_fault(name: &str) -> Option<std::io::Error> {
+    if name.starts_with(".published.") {
+        fault_error(
+            PublicationFaultPointV1::NextIndexWrite,
+            std::io::Error::other("injected local OCI write fault"),
+        )
+    } else if lowercase_hex(name, 64) {
+        fault_error(
+            PublicationFaultPointV1::BlobWrite,
+            std::io::Error::other("injected local OCI write fault"),
+        )
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn private_file_sync_fault(name: &str) -> Option<rustix::io::Errno> {
+    match name {
+        "OWNER" => fault_error(PublicationFaultPointV1::OwnerSync, rustix::io::Errno::IO),
+        "READY" => fault_error(PublicationFaultPointV1::ReadySync, rustix::io::Errno::IO),
+        _ if name.starts_with(".published.") => fault_error(
+            PublicationFaultPointV1::NextIndexSync,
+            rustix::io::Errno::IO,
+        ),
+        _ if lowercase_hex(name, 64) => {
+            fault_error(PublicationFaultPointV1::BlobSync, rustix::io::Errno::IO)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn faulted_io_test<T, E>(
+    error: Option<E>,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    error.map_or_else(operation, Err)
+}
+
 macro_rules! faulted_io {
-    ($selected:expr_2021, $error:expr_2021, $operation:expr_2021) => {{
+    ($error:expr_2021, $operation:expr_2021) => {{
         #[cfg(test)]
         {
-            faulted_io_test($selected, $error, || $operation)
+            faulted_io_test($error, || $operation)
         }
         #[cfg(not(test))]
         {
@@ -528,8 +588,10 @@ impl LocalOciPublisherV1 {
         let index = format!("{{\"manifests\":[{{\"digest\":\"{}\",\"mediaType\":\"{}\",\"size\":{}}}],\"schemaVersion\":2}}", address.digest(), address.media_type(), address.size());
         write_private_file(&staging, "index.json", index.as_bytes())?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::DirectorySync),
-            rustix::io::Errno::IO,
+            fault_error(
+                PublicationFaultPointV1::DirectorySync,
+                rustix::io::Errno::IO
+            ),
             fs::fsync(&sha256)
         )
         .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
@@ -542,13 +604,7 @@ impl LocalOciPublisherV1 {
         write_private_file(&staging, "READY", ready.as_bytes())?;
         fs::fsync(&staging).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::FinalRename)
-                || fault_selected(PublicationFaultPointV1::FinalCollision),
-            if fault_selected(PublicationFaultPointV1::FinalCollision) {
-                rustix::io::Errno::EXIST
-            } else {
-                rustix::io::Errno::IO
-            },
+            final_rename_fault(),
             fs::renameat_with(
                 &releases,
                 &staging_name,
@@ -565,8 +621,7 @@ impl LocalOciPublisherV1 {
             }
         })?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::ReleasesSync),
-            rustix::io::Errno::IO,
+            fault_error(PublicationFaultPointV1::ReleasesSync, rustix::io::Errno::IO),
             fs::fsync(&releases)
         )
         .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
@@ -590,8 +645,10 @@ impl LocalOciPublisherV1 {
             random_nonce_hex().map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?
         );
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::QuarantineRename),
-            rustix::io::Errno::IO,
+            fault_error(
+                PublicationFaultPointV1::QuarantineRename,
+                rustix::io::Errno::IO
+            ),
             fs::renameat_with(
                 source,
                 name,
@@ -602,20 +659,26 @@ impl LocalOciPublisherV1 {
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::QuarantineSourceSync),
-            rustix::io::Errno::IO,
+            fault_error(
+                PublicationFaultPointV1::QuarantineSourceSync,
+                rustix::io::Errno::IO,
+            ),
             fs::fsync(source)
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::QuarantineDirectorySync),
-            rustix::io::Errno::IO,
+            fault_error(
+                PublicationFaultPointV1::QuarantineDirectorySync,
+                rustix::io::Errno::IO,
+            ),
             fs::fsync(&quarantine)
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::QuarantineRootSync),
-            rustix::io::Errno::IO,
+            fault_error(
+                PublicationFaultPointV1::QuarantineRootSync,
+                rustix::io::Errno::IO,
+            ),
             fs::fsync(&self.root)
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
@@ -650,8 +713,7 @@ impl LocalOciPublisherV1 {
         let next = format!(".published.{}.next", &address.digest()[7..39]);
         write_private_file(&self.root, &next, &bytes)?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::IndexRename),
-            rustix::io::Errno::IO,
+            fault_error(PublicationFaultPointV1::IndexRename, rustix::io::Errno::IO),
             fs::renameat_with(
                 &self.root,
                 &next,
@@ -662,8 +724,7 @@ impl LocalOciPublisherV1 {
         )
         .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         faulted_io!(
-            fault_selected(PublicationFaultPointV1::RootSync),
-            rustix::io::Errno::IO,
+            fault_error(PublicationFaultPointV1::RootSync, rustix::io::Errno::IO),
             fs::fsync(&self.root)
         )
         .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))
@@ -1097,11 +1158,7 @@ fn write_private_file(
     bytes: &[u8],
 ) -> Result<(), LocalOciPublicationErrorV1> {
     let mut file = faulted_io!(
-        (name == "OWNER" && fault_selected(PublicationFaultPointV1::OwnerWrite))
-            || (name == "READY" && fault_selected(PublicationFaultPointV1::ReadyWrite))
-            || (name.starts_with(".published.")
-                && fault_selected(PublicationFaultPointV1::NextIndexCreate)),
-        rustix::io::Errno::IO,
+        private_file_create_fault(name),
         fs::openat2(
             root,
             name,
@@ -1112,24 +1169,10 @@ fn write_private_file(
     )
     .map(File::from)
     .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    faulted_io!(
-        (name.starts_with(".published.")
-            && fault_selected(PublicationFaultPointV1::NextIndexWrite))
-            || (lowercase_hex(name, 64) && fault_selected(PublicationFaultPointV1::BlobWrite)),
-        std::io::Error::other("injected local OCI write fault"),
-        file.write_all(bytes)
-    )
-    .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    faulted_io!(
-        (name == "OWNER" && fault_selected(PublicationFaultPointV1::OwnerSync))
-            || (name == "READY" && fault_selected(PublicationFaultPointV1::ReadySync))
-            || (name.starts_with(".published.")
-                && fault_selected(PublicationFaultPointV1::NextIndexSync))
-            || (lowercase_hex(name, 64) && fault_selected(PublicationFaultPointV1::BlobSync)),
-        rustix::io::Errno::IO,
-        fs::fsync(&file)
-    )
-    .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+    faulted_io!(private_file_write_fault(name), file.write_all(bytes))
+        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    faulted_io!(private_file_sync_fault(name), fs::fsync(&file))
+        .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
     fs::fsync(root).map_err(|_| LocalOciPublicationErrorV1::Sync)
 }
 
