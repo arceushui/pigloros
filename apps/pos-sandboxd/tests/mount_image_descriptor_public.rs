@@ -25,11 +25,11 @@ trait MountImageProxy {
 
 #[tokio::test]
 async fn generated_mount_image_call_transfers_both_descriptor_directions(
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     tokio::time::timeout(Duration::from_secs(5), descriptor_round_trip()).await?
 }
 
-async fn descriptor_round_trip() -> Result<(), Box<dyn Error>> {
+async fn descriptor_round_trip() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut image = tempfile::tempfile()?;
     image.write_all(b"held image descriptor")?;
     let mut root = tempfile::tempfile()?;
@@ -44,7 +44,7 @@ async fn descriptor_round_trip() -> Result<(), Box<dyn Error>> {
         client
             .mount_image(0, vec![OwnedFd::from(image.try_clone()?)])
             .await
-            .map_err(Box::<dyn Error>::from)
+            .map_err(Box::<dyn Error + Send + Sync>::from)
     };
     let receive = async {
         let (call, mut image_descriptors) = peer.receive_call::<Value>().await?;
@@ -72,7 +72,7 @@ async fn descriptor_round_trip() -> Result<(), Box<dyn Error>> {
             vec![OwnedFd::from(root)],
         )
         .await?;
-        Ok::<(), Box<dyn Error>>(())
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
     };
     let (reply, ()) = tokio::try_join!(send, receive)?;
     let (parameters, mut root_descriptors) = reply;
