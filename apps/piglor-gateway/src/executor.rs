@@ -380,7 +380,6 @@ enum Command {
         name: String,
         reply: oneshot::Sender<Result<Timeline, StoreExecutorError>>,
     },
-    #[cfg(test)]
     Read {
         timeline: TimelineId,
         range: SeqRange,
@@ -471,14 +470,12 @@ impl Command {
     const fn is_read(&self) -> bool {
         match self {
             Self::RootCount { .. }
+            | Self::Read { .. }
             | Self::ReadPage { .. }
             | Self::ProtectedLogicalHead { .. }
             | Self::ErasureStatus { .. } => true,
             #[cfg(test)]
-            Self::Read { .. }
-            | Self::ReadOne { .. }
-            | Self::GetTimeline { .. }
-            | Self::PanicRead { .. } => true,
+            Self::ReadOne { .. } | Self::GetTimeline { .. } | Self::PanicRead { .. } => true,
             _ => false,
         }
     }
@@ -1496,7 +1493,6 @@ impl StoreExecutor {
     pub(crate) async fn create(&self, name: String) -> Result<Timeline, StoreExecutorError> {
         submit!(self, |reply| Command::Create { name, reply })
     }
-    #[cfg(test)]
     pub(crate) async fn read(
         &self,
         timeline: TimelineId,
@@ -1998,7 +1994,6 @@ fn expire_command_impl(command: Command) {
         Command::Create { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        #[cfg(test)]
         Command::Read { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -2172,7 +2167,6 @@ fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandE
             execute_root_count_command(state, maximum, reply);
         }
         Command::Create { name, reply } => execute_create_command(state, &name, reply),
-        #[cfg(test)]
         Command::Read {
             timeline,
             range,
@@ -2330,7 +2324,6 @@ fn execute_create_command(
     );
 }
 
-#[cfg(test)]
 fn execute_read_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
