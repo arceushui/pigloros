@@ -1511,6 +1511,9 @@ mod tests {
                 recover_with_nth_sync_fault(&publisher, target),
                 Err(LocalOciPublicationErrorV1::RecoveryRequired)
             );
+            for entry in std::fs::read_dir(root.join("quarantine"))? {
+                std::fs::remove_dir_all(entry?.path())?;
+            }
             assert!(publisher.recover_all()?.committed.is_empty());
             std::fs::remove_dir_all(root)?;
         }
