@@ -7,11 +7,13 @@ use std::{
 };
 
 use pos_core::{
-    recipient_owner_id_from_grantee, EntityId, EventStore, KeyDestructionPortV1,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryPortV1,
-    KeyRegistryStateV1, KeyRoleV1, RecipientKeyDescriptorV1,
+    recipient_owner_id_from_grantee, EntityId, EventStore, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, RecipientKeyDescriptorV1,
 };
-use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
+use rand::{
+    rand_core::{Rng, UnwrapErr},
+    rngs::SysRng,
+};
 use zeroize::Zeroizing;
 
 use super::{begin_immediate_sql, finish_immediate_transaction, CoreError, SqliteStore};
@@ -71,44 +73,45 @@ impl SqliteStore {
     ) -> Result<RecipientKeyDescriptorV1, CoreError> {
         let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let registry = self
-            .load_key_registry()?
-            .unwrap_or_else(KeyRegistryStateV1::new);
-        let epoch = match registry.active_key(&owner_id, KeyRoleV1::ExportRecipientEncryption) {
-            Some(record) => record
-                .identity
-                .epoch
-                .checked_add(1)
-                .ok_or_else(|| CoreError::Storage("recipient key epoch overflow".to_owned()))?,
-            None => 1,
-        };
-        let identity =
-            KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
-        let mut ikm = Zeroizing::new([0_u8; 32]);
-        let mut csprng = UnwrapErr(SysRng);
-        csprng.fill(&mut *ikm);
-        let (private_key, public_key) =
-            pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let private_key = Zeroizing::new(private_key);
-        let descriptor = RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let private_path = owner.directory.join(format!("recipient-{epoch}.key"));
-        write_private_key(&private_path, &private_key)?;
-        let material_digest = pos_crypto::key_roles::key_material_digest(&private_key);
-        let mut next = registry;
-        next.register_key(KeyRegistrationV1::new(identity, material_digest, None))
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = self.save_key_registry_in_transaction(&next).and_then(|()| {
+        let result = (|| {
+            let registry = self
+                .load_key_registry()?
+                .unwrap_or_else(KeyRegistryStateV1::new);
+            let epoch =
+                match registry.active_key(&owner_id, KeyRoleV1::ExportRecipientEncryption) {
+                    Some(record) => record.identity.epoch.checked_add(1).ok_or_else(|| {
+                        CoreError::Storage("recipient key epoch overflow".to_owned())
+                    })?,
+                    None => 1,
+                };
+            let identity =
+                KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
+            let mut ikm = Zeroizing::new([0_u8; 32]);
+            let mut csprng = UnwrapErr(SysRng);
+            csprng.fill_bytes(&mut *ikm);
+            let (private_key, public_key) =
+                pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm)
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let private_key = Zeroizing::new(private_key);
+            let descriptor =
+                RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let private_path = owner.directory.join(format!("recipient-{epoch}.key"));
+            write_private_key(&private_path, &private_key)?;
+            let material_digest = pos_crypto::key_roles::key_material_digest(&private_key);
+            let mut next = registry;
+            next.register_key(KeyRegistrationV1::new(identity, material_digest, None))
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
             self.conn.execute_batch("CREATE TABLE IF NOT EXISTS recipient_key_inventory_v1 (owner_id TEXT NOT NULL, epoch INTEGER NOT NULL, descriptor BLOB NOT NULL, material_digest BLOB NOT NULL, private_path BLOB NOT NULL, PRIMARY KEY(owner_id, epoch));")
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
             self.conn.execute("INSERT INTO recipient_key_inventory_v1 (owner_id, epoch, descriptor, material_digest, private_path) VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params![identity.owner_id.as_str(), i64::try_from(epoch).map_err(|error| CoreError::Storage(error.to_string()))?, descriptor.encode(), material_digest.as_bytes().as_slice(), private_path.as_os_str().as_encoded_bytes()])
-                .map(|_| descriptor)
-                .map_err(|error| CoreError::Storage(error.to_string()))
-        });
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            self.save_key_registry_in_transaction(&next)?;
+            Ok(descriptor)
+        })();
         finish_immediate_transaction(&self.conn, result)
     }
 
