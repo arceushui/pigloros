@@ -293,26 +293,14 @@ fn records_round_trip_every_cbor_unsigned_integer_width() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn public_decoders_reject_each_structural_failure_class() -> Result<(), Box<dyn std::error::Error>>
-{
+fn eor1_decoder_rejects_each_structural_failure_class() -> Result<(), Box<dyn std::error::Error>> {
     let origin = origin_record()?;
-    let intervention = intervention_record(&origin)?;
     let eor = origin.to_canonical_cbor();
-    let fia = intervention.to_canonical_cbor();
 
     assert_eq!(
         EventOriginRecordV1::from_canonical_cbor(&vec![0; MAX_EVENT_ORIGIN_RECORD_BYTES_V1 + 1]),
         Err(ForkEventProvenanceErrorV1::FieldOutOfBounds)
     );
-    assert_eq!(
-        ForkInterventionAdmissionV1::from_canonical_cbor(&vec![
-            0;
-            MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1
-                + 1
-        ]),
-        Err(ForkEventProvenanceErrorV1::FieldOutOfBounds)
-    );
-
     for (offset, value) in [(0, 0x88), (2, b'X'), (7, 0), (24, 0x1c), (25, 0x4f)] {
         let mut invalid = eor.clone();
         invalid[offset] = value;
@@ -359,6 +347,21 @@ fn public_decoders_reject_each_structural_failure_class() -> Result<(), Box<dyn 
     assert_eq!(
         EventOriginRecordV1::from_canonical_cbor(&eor[..eor.len() - 1]),
         Err(ForkEventProvenanceErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn fia1_decoder_rejects_each_structural_failure_class() -> Result<(), Box<dyn std::error::Error>> {
+    let origin = origin_record()?;
+    let fia = intervention_record(&origin)?.to_canonical_cbor();
+    assert_eq!(
+        ForkInterventionAdmissionV1::from_canonical_cbor(&vec![
+            0;
+            MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1
+                + 1
+        ]),
+        Err(ForkEventProvenanceErrorV1::FieldOutOfBounds)
     );
 
     for (offset, value) in [
