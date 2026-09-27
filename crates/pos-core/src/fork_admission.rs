@@ -76,6 +76,9 @@ impl PrincipalOwnerTrustV1 {
     }
 
     /// Validate current trusted adapter evidence at the host boundary.
+    ///
+    /// # Errors
+    /// Returns `Unauthenticated` when the adapter evidence is expired or untrusted.
     pub fn validate(
         &self,
         authenticated: &AuthenticatedPrincipalResultV1,
@@ -111,6 +114,9 @@ pub struct PrincipalOwnerBindingV1(PrincipalOwnerBindingInputV1);
 
 impl PrincipalOwnerBindingV1 {
     /// Validate one local POB1 binding.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` when a required digest is zero.
     pub fn new(input: PrincipalOwnerBindingInputV1) -> Result<Self, ForkAdmissionErrorV1> {
         if input.operation_id == Hash::zero() || input.principal_digest == Hash::zero() {
             return Err(ForkAdmissionErrorV1::InvalidRequest);
@@ -148,7 +154,10 @@ impl PrincipalOwnerBindingV1 {
     }
 }
 
-/// Compute the exact ADR-099 PrincipalRef digest.
+/// Compute the exact ADR-099 `PrincipalRefV1` digest.
+///
+/// # Errors
+/// Returns `Unauthenticated` when the Principal cannot be canonically encoded.
 pub fn principal_digest_v1(principal: &PrincipalRefV1) -> Result<Hash, ForkAdmissionErrorV1> {
     principal
         .encode()
@@ -157,6 +166,9 @@ pub fn principal_digest_v1(principal: &PrincipalRefV1) -> Result<Hash, ForkAdmis
 }
 
 /// Return the exact host-request binding used to recognize an admission retry.
+///
+/// # Errors
+/// Returns `Unauthenticated` when the Principal cannot be canonically encoded.
 pub fn fork_admission_request_digest_v1(
     request: &CreateForkAdmittedRequestV1,
 ) -> Result<Hash, ForkAdmissionErrorV1> {
@@ -220,12 +232,18 @@ pub struct ForkAdmissionReceiptV1 {
 /// Storage authority for trusted local POB1 and atomic FAR1 child creation.
 pub trait ForkAdmissionAuthorityPortV1 {
     /// Pin the host's authentication trust policy. Rebinding different policy rejects.
+    ///
+    /// # Errors
+    /// Returns `Unauthenticated` for a conflicting host policy.
     fn bind_principal_owner_trust(
         &mut self,
         trust: PrincipalOwnerTrustV1,
     ) -> Result<(), ForkAdmissionErrorV1>;
 
     /// Commit a host-provisioned local POB1 after independently trusted auth validation.
+    ///
+    /// # Errors
+    /// Returns a closed authentication, conflict, or storage error.
     fn commit_local_binding(
         &mut self,
         operation_id: Hash,
@@ -235,6 +253,9 @@ pub trait ForkAdmissionAuthorityPortV1 {
     ) -> Result<PrincipalOwnerBindingV1, ForkAdmissionErrorV1>;
 
     /// Create child metadata and FAR1 in one transaction, resolving POB1 internally.
+    ///
+    /// # Errors
+    /// Returns a closed authentication, boundary, conflict, corruption, or storage error.
     fn create_fork_admitted(
         &mut self,
         request: &CreateForkAdmittedRequestV1,
@@ -242,6 +263,9 @@ pub trait ForkAdmissionAuthorityPortV1 {
     ) -> Result<ForkAdmissionReceiptV1, ForkAdmissionErrorV1>;
 
     /// Read the one committed local FAR1 authority by child Fork identifier.
+    ///
+    /// # Errors
+    /// Returns a closed corruption or storage error for an untrustworthy join.
     fn read_fork_admission(
         &self,
         child_id: TimelineId,
@@ -269,7 +293,7 @@ fn head(output: &mut Vec<u8>, major: u8, length: usize) {
     if length < 24 {
         output.push((major << 5) | u8::try_from(length).unwrap_or(0));
     } else {
-        output.push((major << 5) | 24);
+        output.push((major << 5) | 24_u8);
         output.push(u8::try_from(length).unwrap_or(u8::MAX));
     }
 }
