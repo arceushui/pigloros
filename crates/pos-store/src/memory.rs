@@ -1534,13 +1534,18 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
         let Some(child) = self.timelines.get(&child_id) else {
             return Err(ForkAdmissionErrorV1::CorruptAuthority);
         };
+        let parent_hash = self
+            .compute_chain_hash_at(
+                admission.input().parent_timeline_id,
+                pos_core::Seq::from_u64(admission.input().parent_logical_head),
+            )
+            .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
         if child.timeline.meta.fork_point
             != Some((
                 admission.input().parent_timeline_id,
                 pos_core::Seq::from_u64(admission.input().parent_logical_head),
             ))
-            || !child.events.is_empty()
-            || child.chain_head != admission.input().parent_chain_head_hash
+            || parent_hash != admission.input().parent_chain_head_hash
             || child.timeline.meta.name.as_deref()
                 != self
                     .fork_admission_operations
