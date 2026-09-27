@@ -116,6 +116,21 @@ fn bundle_with_component(
     Ok(verify_oci_closure_v1(address, manifest, blobs)?)
 }
 
+fn closure_input(
+) -> Result<(BundleAddressV1, Vec<u8>, BTreeMap<String, Vec<u8>>), Box<dyn std::error::Error>> {
+    let verified = bundle()?;
+    let blobs = verified
+        .blobs()
+        .iter()
+        .map(|blob| (blob.digest().to_owned(), blob.bytes().to_vec()))
+        .collect();
+    Ok((
+        verified.address().clone(),
+        verified.manifest().to_vec(),
+        blobs,
+    ))
+}
+
 fn create_private_dir(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -671,6 +686,94 @@ fn owned_staging_with_unrecognized_members_is_quarantined() -> Result<(), Box<dy
         );
         assert_one_quarantined(&root)?;
     }
+    Ok(())
+}
+
+#[test]
+fn recovery_removes_empty_staging_and_bounds_staging_blob_members(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let address = bundle()?.address().clone();
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let staging = root
+        .0
+        .join("releases")
+        .join(format!(".{}.staging.{nonce}", &address.digest()[7..]));
+    create_private_dir(&staging)?;
+    write_private_file(
+        &staging.join("OWNER"),
+        format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes(),
+    )?;
+    assert_eq!(publisher.recover_all()?.removed_staging, 1);
+    assert!(!staging.exists());
+
+    create_private_dir(&staging)?;
+    write_private_file(
+        &staging.join("OWNER"),
+        format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes(),
+    )?;
+    create_private_dir(&staging.join("blobs"))?;
+    create_private_dir(&staging.join("blobs").join("sha256"))?;
+    for member in 0..360_u16 {
+        write_private_file(
+            &staging
+                .join("blobs")
+                .join("sha256")
+                .join(format!("{member:064x}")),
+            b"x",
+        )?;
+    }
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_one_quarantined(&root)?;
+    Ok(())
+}
+
+#[test]
+fn public_verifier_rejects_descriptor_collisions_and_reversed_schema_digests(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_, manifest, blobs) = closure_input()?;
+    let mut collision: serde_json::Value = serde_json::from_slice(&manifest)?;
+    collision["layers"][0]["digest"] = serde_json::json!(digest(b"{}"));
+    let collision = serde_json::to_vec(&collision)?;
+    let collision_address =
+        BundleAddressV1::new(digest(&collision), u64::try_from(collision.len())?)?;
+    assert_eq!(
+        verify_oci_closure_v1(collision_address, collision, blobs.clone()),
+        Err(ReleaseSourceErrorV1::DuplicateMember)
+    );
+
+    let mut disordered: serde_json::Value = serde_json::from_slice(&manifest)?;
+    let mut schemas = [b"schema-a".to_vec(), b"schema-b".to_vec()];
+    schemas.sort_by_key(|bytes| std::cmp::Reverse(digest(bytes)));
+    for (offset, schema) in schemas.iter().enumerate() {
+        let schema_digest = digest(schema);
+        disordered["layers"]
+            .as_array_mut()
+            .ok_or("layers must be an array")?
+            .insert(
+                3 + offset,
+                layer(
+                    &format!("schema/{}", &schema_digest[7..]),
+                    "application/vnd.pigloros.plugin.schema.v1+json",
+                    schema,
+                ),
+            );
+    }
+    let disordered = serde_json::to_vec(&disordered)?;
+    let disordered_address =
+        BundleAddressV1::new(digest(&disordered), u64::try_from(disordered.len())?)?;
+    let mut blobs = blobs;
+    for schema in schemas {
+        blobs.insert(digest(&schema), schema);
+    }
+    assert_eq!(
+        verify_oci_closure_v1(disordered_address, disordered, blobs),
+        Err(ReleaseSourceErrorV1::InvalidDescriptor)
+    );
     Ok(())
 }
 

@@ -1249,9 +1249,11 @@ fn open_root(root: &Path) -> Result<File, LocalOciPublicationErrorV1> {
 }
 
 fn validate_local_filesystem(root: &File) -> Result<(), LocalOciPublicationErrorV1> {
-    let filesystem = fs::fstatfs(root).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+    let filesystem_type = fs::fstatfs(root)
+        .ok()
+        .and_then(|filesystem| u64::try_from(filesystem.f_type).ok());
     if matches!(
-        u64::try_from(filesystem.f_type).ok(),
+        filesystem_type,
         Some(EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | F2FS_SUPER_MAGIC)
     ) {
         Ok(())
