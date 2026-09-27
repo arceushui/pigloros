@@ -3603,8 +3603,9 @@ pub use artifact::{
 };
 mod registration;
 pub use registration::{
-    ArtifactChildEdgeV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
-    ArtifactRegistrationV1, MAX_ARTIFACT_REGISTRATION_BYTES_V1,
+    extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
+    AdapterArtifactRegistrationErrorV1, ArtifactChildEdgeV1, ArtifactRegistrationErrorV1,
+    ArtifactRegistrationFieldsV1, ArtifactRegistrationV1, MAX_ARTIFACT_REGISTRATION_BYTES_V1,
     MAX_ARTIFACT_REGISTRATION_CHILDREN_V1, MAX_ARTIFACT_REGISTRATION_KEYS_V1,
 };
 mod registration_graph;
