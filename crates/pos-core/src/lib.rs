@@ -182,10 +182,10 @@ pub use executable_budget::{
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
 };
 pub use fork_admission::{
-    fork_admission_request_digest_v1, principal_digest_v1, CreateForkAdmittedRequestV1,
-    ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1, ForkAdmissionReceiptV1,
-    ForkAuthorityOriginV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PrincipalOwnerTrustV1,
+    fork_admission_operation_commitment_from_records_v1, principal_digest_v1,
+    CreateForkAdmittedRequestV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
+    ForkAdmissionHostBindingV1, ForkAdmissionHostV1, ForkAdmissionReceiptV1, ForkAuthorityOriginV1,
+    LocalPrincipalOwnerBindingPermitV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
 };
 pub use fork_attribution::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
