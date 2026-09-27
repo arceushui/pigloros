@@ -6,14 +6,26 @@
 
 use ed25519_dalek::VerifyingKey;
 use pos_core::{
-    CanonicalBytes, CoreError, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1,
-    KeyRoleV1, PublicKey, SignedForkReproManifestV1,
+    CanonicalBytes, CoreError, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
+    ForkReproManifestV1, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1,
+    PublicKey, SignedForkReproManifestV1,
 };
 
 use crate::{
     key_roles::{sign_for_registered_role, verify_for_role, SigningKeyMaterial},
     signing::verifying_key_from_public_key,
 };
+
+/// Closed errors for admission-bound signature-only construction.
+#[derive(Debug, thiserror::Error)]
+pub enum ForkAttributionSigningErrorV1 {
+    /// The supplied local attribution records do not form a valid construction input.
+    #[error(transparent)]
+    Codec(#[from] ForkAttributionCodecErrorV1),
+    /// The current key registry rejected the derived attribution identity.
+    #[error(transparent)]
+    Registry(#[from] KeyRegistryErrorV1),
+}
 
 /// Produce a mathematical `FSM1` signature through the current role registry.
 ///
@@ -38,6 +50,39 @@ pub fn sign_local_fork_manifest_signature_only<R: KeyRegistrySigningPortV1>(
     let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
     SignedForkReproManifestV1::new(identity, manifest, signature)
         .map_err(|_| KeyRegistryErrorV1::SigningRoleRequired)
+}
+
+/// Sign an `FSM1` whose creator and duplicate `FRM1` coordinates match local `FAR1`.
+///
+/// The supplied admission record is structural input only. This helper does
+/// not assert that it is a committed host authority or publish the resulting
+/// record; #452 owns that durable authority boundary.
+///
+/// # Errors
+///
+/// Returns the precise codec error for invalid construction input, or the
+/// closed registry error from the signing operation.
+pub fn sign_local_fork_manifest_from_admission_signature_only<R: KeyRegistrySigningPortV1>(
+    registry: &mut R,
+    signing_key: &SigningKeyMaterial,
+    admission: &ForkAdmissionRecordV1,
+    epoch: u64,
+    manifest: ForkReproManifestV1,
+) -> Result<SignedForkReproManifestV1, ForkAttributionSigningErrorV1> {
+    if epoch == 0 {
+        return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds.into());
+    }
+    manifest.validate_against_admission(admission)?;
+    let identity = KeyIdentityV1::from_parts(
+        admission.input().creator,
+        KeyRoleV1::SubjectAttributionSigning,
+        epoch,
+    );
+    let payload = CanonicalBytes::from_vec(manifest.to_canonical_cbor());
+    let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
+    Ok(SignedForkReproManifestV1::new_from_admission(
+        admission, epoch, manifest, signature,
+    )?)
 }
 
 /// Verify only the mathematical ADR-065 role signature in `FSM1`.
