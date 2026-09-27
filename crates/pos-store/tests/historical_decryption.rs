@@ -1,10 +1,6 @@
 #![cfg(feature = "sqlite")]
 
-use std::{
-    cell::Cell,
-    sync::mpsc::{self, RecvTimeoutError},
-    time::Duration,
-};
+use std::{cell::Cell, sync::mpsc, time::Duration};
 
 use pos_core::{
     deletion_receipt, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
@@ -145,11 +141,8 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
         drop(setup);
 
         let mut decrypting_store = SqliteStore::open(path)?;
-        let mut mutating_store = SqliteStore::open(path)?;
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let (mutation_started_tx, mutation_started_rx) = mpsc::channel();
-        let (mutation_tx, mutation_rx) = mpsc::channel();
         std::thread::scope(|scope| {
             let decryption = scope.spawn(move || {
                 decrypting_store.with_decryption_authorization(old, digest(1), || {
@@ -162,39 +155,27 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
                 })
             });
             wait_for_worker(&entered_rx, &release_tx, "decryption callback");
-
-            let mutation = scope.spawn(move || {
-                assert!(
-                    mutation_started_tx.send(()).is_ok(),
-                    "mutation start must be observed"
-                );
-                let result = if rotate {
-                    mutating_store.save_key_registry(&rotated)
-                } else {
-                    mutating_store
-                        .begin_key_registry_destruction(request)
-                        .map(|_| ())
-                };
-                assert!(
-                    mutation_tx.send(result).is_ok(),
-                    "mutation result must be observed"
-                );
-            });
-            wait_for_worker(&mutation_started_rx, &release_tx, "mutation worker");
-            let blocked = mutation_rx.recv_timeout(Duration::from_millis(100));
+            let blocked = (|| {
+                let contender = rusqlite::Connection::open(path)?;
+                contender.busy_timeout(Duration::ZERO)?;
+                contender.execute_batch("BEGIN IMMEDIATE")
+            })();
             assert!(release_tx.send(()).is_ok(), "callback must be released");
-            assert!(matches!(blocked, Err(RecvTimeoutError::Timeout)));
             assert!(decryption
                 .join()
                 .is_ok_and(|result| result == Ok("plaintext")));
-            assert!(mutation.join().is_ok(), "mutation worker must join");
             assert!(
-                mutation_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .is_ok_and(|result| result.is_ok()),
-                "mutation must succeed"
+                blocked.is_err_and(|error| error.to_string().contains("database is locked")),
+                "the held decryption callback must retain SQLite's writer reservation"
             );
         });
+
+        let mut mutating_store = SqliteStore::open(path)?;
+        if rotate {
+            mutating_store.save_key_registry(&rotated)?;
+        } else {
+            mutating_store.begin_key_registry_destruction(request)?;
+        }
 
         let mut verify = SqliteStore::open(path)?;
         if rotate {
