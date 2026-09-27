@@ -61,8 +61,11 @@ impl ForkEventClassificationV1 {
         origin: ForkEventOriginKindV1,
         intervention: bool,
     ) -> Result<Self, ForkEventProvenanceErrorV1> {
-        if origin == ForkEventOriginKindV1::HostInternal && intervention {
-            return Err(ForkEventProvenanceErrorV1::ImpossibleClassification);
+        match origin {
+            ForkEventOriginKindV1::HostInternal if intervention => {
+                return Err(ForkEventProvenanceErrorV1::ImpossibleClassification);
+            }
+            ForkEventOriginKindV1::HostInternal | ForkEventOriginKindV1::ExternalInput => {}
         }
         Ok(Self {
             origin,
