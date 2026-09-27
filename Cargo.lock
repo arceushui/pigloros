@@ -4642,6 +4642,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-plugin-release"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.5",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "pos-reference"
 version = "0.1.0"
 dependencies = [
