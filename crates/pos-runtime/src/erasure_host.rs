@@ -6188,6 +6188,23 @@ mod tests {
     }
 
     #[test]
+    fn unaffected_transition_rejects_an_existing_affected_candidate() {
+        let (mut host, _, affected) = active_identified_fork_host(FaultModeV1::Recovery)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.apply_unaffected_topology_change(
+                None,
+                |_permit, _store| Ok(affected.clone()),
+                |_permit, _store, _candidate| {
+                    panic!("an affected candidate must never reach the store transition")
+                },
+            ),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
     fn unaffected_topology_transition_poisons_when_publication_rollback_fails() {
         let mut publication_failure = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(fault_store(FaultModeV1::DeleteTimeline)),

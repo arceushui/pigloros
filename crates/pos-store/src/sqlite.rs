@@ -7649,6 +7649,29 @@ mod tests {
         store.conn.execute_batch("ROLLBACK").test_ok();
     }
 
+    #[test]
+    fn immediate_scope_rejects_denied_begin_and_savepoint() {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        let store = new_store();
+        let deny = |_context: AuthContext<'_>| Authorization::Deny;
+        store.conn.authorizer(Some(deny)).test_ok();
+        assert!(begin_immediate_scope(&store.conn).is_err());
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+
+        store.conn.execute_batch("BEGIN").test_ok();
+        store.conn.authorizer(Some(deny)).test_ok();
+        assert!(begin_immediate_scope(&store.conn).is_err());
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+        store.conn.execute_batch("ROLLBACK").test_ok();
+    }
+
     fn cover_sqlite_host_transition_success(
         store: &mut SqliteStore,
         gate: &ErasureContainmentGateV1,
@@ -15579,6 +15602,15 @@ mod tests {
     #[test]
     fn sqlite_fork_recovery_rejects_orphaned_proof_and_missing_proof_table() {
         let operation = ErasureReferenceV1::from_digest([65; 32]);
+
+        let mut empty = new_store();
+        let snapshot = empty.complete_erasure_inventory_snapshot(4).test_ok();
+        let mut query = ErasureVerifiedEmptyInventoryQueryV1::new(snapshot);
+        let inventory = query.verified_inventory(4).test_ok();
+        assert_eq!(
+            empty.recover_fork_admission(operation, &inventory),
+            Ok(None)
+        );
 
         let mut orphaned = new_store();
         let snapshot = orphaned.complete_erasure_inventory_snapshot(4).test_ok();
