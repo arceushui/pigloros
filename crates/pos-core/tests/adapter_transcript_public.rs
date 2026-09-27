@@ -1,5 +1,6 @@
 use pos_core::{
-    adapter_output_digest_v1, public_adapter_schema_digest_v1, AdapterInvocationInputV1,
+    adapter_configuration_digest_v1, adapter_output_digest_v1, public_adapter_schema_digest_v1,
+    AdapterAdmissionEntryV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterInvocationInputV1,
     AdapterInvocationV1, AdapterTranscriptCallV1, AdapterTranscriptErrorV1,
     AdapterTranscriptInputV1, AdapterTranscriptV1, Hash, PluginId, WorldReplayHandleV1,
     MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
@@ -64,6 +65,108 @@ fn call(
         exact_output_bytes: vec![u8::try_from(plugin)?, u8::try_from(per_plugin_index)?],
         recorded_wall_time_micros: global_index,
     })
+}
+
+fn admitted_transcript() -> TestResult<(AdapterAdmissionV1, AdapterTranscriptV1)> {
+    let base = input()?;
+    let configuration = b"public configuration".to_vec();
+    let configuration_digest = adapter_configuration_digest_v1(&configuration);
+    let entries = [1_u128, 2].map(|plugin| AdapterAdmissionEntryV1 {
+        plugin_id: PluginId::from_ulid(ulid::Ulid::from(plugin)),
+        adapter_id: "adapter.1".to_owned(),
+        provider_id: "provider_1".to_owned(),
+        operation_id: "read-only".to_owned(),
+        protocol_version: 1,
+        request_schema_digest: public_adapter_schema_digest_v1(),
+        response_schema_digest: public_adapter_schema_digest_v1(),
+        exact_configuration_bytes: configuration.clone(),
+        configuration_digest,
+        input_data_class: 2,
+        output_data_class: 2,
+        effect_mode: 0,
+    });
+    let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+        owner_reference: base.owner_reference,
+        configuration_generation: 1,
+        scope_digest: Hash::from_bytes([0x51; 32]),
+        entries: entries.to_vec(),
+    })?;
+    let mut calls = vec![call(1, 0, 0)?, call(2, 0, 1)?, call(1, 1, 2)?];
+    for call in &mut calls {
+        call.input = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+            configuration_digest,
+            ..call.input.as_input().clone()
+        })?;
+    }
+    let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+        adapter_admission_digest: admission.digest(),
+        calls,
+        ..base
+    })?;
+    Ok((admission, transcript))
+}
+
+#[test]
+fn admitted_call_contracts_match_exact_owner_plugin_tuple_and_configuration() -> TestResult<()> {
+    let (admission, transcript) = admitted_transcript()?;
+    assert_eq!(transcript.compare_call_contracts(&admission), Ok(()));
+
+    let wrong_owner = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+        owner_reference: Hash::from_bytes([7; 32]),
+        ..admission.as_input().clone()
+    })?;
+    assert_eq!(
+        transcript.compare_call_contracts(&wrong_owner),
+        Err(AdapterTranscriptErrorV1::InvalidIdentity)
+    );
+    let wrong_digest = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+        configuration_generation: 2,
+        ..admission.as_input().clone()
+    })?;
+    assert_eq!(
+        transcript.compare_call_contracts(&wrong_digest),
+        Err(AdapterTranscriptErrorV1::InvalidIdentity)
+    );
+
+    let mut wrong_calls = Vec::new();
+    let base = transcript.as_input().calls[0].input.as_input();
+    wrong_calls.push((PluginId::from_ulid(ulid::Ulid::from(3_u128)), base.clone()));
+    for changed in [
+        AdapterInvocationInputV1 {
+            adapter_id: "other".to_owned(),
+            ..base.clone()
+        },
+        AdapterInvocationInputV1 {
+            provider_id: "other".to_owned(),
+            ..base.clone()
+        },
+        AdapterInvocationInputV1 {
+            operation_id: "other".to_owned(),
+            ..base.clone()
+        },
+        AdapterInvocationInputV1 {
+            protocol_version: 2,
+            ..base.clone()
+        },
+        AdapterInvocationInputV1 {
+            configuration_digest: Hash::from_bytes([3; 32]),
+            ..base.clone()
+        },
+    ] {
+        wrong_calls.push((transcript.as_input().calls[0].plugin_id, changed));
+    }
+    for (plugin_id, changed) in wrong_calls {
+        let mut candidate = transcript.as_input().clone();
+        candidate.calls.truncate(1);
+        candidate.calls[0].plugin_id = plugin_id;
+        candidate.calls[0].input = AdapterInvocationV1::new(changed)?;
+        let candidate = AdapterTranscriptV1::new(candidate)?;
+        assert_eq!(
+            candidate.compare_call_contracts(&admission),
+            Err(AdapterTranscriptErrorV1::InvalidCall)
+        );
+    }
+    Ok(())
 }
 
 #[test]
