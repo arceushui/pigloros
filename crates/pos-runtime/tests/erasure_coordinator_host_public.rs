@@ -1160,8 +1160,8 @@ fn sqlite_identified_fork_requires_admitted_lineage() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_reopen_after_peer_request_reconciles_topology() -> Result<(), Box<dyn std::error::Error>>
+{
     let path = std::env::temp_dir().join(format!(
         "pigloros-erasure-topology-request-count-{}.sqlite",
         TimelineId::new()
@@ -1201,7 +1201,7 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
             StoreConfig::Sqlite {
                 path: path_text.clone(),
             },
-            authority,
+            authority.clone(),
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
@@ -1235,8 +1235,30 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
         )?;
     }
 
+    {
+        let mut commands = test_stage("open stale first host sender", first_host.command_sender())?;
+        assert_eq!(
+            commands.create_timeline("request-count-refresh-root"),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+    drop(first_host);
+    let mut refreshed_host = test_stage(
+        "reopen first SQLite host after peer request",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
     let root = {
-        let mut commands = test_stage("reopen first host sender", first_host.command_sender())?;
+        let mut commands = test_stage(
+            "open refreshed host sender",
+            refreshed_host.command_sender(),
+        )?;
         test_stage(
             "create root after peer request",
             commands.create_timeline("request-count-refresh-root"),
@@ -1246,7 +1268,7 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
     {
         let mut reads = test_stage(
             "read through refreshed first host",
-            first_host.read_sender(),
+            refreshed_host.read_sender(),
         )?;
         assert_eq!(
             test_stage("read new root through first host", reads.timeline(root))?
@@ -1256,7 +1278,7 @@ fn sqlite_topology_refresh_tracks_requests_added_by_another_host(
     }
 
     drop(second_host);
-    drop(first_host);
+    drop(refreshed_host);
     remove_sqlite_store_files(path, &path_text)?;
     Ok(())
 }
