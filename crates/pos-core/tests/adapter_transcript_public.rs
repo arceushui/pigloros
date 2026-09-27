@@ -118,6 +118,30 @@ fn canonical_air1_and_interleaved_plugin_calls_round_trip() -> TestResult<()> {
 }
 
 #[test]
+fn truncated_populated_air1_and_mat1_reject_at_every_field_boundary() -> TestResult<()> {
+    let invocation_bytes = invocation(24, b"public request".to_vec())?.to_canonical_cbor();
+    for end in 0..invocation_bytes.len() {
+        assert!(
+            AdapterInvocationV1::from_canonical_cbor(&invocation_bytes[..end]).is_err(),
+            "truncated AIR1 prefix at byte {end} was accepted"
+        );
+    }
+
+    let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+        calls: vec![call(1, 0, 0)?],
+        ..input()?
+    })?;
+    let transcript_bytes = transcript.to_canonical_cbor();
+    for end in 0..transcript_bytes.len() {
+        assert!(
+            AdapterTranscriptV1::from_canonical_cbor(&transcript_bytes[..end]).is_err(),
+            "truncated MAT1 prefix at byte {end} was accepted"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn air1_integer_widths_and_identity_lengths_round_trip() -> TestResult<()> {
     for number in [0, 23, 24, 255, 256, 65_535, 65_536, u64::MAX] {
         let schema = public_adapter_schema_digest_v1();
