@@ -637,15 +637,24 @@ fn sqlite_rotation_waits_until_signed_event_commit() -> Result<(), Box<dyn std::
         Err(CoreError::ErasureContainmentUnavailable)
     ));
     assert!(rotation_waited);
+    assert_rotated_registry_and_signed_event(path, &rotated, timeline.id(), signed)
+}
+
+fn assert_rotated_registry_and_signed_event(
+    path: &str,
+    rotated: &KeyRegistryStateV1,
+    timeline_id: pos_core::TimelineId,
+    signed: Event,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut resumed_rotation_store = SqliteStore::open(path)?;
     resumed_rotation_store
         .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    resumed_rotation_store.save_key_registry(&rotated)?;
+    resumed_rotation_store.save_key_registry(rotated)?;
     let mut reopened = SqliteStore::open(path)?;
     reopened.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let persisted = reopened.load_key_registry()?.ok_or("missing registry")?;
-    assert_eq!(persisted, rotated);
-    assert_eq!(reopened.read(timeline.id(), SeqRange::all())?, vec![signed]);
+    assert_eq!(&persisted, rotated);
+    assert_eq!(reopened.read(timeline_id, SeqRange::all())?, vec![signed]);
     Ok(())
 }
 
