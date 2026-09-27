@@ -300,6 +300,9 @@ fn verify_snapshot_event_sets(
     let full_state = registry
         .state_snapshot(snap.timeline)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
+    if snap.registry.keys().any(|name| !full_state.contains_key(name)) {
+        return Err(SnapshotError::ArtifactUnavailable);
+    }
     verify_snapshot_entities(&all_entities, &incremental_state, &full_state)?;
     if incremental_state != full_state {
         return Err(SnapshotError::InconsistentState);
@@ -1058,6 +1061,32 @@ mod tests {
         assert!(matches!(
             super::verify_snapshot_consistency(&mut reads, &snapshot, &mut registry, &closure),
             Err(SnapshotError::Inconsistent { entity }) if entity == foreign_event.entity
+        ));
+    }
+
+    #[test]
+    fn public_snapshot_verification_rejects_unregistered_reducer_state() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let timeline = host
+            .command_sender()
+            .test_ok()
+            .create_timeline("snapshot-extra-reducer")
+            .test_ok()
+            .id();
+        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let snapshot = Snapshot {
+            timeline,
+            at_seq: Seq::ZERO,
+            registry: std::iter::once(("unknown".to_owned(), StateRegistry::new())).collect(),
+        };
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &snapshot, &mut registry, &closure),
+            Err(SnapshotError::ArtifactUnavailable)
         ));
     }
 

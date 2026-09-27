@@ -701,11 +701,18 @@ impl WorldReplayAdmissionV1 {
     /// # Errors
     /// Returns [`WorldReplayClosureErrorV1::ClaimUnavailable`] when expiry,
     /// erasure, or another required artifact state weakened the claim.
-    pub const fn require_authoritative_use(&self) -> Result<(), WorldReplayClosureErrorV1> {
-        if matches!(
+    pub fn require_authoritative_use(&self) -> Result<(), WorldReplayClosureErrorV1> {
+        let enclosing_claim_permits_use = matches!(
             self.evaluation.replay_claim(),
             ErasureReplayClaimV1::Exact | ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
-        ) {
+        );
+        let required_members_permit_use = self
+            .evaluation
+            .artifacts()
+            .iter()
+            .filter(|artifact| artifact.optionality() == crate::ArtifactOptionalityV1::Required)
+            .all(crate::EvaluatedArtifactClaimV1::authoritative_use_permitted);
+        if enclosing_claim_permits_use && required_members_permit_use {
             Ok(())
         } else {
             Err(WorldReplayClosureErrorV1::ClaimUnavailable)
@@ -722,24 +729,16 @@ impl WorldReplayAdmissionV1 {
         requested_view_roots: &[Hash],
     ) -> Result<(), WorldReplayClosureErrorV1> {
         self.require_authoritative_use()?;
-        let required_members_authorized = self
-            .evaluation
-            .artifacts()
-            .iter()
-            .filter(|artifact| artifact.optionality() == crate::ArtifactOptionalityV1::Required)
-            .all(crate::EvaluatedArtifactClaimV1::authoritative_use_permitted);
-        if required_members_authorized
-            && requested_view_roots.iter().all(|root| {
-                self.optional_views.iter().any(|(node, native)| {
-                    node == root
-                        && self.evaluation.artifacts().iter().any(|artifact| {
-                            Hash::from_bytes(artifact.artifact_digest().digest()) == *native
-                                && artifact.to() == ErasureReplayClaimV1::Exact
-                                && artifact.authoritative_use_permitted()
-                        })
-                })
+        if requested_view_roots.iter().all(|root| {
+            self.optional_views.iter().any(|(node, native)| {
+                node == root
+                    && self.evaluation.artifacts().iter().any(|artifact| {
+                        Hash::from_bytes(artifact.artifact_digest().digest()) == *native
+                            && artifact.to() == ErasureReplayClaimV1::Exact
+                            && artifact.authoritative_use_permitted()
+                    })
             })
-        {
+        }) {
             Ok(())
         } else {
             Err(WorldReplayClosureErrorV1::ClaimUnavailable)

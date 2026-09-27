@@ -416,7 +416,7 @@ fn optional_view_redaction_preserves_authoritative_replay() -> TestResult {
 }
 
 #[test]
-fn required_base_configuration_redaction_admits_test_support_claim() -> TestResult {
+fn required_base_configuration_redaction_rejects_authoritative_use() -> TestResult {
     let mut input = closure_input();
     let mut revised_leaf = input.artifacts[4].as_input().clone();
     revised_leaf.transition = ArtifactTransitionRuleV1::RedactViews;
@@ -428,7 +428,14 @@ fn required_base_configuration_redaction_admits_test_support_claim() -> TestResu
         admission.evaluation().replay_claim(),
         ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews
     );
-    admission.require_authoritative_use()?;
+    assert_eq!(
+        admission.require_authoritative_use(),
+        Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+    );
+    assert_eq!(
+        admission.require_authoritative_use_for(&[]),
+        Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+    );
     Ok(())
 }
 
