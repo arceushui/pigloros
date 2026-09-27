@@ -6185,9 +6185,6 @@ mod coverage_paths {
         poisoned.poison();
         assert!(!poisoned.permits_unverified_test_fixture());
 
-        let poisoned_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
-        poison_authority(&poisoned_authority);
-        assert!(!poisoned_authority.permits_unverified_test_fixture());
         Ok(())
     }
 
@@ -7224,6 +7221,7 @@ mod coverage_paths {
 
         let poisoned_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
         poison_authority(&poisoned_authority);
+        assert!(!poisoned_authority.permits_unverified_test_fixture());
         assert_eq!(
             poisoned_authority.bind_timeline(timeline, reference(7)),
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
