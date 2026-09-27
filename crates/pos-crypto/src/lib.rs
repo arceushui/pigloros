@@ -11,5 +11,6 @@ pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod key_roles;
 pub mod recipient_key;
+pub mod recipient_export;
 pub mod signing;
 pub mod timeline_erasure;
