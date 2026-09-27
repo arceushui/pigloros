@@ -125,3 +125,37 @@ fn admission_rejects_a_parent_head_outside_the_completed_fold_boundary() -> Test
     assert_eq!(store.list_timelines()?.len(), 1);
     Ok(())
 }
+
+#[test]
+fn committed_admission_remains_readable_after_child_events() -> TestResult {
+    let mut store = MemoryStore::new();
+    let parent = store.create_timeline("parent")?;
+    let authenticated = authenticated()?;
+    store.bind_principal_owner_trust(trust(&authenticated)?)?;
+    store.commit_local_binding(
+        Hash::from_bytes([1; 32]),
+        &authenticated,
+        OwnerIdV1::new("creator")?,
+        WallTime::from_micros(20),
+    )?;
+    let receipt = store.create_fork_admitted(
+        &request(parent.id(), authenticated),
+        WallTime::from_micros(20),
+    )?;
+    store.append(
+        receipt.child_id,
+        &[pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("fork.test"),
+            pos_core::CanonicalBytes::from_vec(vec![1]),
+        )],
+    )?;
+    assert_eq!(
+        store
+            .read_fork_admission(receipt.child_id)?
+            .expect("FAR1")
+            .digest(),
+        receipt.admission_digest
+    );
+    Ok(())
+}
