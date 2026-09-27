@@ -152,19 +152,14 @@ impl LocalOciPublisherV1 {
         }
         let index = read_limited(open_private_file(&self.root, INDEX_NAME)?, 64 * 1024)
             .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
-        let index = crate::oci::parse_jcs_object(&index)
-            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
-        let indexed = index
-            .get("addresses")
-            .and_then(serde_json::Value::as_array)
-            .ok_or(LocalOciPublicationErrorV1::InvalidLayout)?;
+        let indexed =
+            parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let unindexed = finals
             .into_iter()
             .filter(|name| {
-                !indexed.iter().any(|entry| {
-                    entry.get("digest").and_then(serde_json::Value::as_str)
-                        == Some(format!("sha256:{name}").as_str())
-                })
+                !indexed
+                    .iter()
+                    .any(|address| address.digest() == format!("sha256:{name}"))
             })
             .collect::<Vec<_>>();
         if unindexed.len() > 1 || (unindexed.len() == 1 && indexed.len() >= 256) {
@@ -351,20 +346,26 @@ impl LocalOciPublisherV1 {
     fn publish_index(&self, address: &BundleAddressV1) -> Result<(), LocalOciPublicationErrorV1> {
         let index = read_limited(open_private_file(&self.root, INDEX_NAME)?, 64 * 1024)
             .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
-        let mut value = crate::oci::parse_jcs_object(&index)
-            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
-        let addresses = value
-            .get_mut("addresses")
-            .and_then(serde_json::Value::as_array_mut)
-            .ok_or(LocalOciPublicationErrorV1::InvalidLayout)?;
+        let mut addresses =
+            parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         if addresses.len() >= 256 {
             return Err(LocalOciPublicationErrorV1::BoundsExceeded);
         }
-        addresses.push(serde_json::json!({"digest": address.digest(), "mediaType": address.media_type(), "size": address.size()}));
-        addresses.sort_by(|left, right| {
-            left.get("digest")
-                .and_then(serde_json::Value::as_str)
-                .cmp(&right.get("digest").and_then(serde_json::Value::as_str))
+        if addresses
+            .iter()
+            .any(|existing| existing.digest() == address.digest())
+        {
+            return Err(LocalOciPublicationErrorV1::Collision);
+        }
+        addresses.push(address.clone());
+        addresses.sort_by(|left, right| left.digest().cmp(right.digest()));
+        let value = serde_json::json!({
+            "addresses": addresses.iter().map(|entry| serde_json::json!({
+                "digest": entry.digest(),
+                "mediaType": entry.media_type(),
+                "size": entry.size(),
+            })).collect::<Vec<_>>(),
+            "version": 1,
         });
         let bytes =
             serde_json::to_vec(&value).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
@@ -461,22 +462,8 @@ impl LocalOciPublisherV1 {
             open_private_file(&self.root, INDEX_NAME).map_err(map_publication_to_source)?,
             64 * 1024,
         )?;
-        let index = crate::oci::parse_jcs_object(&index)?;
-        let addresses = index
-            .get("addresses")
-            .and_then(serde_json::Value::as_array)
-            .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
-        if index.get("version").and_then(serde_json::Value::as_u64) != Some(1)
-            || addresses.len() > 256
-        {
-            return Err(ReleaseSourceErrorV1::InvalidLayout);
-        }
-        let indexed = addresses.iter().any(|entry| {
-            entry.get("digest").and_then(serde_json::Value::as_str) == Some(address.digest())
-                && entry.get("mediaType").and_then(serde_json::Value::as_str)
-                    == Some(address.media_type())
-                && entry.get("size").and_then(serde_json::Value::as_u64) == Some(address.size())
-        });
+        let addresses = parse_root_index(&index)?;
+        let indexed = addresses.iter().any(|entry| entry == address);
         if !indexed {
             return Err(ReleaseSourceErrorV1::NotFound);
         }
@@ -547,6 +534,54 @@ fn collect_descriptor(
         return Err(ReleaseSourceErrorV1::DuplicateMember);
     }
     Ok(())
+}
+
+fn parse_root_index(bytes: &[u8]) -> Result<Vec<BundleAddressV1>, ReleaseSourceErrorV1> {
+    let index =
+        crate::oci::parse_jcs_object(bytes).map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
+    let root = index
+        .as_object()
+        .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
+    if root.len() != 2 || root.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(ReleaseSourceErrorV1::InvalidLayout);
+    }
+    let entries = root
+        .get("addresses")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
+    if entries.len() > 256 {
+        return Err(ReleaseSourceErrorV1::BoundsExceeded);
+    }
+    let mut addresses: Vec<BundleAddressV1> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let object = entry
+            .as_object()
+            .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
+        if object.len() != 3
+            || object.get("mediaType").and_then(serde_json::Value::as_str)
+                != Some("application/vnd.oci.image.manifest.v1+json")
+        {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
+        let digest = object
+            .get("digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
+        let size = object
+            .get("size")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
+        let address = BundleAddressV1::new(digest.to_owned(), size)
+            .map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
+        if addresses
+            .last()
+            .is_some_and(|previous| previous.digest() >= address.digest())
+        {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
+        addresses.push(address);
+    }
+    Ok(addresses)
 }
 
 fn read_limited(mut file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
