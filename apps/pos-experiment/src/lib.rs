@@ -3913,6 +3913,7 @@ mod tests {
             gateway_store
                 .append(timeline, &[human])
                 .map_err(RuntimeError::Store)?;
+            drop(gateway_store);
             let mut ai = EventDraft::new(
                 self.entity,
                 Kind::new("agent.decision"),
@@ -4362,7 +4363,7 @@ mod tests {
         let mut experiment = Experiment::new(ExperimentConfig {
             name: "interleaved-action".to_owned(),
             stop: StopCondition::MaxTicks(10),
-            store_config: StoreConfig::Sqlite { path: path.clone() },
+            store_config: StoreConfig::Sqlite { path },
         });
         experiment
             .register(

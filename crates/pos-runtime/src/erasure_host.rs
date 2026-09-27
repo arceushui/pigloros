@@ -4590,6 +4590,12 @@ mod tests {
             request: ErasureReferenceV1,
             requested: &ErasureStateTransitionV1,
         ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+            let mut scope_timeline_ids = self
+                .timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .clone();
+            scope_timeline_ids.sort_unstable();
             let target = ErasureRequiredTargetV1 {
                 artifact_class: ErasureArtifactClassV1::TimelineReplay,
                 artifact_digest: reference(41),
@@ -4602,7 +4608,7 @@ mod tests {
             let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
                 request,
                 scope_members: vec![reference(9)],
-                scope_timeline_ids: Vec::new(),
+                scope_timeline_ids: scope_timeline_ids.clone(),
                 target_closure: pos_core::erasure::target_closure_digest(&targets),
                 lineage_rule: Some(reference(100)),
             })?;
@@ -4650,7 +4656,7 @@ mod tests {
                     scope: ErasureScopeCommitmentInputV1 {
                         request,
                         scope_members: vec![reference(9)],
-                        scope_timeline_ids: Vec::new(),
+                        scope_timeline_ids,
                         target_closure: pos_core::erasure::target_closure_digest(&[target]),
                         lineage_rule: Some(reference(100)),
                     },
@@ -4730,7 +4736,7 @@ mod tests {
 
         fn verified_topology_observation_for_candidate(
             &self,
-            request: ErasureReferenceV1,
+            _request: ErasureReferenceV1,
             manifest_digest: ErasureReferenceV1,
             candidate: &TimelineMeta,
         ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
@@ -4738,16 +4744,30 @@ mod tests {
                 .lock()
                 .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
                 .push(candidate.clone());
-            {
-                let mut timelines = self
-                    .timelines
-                    .lock()
-                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-                if !timelines.contains(&candidate.id) {
-                    timelines.push(candidate.id);
-                }
+            let mut timelines = self
+                .timelines
+                .lock()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
+                .clone();
+            if !timelines.contains(&candidate.id) {
+                timelines.push(candidate.id);
             }
-            self.verified_topology_observation(request, manifest_digest)
+            if self.frozen.load(std::sync::atomic::Ordering::Acquire) {
+                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+                    manifest_digest,
+                    timelines
+                        .into_iter()
+                        .map(|timeline| (timeline, reference(9)))
+                        .collect(),
+                    Vec::new(),
+                )))
+            } else {
+                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+                    manifest_digest,
+                    Vec::new(),
+                    timelines,
+                )))
+            }
         }
 
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
