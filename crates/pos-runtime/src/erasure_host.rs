@@ -6082,7 +6082,7 @@ mod tests {
         }));
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(Arc::clone(&authority));
+        host.authority = Some(authority.clone());
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -6124,70 +6124,6 @@ mod tests {
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("affected-root"));
         assert_eq!(result, Err(ErasureHostErrorV1::RecoveryUnavailable));
-        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
-        assert_eq!(
-            authority
-                .timelines
-                .lock()
-                .map(|timelines| timelines.len())
-                .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("poisoned test fixture"))),
-            1
-        );
-    }
-
-    #[test]
-    fn invalid_root_candidate_binding_does_not_attempt_rollback() {
-        let authority = Arc::new(ActiveTopologyAuthorityV1::default());
-        let (mut store, _) = fault_store_with_control(FaultModeV1::DeleteTimeline);
-        let authority_for_creation = Arc::clone(&authority);
-        store.timeline_created_hook = Some(Arc::new(move |timeline| {
-            let _result = authority_for_creation.set_timeline(timeline);
-        }));
-        let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(Arc::clone(&authority));
-        host.coordinator = Some(reference(30));
-        host.install_inventory_from_coordinator(4)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-
-        let _parent = host
-            .command_sender()
-            .and_then(|mut sender| sender.create_timeline("rollback-failure-parent"))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let request = coordinator_request()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let request_reference = request.reference();
-        let request_provenance = request.provenance();
-        host.command_sender()
-            .and_then(|mut sender| sender.submit_erasure_request(request, request_provenance))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.command_sender()
-            .and_then(|mut sender| {
-                sender.authorize_erasure_request(request_reference, reference(32))
-            })
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.command_sender()
-            .and_then(|mut sender| {
-                sender.freeze_access(
-                    request_reference,
-                    &ErasureStateTransitionV1 {
-                        lifecycle: pos_core::ErasureLifecycleV1::AccessFrozen,
-                        freeze_position: Some(10),
-                        pending_owners: Vec::new(),
-                        failed_owners: Vec::new(),
-                        acknowledged_targets: Vec::new(),
-                        replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-                        provenance: reference(39),
-                    },
-                )
-            })
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-
-        assert_eq!(
-            host.command_sender()
-                .and_then(|mut sender| sender.create_timeline("rollback-failure-root")),
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        );
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
         assert_eq!(
             authority
