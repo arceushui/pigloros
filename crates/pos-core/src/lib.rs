@@ -120,13 +120,13 @@ pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
-    erasure_evidence_set_reference, selected_obligations_reference, ArtifactClaimInputV1,
-    ArtifactDataClassV1, ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1,
-    inspect_artifact_registration_graph_v1, ArtifactChildEdgeV1, ArtifactOptionalityV1,
-    ArtifactRedactionStateV1,
-    ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationGraphErrorV1,
-    ArtifactRegistrationGraphNodeV1, ArtifactRegistrationGraphSummaryV1, ArtifactRegistrationV1,
-    ArtifactStateV1, ArtifactTransitionRuleV1, ErasureAcknowledgementOutcomeV1,
+    erasure_evidence_set_reference, inspect_artifact_registration_graph_v1,
+    selected_obligations_reference, ArtifactChildEdgeV1, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
+    ArtifactRedactionStateV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
+    ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1,
+    ArtifactRegistrationGraphSummaryV1, ArtifactRegistrationV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
@@ -187,11 +187,10 @@ pub use erasure::{
     ERASURE_REJOIN_PROOF_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
     ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
-    MAX_ARTIFACT_GRAPH_DEPTH_V1, MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1,
-    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
-    MAX_ARTIFACT_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_CHILDREN_V1,
-    MAX_ARTIFACT_REGISTRATION_KEYS_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, MAX_ARTIFACT_GRAPH_DEPTH_V1,
+    MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_BYTES_V1,
+    MAX_ARTIFACT_REGISTRATION_CHILDREN_V1, MAX_ARTIFACT_REGISTRATION_KEYS_V1,
 };
 pub use error::CoreError;
 pub use event::{
