@@ -2118,4 +2118,92 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_entrypoints_reject_untrusted_roots_and_absent_releases(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root("entrypoints")?;
+        let bundle = bundle()?;
+        let address = bundle.address().clone();
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        assert_eq!(
+            publisher.read_verified(&address),
+            Err(ReleaseSourceErrorV1::NotFound)
+        );
+        assert_eq!(
+            publisher.recover(&address)?,
+            RecoveryOutcomeV1::Unpublished(address.clone())
+        );
+        assert_eq!(
+            publisher.publish(&bundle)?,
+            PublishOutcomeV1::Published(address.clone())
+        );
+        assert_eq!(
+            publisher.publish(&bundle)?,
+            PublishOutcomeV1::AlreadyPublished(address)
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let path = std::env::temp_dir().join(format!(
+            "pigloros-oci-untrusted-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, b"not a directory")?;
+        assert_eq!(
+            LocalOciPublisherV1::open(&path),
+            Err(LocalOciPublicationErrorV1::InvalidLayout)
+        );
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        assert_eq!(
+            LocalOciPublisherV1::open(&path),
+            Err(LocalOciPublicationErrorV1::InvalidLayout)
+        );
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_reader_and_recovery_reject_root_index_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (label, index, expected) in [
+            (
+                "index-json",
+                b"[\"not an index\"]".as_slice(),
+                ReleaseSourceErrorV1::InvalidLayout,
+            ),
+            (
+                "index-version",
+                b"{\"addresses\":[],\"version\":2}",
+                ReleaseSourceErrorV1::InvalidLayout,
+            ),
+            (
+                "index-addresses",
+                b"{\"addresses\":{},\"version\":1}",
+                ReleaseSourceErrorV1::InvalidLayout,
+            ),
+            (
+                "index-entry",
+                b"{\"addresses\":[{}],\"version\":1}",
+                ReleaseSourceErrorV1::InvalidLayout,
+            ),
+        ] {
+            let root = private_root(label)?;
+            let publisher = LocalOciPublisherV1::open(&root)?;
+            let address = bundle()?.address().clone();
+            std::fs::write(root.join(INDEX_NAME), index)?;
+            assert_eq!(publisher.read_verified(&address), Err(expected), "{label}");
+            assert_eq!(
+                publisher.recover_all(),
+                Err(LocalOciPublicationErrorV1::InvalidLayout),
+                "{label}"
+            );
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
 }

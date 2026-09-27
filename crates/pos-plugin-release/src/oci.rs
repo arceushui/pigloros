@@ -270,9 +270,6 @@ pub fn verify_oci_closure_v1(
             return Err(ReleaseSourceErrorV1::BoundsExceeded);
         }
         verify_descriptor_bytes(&digest, size, &bytes)?;
-        if digest == EMPTY_CONFIG_DIGEST && bytes != EMPTY_CONFIG_BYTES {
-            return Err(ReleaseSourceErrorV1::DigestMismatch);
-        }
         blobs.push(BlobV1 { digest, bytes });
     }
     if blobs.iter().map(|blob| blob.bytes.len()).sum::<usize>() + manifest.len()
@@ -880,6 +877,32 @@ mod tests {
         blobs.remove(&removed);
         assert_eq!(
             verify_oci_closure_v1(address, manifest, blobs),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_a_closure_that_exceeds_the_total_byte_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_, manifest, mut blobs) = closure()?;
+        let mut value: serde_json::Value = serde_json::from_slice(&manifest)?;
+        for index in 0..3 {
+            let bytes = vec![u8::try_from(index)?; 22 * 1024 * 1024];
+            let digest = digest(&bytes);
+            value["layers"]
+                .as_array_mut()
+                .ok_or("fixture layers")?
+                .push(layer(
+                    &format!("migration-fixture/{}", &digest[7..]),
+                    "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
+                    &bytes,
+                ));
+            blobs.insert(digest, bytes);
+        }
+        assert_eq!(
+            verify_value(&value, blobs),
             Err(ReleaseSourceErrorV1::BoundsExceeded)
         );
         Ok(())
