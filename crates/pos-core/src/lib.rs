@@ -120,11 +120,13 @@ pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, selected_obligations_reference, ArtifactClaimInputV1,
     ArtifactDataClassV1, ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1,
-    ArtifactOptionalityV1, ArtifactRedactionStateV1, ArtifactStateV1, ArtifactTransitionRuleV1,
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
-    ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureAdmittedForkContextV1,
+    ArtifactChildEdgeV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
+    ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationV1,
+    ArtifactStateV1, ArtifactTransitionRuleV1, ErasureAcknowledgementOutcomeV1,
+    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
+    ErasureAdmittedForkContextV1,
     ErasureApplicabilityDecisionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1,
@@ -182,6 +184,8 @@ pub use erasure::{
     ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
     ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
+    MAX_ARTIFACT_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_CHILDREN_V1,
+    MAX_ARTIFACT_REGISTRATION_KEYS_V1,
 };
 pub use error::CoreError;
 pub use event::{
