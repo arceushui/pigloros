@@ -45,7 +45,32 @@ ReleaseSourceV1::read_verified(BundleAddressV1)
 
 `VerifiedReleaseBundleV1` contains the root-manifest blob and an immutable digest-ordered collection of the empty config and every layer blob. Its constructor is private to the verifier. The port verifies the root descriptor, parses only bounded OCI JSON, then verifies the byte count and SHA-256 of the root blob, config blob, and every layer blob before returning. It rejects non-JCS bytes, duplicate JSON object members, unknown object keys, duplicate descriptors, non-SHA-256 descriptors, URLs, embedded data, a subject, malformed JSON, descriptor/media-type mismatch, absent blob, excess bounds, symlinks, and unreferenced local-adapter blobs.
 
-Closed errors are `InvalidAddress`, `NotFound`, `BoundsExceeded`, `InvalidLayout`, `InvalidDescriptor`, `DigestMismatch`, `SizeMismatch`, `DuplicateMember`, `UnsupportedMediaType`, `Uncommitted`, `Collision`, `Io`, `Sync`, `LockUnavailable`, and `RecoveryRequired`. They disclose no filesystem paths. A failure yields no partial bundle. The port never parses PMF1 or decides signing, trust, admission, or activation.
+`ReleaseSourceErrorV1` is the closed set `InvalidAddress`, `NotFound`, `BoundsExceeded`, `InvalidLayout`, `InvalidDescriptor`, `DigestMismatch`, `SizeMismatch`, `DuplicateMember`, `UnsupportedMediaType`, `Uncommitted`, `Io`, `LockUnavailable`, and `RecoveryRequired`. `LocalOciPublicationErrorV1` is the closed set `InvalidAddress`, `BoundsExceeded`, `InvalidLayout`, `Collision`, `Io`, `Sync`, `LockUnavailable`, `RecoveryRequired`, and `OutcomeUnknown(BundleAddressV1)`. Every address carried in an error passed the exact `BundleAddressV1` grammar; errors disclose no filesystem paths. A source failure yields no partial bundle. The port never parses PMF1 or decides signing, trust, admission, or activation.
+
+The exact publisher contract is:
+
+```text
+LocalOciPublisherV1::publish(VerifiedReleaseBundleV1)
+  -> Result<PublishOutcomeV1, LocalOciPublicationErrorV1>
+
+PublishOutcomeV1 = Published(BundleAddressV1) | AlreadyPublished(BundleAddressV1)
+
+LocalOciPublisherV1::recover_all()
+  -> Result<RecoveryReportV1, LocalOciPublicationErrorV1>
+
+LocalOciPublisherV1::recover(BundleAddressV1)
+  -> Result<RecoveryOutcomeV1, LocalOciPublicationErrorV1>
+
+RecoveryOutcomeV1 = Committed(BundleAddressV1) | Unpublished(BundleAddressV1)
+
+RecoveryReportV1 {
+  committed: Vec<BundleAddressV1>, // digest-sorted, at most 256
+  removed_staging: u8,             // 0 or 1
+  removed_next_index: bool,
+}
+```
+
+`recover_all` is global: under the exclusive lock it performs the bounded staging, final, next-index, and quarantine scan below, durably completes every valid final-but-unindexed release, and returns the sorted set of addresses it committed plus removed owned staging/next-index counts. `recover(address)` first validates the supplied address, invokes `recover_all`, then returns `Committed(address)` when that address is indexed and fully revalidates, or `Unpublished(address)` only when it is absent from the index and final location. A caller that receives `OutcomeUnknown(address)` must call `recover(address)` before retrying; it may retry only after `Committed` or `Unpublished`. Any unsafe unrelated entry makes both recovery calls return `RecoveryRequired`.
 
 ### Exact OCI artifact closure
 
@@ -75,6 +100,8 @@ The source validates this closure mechanically. #401's PMF1 codec must contain a
   published.json                 # sole durable discovery/commit index
   .publisher.lock                # root-owned advisory lock file
   .published.<32-hex>.next       # owned private next-index file
+  quarantine/                    # at most one retained unsafe entry
+    <kind>.<32-hex>/              # never traversed by ReleaseSourceV1
   releases/<sha256-hex>/
     READY                         # recovery evidence, never a discovery entry
     oci-layout
@@ -105,7 +132,7 @@ sha256:<64 lowercase hex>
 
 The initialized store creates and syncs the empty index `{"addresses":[],"version":1}` before it accepts reads or writes. It is the sole durable discovery index. A reader accepts a release only when the index entry, final directory, `READY`, and entire revalidated closure agree. `READY` is recovery evidence only. Publishing a 257th address returns `BoundsExceeded`; V1 has no implicit retention or deletion. Reads inspect one requested indexed address, while recovery scans at most 256 index addresses and at most 258 `releases/` entries (256 final directories, one staging directory, and one quarantine directory). Any larger directory set fails closed as `BoundsExceeded`.
 
-The store root is selected by a trusted local operator and must already exist as a directory owned by the effective UID with mode exactly `0700`, on a local filesystem that supports the required calls. Initialization uses the root directory file descriptor, creates `releases/` with mode `0700`, creates `.publisher.lock` as a root-owned regular `0600` file, and creates the empty index as a root-owned regular `0600` file; it fsyncs each file then the affected directory. All later traversal is relative to retained directory file descriptors through `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV`, uses `O_NOFOLLOW`, and verifies regular-file/directory type, effective-UID ownership, and mode before use. [S7] An unavailable syscall, unsafe root, changed owner/mode, symlink, mount crossing, or non-local filesystem is `InvalidLayout`.
+The store root is selected by a trusted local operator and must already exist as a directory owned by the effective UID with mode exactly `0700`, on a local filesystem that supports the required calls. Initialization uses the root directory file descriptor, creates `releases/` and `quarantine/` with mode `0700`, creates `.publisher.lock` as a root-owned regular `0600` file, and creates the empty index as a root-owned regular `0600` file; it fsyncs each new file and directory, then fsyncs the root directory. All later traversal is relative to retained directory file descriptors through `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV`, uses `O_NOFOLLOW`, and verifies regular-file/directory type, effective-UID ownership, and mode before use. [S7] An unavailable syscall, unsafe root, changed owner/mode, symlink, mount crossing, or non-local filesystem is `InvalidLayout`; a nonempty quarantine is `RecoveryRequired`.
 
 Readers hold `flock(LOCK_SH)` on `.publisher.lock` for the complete index-to-closure verification. Publishers and recovery hold `flock(LOCK_EX)` for their complete operation. [S8] The lock is an ordering device only; root privacy and descriptor-relative no-follow traversal are the security boundary. `flock` errors or a non-private root are `LockUnavailable` or `InvalidLayout` rather than a fallback.
 
@@ -136,16 +163,19 @@ The final path is derived only from the lower-case root manifest SHA-256. A stag
 
 Recovery holds the same lock before reads or writes:
 
-1. Remove an owned staging directory only after descriptor-relative no-follow traversal confirms its name grammar, `OWNER` nonce match, effective-UID ownership, `0700` directory mode, regular `0600` owner marker, and absence from `published.json`; fsync `releases/` after removal. A name-shaped directory lacking this proof is quarantined and returns `RecoveryRequired`.
-2. Revalidate each final `READY` directory absent from the root index. Add a complete one through the durable index protocol; quarantine an incomplete one and return `RecoveryRequired`.
-3. Revalidate every indexed final directory. A missing, changed, malformed, or unready release fails the entire source closed as `RecoveryRequired`.
-4. Remove an owned next-index file as defined above and fsync the root; a malformed or unowned next-index file is quarantined and returns `RecoveryRequired`.
+1. Refuse every read, publish, and recovery operation with `RecoveryRequired` when `quarantine/` is nonempty. It is never parsed, used as a source, or deleted by the port; an operator must retain or remove it through an audited maintenance procedure before re-opening the store.
+2. Remove an owned staging directory only after descriptor-relative no-follow traversal confirms its name grammar, `OWNER` nonce match, effective-UID ownership, `0700` directory mode, regular `0600` owner marker, and absence from `published.json`; fsync `releases/` after removal.
+3. Revalidate each final `READY` directory absent from the root index. Add a complete one through the durable index protocol.
+4. Revalidate every indexed final directory. A missing, changed, malformed, or unready release fails the entire source closed as `RecoveryRequired`.
+5. Remove an owned next-index file as defined above and fsync the root.
+
+An unsafe name-shaped staging directory, incomplete final directory, malformed or unowned next-index file, or any entry that fails the checks above is quarantined before `RecoveryRequired` is returned. Quarantine uses the single initialized `quarantine/` directory; if it already contains an entry, recovery returns `RecoveryRequired` without moving another. Under the exclusive lock, the adapter creates a destination name `staging.<32 lower-case hex>`, `final.<32 lower-case hex>`, or `next-index.<32 lower-case hex>` with an in-process CSPRNG nonce, moves the source using descriptor-relative `renameat2(RENAME_NOREPLACE)`, fsyncs the source directory, fsyncs `quarantine/`, then fsyncs the root. The destination must be a root-owned `0700` directory (or regular `0600` file for `next-index`) and its random suffix has no semantic meaning. A move or any sync failure returns `RecoveryRequired`; restart scans the bounded quarantine directory first and remains fail-closed until the operator handles its one retained entry. Readers never traverse the directory.
 
 No automatic deletion occurs for a once-ready final directory that no longer validates. V1 has no garbage collection or shared-blob deduplication.
 
-Production exposes only `ReleaseSourceV1`, `LocalOciPublisherV1::publish`, and `recover`. Tests may use private `PublicationFaultPointV1` to fail initialization file/directory creation or sync, blob write, blob sync, directory sync, `OWNER` write/sync, `READY` write/sync, final rename, `releases/` sync, next-index create/write/sync, index rename, root sync, or recovery cleanup sync. It cannot alter production inputs or be externally enabled.
+Production exposes only `ReleaseSourceV1`, `LocalOciPublisherV1::publish`, `recover_all`, and `recover`. Tests may use private `PublicationFaultPointV1` to fail initialization file/directory/quarantine creation or sync, blob write, blob sync, directory sync, `OWNER` write/sync, `READY` write/sync, final rename, `releases/` sync, next-index create/write/sync, index rename, root sync, quarantine rename, quarantine-source sync, quarantine-directory sync, quarantine-root sync, or recovery cleanup sync. It cannot alter production inputs or be externally enabled.
 
-Public-seam evidence must prove: initialized empty-index read; roundtrip; missing/mutated member rejection; JCS re-canonicalization, duplicate JSON key, unknown key, annotation grammar, PMF1 tuple, and role/cardinality rejection; all full-capacity boundaries; index byte/address/recovery-scan limits; equivalent collision idempotency; non-equivalent collision refusal; staging and next-index invisibility; final-ready-but-unindexed recovery; indexed missing/mutated release fail-closed; `OutcomeUnknown` recovery to committed or unpublished; unsafe root, lock, symlink, mount, owner, and mode rejection; and each injected failure leaves no discoverable partial release.
+Public-seam evidence must prove: initialized empty-index read; roundtrip; missing/mutated member rejection; JCS re-canonicalization, duplicate JSON key, unknown key, annotation grammar, PMF1 tuple, and role/cardinality rejection; all full-capacity boundaries; index byte/address/recovery-scan limits; equivalent collision idempotency; non-equivalent collision refusal; staging and next-index invisibility; final-ready-but-unindexed recovery; indexed missing/mutated release fail-closed; `OutcomeUnknown(address)` followed by address-scoped `recover` to committed or unpublished, and global `recover_all` report ordering; unsafe root, lock, symlink, mount, owner, and mode rejection; quarantine initialization, one-entry capacity, exclusion, move/sync failure, retained restart failure, and operator-cleared restart; and each injected failure leaves no discoverable partial release.
 
 ## Consequences and non-goals
 
