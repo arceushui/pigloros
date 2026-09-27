@@ -144,10 +144,10 @@ fn open_rejects_a_symlinked_root() -> Result<(), Box<dyn std::error::Error>> {
     let link = root.0.join("root-link");
     std::os::unix::fs::symlink(&root.0, &link)?;
 
-    assert!(matches!(
-        LocalOciPublisherV1::open(&link),
-        Err(LocalOciPublicationErrorV1::InvalidLayout)
-    ));
+    assert_eq!(
+        LocalOciPublisherV1::open(&link).err(),
+        Some(LocalOciPublicationErrorV1::InvalidLayout)
+    );
     assert_eq!(fs::read_dir(&root.0)?.count(), 1);
     Ok(())
 }
@@ -183,10 +183,10 @@ fn open_rejects_an_unsupported_filesystem_before_initialization(
     let entries = fs::read_dir(&root)?.count();
     fs::remove_dir(&root)?;
 
-    assert!(matches!(
-        opened,
-        Err(LocalOciPublicationErrorV1::InvalidLayout)
-    ));
+    assert_eq!(
+        opened.err(),
+        Some(LocalOciPublicationErrorV1::InvalidLayout)
+    );
     assert_eq!(entries, 0);
     Ok(())
 }
