@@ -295,7 +295,7 @@ impl SqliteStore {
                 "recipient key inventory identity is invalid".to_owned(),
             ));
         }
-        let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path));
+        let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
         if path != recipient_private_path(&owner.directory, descriptor) {
             return Err(CoreError::Storage(
                 "recipient key inventory path does not match descriptor".to_owned(),
@@ -423,6 +423,10 @@ fn delete_bound_private_key(
     let mut material = Zeroizing::new(Vec::with_capacity(32));
     file.read_to_end(&mut material)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
+    let material =
+        Zeroizing::new(material.as_slice().try_into().map_err(|_| {
+            CoreError::Storage("recipient private key width is invalid".to_owned())
+        })?);
     if pos_crypto::key_roles::key_material_digest(&material) != material_digest {
         return Err(CoreError::Storage(
             "recipient private key digest differs from pending destruction".to_owned(),
