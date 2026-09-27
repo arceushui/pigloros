@@ -1099,7 +1099,10 @@ mod tests {
                 .into_iter()
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
-            assert!(names.iter().any(|name| name.ends_with(".orphan")));
+            // A registry-free recovery deliberately stops before it can classify
+            // the staged file. It must leave that material unavailable rather
+            // than move an entry that could belong to a live registry.
+            assert!(names.iter().any(|name| name.ends_with(".key")));
         }
 
         for failure in [0, 1] {
