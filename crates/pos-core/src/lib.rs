@@ -23,6 +23,7 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod fork_attribution;
+pub mod fork_admission;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
@@ -186,6 +187,11 @@ pub use fork_attribution::{
     SignedForkReproManifestV1, MAX_FORK_ADMISSION_RECORD_BYTES_V1,
     MAX_FORK_MANIFEST_INTERVENTIONS_V1, MAX_FORK_REPRO_MANIFEST_BYTES_V1,
     MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1,
+};
+pub use fork_admission::{
+    fork_admission_request_digest_v1, principal_digest_v1, CreateForkAdmittedRequestV1, ForkAdmissionAuthorityPortV1,
+    ForkAdmissionErrorV1, ForkAdmissionReceiptV1, ForkAuthorityOriginV1,
+    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PrincipalOwnerTrustV1,
 };
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
