@@ -6852,6 +6852,7 @@ dependencies = [
  "ryu",
  "serde",
  "serde_json",
+ "tracing",
  "zlink-macros",
 ]
 

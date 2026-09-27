@@ -31,6 +31,7 @@ tokio = { workspace = true }
 zlink = { version = "=0.7.0", default-features = false, features = [
   "proxy",
   "tokio",
+  "tracing",
 ] }
 zbus = { version = "=5.19.0", default-features = false, features = [
   "p2p",
