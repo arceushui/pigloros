@@ -15,13 +15,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use pos_core::{
-    AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
-    CanonicalBytes, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
-    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
-    Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
-    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
-    Reducer, Relationship, Seq, State, StateRegistry, TimelineId, EVENT_TYPE_CONSENT_REVOKED_V1,
-    MAX_OBSERVATION_SNAPSHOT_RECORDS,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1,
+    AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener,
+    ConsentRevokedV1, EntityId, ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1,
+    ErasureReferenceV1, Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1,
+    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
+    PersistedAuthorityV1, PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId,
+    WallTime,
+    EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,8 +61,18 @@ impl Reducer for EntityStateProjection {
 // ProjectionRegistry
 // ---------------------------------------------------------------------------
 
+/// Rejection before an installed reducer slot is mutated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionSlotErrorV1 {
+    /// A display name is empty or exceeds the canonical text bound.
+    InvalidName,
+    /// The stable Plugin identity already owns a slot.
+    DuplicatePluginId { plugin_id: PluginId },
+}
+
 /// One named slot inside the registry.
 struct Slot {
+    plugin_id: Option<PluginId>,
     reducer: Box<dyn Reducer>,
     registry: StateRegistry,
     observation_policy: Option<ProjectionObservationPolicyV1>,
@@ -234,15 +245,50 @@ impl ProjectionRegistry {
         reducer: Box<dyn Reducer>,
         observation_policy: Option<ProjectionObservationPolicyV1>,
     ) {
-        self.slots.retain(|(registered, _)| registered != name);
+        self.slots
+            .retain(|(registered, slot)| registered != name || slot.plugin_id.is_some());
         self.slots.push((
             name.to_owned(),
             Slot {
+                plugin_id: None,
                 reducer,
                 registry: StateRegistry::new(),
                 observation_policy,
             },
         ));
+    }
+
+    /// Register an installed reducer under its stable Plugin identity.
+    /// Display names may coincide; they are never used as installed slot keys.
+    ///
+    /// # Errors
+    /// Rejects an invalid name or duplicate Plugin identity before mutation.
+    pub fn register_installed_reducer(
+        &mut self,
+        plugin_id: PluginId,
+        name: &str,
+        reducer: Box<dyn Reducer>,
+    ) -> Result<(), ProjectionSlotErrorV1> {
+        if name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES {
+            return Err(ProjectionSlotErrorV1::InvalidName);
+        }
+        if self
+            .slots
+            .iter()
+            .any(|(_, slot)| slot.plugin_id == Some(plugin_id))
+        {
+            return Err(ProjectionSlotErrorV1::DuplicatePluginId { plugin_id });
+        }
+        self.slots.push((
+            name.to_owned(),
+            Slot {
+                plugin_id: Some(plugin_id),
+                reducer,
+                registry: StateRegistry::new(),
+                observation_policy: None,
+            },
+        ));
+        Ok(())
     }
 
     /// Apply one Event from its host-identified Timeline to every registered
@@ -409,6 +455,13 @@ impl ProjectionRegistry {
                 .and_then(|(_, slot)| slot.registry.get(entity))
                 .cloned())
         })
+    /// Return state from one installed Plugin's reducer slot.
+    #[must_use]
+    pub fn state_for_plugin(&self, plugin_id: PluginId, entity: &EntityId) -> Option<&State> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.plugin_id == Some(plugin_id))
+            .and_then(|(_, slot)| slot.registry.get(entity))
     }
 
     /// Materialize exactly one host-authorized participant observation.
@@ -477,13 +530,16 @@ impl ProjectionRegistry {
         else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
-        let Some(slot) = self
-            .slots
-            .iter()
-            .find_map(|(name, slot)| (name == &context.reducer).then_some(slot))
-        else {
+        let mut matches = self.slots.iter().filter(|(name, slot)| {
+            name == &context.reducer && slot.plugin_id.is_none_or(|id| id == plugin_id)
+        });
+        let slot = matches
+            .next()
+            .map(|(_, slot)| slot)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        if matches.next().is_some() {
             return Err(AuthorityErrorV1::SourceUnavailable);
-        };
+        }
         let Some(policy) = slot.observation_policy.as_ref() else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
@@ -716,7 +772,17 @@ impl ProjectionRegistry {
         &self,
         timeline: TimelineId,
     ) -> Result<std::collections::HashMap<String, StateRegistry>, AuthorityErrorV1> {
-        self.with_erasure_fence(timeline, |registry| Ok(registry.snapshot_unfenced()))
+        self.with_erasure_fence(timeline, |registry| {
+            if registry.has_duplicate_names() {
+                return Err(AuthorityErrorV1::SourceUnavailable);
+            }
+            Ok(registry.snapshot_unfenced())
+        })
+    }
+
+    fn has_duplicate_names(&self) -> bool {
+        let mut names = std::collections::HashSet::new();
+        self.slots.iter().any(|(name, _)| !names.insert(name))
     }
 
     fn snapshot_unfenced(&self) -> std::collections::HashMap<String, StateRegistry> {
@@ -2265,6 +2331,64 @@ mod wave3_tests {
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn installed_same_name_reducers_keep_independent_state_and_rollback() {
+        let first = PluginId::new();
+        let second = PluginId::new();
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        let mut registry = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        assert!(registry
+            .register_installed_reducer(first, "same", Box::new(EntityStateProjection))
+            .is_ok());
+        registry.apply_event(&ev(entity));
+        assert!(registry
+            .register_installed_reducer(second, "same", Box::new(EntityStateProjection))
+            .is_ok());
+        let count = |registry: &ProjectionRegistry, id| {
+            registry
+                .state_for_plugin(id, &entity)
+                .and_then(|state| state.get("event_count"))
+                .and_then(serde_json::Value::as_u64)
+        };
+        assert_eq!(count(&registry, first), Some(1));
+        assert_eq!(count(&registry, second), None);
+        assert!(registry.state_for_reducer("same", &entity).is_none());
+        assert!(registry.state_for(&entity).is_none());
+        assert!(matches!(
+            registry.state_snapshot(timeline),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        ));
+        assert!(matches!(
+            registry.register_installed_reducer(first, "other", Box::new(EntityStateProjection)),
+            Err(ProjectionSlotErrorV1::DuplicatePluginId { .. })
+        ));
+        assert_eq!(
+            registry.register_installed_reducer(
+                PluginId::new(),
+                "",
+                Box::new(EntityStateProjection),
+            ),
+            Err(ProjectionSlotErrorV1::InvalidName)
+        );
+        assert_eq!(
+            registry.register_installed_reducer(
+                PluginId::new(),
+                &"x".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1),
+                Box::new(EntityStateProjection),
+            ),
+            Err(ProjectionSlotErrorV1::InvalidName)
+        );
+        let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
+            candidate.apply_event(&ev(entity));
+            Err("denied")
+        });
+        assert_eq!(denied, Err("denied"));
+        assert_eq!(count(&registry, first), Some(1));
+        assert_eq!(count(&registry, second), None);
     }
 
     #[test]

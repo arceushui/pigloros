@@ -3284,6 +3284,17 @@ impl PluginRegistry {
             }
         }
 
+        // All fallible installed-slot checks precede the first registry mutation.
+        if options.registration.is_some()
+            && reducer.is_some()
+            && (name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES)
+        {
+            return Err(RuntimeError::CapabilityMismatch {
+                name,
+                reason: "installed reducer name is outside the canonical text bound".to_owned(),
+            });
+        }
+
         // Register event type schemas
         for kind in &cap.owned_event_types {
             self.schemas.register(EventTypeSchema {
@@ -3295,7 +3306,16 @@ impl PluginRegistry {
 
         // Wire reducer into projection registry
         if let Some(r) = reducer {
-            self.projections.register(&name, r);
+            if options.registration.is_some() {
+                self.projections
+                    .register_installed_reducer(id, &name, r)
+                    .map_err(|error| RuntimeError::CapabilityMismatch {
+                        name: name.clone(),
+                        reason: format!("installed projection slot rejected: {error:?}"),
+                    })?;
+            } else {
+                self.projections.register(&name, r);
+            }
         }
 
         // Index action approver if present
