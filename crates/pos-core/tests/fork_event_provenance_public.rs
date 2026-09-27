@@ -66,15 +66,6 @@ fn hex_bytes(value: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
 #[test]
 fn eor1_and_fia1_match_fixed_public_bytes_and_digests() -> Result<(), Box<dyn std::error::Error>> {
-    let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
-        fork_timeline_id: TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes([0x11; 16]))),
-        logical_seq: 9,
-        event_id: EventId::from_ulid(ulid::Ulid::from(u128::from_be_bytes([0x22; 16]))),
-        classification: ForkEventClassificationV1::new(ForkEventOriginKindV1::ExternalInput, true)?,
-        classifier_revision_digest: hash(4),
-        fork_admission_digest: hash(5),
-    })?;
-    let intervention = intervention_record(&origin)?;
     const EOR1_HEX: &str = concat!(
         "8944454f52310150111111111111111111111111111111110950222222222222",
         "2222222222222222222201015820040404040404040404040404040404040404",
@@ -90,6 +81,15 @@ fn eor1_and_fia1_match_fixed_public_bytes_and_digests() -> Result<(), Box<dyn st
         "0404040404040404040404040404040404045820050505050505050505050505",
         "0505050505050505050505050505050505050505",
     );
+    let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
+        fork_timeline_id: TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes([0x11; 16]))),
+        logical_seq: 9,
+        event_id: EventId::from_ulid(ulid::Ulid::from(u128::from_be_bytes([0x22; 16]))),
+        classification: ForkEventClassificationV1::new(ForkEventOriginKindV1::ExternalInput, true)?,
+        classifier_revision_digest: hash(4),
+        fork_admission_digest: hash(5),
+    })?;
+    let intervention = intervention_record(&origin)?;
     assert_eq!(origin.to_canonical_cbor(), hex_bytes(EOR1_HEX)?);
     assert_eq!(intervention.to_canonical_cbor(), hex_bytes(FIA1_HEX)?);
     assert_eq!(
