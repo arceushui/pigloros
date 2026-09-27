@@ -795,6 +795,12 @@ impl KeyRegistryStateV1 {
         Ok(KeyRegistrationOutcomeV1::Registered)
     }
 
+    /// Return every registered key record, including retained historical and
+    /// destroyed records.
+    pub fn key_records(&self) -> impl Iterator<Item = KeyRecordV1> + '_ {
+        self.records.values().copied()
+    }
+
     /// Return the active record for an owner-scoped `role`.
     #[must_use]
     pub fn active_key(&self, owner_id: &OwnerIdV1, role: KeyRoleV1) -> Option<KeyRecordV1> {
