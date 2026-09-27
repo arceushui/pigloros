@@ -208,7 +208,7 @@ mod hosted_cli_store_tests {
         );
         assert!(result.is_ok(), "CLI read fence failed: {result:?}");
         assert!(
-            matches!(read_result, Some(Ok(_))),
+            matches!(read_result.as_ref(), Some(Ok(_))),
             "nested CLI read failed: {read_result:?}"
         );
         Ok(())
