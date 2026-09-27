@@ -186,7 +186,7 @@ fn malformed_noncanonical_and_oversized_roots_reject() -> TestResult<()> {
     overbound_handle.insert(43, 0x01);
     cases.push((overbound_handle, ReproManifestRootErrorV1::FieldOutOfBounds));
     let mut enormous_label = good.clone();
-    enormous_label[308] = 0x1a;
+    enormous_label[308] = 0x7a;
     enormous_label.extend_from_slice(&65_536_u32.to_be_bytes());
     cases.push((enormous_label, ReproManifestRootErrorV1::FieldOutOfBounds));
     for (bytes, expected) in cases {
@@ -214,7 +214,7 @@ fn label_text_and_length_boundaries_reject() -> TestResult<()> {
     );
     let mut long_label = vector()?;
     long_label.truncate(308);
-    long_label.extend_from_slice(&[0x59, 0x01, 0x01]);
+    long_label.extend_from_slice(&[0x79, 0x01, 0x01]);
     long_label.extend_from_slice(&[b'x'; 257]);
     assert_eq!(
         ReproManifestRootV1::from_canonical_cbor(&long_label),
