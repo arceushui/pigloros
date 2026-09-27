@@ -578,20 +578,19 @@ impl LocalOciPublisherV1 {
         }
         let index = format!("{{\"manifests\":[{{\"digest\":\"{}\",\"mediaType\":\"{}\",\"size\":{}}}],\"schemaVersion\":2}}", address.digest(), address.media_type(), address.size());
         write_private_file(&staging, "index.json", index.as_bytes())?;
-        faulted_io!(
-            fault_selected(PublicationFaultPointV1::DirectorySync),
-            rustix::io::Errno::IO,
-            fs::fsync(&sha256)
-        )
-        .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        fs::fsync(&blobs).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_sync!(
+            Some(PublicationFaultPointV1::DirectorySync),
+            &sha256,
+            LocalOciPublicationErrorV1::Sync
+        )?;
+        faulted_sync!(None, &blobs, LocalOciPublicationErrorV1::Sync)?;
         let ready = format!(
             "pigloros-local-oci-ready-v1\n{}\n{}\n",
             address.digest(),
             address.size()
         );
         write_private_file(&staging, "READY", ready.as_bytes())?;
-        fs::fsync(&staging).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_sync!(None, &staging, LocalOciPublicationErrorV1::Sync)?;
         faulted_io!(
             fault_selected(PublicationFaultPointV1::FinalRename)
                 || fault_selected(PublicationFaultPointV1::FinalCollision),
@@ -615,12 +614,11 @@ impl LocalOciPublisherV1 {
                 LocalOciPublicationErrorV1::Sync
             }
         })?;
-        faulted_io!(
-            fault_selected(PublicationFaultPointV1::ReleasesSync),
-            rustix::io::Errno::IO,
-            fs::fsync(&releases)
-        )
-        .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_sync!(
+            Some(PublicationFaultPointV1::ReleasesSync),
+            &releases,
+            LocalOciPublicationErrorV1::Sync
+        )?;
         self.publish_index(address)?;
         Ok(PublishOutcomeV1::Published(address.clone()))
     }
@@ -652,24 +650,21 @@ impl LocalOciPublisherV1 {
             )
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        faulted_io!(
-            fault_selected(PublicationFaultPointV1::QuarantineSourceSync),
-            rustix::io::Errno::IO,
-            fs::fsync(source)
+        faulted_sync!(
+            Some(PublicationFaultPointV1::QuarantineSourceSync),
+            source,
+            LocalOciPublicationErrorV1::RecoveryRequired
+        )?;
+        faulted_sync!(
+            Some(PublicationFaultPointV1::QuarantineDirectorySync),
+            &quarantine,
+            LocalOciPublicationErrorV1::RecoveryRequired
+        )?;
+        faulted_sync!(
+            Some(PublicationFaultPointV1::QuarantineRootSync),
+            &self.root,
+            LocalOciPublicationErrorV1::RecoveryRequired
         )
-        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        faulted_io!(
-            fault_selected(PublicationFaultPointV1::QuarantineDirectorySync),
-            rustix::io::Errno::IO,
-            fs::fsync(&quarantine)
-        )
-        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        faulted_io!(
-            fault_selected(PublicationFaultPointV1::QuarantineRootSync),
-            rustix::io::Errno::IO,
-            fs::fsync(&self.root)
-        )
-        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
     }
 
     fn publish_index(&self, address: &BundleAddressV1) -> Result<(), LocalOciPublicationErrorV1> {
@@ -712,12 +707,11 @@ impl LocalOciPublisherV1 {
             )
         )
         .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        faulted_io!(
-            fault_selected(PublicationFaultPointV1::RootSync),
-            rustix::io::Errno::IO,
-            fs::fsync(&self.root)
+        faulted_sync!(
+            Some(PublicationFaultPointV1::RootSync),
+            &self.root,
+            LocalOciPublicationErrorV1::OutcomeUnknown(address.clone())
         )
-        .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))
     }
 }
 
@@ -1408,6 +1402,20 @@ mod tests {
         outcome
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn publish_with_nth_sync_fault(
+        publisher: &LocalOciPublisherV1,
+        bundle: &VerifiedReleaseBundleV1,
+        target: usize,
+    ) -> Result<PublishOutcomeV1, LocalOciPublicationErrorV1> {
+        reset_sync_attempts();
+        PUBLICATION_FAULT.with(|fault| fault.set(Some(PublicationFaultPointV1::NthSync(target))));
+        let outcome = publisher.publish(bundle);
+        PUBLICATION_FAULT.with(|fault| fault.set(None));
+        reset_sync_attempts();
+        outcome
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn initialization_faults_retry_from_private_root_without_partial_index(
@@ -1515,6 +1523,55 @@ mod tests {
                 std::fs::remove_dir_all(entry?.path())?;
             }
             assert!(publisher.recover_all()?.committed.is_empty());
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn publication_sync_failures_are_recoverable_or_address_scoped(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for target in 0..7 {
+            let root = private_root("publication-nth-sync")?;
+            let publisher = LocalOciPublisherV1::open(&root)?;
+            let bundle = bundle()?;
+            let address = bundle.address().clone();
+            let result = publish_with_nth_sync_fault(&publisher, &bundle, target);
+            if target == 6 {
+                assert_eq!(
+                    result,
+                    Err(LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))
+                );
+                assert_eq!(
+                    publisher.recover(&address)?,
+                    RecoveryOutcomeV1::Committed(address)
+                );
+            } else {
+                let expected_error = if target < 2 {
+                    LocalOciPublicationErrorV1::RecoveryRequired
+                } else {
+                    LocalOciPublicationErrorV1::Sync
+                };
+                assert_eq!(result, Err(expected_error));
+                let report = publisher.recover_all()?;
+                assert_eq!(
+                    report.committed,
+                    if target == 5 {
+                        vec![address.clone()]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(
+                    publisher.publish(&bundle)?,
+                    if target == 5 {
+                        PublishOutcomeV1::AlreadyPublished(address)
+                    } else {
+                        PublishOutcomeV1::Published(address)
+                    }
+                );
+            }
             std::fs::remove_dir_all(root)?;
         }
         Ok(())
