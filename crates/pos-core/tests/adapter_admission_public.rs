@@ -121,6 +121,22 @@ fn ordered_entries_and_integer_and_configuration_boundaries_round_trip() -> Test
 }
 
 #[test]
+fn truncated_populated_maa1_rejects_at_every_field_boundary() -> TestResult<()> {
+    let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+        entries: vec![entry(1, 24, b"public configuration".to_vec())],
+        ..input()?
+    })?;
+    let bytes = admission.to_canonical_cbor();
+    for end in 0..bytes.len() {
+        assert!(
+            AdapterAdmissionV1::from_canonical_cbor(&bytes[..end]).is_err(),
+            "truncated MAA1 prefix at byte {end} was accepted"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn schema_and_configuration_digests_use_exact_length_framing() {
     let schema = b"pigloros.repro.public-bytes-v1";
     assert_eq!(schema.len(), 30);
