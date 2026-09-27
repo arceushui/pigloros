@@ -554,6 +554,11 @@ impl KeyRegistryStateV1 {
         self.pending_destructions.values().copied()
     }
 
+    /// Return the committed immutable destruction facts for artifact consumers.
+    pub fn committed_destruction_facts(&self) -> impl Iterator<Item = KeyTombstoneV1> + '_ {
+        self.tombstones.values().copied()
+    }
+
     /// Validate a decoded or adapter-provided registry snapshot.
     ///
     /// This is a public load-boundary contract because `Deserialize` can

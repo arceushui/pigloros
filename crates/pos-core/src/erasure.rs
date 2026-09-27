@@ -35,6 +35,9 @@ pub const ERASURE_MAX_REFERENCES: usize = 4_096;
 pub const ERASURE_MAX_INVENTORY_RESULTS: usize = 4_096;
 /// Largest canonical target closure admitted for one ERQ1.
 pub const ERASURE_MAX_TARGETS: usize = 4_096;
+/// Largest dependency or committed-fact slice accepted by pure diagnostic key policy.
+/// Authoritative artifact registration applies separate limits.
+pub const ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS: usize = 4_096;
 /// Largest number of frozen obligations in one category.
 pub const ERASURE_MAX_OBLIGATIONS_PER_CATEGORY: usize = 4_096;
 /// Largest number of frozen obligations across all categories.
@@ -2794,8 +2797,9 @@ mod receipt;
 pub use receipt::target_closure_digest;
 mod artifact;
 pub use artifact::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
-    ArtifactStateV1, ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1, RegisteredArtifactV1,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactDestructionDispositionV1,
+    ArtifactKeyDependencyV1, ArtifactOptionalityV1, ArtifactRedactionStateV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1, RegisteredArtifactV1,
     ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
 };
 mod rejoin;
