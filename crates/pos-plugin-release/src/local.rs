@@ -776,7 +776,7 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
             fs::unlinkat(sha256, member, AtFlags::empty())
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         }
-        fs::fsync(sha256).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_sync!(None, sha256, LocalOciPublicationErrorV1::Sync)?;
         fs::unlinkat(
             blobs
                 .as_ref()
@@ -787,7 +787,7 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
     }
     if let Some(blobs) = &blobs {
-        fs::fsync(blobs).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_sync!(None, blobs, LocalOciPublicationErrorV1::Sync)?;
         fs::unlinkat(&staging, "blobs", AtFlags::REMOVEDIR)
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
     }
@@ -797,7 +797,7 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         }
     }
-    fs::fsync(&staging).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+    faulted_sync!(None, &staging, LocalOciPublicationErrorV1::Sync)?;
     fs::unlinkat(releases, name, AtFlags::REMOVEDIR)
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
 }
@@ -1499,7 +1499,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recovery_sync_failures_are_fail_closed_and_retryable(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        for target in 0..2 {
+        for target in 0..6 {
             let root = private_root("recovery-nth-sync")?;
             let publisher = LocalOciPublisherV1::open(&root)?;
             let bundle = bundle()?;
