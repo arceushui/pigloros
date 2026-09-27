@@ -1106,7 +1106,7 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
             ERASURE_SCOPE_COMMITMENT_TAG_V1,
             SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD,
             Value::Bytes(reference(250).digest().to_vec()),
-            ErasureErrorV1::ProvenanceMissing,
+            ErasureErrorV1::ScopeInvalid,
         ),
         (
             MANIFEST_FREEZE_PROVENANCE_FIELD,
