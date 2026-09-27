@@ -152,11 +152,8 @@ fn malformed_noncanonical_and_oversized_roots_reject() -> TestResult<()> {
         (41, 0x57, ReproManifestRootErrorV1::InvalidEncoding),
         (43, 0x88, ReproManifestRootErrorV1::InvalidEncoding),
         (205, 0x57, ReproManifestRootErrorV1::InvalidEncoding),
-        (207, 0, ReproManifestRootErrorV1::InvalidIdentity),
         (239, 0x57, ReproManifestRootErrorV1::InvalidEncoding),
-        (241, 0, ReproManifestRootErrorV1::InvalidIdentity),
         (273, 0x57, ReproManifestRootErrorV1::InvalidEncoding),
-        (275, 0, ReproManifestRootErrorV1::InvalidIdentity),
         (308, 0xff, ReproManifestRootErrorV1::InvalidEncoding),
         (308, 0x7f, ReproManifestRootErrorV1::InvalidEncoding),
     ] {
@@ -167,6 +164,11 @@ fn malformed_noncanonical_and_oversized_roots_reject() -> TestResult<()> {
     let mut wrong_owner = good.clone();
     wrong_owner[9] ^= 1;
     cases.push((wrong_owner, ReproManifestRootErrorV1::InvalidIdentity));
+    for range in [207..239, 241..273, 275..307] {
+        let mut bytes = good.clone();
+        bytes[range].fill(0);
+        cases.push((bytes, ReproManifestRootErrorV1::InvalidIdentity));
+    }
     let mut trailing = good.clone();
     trailing.push(0);
     cases.push((trailing, ReproManifestRootErrorV1::NonCanonical));
@@ -183,6 +185,10 @@ fn malformed_noncanonical_and_oversized_roots_reject() -> TestResult<()> {
     overbound_handle[42] = 0x01;
     overbound_handle.insert(43, 0x01);
     cases.push((overbound_handle, ReproManifestRootErrorV1::FieldOutOfBounds));
+    let mut enormous_label = good.clone();
+    enormous_label[308] = 0x1a;
+    enormous_label.extend_from_slice(&65_536_u32.to_be_bytes());
+    cases.push((enormous_label, ReproManifestRootErrorV1::FieldOutOfBounds));
     for (bytes, expected) in cases {
         assert_eq!(
             ReproManifestRootV1::from_canonical_cbor(&bytes),
