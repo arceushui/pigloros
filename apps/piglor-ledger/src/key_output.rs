@@ -58,6 +58,35 @@ impl BoundFileIdentity {
     }
 }
 
+#[cfg(unix)]
+fn validate_owned_key_file(metadata: &std::fs::Metadata) -> Result<(), &'static str> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+        return Err("key is not a private single-link regular file");
+    }
+    if metadata.len() > 128 {
+        return Err("key exceeds the supported size");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn owned_key_material_digest(encoded: &[u8]) -> Result<pos_core::Hash, String> {
+    std::str::from_utf8(encoded)
+        .map_err(|error| error.to_string())
+        .and_then(|text| crate::hex::hex_decode(text.trim()))
+        .and_then(|decoded| {
+            let decoded = zeroize::Zeroizing::new(decoded);
+            <[u8; 32]>::try_from(decoded.as_slice())
+                .map(|seed| {
+                    let seed = zeroize::Zeroizing::new(seed);
+                    pos_crypto::key_roles::key_material_digest(&seed)
+                })
+                .map_err(|error| error.to_string())
+        })
+}
+
 /// Persist the exact owner-managed key path before its registry identity is
 /// first registered. A stale binding after a failed registration is safe: it
 /// prevents a later registration from silently moving the owned artifact.
@@ -74,7 +103,7 @@ pub(crate) fn bind_owned_secret_key(
 ) -> Result<(), pos_core::CoreError> {
     use rusqlite::{params, Connection, OpenFlags};
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
 
     let absolute = absolute_output(path).map_err(binding_error)?;
     let parent = absolute
@@ -89,24 +118,14 @@ pub(crate) fn bind_owned_secret_key(
     let metadata = fault!(&absolute, FaultStage::BindMetadata)
         .and_then(|()| file.metadata())
         .map_err(binding_error)?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
-        return Err(binding_error(
-            "owned key is not a private single-link regular file",
-        ));
-    }
-    if metadata.len() > 128 {
-        return Err(binding_error("owned key exceeds the supported size"));
+    if let Err(reason) = validate_owned_key_file(&metadata) {
+        return Err(binding_error(reason));
     }
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
     fault!(&absolute, FaultStage::BindRead)
         .and_then(|()| file.read_to_end(&mut encoded))
         .map_err(binding_error)?;
-    let text = std::str::from_utf8(&encoded).map_err(binding_error)?;
-    let decoded =
-        zeroize::Zeroizing::new(crate::hex::hex_decode(text.trim()).map_err(binding_error)?);
-    let seed =
-        zeroize::Zeroizing::new(<[u8; 32]>::try_from(decoded.as_slice()).map_err(binding_error)?);
-    if pos_crypto::key_roles::key_material_digest(&seed) != material_digest {
+    if owned_key_material_digest(&encoded).map_err(binding_error)? != material_digest {
         return Err(binding_error(
             "owned key bytes differ from the loaded signing key",
         ));
@@ -334,28 +353,16 @@ fn delete_owned_secret_key_with_identity(
             "owned signing-key file identity differs from durable binding".to_owned(),
         ));
     }
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
-        return Err(pos_core::CoreError::Storage(
-            "owned signing-key file is not a private single-link regular file".to_owned(),
-        ));
-    }
-    if metadata.len() > 128 {
-        return Err(pos_core::CoreError::Storage(
-            "owned signing-key file exceeds the supported size".to_owned(),
-        ));
+    if let Err(reason) = validate_owned_key_file(&metadata) {
+        return Err(storage_error(&reason));
     }
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
     fault!(&absolute, FaultStage::DeleteRead)
         .and_then(|()| file.read_to_end(&mut encoded))
         .map_err(|error| storage_error(&error))?;
-    let text = std::str::from_utf8(&encoded).map_err(|error| storage_error(&error))?;
-    let decoded = zeroize::Zeroizing::new(
-        crate::hex::hex_decode(text.trim()).map_err(|error| storage_error(&error))?,
-    );
-    let seed = zeroize::Zeroizing::new(
-        <[u8; 32]>::try_from(decoded.as_slice()).map_err(|error| storage_error(&error))?,
-    );
-    if pos_crypto::key_roles::key_material_digest(&seed) != request.expected_material_digest {
+    if owned_key_material_digest(&encoded).map_err(|error| storage_error(&error))?
+        != request.expected_material_digest
+    {
         return Err(pos_core::CoreError::Storage(
             "owned signing-key file does not match the pending material digest".to_owned(),
         ));

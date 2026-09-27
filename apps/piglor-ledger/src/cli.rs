@@ -299,7 +299,8 @@ fn find_ledger_timeline(store: &dyn pos_core::store::EventStore) -> Result<Timel
 /// Returns [`CliError`] on any failure. Used by `src/main.rs`.
 pub fn run(args: &[String]) -> Result<(), CliError> {
     match args.get(1).map(String::as_str) {
-        Some(command @ ("keygen" | "destroy-key")) => run_key_command(command, &args[2..]),
+        Some("keygen") => cmd_keygen(&args[2..]),
+        Some("destroy-key") => cmd_destroy_key(&args[2..]),
         Some("predict") => cmd_predict(&args[2..]),
         Some("resolve") => cmd_resolve(&args[2..]),
         Some("export") => cmd_export(&args[2..]),
@@ -326,14 +327,6 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             output_stderr!("  verify --source toml:DIR|store:DB [--pubkey BASE64URL-OWNER/ROLE-CODE/EPOCH=HEX,... (required trust anchor for store:)] [--manifest FILE]");
             Ok(())
         }
-    }
-}
-
-fn run_key_command(command: &str, args: &[String]) -> Result<(), CliError> {
-    if command == "keygen" {
-        cmd_keygen(args)
-    } else {
-        cmd_destroy_key(args)
     }
 }
 
