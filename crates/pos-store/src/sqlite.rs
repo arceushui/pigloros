@@ -15126,14 +15126,7 @@ mod tests {
 
     #[test]
     fn sqlite_recovery_proof_checks_objects_states_all_indexes_and_subject() {
-        use ciborium::value::Value;
-
         let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
-        let extension = reference(50);
-        let request = reference(51);
-        let state_reference = reference(52);
-        let manifest = reference(53);
-        let effect_subject = reference(54);
         let proof_value = sqlite_recovery_proof_test_value();
         let mut proof_bytes = Vec::new();
         ciborium::into_writer(&proof_value, &mut proof_bytes).test_ok();
