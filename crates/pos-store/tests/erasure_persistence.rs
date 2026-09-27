@@ -269,12 +269,13 @@ fn verified_empty_inventory(
 fn commit_fork_admission_with(
     gate: &Arc<ErasureContainmentGateV1>,
     admission: &pos_core::PreparedErasureForkBatchV1,
+    candidate: &ErasureVerifiedInventoryV1,
     mut commit: impl FnMut(
         &pos_core::ErasureTopologyTransitionPermitV1,
         pos_core::PreparedErasureForkBatchV1,
     ) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1>,
 ) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1> {
-    let candidate = admission.successor_inventory().clone();
+    let candidate = candidate.clone();
     let mut transition_error = None;
     let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| match commit(
         permit,
@@ -305,9 +306,12 @@ fn commit_fork_admission<S>(
 where
     S: ErasureForkPersistencePortV1,
 {
-    commit_fork_admission_with(gate, admission, |permit, batch| {
-        shared.borrow_mut().commit_fork_admission(permit, batch)
-    })
+    commit_fork_admission_with(
+        gate,
+        admission,
+        admission.successor_inventory(),
+        |permit, batch| shared.borrow_mut().commit_fork_admission(permit, batch),
+    )
 }
 
 fn commit_fork_admission_direct<S>(
@@ -318,9 +322,12 @@ fn commit_fork_admission_direct<S>(
 where
     S: ErasureForkPersistencePortV1,
 {
-    commit_fork_admission_with(gate, admission, |permit, batch| {
-        store.commit_fork_admission(permit, batch)
-    })
+    commit_fork_admission_with(
+        gate,
+        admission,
+        admission.successor_inventory(),
+        |permit, batch| store.commit_fork_admission(permit, batch),
+    )
 }
 
 impl<S: ErasurePersistencePortV1> ErasureStateResolverV1 for Host<S> {
@@ -957,14 +964,14 @@ where
         },
         reference(30),
     );
-    let inventory = coordinator.verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)?;
-    let snapshot = shared
-        .borrow_mut()
-        .complete_erasure_inventory_snapshot(ERASURE_MAX_INVENTORY_REQUESTS)?;
-    let parent = *snapshot
-        .topology()
-        .first()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let inventory = coordinator
+        .verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)
+        .map_err(|error| std::io::Error::other(format!("later Fork inventory: {error}")))?;
+    let parent = first
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .0;
     let previous_extension = first
         .admissions()
         .first()
@@ -992,10 +999,15 @@ where
             fork_point: Some((parent, Seq::ZERO)),
         },
     };
-    let later_admission = coordinator.prepare_fork_admission(request, extension, input.clone())?;
-    let later = inventory.prepare_fork_batch(input, vec![later_admission])?;
+    let later_admission = coordinator
+        .prepare_fork_admission(request, extension, input.clone())
+        .map_err(|error| std::io::Error::other(format!("later Fork admission: {error}")))?;
+    let later = inventory
+        .prepare_fork_batch(input, vec![later_admission])
+        .map_err(|error| std::io::Error::other(format!("later Fork batch: {error}")))?;
     assert_eq!(
-        commit_fork_admission(&shared, &gate, &later)?,
+        commit_fork_admission(&shared, &gate, &later)
+            .map_err(|error| std::io::Error::other(format!("later Fork commit: {error}")))?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
     assert_eq!(
@@ -1005,8 +1017,14 @@ where
             .map(|manifest| manifest.digest()),
         Some(later.admissions()[0].mutation().next_manifest().digest())
     );
+    let current_inventory = coordinator
+        .verified_inventory(ERASURE_MAX_INVENTORY_REQUESTS)
+        .map_err(|error| std::io::Error::other(format!("retry inventory: {error}")))?;
     assert_eq!(
-        commit_fork_admission(&shared, &gate, &first)?,
+        commit_fork_admission_with(&gate, &first, &current_inventory, |permit, batch| {
+            shared.borrow_mut().commit_fork_admission(permit, batch)
+        })
+        .map_err(|error| std::io::Error::other(format!("original Fork retry: {error}")))?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
     );
     Ok(())
@@ -2180,11 +2198,16 @@ fn sqlite_fork_recovery_rejects_a_missing_events_table() -> Result<(), Box<dyn s
         commit_fork_admission(&store, &gate, &batch)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
+    let mut unbound = SqliteStore::open(path)?;
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("DROP TABLE events")?;
     drop(connection);
     assert_eq!(
         recover_fork_admission(&mut *store.borrow_mut(), operation, successor_inventory),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut unbound, operation, successor_inventory),
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     Ok(())
@@ -2413,6 +2436,7 @@ fn assert_sqlite_fork_recovery_corruption_error(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
+    let mut unbound = SqliteStore::open(path)?;
     let connection = rusqlite::Connection::open(path)?;
     assert_eq!(corrupt(&connection, &prepared)?, 1);
     drop(connection);
@@ -2427,11 +2451,23 @@ fn assert_sqlite_fork_recovery_corruption_error(
             prepared.operation(),
             &stale_inventory,
         ),
-        Err(expected)
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert_eq!(
         recover_fork_admission(
             &mut *store.borrow_mut(),
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut unbound, prepared.operation(), &stale_inventory),
+        Err(expected)
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut unbound,
             prepared.operation(),
             prepared.successor_inventory(),
         ),
@@ -2455,6 +2491,7 @@ fn assert_sqlite_fork_recovery_sql_error(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
+    let mut unbound = SqliteStore::open(path)?;
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch(sql)?;
     drop(connection);
@@ -2469,11 +2506,23 @@ fn assert_sqlite_fork_recovery_sql_error(
             prepared.operation(),
             &stale_inventory,
         ),
-        Err(expected)
+        Err(ErasureErrorV1::StaleGeneration)
     );
     assert_eq!(
         recover_fork_admission(
             &mut *store.borrow_mut(),
+            prepared.operation(),
+            prepared.successor_inventory(),
+        ),
+        Err(ErasureErrorV1::StaleGeneration)
+    );
+    assert_eq!(
+        recover_fork_admission(&mut unbound, prepared.operation(), &stale_inventory),
+        Err(expected)
+    );
+    assert_eq!(
+        recover_fork_admission(
+            &mut unbound,
             prepared.operation(),
             prepared.successor_inventory(),
         ),
@@ -3182,21 +3231,31 @@ fn sqlite_fork_recovery_rejects_a_skipped_child_event_sequence(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
-    store.borrow_mut().append(
-        child,
-        &[pos_core::EventDraft::new(
-            pos_core::EntityId::new(),
-            pos_core::Kind::new("test.fork.child.sequence"),
-            pos_core::CanonicalBytes::from_vec(vec![1]),
-        )],
-    )?;
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
+    let payload = pos_core::CanonicalBytes::from_vec(vec![1]);
+    let payload_hash = pos_crypto::chain::hash_payload(&payload);
+    let inherited_prefix = prepared
+        .child()
+        .fork_point
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .1
+        .as_u64();
     assert_eq!(
         connection.execute(
-            "UPDATE events SET seq=2 WHERE timeline_id=?1 AND seq=1",
-            rusqlite::params![child.to_string()],
+            "INSERT INTO events
+             (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
+              schema_version, payload_hash, origin_timeline_id, origin_logical_seq)
+             VALUES (?1, 2, ?2, ?3, 'test.fork.child.sequence', ?4, 0, 1, ?5, ?1, ?6)",
+            rusqlite::params![
+                child.to_string(),
+                pos_core::EventId::new().to_string(),
+                pos_core::EntityId::new().to_string(),
+                payload.as_slice(),
+                payload_hash.as_bytes().as_slice(),
+                i64::try_from(inherited_prefix + 2)?,
+            ],
         )?,
         1
     );
