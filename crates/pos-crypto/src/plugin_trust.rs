@@ -153,6 +153,7 @@ pub struct VerifiedPluginTrustEvidenceV1 {
     evaluation_tick: u64,
     root_validity: (i64, i64),
     revocation_validity: (i64, i64),
+    root_keys: Vec<RootKey>,
     publishers: Vec<PublisherKey>,
     grants: Vec<Grant>,
     revoked_keys: BTreeSet<PublisherKey>,
@@ -188,6 +189,12 @@ impl VerifiedPluginTrustEvidenceV1 {
     #[must_use]
     pub const fn terminal_validity(&self) -> ((i64, i64), (i64, i64)) {
         (self.root_validity, self.revocation_validity)
+    }
+
+    /// Root key IDs and public keys in the verified terminal PTR1, ordered by
+    /// canonical root key ID.
+    pub fn terminal_root_keys(&self) -> impl Iterator<Item = ([u8; 32], [u8; 32])> + '_ {
+        self.root_keys.iter().map(|key| (key.id, key.public))
     }
 
     /// Publisher records in the verified terminal PTR1. This is a fact for
@@ -995,6 +1002,7 @@ pub fn verify_plugin_trust_v1(
         evaluation_tick,
         root_validity: (terminal_root.not_before, terminal_root.expires),
         revocation_validity: (terminal_revocation.not_before, terminal_revocation.expires),
+        root_keys: terminal_root.keys.clone(),
         publishers: terminal_root.publishers.clone(),
         grants: terminal_root.grants.clone(),
         revoked_keys: terminal_revocation
@@ -1220,7 +1228,7 @@ mod tests {
     #[test]
     fn pinned_genesis_and_empty_revocation_produce_bound_facts(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (_, publisher, root, revocation) = fixture()?;
+        let (signer, publisher, root, revocation) = fixture()?;
         let root_digest = *blake3::hash(&root).as_bytes();
         let revocation_digest = *blake3::hash(&revocation).as_bytes();
         let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
@@ -1230,6 +1238,11 @@ mod tests {
         assert_eq!(evidence.terminal_revocation(), (1, revocation_digest));
         assert_eq!(evidence.evaluation_coordinates(), (50, 4));
         assert_eq!(evidence.terminal_validity(), ((0, 100), (0, 100)));
+        let root_public = signer.verifying_key().to_bytes();
+        assert_eq!(
+            evidence.terminal_root_keys().collect::<Vec<_>>(),
+            vec![(root_key_id(root_public), root_public)]
+        );
         assert_eq!(
             evidence.publisher_keys().collect::<Vec<_>>(),
             vec![(OwnerIdV1::new("publisher")?, 1, publisher)]
