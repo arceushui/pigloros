@@ -2198,12 +2198,49 @@ mod tests {
             std::fs::write(root.join(INDEX_NAME), index)?;
             assert_eq!(publisher.read_verified(&address), Err(expected), "{label}");
             assert_eq!(
+                publisher.recover(&address),
+                Err(LocalOciPublicationErrorV1::RecoveryRequired),
+                "{label}"
+            );
+            assert_eq!(
                 publisher.recover_all(),
                 Err(LocalOciPublicationErrorV1::InvalidLayout),
                 "{label}"
             );
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_recovery_quarantines_staging_that_claims_an_indexed_address(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (root, publisher, address) = published_release("indexed-staging")?;
+        let nonce = "a".repeat(32);
+        let staging = root
+            .join(RELEASES_NAME)
+            .join(format!(".{}.staging.{nonce}", &address.digest()[7..]));
+        std::fs::create_dir(&staging)?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(
+            staging.join("OWNER"),
+            format!("pigloros-local-oci-staging-v1\n{nonce}\n"),
+        )?;
+        std::fs::set_permissions(
+            staging.join("OWNER"),
+            std::fs::Permissions::from_mode(0o600),
+        )?;
+        assert_eq!(
+            publisher.recover_all(),
+            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+        );
+        let quarantine = root.join(QUARANTINE_NAME);
+        let entries = std::fs::read_dir(&quarantine)?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(entries.len(), 1);
+        std::fs::remove_dir_all(entries[0].path())?;
+        assert!(publisher.recover_all()?.committed.is_empty());
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
