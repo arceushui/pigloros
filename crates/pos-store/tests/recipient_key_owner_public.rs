@@ -383,7 +383,7 @@ fn recipient_owner_public_contract_rejects_directory_that_becomes_unsafe(
 #[test]
 fn recipient_owner_public_contract_destruction_is_idempotent_after_receipt(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_, mut store, owner, descriptor) = enrolled_owner()?;
+    let (_temporary, mut store, owner, descriptor) = enrolled_owner()?;
     let authorization = Hash::from_bytes([42; 32]);
     store.destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)?;
     store.destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)?;
