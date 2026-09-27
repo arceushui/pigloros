@@ -173,10 +173,17 @@ fn scope() -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
 fn scope_with_members(
     scope_members: Vec<ErasureReferenceV1>,
 ) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+    scope_with_members_and_timelines(scope_members, Vec::new())
+}
+
+fn scope_with_members_and_timelines(
+    scope_members: Vec<ErasureReferenceV1>,
+    scope_timeline_ids: Vec<TimelineId>,
+) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members,
-        scope_timeline_ids: Vec::new(),
+        scope_timeline_ids,
         target_closure: reference(8),
         lineage_rule: Some(reference(9)),
     })
@@ -1008,7 +1015,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     let parent = TimelineId::new();
     let child = TimelineId::new();
     let first_child = TimelineId::new();
-    let scope = scope()?;
+    let scope = scope_with_members_and_timelines(vec![reference(7)], vec![parent])?;
     let first_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: reference(1),
         scope_commitment: scope.reference(),
@@ -1064,13 +1071,7 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
     );
     assert_eq!(requirements[0].extension(), &second_extension);
 
-    assert_directly_included_child_does_not_add_retry_requirement(
-        scope,
-        first_extension,
-        second_extension,
-        parent,
-        child,
-    )?;
+    assert_directly_included_child_does_not_add_retry_requirement(parent, child, second_fork)?;
 
     let excluded_state =
         verified_state_for_containment(ErasureLifecycleV1::Submitted, None, Vec::new())?;
@@ -1100,37 +1101,50 @@ fn fork_retry_requirements_verify_the_complete_predecessor_and_child_inventory(
 }
 
 fn assert_directly_included_child_does_not_add_retry_requirement(
-    scope: ErasureScopeCommitmentV1,
-    first_extension: ErasureScopeExtensionV1,
-    second_extension: ErasureScopeExtensionV1,
     parent: TimelineId,
     child: TimelineId,
+    reused_fork_scope: ErasureReferenceV1,
 ) -> Result<(), ErasureErrorV1> {
     // A later request can include this historical child directly and then
     // admit another Fork whose child-scope reference matches the old Fork.
     // That later extension is not part of the old operation's proof.
+    let later_child = TimelineId::new();
+    let scope = scope_with_members_and_timelines(vec![reference(7)], vec![parent, child])?;
+    let later_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: scope.reference(),
+        fork: reused_fork_scope,
+        child_timeline: later_child,
+        lineage_rule: reference(9),
+        predecessor_extension: None,
+        admission_provenance: reference(37),
+    })?;
     let state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
         Some(scope),
-        vec![first_extension, second_extension],
+        vec![later_extension],
     )?;
     let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
         vec![(
             state,
             ErasureVerifiedTopologyProofV1::from_verified_recovery(
                 reference(5),
-                vec![(parent, reference(7)), (child, reference(7))],
+                vec![
+                    (parent, reference(7)),
+                    (child, reference(7)),
+                    (later_child, reused_fork_scope),
+                ],
                 Vec::new(),
             ),
         )],
-        vec![parent, child],
+        vec![parent, child, later_child],
         4,
     )?;
     assert!(collect_fork_retry_scope_requirements_for_scope(
         &inventory,
         parent,
         child,
-        second_extension.fork(),
+        reused_fork_scope,
     )?
     .is_empty());
     Ok(())
@@ -1427,7 +1441,10 @@ fn containment_gate_installs_verified_query_and_scope_bindings() -> Result<(), E
     let timeline = TimelineId::new();
     let state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
-        Some(scope()?),
+        Some(scope_with_members_and_timelines(
+            vec![reference(7)],
+            vec![timeline],
+        )?),
         Vec::new(),
     )?;
     let mut query = TestVerifiedStateQuery { state: Some(state) };
@@ -1596,7 +1613,10 @@ fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result
     let gate = ErasureContainmentGateV1::new_test_open();
     let state = verified_state_for_containment(
         ErasureLifecycleV1::AccessFrozen,
-        Some(scope()?),
+        Some(scope_with_members_and_timelines(
+            vec![reference(7)],
+            vec![timeline],
+        )?),
         Vec::new(),
     )?;
     assert_eq!(
@@ -1610,14 +1630,23 @@ fn containment_gate_rejects_incomplete_and_conflicting_installations() -> Result
 
     gate.install_verified_state(&state, &[(timeline, reference(7))])
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-    let submitted =
-        verified_state_for_containment(ErasureLifecycleV1::Submitted, Some(scope()?), Vec::new())?;
+    let submitted = verified_state_for_containment(
+        ErasureLifecycleV1::Submitted,
+        Some(scope_with_members_and_timelines(
+            vec![reference(7)],
+            vec![timeline],
+        )?),
+        Vec::new(),
+    )?;
     assert_eq!(
         gate.install_verified_state(&submitted, &[(timeline, reference(7))]),
         Err(ErasureContainmentErrorV1::RecoveryUnavailable)
     );
 
-    let conflicting_scope = scope_with_members(vec![reference(7), reference(8)])?;
+    let conflicting_scope = scope_with_members_and_timelines(
+        vec![reference(7), reference(8)],
+        vec![timeline, other_timeline],
+    )?;
     let conflicting_state = verified_state_for_containment(
         ErasureLifecycleV1::Submitted,
         Some(conflicting_scope),

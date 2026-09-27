@@ -5901,12 +5901,9 @@ mod coverage_paths {
         ErasureReferenceV1::from_digest([value; 32])
     }
 
-    fn frozen_state() -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
-        frozen_state_with_manifest(reference(6))
-    }
-
-    fn frozen_state_with_manifest(
+    fn frozen_state_with_manifest_and_timelines(
         manifest_digest: ErasureReferenceV1,
+        scope_timeline_ids: Vec<TimelineId>,
     ) -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
         let request = ErasureRequestV1::new(ErasureRequestInputV1 {
             request: reference(1),
@@ -5923,7 +5920,7 @@ mod coverage_paths {
         let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: reference(1),
             scope_members: vec![reference(7)],
-            scope_timeline_ids: Vec::new(),
+            scope_timeline_ids,
             target_closure: reference(8),
             lineage_rule: Some(reference(9)),
         })?;
@@ -5949,9 +5946,17 @@ mod coverage_paths {
     }
 
     fn coverage_state(manifest_digest: ErasureReferenceV1) -> ErasureVerifiedStateV1 {
-        frozen_state_with_manifest(manifest_digest).unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("coverage state failed: {error:?}")))
-        })
+        coverage_state_with_timelines(manifest_digest, Vec::new())
+    }
+
+    fn coverage_state_with_timelines(
+        manifest_digest: ErasureReferenceV1,
+        scope_timeline_ids: Vec<TimelineId>,
+    ) -> ErasureVerifiedStateV1 {
+        frozen_state_with_manifest_and_timelines(manifest_digest, scope_timeline_ids)
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("coverage state failed: {error:?}")))
+            })
     }
 
     fn inventory_state(
@@ -5959,6 +5964,22 @@ mod coverage_paths {
         manifest: ErasureReferenceV1,
         scope_reference: ErasureReferenceV1,
         lifecycle: ErasureLifecycleV1,
+    ) -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
+        inventory_state_with_timelines(
+            request_reference,
+            manifest,
+            scope_reference,
+            lifecycle,
+            Vec::new(),
+        )
+    }
+
+    fn inventory_state_with_timelines(
+        request_reference: ErasureReferenceV1,
+        manifest: ErasureReferenceV1,
+        scope_reference: ErasureReferenceV1,
+        lifecycle: ErasureLifecycleV1,
+        scope_timeline_ids: Vec<TimelineId>,
     ) -> Result<ErasureVerifiedStateV1, ErasureErrorV1> {
         let request = ErasureRequestV1::new(ErasureRequestInputV1 {
             request: request_reference,
@@ -5975,7 +5996,7 @@ mod coverage_paths {
         let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: request_reference,
             scope_members: vec![scope_reference],
-            scope_timeline_ids: Vec::new(),
+            scope_timeline_ids,
             target_closure: reference(27),
             lineage_rule: Some(reference(28)),
         })?;
@@ -6205,17 +6226,19 @@ mod coverage_paths {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         );
 
-        let first = inventory_state(
+        let first = inventory_state_with_timelines(
             reference(41),
             reference(42),
             reference(43),
             ErasureLifecycleV1::AccessFrozen,
+            vec![affected],
         )?;
-        let second = inventory_state(
+        let second = inventory_state_with_timelines(
             reference(44),
             reference(45),
             reference(46),
             ErasureLifecycleV1::Authorized,
+            vec![unaffected],
         )?;
         let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
             vec![
@@ -6327,11 +6350,12 @@ mod coverage_paths {
     #[test]
     fn corrupted_opaque_fork_inventory_requirements_fail_closed() -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
-        let state = inventory_state(
+        let state = inventory_state_with_timelines(
             reference(61),
             reference(62),
             reference(63),
             ErasureLifecycleV1::Authorized,
+            vec![parent],
         )?;
         let scope_commitment = state
             .scope()
@@ -6388,8 +6412,14 @@ mod coverage_paths {
             Vec::new(),
             vec![parent],
         );
+        let excluded_state = inventory_state(
+            reference(61),
+            reference(62),
+            reference(63),
+            ErasureLifecycleV1::Authorized,
+        )?;
         let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
-            vec![(state, proof)],
+            vec![(excluded_state, proof)],
             vec![parent],
             4,
         )?;
@@ -6832,11 +6862,12 @@ mod coverage_paths {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let timeline = TimelineId::new();
         let unrelated_timeline = TimelineId::new();
-        let unrelated_state = inventory_state(
+        let unrelated_state = inventory_state_with_timelines(
             reference(71),
             reference(72),
             reference(73),
             ErasureLifecycleV1::Authorized,
+            vec![unrelated_timeline],
         )
         .unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!(
@@ -6851,11 +6882,12 @@ mod coverage_paths {
         assert!(gate
             .install_verified_state_with_topology(&unrelated_state, &unrelated_proof)
             .is_ok());
-        let state = inventory_state(
+        let state = inventory_state_with_timelines(
             reference(81),
             reference(82),
             reference(83),
             ErasureLifecycleV1::Authorized,
+            vec![timeline],
         )
         .unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("authorized state failed: {error:?}")))
@@ -6969,11 +7001,12 @@ mod coverage_paths {
         let parent = TimelineId::new();
         let existing_child = TimelineId::new();
         let child_scope = reference(97);
-        let affected = inventory_state(
+        let affected = inventory_state_with_timelines(
             reference(91),
             reference(92),
             reference(93),
             ErasureLifecycleV1::AccessFrozen,
+            vec![parent],
         )?;
         let affected_scope_commitment = affected
             .scope()
@@ -7209,7 +7242,7 @@ mod coverage_paths {
         let affected = TimelineId::new();
         let unaffected = TimelineId::new();
         let unknown = TimelineId::new();
-        let state = frozen_state()?;
+        let state = frozen_state_with_manifest_and_timelines(reference(6), vec![affected])?;
         let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             state.manifest_digest(),
             vec![(affected, reference(7))],
@@ -7263,7 +7296,8 @@ mod coverage_paths {
         conflicting_gate
             .install_verified_state_with_topology(&state, &initial_proof)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        let replacement_state = frozen_state_with_manifest(reference(9))?;
+        let replacement_state =
+            frozen_state_with_manifest_and_timelines(reference(9), vec![affected])?;
         let replacement_proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             replacement_state.manifest_digest(),
             vec![(affected, reference(7))],
@@ -7284,19 +7318,20 @@ mod coverage_paths {
     #[test]
     fn topology_proof_rejects_conflicting_unaffected_manifest() -> Result<(), ErasureErrorV1> {
         let gate = ErasureContainmentGateV1::new_fail_closed();
-        let state = frozen_state_with_manifest(reference(6))?;
+        let affected = TimelineId::new();
+        let state = frozen_state_with_manifest_and_timelines(reference(6), vec![affected])?;
         let unaffected = TimelineId::new();
         let initial = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             state.manifest_digest(),
-            vec![(TimelineId::new(), reference(7))],
+            vec![(affected, reference(7))],
             vec![unaffected],
         );
         gate.install_verified_state_with_topology(&state, &initial)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        let replacement = frozen_state_with_manifest(reference(8))?;
+        let replacement = frozen_state_with_manifest_and_timelines(reference(8), vec![affected])?;
         let conflicting = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             replacement.manifest_digest(),
-            vec![(TimelineId::new(), reference(7))],
+            vec![(affected, reference(7))],
             vec![unaffected],
         );
         assert_eq!(
@@ -7312,7 +7347,7 @@ mod coverage_paths {
         let gate = ErasureContainmentGateV1::new_fail_closed();
         let affected = TimelineId::new();
         let unaffected = TimelineId::new();
-        let state = coverage_state(reference(6));
+        let state = coverage_state_with_timelines(reference(6), vec![affected]);
         let initial = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             state.manifest_digest(),
             vec![(affected, reference(7))],
@@ -7321,7 +7356,7 @@ mod coverage_paths {
         assert!(gate
             .install_verified_state_with_topology(&state, &initial)
             .is_ok());
-        let replacement = coverage_state(reference(8));
+        let replacement = coverage_state_with_timelines(reference(8), vec![affected]);
         let conflicting = ErasureVerifiedTopologyProofV1::from_verified_recovery(
             replacement.manifest_digest(),
             vec![(affected, reference(7))],
@@ -7813,11 +7848,12 @@ mod coverage_paths {
         let parent = TimelineId::new();
         let child = TimelineId::new();
         let request = reference(220);
-        let state = inventory_state(
+        let state = inventory_state_with_timelines(
             request,
             reference(221),
             reference(222),
             ErasureLifecycleV1::AccessFrozen,
+            vec![parent],
         )?;
         let predecessor = ErasureVerifiedInventoryV1::from_verified_recovery(
             vec![(
