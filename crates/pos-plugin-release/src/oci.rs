@@ -579,14 +579,14 @@ mod tests {
         value: &serde_json::Value,
         blobs: BTreeMap<String, Vec<u8>>,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
-        let manifest = serde_json::to_vec(value).expect("fixture JSON");
-        let address = BundleAddressV1::new(digest(&manifest), manifest.len() as u64)
-            .expect("fixture address");
+        let manifest =
+            serde_json::to_vec(value).map_err(|_| ReleaseSourceErrorV1::InvalidDescriptor)?;
+        let address = BundleAddressV1::new(digest(&manifest), manifest.len() as u64)?;
         verify_oci_closure_v1(address, manifest, blobs)
     }
 
     #[test]
-    fn rejects_malformed_public_manifest_json() {
+    fn rejects_malformed_public_manifest_json() -> Result<(), Box<dyn std::error::Error>> {
         for manifest in [
             b"0".as_slice(),
             b"true",
@@ -612,8 +612,7 @@ mod tests {
             b"{}x",
             b" { } ",
         ] {
-            let address = BundleAddressV1::new(digest(manifest), manifest.len() as u64)
-                .expect("fixture address");
+            let address = BundleAddressV1::new(digest(manifest), manifest.len() as u64)?;
             assert_eq!(
                 verify_oci_closure_v1(address, manifest.to_vec(), BTreeMap::new()),
                 Err(ReleaseSourceErrorV1::InvalidDescriptor),
@@ -621,12 +620,12 @@ mod tests {
             );
         }
         let invalid_utf8 = b"{\"x\":\"\xff\"}";
-        let address = BundleAddressV1::new(digest(invalid_utf8), invalid_utf8.len() as u64)
-            .expect("fixture address");
+        let address = BundleAddressV1::new(digest(invalid_utf8), invalid_utf8.len() as u64)?;
         assert_eq!(
             verify_oci_closure_v1(address, invalid_utf8.to_vec(), BTreeMap::new()),
             Err(ReleaseSourceErrorV1::InvalidDescriptor)
         );
+        Ok(())
     }
 
     #[test]
@@ -755,19 +754,28 @@ mod tests {
             Err(ReleaseSourceErrorV1::DuplicateMember)
         );
         let mut changed = valid.clone();
-        changed["layers"].as_array_mut().expect("layers").swap(0, 1);
+        changed["layers"]
+            .as_array_mut()
+            .ok_or("fixture layers")?
+            .swap(0, 1);
         assert_eq!(
             verify_value(&changed, blobs.clone()),
             Err(ReleaseSourceErrorV1::InvalidDescriptor)
         );
         let mut changed = valid.clone();
-        changed["layers"].as_array_mut().expect("layers").remove(0);
+        changed["layers"]
+            .as_array_mut()
+            .ok_or("fixture layers")?
+            .remove(0);
         assert_eq!(
             verify_value(&changed, blobs.clone()),
             Err(ReleaseSourceErrorV1::InvalidDescriptor)
         );
         let mut changed = valid;
-        changed["layers"].as_array_mut().expect("layers").pop();
+        changed["layers"]
+            .as_array_mut()
+            .ok_or("fixture layers")?
+            .pop();
         assert_eq!(
             verify_value(&changed, blobs),
             Err(ReleaseSourceErrorV1::BoundsExceeded)
@@ -824,19 +832,25 @@ mod tests {
         let migration = b"migration".to_vec();
         let schema_digest = digest(&schema);
         let migration_digest = digest(&migration);
-        value["layers"].as_array_mut().expect("layers").insert(
-            3,
-            layer(
-                &format!("schema/{}", &schema_digest[7..]),
-                "application/vnd.pigloros.plugin.schema.v1+json",
-                &schema,
-            ),
-        );
-        value["layers"].as_array_mut().expect("layers").push(layer(
-            &format!("migration-fixture/{}", &migration_digest[7..]),
-            "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
-            &migration,
-        ));
+        value["layers"]
+            .as_array_mut()
+            .ok_or("fixture layers")?
+            .insert(
+                3,
+                layer(
+                    &format!("schema/{}", &schema_digest[7..]),
+                    "application/vnd.pigloros.plugin.schema.v1+json",
+                    &schema,
+                ),
+            );
+        value["layers"]
+            .as_array_mut()
+            .ok_or("fixture layers")?
+            .push(layer(
+                &format!("migration-fixture/{}", &migration_digest[7..]),
+                "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
+                &migration,
+            ));
         blobs.insert(schema_digest, schema);
         blobs.insert(migration_digest, migration);
         let verified = verify_value(&value, blobs)?;

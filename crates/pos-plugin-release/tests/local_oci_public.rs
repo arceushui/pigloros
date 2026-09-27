@@ -362,3 +362,109 @@ fn partial_owned_staging_is_removed_and_bad_owner_is_quarantined(
     );
     Ok(())
 }
+
+#[test]
+fn indexed_release_rejects_mutated_evidence_and_extra_members(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (relative, bytes, expected) in [
+        (
+            "OWNER".to_owned(),
+            b"wrong owner".to_vec(),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            "OWNER".to_owned(),
+            b"pigloros-local-oci-staging-v1\nnot-a-nonce\n".to_vec(),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            "OWNER".to_owned(),
+            vec![b'x'; 129],
+            ReleaseSourceErrorV1::BoundsExceeded,
+        ),
+        (
+            "READY".to_owned(),
+            b"not ready".to_vec(),
+            ReleaseSourceErrorV1::Uncommitted,
+        ),
+        (
+            "READY".to_owned(),
+            vec![b'x'; 257],
+            ReleaseSourceErrorV1::BoundsExceeded,
+        ),
+        (
+            "index.json".to_owned(),
+            b"not the descriptor".to_vec(),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            "oci-layout".to_owned(),
+            vec![b'x'; 65],
+            ReleaseSourceErrorV1::BoundsExceeded,
+        ),
+        (
+            format!("blobs/sha256/{}", &digest(b"component")[7..]),
+            b"xxxxxxxxx".to_vec(),
+            ReleaseSourceErrorV1::DigestMismatch,
+        ),
+    ] {
+        let root = PrivateRoot::new()?;
+        let publisher = LocalOciPublisherV1::open(&root.0)?;
+        let bundle = bundle()?;
+        let address = bundle.address().clone();
+        publisher.publish(&bundle)?;
+        let final_path = root.0.join("releases").join(&address.digest()[7..]);
+        fs::write(final_path.join(relative), bytes)?;
+        assert_eq!(publisher.read_verified(&address), Err(expected));
+        assert_eq!(
+            publisher.recover_all(),
+            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+        );
+        assert_one_quarantined(&root)?;
+    }
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let bundle = bundle()?;
+    let address = bundle.address().clone();
+    publisher.publish(&bundle)?;
+    let final_path = root.0.join("releases").join(&address.digest()[7..]);
+    write_private_file(&final_path.join("unexpected"), b"extra")?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    Ok(())
+}
+
+#[test]
+fn unindexed_final_recovery_quarantines_bad_ready_evidence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for ready in [
+        b"bad header\nsha256:bad\n1\n".as_slice(),
+        b"pigloros-local-oci-ready-v1\n",
+        b"pigloros-local-oci-ready-v1\nsha256:bad\n",
+        b"pigloros-local-oci-ready-v1\nsha256:bad\nnot-a-size\n",
+        b"pigloros-local-oci-ready-v1\nsha256:bad\n1\nextra\n",
+        b"pigloros-local-oci-ready-v1\nsha256:bad\n1\n",
+        b"pigloros-local-oci-ready-v1\nsha256:bad\n0\n",
+        b"\xff",
+    ] {
+        let root = PrivateRoot::new()?;
+        let publisher = LocalOciPublisherV1::open(&root.0)?;
+        let bundle = bundle()?;
+        let address = bundle.address().clone();
+        publisher.publish(&bundle)?;
+        fs::write(
+            root.0.join("published.json"),
+            b"{\"addresses\":[],\"version\":1}",
+        )?;
+        let final_path = root.0.join("releases").join(&address.digest()[7..]);
+        fs::write(final_path.join("READY"), ready)?;
+        assert_eq!(
+            publisher.recover_all(),
+            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+        );
+        assert_one_quarantined(&root)?;
+    }
+    Ok(())
+}
