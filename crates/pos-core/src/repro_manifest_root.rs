@@ -1,7 +1,7 @@
 //! ADR-101 MRM1 structural root bytes for one selected World run.
 //!
 //! This record does not authenticate a cut, roster, adapter transcript, owner
-//! operation, or guarded ReproManifest release.
+//! operation, or guarded `ReproManifest` release.
 
 use crate::{Hash, WorldReplayHandleV1};
 
@@ -116,9 +116,7 @@ impl ReproManifestRootV1 {
         }
         let mut reader = Reader { bytes, offset: 0 };
         reader.root().and_then(|root| {
-            if reader.offset != bytes.len() {
-                Err(ReproManifestRootErrorV1::NonCanonical)
-            } else if root.to_canonical_cbor() != bytes {
+            if reader.offset != bytes.len() || root.to_canonical_cbor() != bytes {
                 Err(ReproManifestRootErrorV1::NonCanonical)
             } else {
                 Ok(root)
@@ -142,17 +140,17 @@ fn encode_head(bytes: &mut Vec<u8>, major: u8, value: u64) {
     let full = value.to_be_bytes();
     match value {
         0..=23 => bytes.push(prefix | full[7]),
-        24..=0xff => bytes.extend_from_slice(&[prefix | 24, full[7]]),
+        24..=0xff => bytes.extend_from_slice(&[prefix | 0x18, full[7]]),
         0x100..=0xffff => {
-            bytes.push(prefix | 25);
+            bytes.push(prefix | 0x19);
             bytes.extend_from_slice(&full[6..]);
         }
         0x1_0000..=0xffff_ffff => {
-            bytes.push(prefix | 26);
+            bytes.push(prefix | 0x1a);
             bytes.extend_from_slice(&full[4..]);
         }
         _ => {
-            bytes.push(prefix | 27);
+            bytes.push(prefix | 0x1b);
             bytes.extend_from_slice(&full);
         }
     }
@@ -246,13 +244,18 @@ impl Reader<'_> {
         major: u8,
         maximum: usize,
     ) -> Result<&[u8], ReproManifestRootErrorV1> {
-        self.head(major).and_then(|length| {
-            if length > maximum as u64 {
-                Err(ReproManifestRootErrorV1::FieldOutOfBounds)
-            } else {
-                self.take(length as usize)
-            }
-        })
+        self.head(major)
+            .and_then(|length| {
+                u16::try_from(length).map_err(|_| ReproManifestRootErrorV1::FieldOutOfBounds)
+            })
+            .and_then(|length| {
+                let length = usize::from(length);
+                if length > maximum {
+                    Err(ReproManifestRootErrorV1::FieldOutOfBounds)
+                } else {
+                    self.take(length)
+                }
+            })
     }
 
     fn label(&mut self) -> Result<Option<String>, ReproManifestRootErrorV1> {
