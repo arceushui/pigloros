@@ -124,7 +124,7 @@ impl NetworkExchangeRequest {
 
     /// A terminal failed exchange, with no response bytes or transcript evidence.
     #[must_use]
-    pub fn failed(&self, failure: NetworkExchangeFailure) -> NetworkExchangeReply {
+    pub const fn failed(&self, failure: NetworkExchangeFailure) -> NetworkExchangeReply {
         NetworkExchangeReply {
             exchange_id: self.plan.exchange_id,
             occurrence: self.plan.occurrence,
@@ -238,7 +238,7 @@ impl NetworkExchangeReply {
 
     /// Return the exact transcript that must be persisted before Captured is sent.
     #[must_use]
-    pub fn transcript(&self) -> Option<&NetworkExchangeTranscript> {
+    pub const fn transcript(&self) -> Option<&NetworkExchangeTranscript> {
         match &self.outcome {
             ReplyOutcome::Captured { transcript, .. } => Some(transcript),
             ReplyOutcome::Failed(_) => None,
@@ -247,7 +247,7 @@ impl NetworkExchangeReply {
 
     /// Return the terminal failure, if this reply contains no capture.
     #[must_use]
-    pub fn failure(&self) -> Option<NetworkExchangeFailure> {
+    pub const fn failure(&self) -> Option<NetworkExchangeFailure> {
         match self.outcome {
             ReplyOutcome::Failed(failure) => Some(failure),
             ReplyOutcome::Captured { .. } => None,
@@ -290,6 +290,7 @@ impl NetworkExchangeReply {
     }
 }
 
+#[derive(Clone, Copy)]
 enum PayloadFrame {
     Query,
     Reply,
@@ -300,7 +301,7 @@ fn validate_plan(plan: &NetworkExchangePlan) -> Result<(), SandboxProviderProtoc
         .and_then(|()| validate_retention(plan).map(|_| ()))
 }
 
-fn check_encoded_size(
+const fn check_encoded_size(
     occurrence: u64,
     length: u64,
     frame: PayloadFrame,
@@ -323,8 +324,8 @@ const fn integer_size(value: u64) -> u64 {
     match value {
         0..=23 => 1,
         24..=255 => 2,
-        256..=65535 => 3,
-        65536..=4294967295 => 5,
+        256..=65_535 => 3,
+        65_536..=4_294_967_295 => 5,
         _ => 9,
     }
 }
