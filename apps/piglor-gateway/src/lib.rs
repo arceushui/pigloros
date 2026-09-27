@@ -5782,12 +5782,13 @@ mod tests {
     async fn sqlite_gateways_enforce_one_atomic_event_ceiling() {
         let database = TemporarySqliteFile::new("atomic-ceiling");
         let path = database.path.clone();
-        let mut seed = checked_sqlite_ceiling_result(
-            open_store(StoreConfig::Sqlite { path: path.clone() }),
-            "open seed",
-        );
+        let open = || open_store(StoreConfig::Sqlite { path: path.clone() });
+        let mut seed = checked_sqlite_ceiling_result(open(), "open seed");
         Gateway::bind_test_erasure_gate(seed.as_mut());
         let timeline = checked_sqlite_ceiling_result(seed.create_timeline("sqlite"), "create root");
+        drop(seed);
+        let mut seed = checked_sqlite_ceiling_result(open(), "reopen seed after root");
+        Gateway::bind_test_erasure_gate(seed.as_mut());
         let entity = EntityId::new();
         let prefill = EventDraft::new(
             entity,
@@ -5803,14 +5804,8 @@ mod tests {
         );
         drop(seed);
 
-        let first = Gateway::new(checked_sqlite_ceiling_result(
-            open_store(StoreConfig::Sqlite { path: path.clone() }),
-            "open first",
-        ));
-        let second = Gateway::new(checked_sqlite_ceiling_result(
-            open_store(StoreConfig::Sqlite { path: path.clone() }),
-            "open second",
-        ));
+        let first = Gateway::new(checked_sqlite_ceiling_result(open(), "open first"));
+        let second = Gateway::new(checked_sqlite_ceiling_result(open(), "open second"));
         let timeline_id = timeline.id().to_string();
         let entity_id = entity.to_string();
         let payload_a = serde_json::json!({"writer": "a"});
@@ -5859,10 +5854,7 @@ mod tests {
             } | GatewayError::Store(CoreError::ErasureContainmentUnavailable)
         );
         assert!(expected_rejection, "unexpected rejection: {rejected:?}");
-        let mut fresh = checked_sqlite_ceiling_result(
-            open_store(StoreConfig::Sqlite { path: path.clone() }),
-            "open fresh",
-        );
+        let mut fresh = checked_sqlite_ceiling_result(open(), "open fresh");
         Gateway::bind_test_erasure_gate(fresh.as_mut());
         assert_eq!(
             checked_sqlite_ceiling_result(fresh.get_timeline(timeline.id()), "read root")
