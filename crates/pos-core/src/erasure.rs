@@ -2804,32 +2804,34 @@ impl ErasureVerifiedInventoryV1 {
         &self,
         parent: TimelineId,
     ) -> Result<Vec<ErasureForkScopeRequirementV1>, ErasureErrorV1> {
-        let classifications = self.admitted_fork_parent_classifications(parent)?;
-        self.members
-            .iter()
-            .zip(classifications)
-            .filter_map(|((state, _), classification)| {
-                let request = state.request().reference();
-                if classification.request != request {
-                    return Some(Err(ErasureErrorV1::ProvenanceMissing));
-                }
-                classification.membership.included_scope()?;
-                let Some(scope) = state.scope() else {
-                    return Some(Err(ErasureErrorV1::ProvenanceMissing));
-                };
-                scope.lineage_rule().map(|lineage_rule| {
-                    Ok(ErasureForkScopeRequirementV1 {
-                        request,
-                        scope_commitment: scope.reference(),
-                        lineage_rule,
-                        predecessor_extension: state
-                            .scope_extensions()
-                            .last()
-                            .map(ErasureScopeExtensionV1::reference),
+        self.admitted_fork_parent_classifications(parent)
+            .and_then(|classifications| {
+                self.members
+                    .iter()
+                    .zip(classifications)
+                    .filter_map(|((state, _), classification)| {
+                        let request = state.request().reference();
+                        if classification.request != request {
+                            return Some(Err(ErasureErrorV1::ProvenanceMissing));
+                        }
+                        classification.membership.included_scope()?;
+                        let Some(scope) = state.scope() else {
+                            return Some(Err(ErasureErrorV1::ProvenanceMissing));
+                        };
+                        scope.lineage_rule().map(|lineage_rule| {
+                            Ok(ErasureForkScopeRequirementV1 {
+                                request,
+                                scope_commitment: scope.reference(),
+                                lineage_rule,
+                                predecessor_extension: state
+                                    .scope_extensions()
+                                    .last()
+                                    .map(ErasureScopeExtensionV1::reference),
+                            })
+                        })
                     })
-                })
+                    .collect()
             })
-            .collect()
     }
 
     fn admitted_fork_parent_classifications(
@@ -2999,12 +3001,11 @@ impl ErasureVerifiedInventoryV1 {
         input: ErasureForkAdmissionInputV1,
         mut admissions: Vec<PreparedErasureForkAdmissionV1>,
     ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
-        let Some((parent, _)) = input.child.fork_point else {
-            return Err(ErasureErrorV1::PolicyConflict);
-        };
-        if input.child.mode != crate::TimelineMode::Historical {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
+        let (parent, _) = input
+            .child
+            .fork_point
+            .filter(|_| input.child.mode == crate::TimelineMode::Historical)
+            .ok_or(ErasureErrorV1::PolicyConflict)?;
         if input.expected_inventory_generation != self.generation {
             return Err(ErasureErrorV1::StaleGeneration);
         }
@@ -3077,43 +3078,14 @@ impl ErasureVerifiedInventoryV1 {
         for ((mut state, mut proof), classification) in
             members.into_iter().zip(parent_classifications.iter())
         {
-            let request = state.request().reference();
-            if classification.request != request {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            let requires_extension = classification.membership.included_scope().is_some()
-                && state
-                    .scope()
-                    .and_then(ErasureScopeCommitmentV1::lineage_rule)
-                    .is_some();
-            let admission = admissions
-                .get(admission_index)
-                .filter(|admission| admission.mutation.request() == request);
-            match (requires_extension, admission) {
-                (true, Some(admission))
-                    if admission.mutation.expected_manifest_digest()
-                        == Some(state.manifest_digest()) =>
-                {
-                    state.manifest_digest = admission.mutation.next_manifest().digest();
-                    state
-                        .scope_extensions
-                        .try_reserve(1)
-                        .map_err(allocation_failure)?;
-                    proof.bindings.try_reserve(1).map_err(allocation_failure)?;
-                    state.scope_extensions.push(admission.extension);
-                    proof.manifest_digest = state.manifest_digest();
-                    proof
-                        .bindings
-                        .push((input.child.id, admission.child_scope()));
-                    admission_index += 1;
-                }
-                (false, None) => {
-                    Self::append_unaffected_child(&mut proof, input.child.id)?;
-                }
-                (true, None | Some(_)) | (false, Some(_)) => {
-                    return Err(ErasureErrorV1::PolicyConflict)
-                }
-            }
+            Self::apply_successor_fork_member(
+                &mut state,
+                &mut proof,
+                classification,
+                &admissions,
+                &mut admission_index,
+                input.child.id,
+            )?;
             successor_members.push((state, proof));
         }
         let mut topology = Vec::new();
@@ -3126,6 +3098,52 @@ impl ErasureVerifiedInventoryV1 {
         let successor =
             Self::from_verified_recovery_with_limits(successor_members, topology, limits)?;
         PreparedErasureForkBatchV1::new(input, admissions, successor)
+    }
+
+    fn apply_successor_fork_member(
+        state: &mut ErasureVerifiedStateV1,
+        proof: &mut ErasureVerifiedTopologyProofV1,
+        classification: &ErasureInventoryClassificationV1,
+        admissions: &[PreparedErasureForkAdmissionV1],
+        admission_index: &mut usize,
+        child: TimelineId,
+    ) -> Result<(), ErasureErrorV1> {
+        let request = state.request().reference();
+        if classification.request != request {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let requires_extension = classification.membership.included_scope().is_some()
+            && state
+                .scope()
+                .and_then(ErasureScopeCommitmentV1::lineage_rule)
+                .is_some();
+        let admission = admissions
+            .get(*admission_index)
+            .filter(|admission| admission.mutation.request() == request);
+        match (requires_extension, admission) {
+            (true, Some(admission))
+                if admission.mutation.expected_manifest_digest()
+                    == Some(state.manifest_digest()) =>
+            {
+                state.manifest_digest = admission.mutation.next_manifest().digest();
+                state
+                    .scope_extensions
+                    .try_reserve(1)
+                    .map_err(allocation_failure)?;
+                proof.bindings.try_reserve(1).map_err(allocation_failure)?;
+                state.scope_extensions.push(admission.extension);
+                proof.manifest_digest = state.manifest_digest();
+                proof.bindings.push((child, admission.child_scope()));
+                *admission_index += 1;
+            }
+            (false, None) => {
+                Self::append_unaffected_child(proof, child)?;
+            }
+            (true, None | Some(_)) | (false, Some(_)) => {
+                return Err(ErasureErrorV1::PolicyConflict)
+            }
+        }
+        Ok(())
     }
 
     fn append_unaffected_child(

@@ -73,6 +73,23 @@ pub(crate) const fn inventory_generation_may_have_changed<T>(
     matches!(result, Ok(_) | Err(CoreError::StorageOutcomeUnknown(_)))
 }
 
+pub(crate) fn with_validated_erasure_write_fence<T>(
+    gate: &pos_core::ErasureContainmentGateV1,
+    timeline: TimelineId,
+    operation: pos_core::ErasureProtectedOperationV1,
+    mut effect: impl FnMut() -> Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    let mut result = Err(CoreError::Storage(
+        "erasure fence did not execute the protected operation".to_owned(),
+    ));
+    let mut run = || {
+        result = effect();
+    };
+    gate.with_fence(timeline, operation, &mut run)
+        .map_err(pos_core::store::erasure_containment_error)?;
+    result
+}
+
 /// Finalize first-commit context for a local committed batch. A supplied
 /// origin must agree with the owning segment and inherited Fork prefix.
 fn finalize_committed_origins(

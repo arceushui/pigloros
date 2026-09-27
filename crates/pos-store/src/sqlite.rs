@@ -2140,6 +2140,11 @@ struct TimelineRow {
     head_seq: i64,
 }
 
+enum TopologyInitializationPath {
+    Direct,
+    HostTransition,
+}
+
 struct GeographicCellDedupRow {
     timeline: TimelineId,
     entity: EntityId,
@@ -2399,15 +2404,7 @@ impl SqliteStore {
         mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
         let gate = self.validated_erasure_gate()?;
-        let mut result = Err(CoreError::Storage(
-            "erasure fence did not execute the protected operation".to_owned(),
-        ));
-        let mut run = || {
-            result = effect(self);
-        };
-        gate.with_fence(timeline, operation, &mut run)
-            .map_err(pos_core::store::erasure_containment_error)?;
-        result
+        crate::with_validated_erasure_write_fence(&gate, timeline, operation, || effect(self))
     }
 
     fn with_erasure_read_fence<T>(
@@ -3941,7 +3938,7 @@ impl SqliteStore {
         self.initialize_timeline_with_key_registry_in_transaction_with_meta(
             &TimelineMeta::root(name),
             expected_registry,
-            false,
+            TopologyInitializationPath::Direct,
         )
     }
 
@@ -3949,7 +3946,7 @@ impl SqliteStore {
         &self,
         meta: &TimelineMeta,
         expected_registry: &KeyRegistryStateV1,
-        host_transition: bool,
+        path: TopologyInitializationPath,
     ) -> Result<(Timeline, bool), CoreError> {
         let persisted = self.load_key_registry()?;
         if persisted
@@ -3970,7 +3967,7 @@ impl SqliteStore {
             .ok_or_else(|| CoreError::Storage("ledger Timeline name is missing".to_owned()))?;
         self.find_timeline_by_name_unchecked(name)?.map_or_else(
             || {
-                if !host_transition {
+                if matches!(path, TopologyInitializationPath::Direct) {
                     self.ensure_direct_topology_mutation_allowed()?;
                 }
                 self.create_timeline_with_meta_for_host_transition_unchecked(meta)
@@ -3991,18 +3988,8 @@ impl SqliteStore {
             )
             .optional()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        row.map_or(Ok(None), |timeline_row| {
-            let mut timeline = timeline_fields_to_timeline(
-                &timeline_row.id,
-                timeline_row.name,
-                &timeline_row.mode,
-                timeline_row.parent_id,
-                timeline_row.fork_seq,
-                timeline_row.head_seq,
-            )?;
-            timeline.meta.owner = self.timeline_owner(timeline.id())?;
-            Ok(Some(timeline))
-        })
+        row.map(|row| self.timeline_from_row_with_owner(row))
+            .transpose()
     }
 
     fn get_timeline_for_host_transition_unchecked(
@@ -4019,18 +4006,21 @@ impl SqliteStore {
             .optional()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
 
-        row.map_or(Ok(None), |timeline_row| {
-            let mut timeline = timeline_fields_to_timeline(
-                &timeline_row.id,
-                timeline_row.name,
-                &timeline_row.mode,
-                timeline_row.parent_id,
-                timeline_row.fork_seq,
-                timeline_row.head_seq,
-            )?;
-            timeline.meta.owner = self.timeline_owner(timeline.id())?;
-            Ok(Some(timeline))
-        })
+        row.map(|row| self.timeline_from_row_with_owner(row))
+            .transpose()
+    }
+
+    fn timeline_from_row_with_owner(&self, row: TimelineRow) -> Result<Timeline, CoreError> {
+        let mut timeline = timeline_fields_to_timeline(
+            &row.id,
+            row.name,
+            &row.mode,
+            row.parent_id,
+            row.fork_seq,
+            row.head_seq,
+        )?;
+        timeline.meta.owner = self.timeline_owner(timeline.id())?;
+        Ok(timeline)
     }
 }
 
@@ -4153,7 +4143,7 @@ impl EventStore for SqliteStore {
                 self.initialize_timeline_with_key_registry_in_transaction_with_meta(
                     meta,
                     expected_registry,
-                    true,
+                    TopologyInitializationPath::HostTransition,
                 )
             });
         let result = finish_immediate_scope(&self.conn, scope, result);
@@ -4744,16 +4734,7 @@ impl EventStore for SqliteStore {
             };
             let timeline_row =
                 read_timeline_row(row).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let timeline = timeline_fields_to_timeline(
-                &timeline_row.id,
-                timeline_row.name,
-                &timeline_row.mode,
-                timeline_row.parent_id,
-                timeline_row.fork_seq,
-                timeline_row.head_seq,
-            )?;
-            let mut timeline = timeline;
-            timeline.meta.owner = self.timeline_owner(timeline.id())?;
+            let timeline = self.timeline_from_row_with_owner(timeline_row)?;
             let timeline_id = timeline.id();
             let visible = self.with_erasure_read_filter(
                 timeline_id,

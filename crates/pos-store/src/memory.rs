@@ -1184,15 +1184,7 @@ impl MemoryStore {
         mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
         let gate = self.validated_erasure_gate()?;
-        let mut result = Err(CoreError::Storage(
-            "erasure fence did not execute the protected operation".to_owned(),
-        ));
-        let mut run = || {
-            result = effect(self);
-        };
-        gate.with_fence(timeline, operation, &mut run)
-            .map_err(pos_core::store::erasure_containment_error)?;
-        result
+        crate::with_validated_erasure_write_fence(&gate, timeline, operation, || effect(self))
     }
 
     fn with_erasure_read_fence<T>(
@@ -1520,29 +1512,32 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         &mut self,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-        self.ensure_inventory_snapshot_limits(limits)?;
-        let mut request_heads = Vec::new();
-        let snapshot = request_heads
-            .try_reserve(self.erasure_records.len())
-            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+        let snapshot = self
+            .ensure_inventory_snapshot_limits(limits)
             .and_then(|()| {
-                request_heads.extend(
-                    self.erasure_records
-                        .iter()
-                        .map(|(request, (manifest, _))| (*request, *manifest)),
-                );
-                let mut topology = Vec::new();
-                topology
-                    .try_reserve(self.timelines.len())
+                let mut request_heads = Vec::new();
+                request_heads
+                    .try_reserve(self.erasure_records.len())
                     .map_err(|_| ErasureErrorV1::ScopeInvalid)
                     .and_then(|()| {
-                        topology.extend(self.timelines.keys().copied());
-                        topology.sort_unstable();
-                        ErasurePersistenceInventorySnapshotV1::new_with_limits(
-                            request_heads,
-                            topology,
-                            limits,
-                        )
+                        request_heads.extend(
+                            self.erasure_records
+                                .iter()
+                                .map(|(request, (manifest, _))| (*request, *manifest)),
+                        );
+                        let mut topology = Vec::new();
+                        topology
+                            .try_reserve(self.timelines.len())
+                            .map_err(|_| ErasureErrorV1::ScopeInvalid)
+                            .and_then(|()| {
+                                topology.extend(self.timelines.keys().copied());
+                                topology.sort_unstable();
+                                ErasurePersistenceInventorySnapshotV1::new_with_limits(
+                                    request_heads,
+                                    topology,
+                                    limits,
+                                )
+                            })
                     })
             })?;
         self.erasure_inventory_generation = Some(snapshot.generation());
