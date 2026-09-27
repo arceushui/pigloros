@@ -341,13 +341,7 @@ impl SqliteStore {
             }
             Ok((request, outcome))
         })();
-        let (request, outcome) = finish_immediate_transaction(&self.conn, begun)?;
-        if matches!(
-            outcome,
-            pos_core::KeyDestructionBeginOutcomeV1::AlreadyDestroyed(_)
-        ) {
-            return Ok(());
-        }
+        let (request, _) = finish_immediate_transaction(&self.conn, begun)?;
         self.finish_recipient_key_destruction(owner, request)
     }
 
