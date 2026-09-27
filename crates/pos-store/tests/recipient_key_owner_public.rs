@@ -2,7 +2,7 @@
 
 //! Public black-box contracts for role-4 recipient private-file custody.
 
-use std::os::unix::fs::PermissionsExt;
+use std::{os::unix::fs::PermissionsExt, sync::mpsc, thread};
 
 use pos_core::{EntityId, EventStore, Hash, KeyDestructionRequestV1, KeyRoleV1};
 use pos_store::sqlite::{RecipientKeyOwnerV1, SqliteStore};
@@ -48,6 +48,19 @@ fn only_private_file(
         return Err("private directory has more than one entry".into());
     }
     Ok(path)
+}
+
+fn recipient_private_path(
+    directory: &std::path::Path,
+    descriptor: pos_core::RecipientKeyDescriptorV1,
+) -> std::path::PathBuf {
+    let mut name = format!("recipient-{}-", descriptor.identity().epoch);
+    for byte in descriptor.fingerprint().as_bytes() {
+        name.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        name.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    name.push_str(".key");
+    directory.join(name)
 }
 
 fn begin_pending_destruction(
@@ -180,6 +193,91 @@ fn recipient_owner_public_contract_keeps_using_the_retained_directory_descriptor
 }
 
 #[test]
+fn recipient_owner_public_contract_claims_directory_for_one_grantee_across_path_aliases(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let database = temporary.path().join("recipient.sqlite");
+    let grantee = EntityId::new();
+    let mut store = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    let owner = RecipientKeyOwnerV1::open(directory.clone(), grantee)?;
+    let descriptor = store.enroll_recipient_key(&owner)?;
+    let same_grantee_alias = RecipientKeyOwnerV1::open(directory.join("."), grantee)?;
+    let other_grantee = RecipientKeyOwnerV1::open(directory.clone(), EntityId::new())?;
+    let path = only_private_file(&directory)?;
+
+    assert_eq!(
+        store.recover_recipient_keys(&same_grantee_alias)?,
+        vec![descriptor]
+    );
+    assert!(store.recover_recipient_keys(&other_grantee).is_err());
+    assert!(store.enroll_recipient_key(&other_grantee).is_err());
+    assert!(store
+        .destroy_recipient_key(
+            &other_grantee,
+            descriptor.identity().epoch,
+            Hash::from_bytes([83; 32]),
+        )
+        .is_err());
+    assert!(path.exists());
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_ignores_foreign_directory_inventory_with_shared_key_coordinates(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let foreign_directory = temporary.path().join("recipient-private-foreign");
+    std::fs::create_dir(&foreign_directory)?;
+    std::fs::set_permissions(&foreign_directory, std::fs::Permissions::from_mode(0o700))?;
+    let database = temporary.path().join("recipient.sqlite");
+    let grantee = EntityId::new();
+    let foreign_grantee = EntityId::new();
+    let mut store = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    let owner = RecipientKeyOwnerV1::open(directory.clone(), grantee)?;
+    let descriptor = store.enroll_recipient_key(&owner)?;
+    let foreign_descriptor = pos_core::RecipientKeyDescriptorV1::for_grantee(
+        foreign_grantee,
+        descriptor.identity().epoch,
+        descriptor.public_key(),
+    )?;
+    let local_path = only_private_file(&directory)?;
+    let foreign_path = recipient_private_path(&foreign_directory, foreign_descriptor);
+    std::fs::copy(&local_path, &foreign_path)?;
+    std::fs::set_permissions(&foreign_path, std::fs::Permissions::from_mode(0o600))?;
+    let foreign_metadata = std::fs::metadata(&foreign_path)?;
+    let connection = rusqlite::Connection::open(&database)?;
+    let material_digest = connection.query_row(
+        "SELECT material_digest FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
+        rusqlite::params![
+            descriptor.identity().owner_id.as_str(),
+            i64::try_from(descriptor.identity().epoch)?,
+        ],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    connection.execute(
+        "INSERT INTO recipient_key_inventory_v1
+         (owner_id, epoch, descriptor, material_digest, private_path, file_device, file_inode, file_uid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            foreign_descriptor.identity().owner_id.as_str(),
+            i64::try_from(foreign_descriptor.identity().epoch)?,
+            foreign_descriptor.encode(),
+            material_digest,
+            foreign_path.as_os_str().as_encoded_bytes(),
+            std::os::unix::fs::MetadataExt::dev(&foreign_metadata).to_be_bytes(),
+            std::os::unix::fs::MetadataExt::ino(&foreign_metadata).to_be_bytes(),
+            std::os::unix::fs::MetadataExt::uid(&foreign_metadata).to_be_bytes(),
+        ],
+    )?;
+
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
@@ -198,6 +296,35 @@ fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     assert!(names.iter().any(|name| name.ends_with(".orphan")));
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_serializes_recovery_with_enrollment_staging(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, _) = enrolled_owner()?;
+    let database = temporary.path().join("recipient.sqlite");
+    let staged = temporary
+        .path()
+        .join("recipient-private")
+        .join("recipient-staged.key");
+    std::fs::write(&staged, [1_u8; 32])?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))?;
+    let writer = rusqlite::Connection::open(&database)?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    let (started_sender, started_receiver) = mpsc::channel();
+    let recovery = thread::spawn(move || {
+        let _ = started_sender.send(());
+        store.recover_recipient_keys(&owner)
+    });
+    started_receiver.recv()?;
+    assert!(staged.exists());
+    writer.execute_batch("COMMIT")?;
+    assert!(recovery
+        .join()
+        .map_err(|_| "recovery thread panicked")?
+        .is_ok());
+    assert!(!staged.exists());
     Ok(())
 }
 
@@ -469,6 +596,7 @@ fn recipient_owner_public_contract_rejects_duplicate_inventory_identity(
 fn recipient_owner_public_contract_rejects_a_missing_live_inventory_identity(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (temporary, store, owner, descriptor) = enrolled_owner()?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
     let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
     connection.execute(
         "DELETE FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
@@ -479,6 +607,7 @@ fn recipient_owner_public_contract_rejects_a_missing_live_inventory_identity(
     )?;
 
     assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(path.exists());
     Ok(())
 }
 
