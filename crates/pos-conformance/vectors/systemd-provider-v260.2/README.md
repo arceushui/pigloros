@@ -38,7 +38,8 @@ names, and its D-Bus getter retains resolvable PNR identifiers. The offline
 materializer enumerates those implicit additions into the expected array:
 333 names for x86_64 and 300 for aarch64. These additional readback names do not
 claim native kernel rules and are never added to the requested arrays. Actual
-runtime readback/enforcement proof remains in #214.
+runtime readback and kernel enforcement proof remain in epic #287 tickets
+#441, #443, and #444.
 
 Production code must consume these checked-in records through APT1/SIC1; it
 must never invoke `systemd-analyze`, expand groups, infer architecture, or add

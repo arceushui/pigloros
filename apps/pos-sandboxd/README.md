@@ -2,7 +2,8 @@
 
 This package holds the systemd-specific implementation of Accepted ADR-069 and
 ADR-072. It is separate from the reference evaluator and provider-neutral wire
-contracts. Complete daemon/runtime delivery remains tracked by Redmine #214.
+contracts. Redmine #214 tracks the delivered component foundation. Complete
+daemon/runtime delivery remains tracked by epic #287 tickets #437–#444.
 
 `SystemCallFilter` compiles a canonical selected SCS1 into the exact `(bas)`
 requested property, checks the selected digest and architecture, and compares
@@ -42,5 +43,5 @@ converted from milliseconds to microseconds with overflow rejection. Values
 that pinned systemd cannot represent as exact finite ceilings fail before
 submission; the generated service proxy then reads back each typed `t` value.
 This is requested-state verification, not ELM1 authentication or proof that the
-kernel enforced the effective limit. Provider admission, kernel limit reads,
-and signed limit evidence remain separate #214 work.
+kernel enforced the effective limit. Provider admission remains in #437–#438;
+kernel limit reads and signed limit evidence remain in #443.
