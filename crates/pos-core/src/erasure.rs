@@ -3601,6 +3601,12 @@ pub use artifact::{
     ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1, RegisteredArtifactV1,
     ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
 };
+mod registration;
+pub use registration::{
+    ArtifactChildEdgeV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
+    ArtifactRegistrationV1, MAX_ARTIFACT_REGISTRATION_BYTES_V1,
+    MAX_ARTIFACT_REGISTRATION_CHILDREN_V1, MAX_ARTIFACT_REGISTRATION_KEYS_V1,
+};
 mod rejoin;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
