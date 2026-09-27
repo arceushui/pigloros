@@ -77,6 +77,13 @@ fn recipient_owner_public_contract_recovers_and_destroys_the_bound_file(
         )
         .is_none());
     assert!(registry.tombstone(descriptor.identity()).is_some());
+    let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
+        .query_row(
+            "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+    assert_eq!(receipt_count, 1);
     assert!(store.recover_recipient_keys(&owner).is_err());
     Ok(())
 }
@@ -98,7 +105,22 @@ fn recipient_owner_public_contract_rejects_replaced_file_and_keeps_pending(
             Hash::from_bytes([9; 32])
         )
         .is_err());
-    let registry = store
+    drop(store);
+    let mut resumed = SqliteStore::open(
+        temporary
+            .path()
+            .join("recipient.sqlite")
+            .to_str()
+            .ok_or("database path is not UTF-8")?,
+    )?;
+    assert!(resumed
+        .destroy_recipient_key(
+            &owner,
+            descriptor.identity().epoch,
+            Hash::from_bytes([9; 32])
+        )
+        .is_err());
+    let registry = resumed
         .load_key_registry()?
         .ok_or("recipient registry is absent")?;
     assert!(registry
@@ -108,6 +130,54 @@ fn recipient_owner_public_contract_rejects_replaced_file_and_keeps_pending(
         )
         .is_none());
     assert!(registry.tombstone(descriptor.identity()).is_none());
+    let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
+        .query_row(
+            "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+    assert_eq!(receipt_count, 0);
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_keeps_using_the_retained_directory_descriptor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, descriptor) = enrolled_owner()?;
+    let original = temporary.path().join("recipient-private");
+    let moved = temporary.path().join("recipient-private-moved");
+    std::fs::rename(&original, &moved)?;
+    std::fs::create_dir(&original)?;
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(original.join("untrusted.key"), [9_u8; 32])?;
+    std::fs::set_permissions(
+        original.join("untrusted.key"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
+
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_recipient_inventory
+         BEFORE INSERT ON recipient_key_inventory_v1
+         BEGIN SELECT RAISE(ABORT, 'injected inventory failure'); END;",
+    )?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    let names = std::fs::read_dir(temporary.path().join("recipient-private"))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|entry| entry.file_name().into_string())
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(names.iter().any(|name| name.ends_with(".orphan")));
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
     Ok(())
 }
 
