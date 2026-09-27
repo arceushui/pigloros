@@ -115,7 +115,9 @@ impl LocalOciPublisherV1 {
         let lock = open_private_file(&self.root, LOCK_NAME)?;
         fs::flock(&lock, FlockOperation::LockExclusive)
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
-        let result = self.publish_locked(bundle);
+        let result = self
+            .recover_locked()
+            .and_then(|_| self.publish_locked(bundle));
         fs::flock(&lock, FlockOperation::Unlock)
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         result
@@ -446,10 +448,28 @@ impl ReleaseSourceV1 for LocalOciPublisherV1 {
         let lock = open_private_file(&self.root, LOCK_NAME).map_err(map_publication_to_source)?;
         fs::flock(&lock, FlockOperation::LockShared)
             .map_err(|_| ReleaseSourceErrorV1::LockUnavailable)?;
-        let result = self.read_locked(address);
+        let result = self
+            .reader_recovery_floor()
+            .and_then(|()| self.read_locked(address));
         fs::flock(&lock, FlockOperation::Unlock)
             .map_err(|_| ReleaseSourceErrorV1::LockUnavailable)?;
         result
+    }
+}
+
+impl LocalOciPublisherV1 {
+    fn reader_recovery_floor(&self) -> Result<(), ReleaseSourceErrorV1> {
+        let quarantine =
+            open_directory(&self.root, QUARANTINE_NAME).map_err(map_publication_to_source)?;
+        if directory_entries(&quarantine)
+            .map_err(map_publication_to_source)?
+            .next()
+            .is_some()
+        {
+            Err(ReleaseSourceErrorV1::RecoveryRequired)
+        } else {
+            Ok(())
+        }
     }
 }
 
