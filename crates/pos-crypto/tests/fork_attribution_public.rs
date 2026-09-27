@@ -31,6 +31,39 @@ fn check_signature(
         .find(|key| verifying_key_from_public_key(key).is_err())
         .ok_or("no invalid compressed public key fixture")?;
     assert!(verify_local_fork_manifest_signature_only(signed, invalid_public_key).is_err());
+
+    let identity = signed.identity();
+    let changed_owner = SignedForkReproManifestV1::new(
+        KeyIdentityV1::new("creator-b", identity.role, identity.epoch),
+        signed.manifest().clone(),
+        signed.signature(),
+    )?;
+    let changed_epoch = SignedForkReproManifestV1::new(
+        KeyIdentityV1::new(identity.owner_id, identity.role, identity.epoch + 1),
+        signed.manifest().clone(),
+        signed.signature(),
+    )?;
+    let mut changed_input = signed.manifest().input().clone();
+    changed_input.final_fork_chain_head_hash = hash(7);
+    let changed_payload = SignedForkReproManifestV1::new(
+        identity,
+        ForkReproManifestV1::new(changed_input)?,
+        signed.signature(),
+    )?;
+    for changed in [changed_owner, changed_epoch, changed_payload] {
+        let decoded = SignedForkReproManifestV1::from_canonical_cbor(&changed.to_canonical_cbor())?;
+        assert!(verify_local_fork_manifest_signature_only(&decoded, public).is_err());
+    }
+    assert!(SignedForkReproManifestV1::new(
+        KeyIdentityV1::new(
+            identity.owner_id,
+            KeyRoleV1::TimelineIntegritySigning,
+            identity.epoch,
+        ),
+        signed.manifest().clone(),
+        signed.signature(),
+    )
+    .is_err());
     Ok(())
 }
 
