@@ -2545,9 +2545,7 @@ fn with_host_action_fence<T>(
                 )
                 .map_err(host_action_error)
         });
-    if let Err(error) = fence_result {
-        return Err(error);
-    }
+    fence_result?;
     result
 }
 
