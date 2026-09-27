@@ -7571,6 +7571,27 @@ mod tests {
     }
 
     #[test]
+    fn protected_interval_rejects_denied_begin() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let store = new_store();
+        store
+            .conn
+            .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(context.action, AuthAction::Transaction { .. }) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+    }
+
+    #[test]
     fn protected_interval_fails_closed_when_sqlite_rejects_validation_or_rollback() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
@@ -7586,27 +7607,7 @@ mod tests {
                 Authorization::Allow
             }
         }
-
         let mut store = new_store();
-        store
-            .conn
-            .authorizer(Some(|context: AuthContext<'_>| {
-                if matches!(context.action, AuthAction::Transaction { .. }) {
-                    Authorization::Deny
-                } else {
-                    Authorization::Allow
-                }
-            }))
-            .test_ok();
-        assert_eq!(
-            store.begin_protected_effect_interval(),
-            Err(ErasureErrorV1::ReceiptCommitFailed)
-        );
-        store
-            .conn
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-            .test_ok();
-
         store
             .conn
             .authorizer(Some(|context: AuthContext<'_>| {
