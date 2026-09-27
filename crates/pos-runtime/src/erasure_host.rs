@@ -2534,6 +2534,28 @@ pub struct ErasureReadSenderV1<'host> {
 }
 
 impl ErasureReadSenderV1<'_> {
+    /// Read a page only while the host still owns the expected inventory generation.
+    ///
+    /// The expected digest is a cursor comparison, never authority to choose or
+    /// install a gate. The returned digest comes from the installed host state.
+    ///
+    /// # Errors
+    /// Returns [`ErasureHostErrorV1::StaleGeneration`] for a stale cursor and
+    /// the ordinary protected-read error for a denied or unavailable Timeline.
+    pub fn read_bounded_at_generation(
+        &mut self,
+        timeline: TimelineId,
+        range: SeqRange,
+        bounds: EventReadBounds,
+        expected: Option<ErasureReferenceV1>,
+    ) -> Result<(Vec<Event>, ErasureReferenceV1), ErasureHostErrorV1> {
+        if expected.is_some_and(|expected| expected != self.generation) {
+            return Err(ErasureHostErrorV1::StaleGeneration);
+        }
+        let events = self.read_bounded(timeline, range, bounds)?;
+        Ok((events, self.generation))
+    }
+
     /// Recover one authoritative, payload-free ERS1 state through the
     /// coordinator that owns this host's installed generation.
     ///

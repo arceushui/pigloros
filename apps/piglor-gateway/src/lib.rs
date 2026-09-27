@@ -35,8 +35,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1, Plugin,
-    ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1,
+    ErasureReferenceV1, Plugin, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -694,6 +694,8 @@ impl GatewayLimits {
 pub struct EventPage {
     pub events: Vec<Event>,
     pub next_from_seq: Option<Seq>,
+    /// Installed host generation that authorized this page, when host-owned.
+    pub inventory_generation: Option<ErasureReferenceV1>,
 }
 
 /// JSON notice pushed on the event bus / WebSocket.
@@ -743,6 +745,9 @@ pub enum GatewayError {
     /// Malformed event polling query.
     #[error("invalid events query: {0}")]
     InvalidEventsQuery(String),
+    /// A continuation cursor belongs to an older host inventory generation.
+    #[error("event cursor generation is stale")]
+    StaleEventCursor,
     /// Authorization request fields failed host-side validation.
     #[error("invalid authorization request")]
     InvalidAuthorizationRequest,
@@ -927,6 +932,7 @@ impl From<executor::StoreExecutorError> for GatewayError {
             executor::StoreExecutorError::Closed => Self::StoreExecutorClosed,
             executor::StoreExecutorError::DeadlineExceeded => Self::StoreExecutorDeadlineExceeded,
             executor::StoreExecutorError::Unhealthy => Self::StoreExecutorUnhealthy,
+            executor::StoreExecutorError::StaleGeneration => Self::StaleEventCursor,
             executor::StoreExecutorError::Store(error) => Self::Store(error),
         }
     }
@@ -1895,10 +1901,21 @@ impl Gateway {
         from_seq: u64,
         limit: usize,
     ) -> Result<EventPage, GatewayError> {
+        self.read_events_page_at_generation(timeline_id, from_seq, limit, None)
+            .await
+    }
+
+    pub(crate) async fn read_events_page_at_generation(
+        &self,
+        timeline_id: &str,
+        from_seq: u64,
+        limit: usize,
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<EventPage, GatewayError> {
         if self.authorization.is_some() {
             return Err(GatewayError::AuthorizationUnavailable);
         }
-        self.read_events_page_unchecked(timeline_id, from_seq, limit)
+        self.read_events_page_unchecked(timeline_id, from_seq, limit, expected_generation)
             .await
     }
 
@@ -1907,6 +1924,7 @@ impl Gateway {
         timeline_id: &str,
         from_seq: u64,
         limit: usize,
+        expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<EventPage, GatewayError> {
         if limit == 0 || limit > MAX_EVENTS_PER_POLL {
             return Err(GatewayError::InvalidPageLimit {
@@ -1928,8 +1946,12 @@ impl Gateway {
             MAX_EVENTS_RESPONSE_BYTES,
             MAX_EVENTS_READ_TIME_MICROS,
         );
-        let mut events = match self.store.read(id, range, bounds).await {
-            Ok(events) => events,
+        let page = match self
+            .store
+            .read_page(id, range, bounds, expected_generation)
+            .await
+        {
+            Ok(page) => page,
             Err(executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. })) => {
                 return Err(GatewayError::EventPayloadTooLarge {
                     maximum: MAX_EVENT_PAYLOAD_BYTES,
@@ -1964,6 +1986,7 @@ impl Gateway {
             }
             Err(error) => return Err(error.into()),
         };
+        let mut events = page.events;
         if events
             .iter()
             .any(|event| is_subject_controlled_event_type(&event.event_type))
@@ -1977,6 +2000,7 @@ impl Gateway {
         Ok(EventPage {
             events,
             next_from_seq,
+            inventory_generation: page.generation,
         })
     }
 
@@ -1996,6 +2020,18 @@ impl Gateway {
         from_seq: u64,
         limit: usize,
         request: GatewayAuthorizationRequest,
+    ) -> Result<EventPage, GatewayError> {
+        self.read_events_page_authorized_at_generation(timeline_id, from_seq, limit, request, None)
+            .await
+    }
+
+    pub(crate) async fn read_events_page_authorized_at_generation(
+        &self,
+        timeline_id: &str,
+        from_seq: u64,
+        limit: usize,
+        request: GatewayAuthorizationRequest,
+        expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<EventPage, GatewayError> {
         let Some(authorization) = self.authorization.as_ref() else {
             return Err(GatewayError::AuthorizationUnavailable);
@@ -2026,7 +2062,7 @@ impl Gateway {
         }
         let page = normalize_protected_read_error(
             match self
-                .read_events_page_unchecked(timeline_id, from_seq, limit)
+                .read_events_page_unchecked(timeline_id, from_seq, limit, expected_generation)
                 .await
             {
                 Err(GatewayError::Store(CoreError::TimelineNotFound(_))) => {
@@ -2881,6 +2917,8 @@ impl SignalRequest {
 pub struct EventsQuery {
     pub from_seq: u64,
     pub limit: usize,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 impl Default for EventsQuery {
@@ -2888,6 +2926,7 @@ impl Default for EventsQuery {
         Self {
             from_seq: 0,
             limit: MAX_EVENTS_PER_POLL,
+            cursor: None,
         }
     }
 }
@@ -6075,7 +6114,8 @@ mod tests {
             query,
             EventsQuery {
                 from_seq: 7,
-                limit: 8
+                limit: 8,
+                cursor: None,
             }
         );
     }

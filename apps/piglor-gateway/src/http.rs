@@ -19,7 +19,7 @@ use axum::{
 use piglor_ledger::{render_html, LedgerView};
 use pos_core::{
     clock::{Seq, WallTime},
-    ActionRejected, CoreError,
+    ActionRejected, CoreError, ErasureReferenceV1,
 };
 use pos_plugin_ledger::NewPrediction;
 use pos_runtime::ErasureHostStatusV1;
@@ -80,8 +80,10 @@ mod coverage_tests {
             EventPage {
                 events: vec![event],
                 next_from_seq: None,
+                inventory_generation: None,
             },
             MAX_EVENTS_RESPONSE_BYTES,
+            &timeline.id().to_string(),
         )
         .is_err());
         drop(gateway);
@@ -221,15 +223,23 @@ async fn list_events_response(
     raw_query: Option<&str>,
     headers: &HeaderMap,
 ) -> Result<serde_json::Value, GatewayError> {
-    let q = match parse_events_query(raw_query) {
+    let mut q = match parse_events_query(raw_query) {
         Ok(query) => query,
         Err(error) => return Err(error),
     };
-    let page = match read_events_page(gateway, timeline_id, &q, headers).await {
+    let expected_generation = if let Some(cursor) = q.cursor.as_deref() {
+        let (from_seq, generation) = parse_event_cursor(cursor, timeline_id)?;
+        q.from_seq = from_seq;
+        Some(generation)
+    } else {
+        None
+    };
+    let page = match read_events_page(gateway, timeline_id, &q, headers, expected_generation).await
+    {
         Ok(page) => page,
         Err(error) => return Err(error),
     };
-    let response = match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES) {
+    let response = match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES, timeline_id) {
         Ok(response) => response,
         Err(error) => return Err(error),
     };
@@ -241,12 +251,18 @@ async fn read_events_page(
     timeline_id: &str,
     query: &EventsQuery,
     headers: &HeaderMap,
+    expected_generation: Option<ErasureReferenceV1>,
 ) -> Result<EventPage, GatewayError> {
     if gateway.has_authorization() {
-        read_authorized_events(gateway, timeline_id, query, headers).await
+        read_authorized_events(gateway, timeline_id, query, headers, expected_generation).await
     } else {
         gateway
-            .read_events_page(timeline_id, query.from_seq, query.limit)
+            .read_events_page_at_generation(
+                timeline_id,
+                query.from_seq,
+                query.limit,
+                expected_generation,
+            )
             .await
     }
 }
@@ -256,6 +272,7 @@ async fn read_authorized_events(
     timeline_id: &str,
     query: &EventsQuery,
     headers: &HeaderMap,
+    expected_generation: Option<ErasureReferenceV1>,
 ) -> Result<EventPage, GatewayError> {
     let Some(actor) = headers
         .get("x-piglor-actor-entity")
@@ -269,7 +286,7 @@ async fn read_authorized_events(
         Err(error) => return Err(error),
     };
     gateway
-        .read_events_page_authorized(
+        .read_events_page_authorized_at_generation(
             timeline_id,
             query.from_seq,
             query.limit,
@@ -280,6 +297,7 @@ async fn read_authorized_events(
                 query.limit,
                 WallTime::now(),
             ),
+            expected_generation,
         )
         .await
 }
@@ -291,6 +309,7 @@ fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayErr
     let mut query = EventsQuery::default();
     let mut saw_from_seq = false;
     let mut saw_limit = false;
+    let mut saw_cursor = false;
     for field in raw_query.split('&') {
         let Some((name, value)) = field.split_once('=') else {
             return Err(GatewayError::InvalidEventsQuery(field.to_owned()));
@@ -308,6 +327,10 @@ fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayErr
                     .map_err(|_| GatewayError::InvalidEventsQuery(field.to_owned()))?;
                 saw_limit = true;
             }
+            "cursor" if !saw_cursor => {
+                query.cursor = Some(value.to_owned());
+                saw_cursor = true;
+            }
             _ => return Err(GatewayError::InvalidEventsQuery(field.to_owned())),
         }
     }
@@ -316,12 +339,54 @@ fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayErr
             maximum: MAX_EVENTS_PER_POLL,
         });
     }
+    if saw_from_seq && saw_cursor {
+        return Err(GatewayError::InvalidEventsQuery("cursor".to_owned()));
+    }
     Ok(query)
+}
+
+fn event_cursor(generation: ErasureReferenceV1, timeline_id: &str, from_seq: u64) -> String {
+    format!(
+        "v1.{}.{timeline_id}.{from_seq}",
+        crate::hex_encode(&generation.digest())
+    )
+}
+
+fn parse_event_cursor(
+    cursor: &str,
+    timeline_id: &str,
+) -> Result<(u64, ErasureReferenceV1), GatewayError> {
+    let invalid = || GatewayError::InvalidEventsQuery("cursor".to_owned());
+    let mut parts = cursor.split('.');
+    let (Some("v1"), Some(hex), Some(bound_timeline), Some(position), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return Err(invalid());
+    };
+    if hex.len() != 64 || bound_timeline != timeline_id {
+        return Err(invalid());
+    }
+    let mut digest = [0; 32];
+    for (slot, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        let pair = std::str::from_utf8(pair).map_err(|_| invalid())?;
+        *slot = u8::from_str_radix(pair, 16).map_err(|_| invalid())?;
+    }
+    let from_seq = position
+        .parse::<u64>()
+        .ok()
+        .filter(|position| *position > 0)
+        .ok_or_else(invalid)?;
+    Ok((from_seq, ErasureReferenceV1::from_digest(digest)))
 }
 
 fn bounded_events_response(
     page: EventPage,
     maximum_bytes: usize,
+    timeline_id: &str,
 ) -> Result<serde_json::Value, GatewayError> {
     let mut events = Vec::with_capacity(page.events.len());
     let mut source = page.events.into_iter().peekable();
@@ -340,6 +405,10 @@ fn bounded_events_response(
         let candidate = json!({
             "events": events,
             "next_from_seq": next_from_seq,
+            "next_cursor": next_from_seq.and_then(|seq| {
+                page.inventory_generation
+                    .map(|generation| event_cursor(generation, timeline_id, seq.as_u64()))
+            }),
         });
         if serialized_len(&candidate) > maximum_bytes {
             events.pop();
@@ -351,12 +420,19 @@ fn bounded_events_response(
             return Ok(json!({
                 "events": events,
                 "next_from_seq": Seq::from_u64(event_seq),
+                "next_cursor": page.inventory_generation.map(|generation| {
+                    event_cursor(generation, timeline_id, event_seq)
+                }),
             }));
         }
     }
     Ok(json!({
         "events": events,
         "next_from_seq": page.next_from_seq,
+        "next_cursor": page.next_from_seq.and_then(|seq| {
+            page.inventory_generation
+                .map(|generation| event_cursor(generation, timeline_id, seq.as_u64()))
+        }),
     }))
 }
 
@@ -468,7 +544,9 @@ impl IntoResponse for GatewayError {
             | Self::ForkDepthTooLarge { .. }
             | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
-            Self::CompatibilityReadTruncated { .. } | Self::IngressConflict => StatusCode::CONFLICT,
+            Self::CompatibilityReadTruncated { .. }
+            | Self::IngressConflict
+            | Self::StaleEventCursor => StatusCode::CONFLICT,
             Self::ResourceUnavailable => StatusCode::NOT_FOUND,
             Self::Store(error) => {
                 gateway_store_status(error).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1244,6 +1322,94 @@ osf_link = \"https://osf.io/example\"\n";
             test_app(),
             "GET",
             &format!("/v1/timelines/{id}/events?limit=0"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn host_event_cursor_rejects_stale_generation_and_wrong_timeline() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let timeline = gateway.create_timeline("cursor-owner").await.test_ok();
+        let id = timeline.id().to_string();
+        let actor = EntityId::new().to_string();
+        for marker in 1..=2 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor,
+                    crate::EVENT_TYPE_ACTION,
+                    &json!({"marker": marker}),
+                )
+                .await
+                .test_ok();
+        }
+        let app = router(AppState {
+            gateway: gateway.clone(),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        let (status, first) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let cursor = first["next_cursor"].as_str().test_ok();
+        let (status, second) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}&limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["events"][0]["seq"], 2);
+
+        let other = gateway.create_timeline("cursor-other").await.test_ok();
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{}/events?cursor={cursor}", other.id()),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        for invalid in [
+            "bad".to_owned(),
+            format!("v1.{}.{id}.2", "z".repeat(64)),
+            format!("v1.{}.{id}.0", "a".repeat(64)),
+            format!("v2.{}.{id}.2", "a".repeat(64)),
+        ] {
+            let (status, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("/v1/timelines/{id}/events?cursor={invalid}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, _) = json_request(
+            app,
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}&from_seq=2"),
             None,
         )
         .await;
