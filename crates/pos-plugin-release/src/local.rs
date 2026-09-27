@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::MetadataExt as _;
@@ -18,6 +18,33 @@ const LOCK_NAME: &str = ".publisher.lock";
 const INDEX_NAME: &str = "published.json";
 const RELEASES_NAME: &str = "releases";
 const QUARANTINE_NAME: &str = "quarantine";
+
+fn random_nonce_hex() -> Result<String, LocalOciPublicationErrorV1> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut source = File::open("/dev/urandom").map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    let mut nonce = [0_u8; 16];
+    source
+        .read_exact(&mut nonce)
+        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    let mut encoded = String::with_capacity(32);
+    for byte in nonce {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(encoded)
+}
+
+fn lowercase_hex(value: &str, width: usize) -> bool {
+    value.len() == width
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn staging_name_parts(name: &str) -> Option<(&str, &str)> {
+    let (digest, nonce) = name.strip_prefix('.')?.split_once(".staging.")?;
+    (lowercase_hex(digest, 64) && lowercase_hex(nonce, 32)).then_some((digest, nonce))
+}
 
 /// Closed failures for the Linux-local OCI publisher.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -144,7 +171,11 @@ impl LocalOciPublisherV1 {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
         let releases = open_directory(&self.root, RELEASES_NAME)?;
-        let removed_staging = self.recover_staging(&releases)?;
+        let index = read_limited(open_private_file(&self.root, INDEX_NAME)?, 64 * 1024)
+            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        let indexed =
+            parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        let removed_staging = self.recover_staging(&releases, &indexed)?;
         let removed_next_index = self.recover_next_index()?;
         let finals = directory_entries(&releases)?
             .filter(|name| !name.starts_with('.'))
@@ -152,10 +183,6 @@ impl LocalOciPublisherV1 {
         if finals.len() > 256 {
             return Err(LocalOciPublicationErrorV1::BoundsExceeded);
         }
-        let index = read_limited(open_private_file(&self.root, INDEX_NAME)?, 64 * 1024)
-            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
-        let indexed =
-            parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let unindexed = finals
             .into_iter()
             .filter(|name| {
@@ -166,6 +193,12 @@ impl LocalOciPublisherV1 {
             .collect::<Vec<_>>();
         if unindexed.len() > 1 || (unindexed.len() == 1 && indexed.len() >= 256) {
             return Err(LocalOciPublicationErrorV1::BoundsExceeded);
+        }
+        for address in &indexed {
+            let directory = open_directory(&releases, &address.digest()[7..])
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            Self::read_release(&directory, address)
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         }
         let mut committed = Vec::new();
         if let Some(name) = unindexed.first() {
@@ -191,6 +224,8 @@ impl LocalOciPublisherV1 {
             }
             let address = BundleAddressV1::new(digest.to_owned(), size)
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            Self::read_release(&final_directory, &address)
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             self.publish_index(&address)?;
             committed.push(address);
         }
@@ -201,7 +236,11 @@ impl LocalOciPublisherV1 {
         })
     }
 
-    fn recover_staging(&self, releases: &File) -> Result<u8, LocalOciPublicationErrorV1> {
+    fn recover_staging(
+        &self,
+        releases: &File,
+        indexed: &[BundleAddressV1],
+    ) -> Result<u8, LocalOciPublicationErrorV1> {
         let staging = directory_entries(releases)?
             .filter(|name| name.starts_with('.'))
             .collect::<Vec<_>>();
@@ -209,14 +248,33 @@ impl LocalOciPublisherV1 {
             return Err(LocalOciPublicationErrorV1::BoundsExceeded);
         }
         if let Some(name) = staging.first() {
-            let dir = open_directory(releases, name)?;
-            let owner = read_limited(open_private_file(&dir, "OWNER")?, 128)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            if !owner.starts_with(b"pigloros-local-oci-staging-v1\n") {
+            let Some((digest, nonce)) = staging_name_parts(name) else {
+                self.quarantine_entry(releases, name, "staging")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            };
+            if indexed
+                .iter()
+                .any(|address| &address.digest()[7..] == digest)
+            {
                 self.quarantine_entry(releases, name, "staging")?;
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             }
-            remove_owned_staging(releases, name)?;
+            let owner = open_directory(releases, name)
+                .and_then(|dir| open_private_file(&dir, "OWNER"))
+                .and_then(|file| {
+                    read_limited(file, 128)
+                        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
+                });
+            if owner.ok().as_deref()
+                != Some(format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes())
+            {
+                self.quarantine_entry(releases, name, "staging")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
+            if remove_owned_staging(releases, name).is_err() {
+                self.quarantine_entry(releases, name, "staging")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
             fs::fsync(releases).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
             Ok(1)
         } else {
@@ -260,26 +318,33 @@ impl LocalOciPublisherV1 {
         bundle: &VerifiedReleaseBundleV1,
     ) -> Result<PublishOutcomeV1, LocalOciPublicationErrorV1> {
         let address = bundle.address();
-        if self.read_locked(address).is_ok() {
-            return Ok(PublishOutcomeV1::AlreadyPublished(address.clone()));
+        match self.read_locked(address) {
+            Ok(existing) if existing == *bundle => {
+                return Ok(PublishOutcomeV1::AlreadyPublished(address.clone()));
+            }
+            Ok(_) => return Err(LocalOciPublicationErrorV1::Collision),
+            Err(ReleaseSourceErrorV1::NotFound) => {}
+            Err(_) => return Err(LocalOciPublicationErrorV1::RecoveryRequired),
+        }
+        let index = read_limited(open_private_file(&self.root, INDEX_NAME)?, 64 * 1024)
+            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        if parse_root_index(&index)
+            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?
+            .len()
+            >= 256
+        {
+            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
         }
         let releases = open_directory(&self.root, RELEASES_NAME)?;
-        let staging_name = format!(
-            ".{}.staging.{}",
-            &address.digest()[7..],
-            &address.digest()[7..39]
-        );
+        let staging_nonce = random_nonce_hex()?;
+        let staging_name = format!(".{}.staging.{staging_nonce}", &address.digest()[7..],);
         fs::mkdirat(&releases, &staging_name, PRIVATE_DIRECTORY_MODE)
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         let staging = open_directory(&releases, &staging_name)?;
         write_private_file(
             &staging,
             "OWNER",
-            format!(
-                "pigloros-local-oci-staging-v1\n{}\n",
-                &address.digest()[7..39]
-            )
-            .as_bytes(),
+            format!("pigloros-local-oci-staging-v1\n{staging_nonce}\n",).as_bytes(),
         )?;
         write_private_file(
             &staging,
@@ -326,12 +391,7 @@ impl LocalOciPublisherV1 {
         if directory_entries(&quarantine)?.next().is_some() {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
-        let destination = format!(
-            "{kind}.{}",
-            name.as_bytes().iter().fold(0_u64, |hash, byte| hash
-                .wrapping_mul(131)
-                .wrapping_add(u64::from(*byte)))
-        );
+        let destination = format!("{kind}.{}", random_nonce_hex()?);
         fs::renameat_with(
             source,
             name,
@@ -389,32 +449,79 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
     let staging = open_directory(releases, name)?;
     let mut entries = directory_entries(&staging)?.collect::<Vec<_>>();
     entries.sort();
-    for required in ["OWNER", "oci-layout", "index.json", "blobs"] {
-        if !entries.iter().any(|entry| entry == required) {
-            return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-        }
-    }
-    if entries.len() != 4 {
+    if !entries.iter().any(|entry| entry == "OWNER")
+        || entries.len() > 5
+        || entries.iter().any(|entry| {
+            !["OWNER", "READY", "oci-layout", "index.json", "blobs"].contains(&entry.as_str())
+        })
+    {
         return Err(LocalOciPublicationErrorV1::RecoveryRequired);
     }
-    for file in ["OWNER", "oci-layout", "index.json"] {
-        fs::unlinkat(&staging, file, AtFlags::empty())
+    for file in ["OWNER", "READY", "oci-layout", "index.json"] {
+        if entries.iter().any(|entry| entry == file) {
+            open_private_file(&staging, file)?;
+        }
+    }
+    let blobs = if entries.iter().any(|entry| entry == "blobs") {
+        Some(open_directory(&staging, "blobs")?)
+    } else {
+        None
+    };
+    let sha256 = if let Some(blobs) = &blobs {
+        let children = directory_entries(blobs)?.collect::<Vec<_>>();
+        if children.len() > 1 || children.iter().any(|name| name != "sha256") {
+            return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+        }
+        if children.is_empty() {
+            None
+        } else {
+            Some(open_directory(blobs, "sha256")?)
+        }
+    } else {
+        None
+    };
+    let members = if let Some(sha256) = &sha256 {
+        let names = directory_entries(sha256)?.collect::<Vec<_>>();
+        if names.len() > 359 {
+            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
+        }
+        for member in &names {
+            if !lowercase_hex(member, 64) {
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
+            open_private_file(sha256, member)?;
+        }
+        names
+    } else {
+        Vec::new()
+    };
+    if let Some(sha256) = &sha256 {
+        for member in members {
+            fs::unlinkat(sha256, member, AtFlags::empty())
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        }
+        fs::fsync(sha256).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        fs::unlinkat(
+            blobs
+                .as_ref()
+                .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?,
+            "sha256",
+            AtFlags::REMOVEDIR,
+        )
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    }
+    if let Some(blobs) = &blobs {
+        fs::fsync(blobs).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        fs::unlinkat(&staging, "blobs", AtFlags::REMOVEDIR)
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
     }
-    let blobs = open_directory(&staging, "blobs")?;
-    let sha256 = open_directory(&blobs, "sha256")?;
-    let members = directory_entries(&sha256)?.collect::<Vec<_>>();
-    if members.len() > 359 {
-        return Err(LocalOciPublicationErrorV1::BoundsExceeded);
+    for file in ["READY", "index.json", "oci-layout", "OWNER"] {
+        if entries.iter().any(|entry| entry == file) {
+            fs::unlinkat(&staging, file, AtFlags::empty())
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        }
     }
-    for member in members {
-        fs::unlinkat(&sha256, member, AtFlags::empty())
-            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-    }
-    fs::unlinkat(&blobs, "sha256", AtFlags::REMOVEDIR)
-        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-    fs::unlinkat(&staging, "blobs", AtFlags::REMOVEDIR)
-        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    fs::fsync(&staging).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
     fs::unlinkat(releases, name, AtFlags::REMOVEDIR)
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
 }
@@ -491,8 +598,55 @@ impl LocalOciPublisherV1 {
             open_directory(&self.root, RELEASES_NAME).map_err(map_publication_to_source)?;
         let release =
             open_directory(&releases, &address.digest()[7..]).map_err(map_publication_to_source)?;
+        Self::read_release(&release, address)
+    }
+
+    fn read_release(
+        release: &File,
+        address: &BundleAddressV1,
+    ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
+        let mut entries = directory_entries(release)
+            .map_err(map_publication_to_source)?
+            .collect::<Vec<_>>();
+        entries.sort();
+        if !entries.iter().map(String::as_str).eq([
+            "OWNER",
+            "READY",
+            "blobs",
+            "index.json",
+            "oci-layout",
+        ]) {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
+        let owner = read_limited(
+            open_private_file(release, "OWNER").map_err(map_publication_to_source)?,
+            128,
+        )?;
+        let owner = std::str::from_utf8(&owner).map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
+        let nonce = owner
+            .strip_prefix("pigloros-local-oci-staging-v1\n")
+            .and_then(|value| value.strip_suffix('\n'))
+            .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
+        if !lowercase_hex(nonce, 32) {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
+        let layout = read_limited(
+            open_private_file(release, "oci-layout").map_err(map_publication_to_source)?,
+            64,
+        )?;
+        if layout != b"{\"imageLayoutVersion\":\"1.0.0\"}\n" {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
+        let index = read_limited(
+            open_private_file(release, "index.json").map_err(map_publication_to_source)?,
+            512,
+        )?;
+        let expected_index = format!("{{\"manifests\":[{{\"digest\":\"{}\",\"mediaType\":\"{}\",\"size\":{}}}],\"schemaVersion\":2}}", address.digest(), address.media_type(), address.size());
+        if index != expected_index.as_bytes() {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
         let ready = read_limited(
-            open_private_file(&release, "READY").map_err(map_publication_to_source)?,
+            open_private_file(release, "READY").map_err(map_publication_to_source)?,
             256,
         )?;
         let expected_ready = format!(
@@ -503,7 +657,13 @@ impl LocalOciPublisherV1 {
         if ready != expected_ready.as_bytes() {
             return Err(ReleaseSourceErrorV1::Uncommitted);
         }
-        let blobs = open_directory(&release, "blobs").map_err(map_publication_to_source)?;
+        let blobs = open_directory(release, "blobs").map_err(map_publication_to_source)?;
+        let blob_directories = directory_entries(&blobs)
+            .map_err(map_publication_to_source)?
+            .collect::<Vec<_>>();
+        if !blob_directories.iter().map(String::as_str).eq(["sha256"]) {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
         let sha256 = open_directory(&blobs, "sha256").map_err(map_publication_to_source)?;
         let manifest = read_limited(
             open_private_file(&sha256, &address.digest()[7..])
@@ -534,7 +694,22 @@ impl LocalOciPublisherV1 {
             )?;
             bytes.insert(digest, blob);
         }
-        verify_oci_closure_v1(address.clone(), manifest, bytes)
+        let bundle = verify_oci_closure_v1(address.clone(), manifest, bytes)?;
+        let expected_blobs = std::iter::once(address.digest()[7..].to_owned())
+            .chain(
+                bundle
+                    .blobs()
+                    .iter()
+                    .map(|blob| blob.digest()[7..].to_owned()),
+            )
+            .collect::<BTreeSet<_>>();
+        let actual_blobs = directory_entries(&sha256)
+            .map_err(map_publication_to_source)?
+            .collect::<BTreeSet<_>>();
+        if actual_blobs != expected_blobs {
+            return Err(ReleaseSourceErrorV1::InvalidLayout);
+        }
+        Ok(bundle)
     }
 }
 
@@ -720,7 +895,7 @@ fn create_private_file(
 }
 
 fn open_directory(root: &File, name: &str) -> Result<File, LocalOciPublicationErrorV1> {
-    fs::openat2(
+    let directory = fs::openat2(
         root,
         name,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
@@ -728,11 +903,13 @@ fn open_directory(root: &File, name: &str) -> Result<File, LocalOciPublicationEr
         resolution(),
     )
     .map(File::from)
-    .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)
+    .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+    validate_private_directory(&directory, rustix::process::geteuid().as_raw())?;
+    Ok(directory)
 }
 
 fn open_private_file(root: &File, name: &str) -> Result<File, LocalOciPublicationErrorV1> {
-    fs::openat2(
+    let file = fs::openat2(
         root,
         name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
@@ -740,7 +917,17 @@ fn open_private_file(root: &File, name: &str) -> Result<File, LocalOciPublicatio
         resolution(),
     )
     .map(File::from)
-    .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)
+    .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(LocalOciPublicationErrorV1::InvalidLayout);
+    }
+    Ok(file)
 }
 
 fn validate_private_directory(file: &File, owner: u32) -> Result<(), LocalOciPublicationErrorV1> {

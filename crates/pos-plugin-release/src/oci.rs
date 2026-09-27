@@ -455,7 +455,7 @@ fn verify_descriptor_bytes(
     Ok(())
 }
 
-pub(super) fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
+pub fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
     if bytes.is_empty() || bytes.len() > MAX_MANIFEST_BYTES || has_duplicate_object_keys(bytes) {
         return Err(ReleaseSourceErrorV1::InvalidDescriptor);
     }
@@ -682,7 +682,7 @@ mod tests {
             layer("provenance", "application/vnd.in-toto+json", &provenance),
             layer("sbom", "application/spdx+json", &sbom),
             layer(
-                &format!("licence:{}", &licence_digest[7..]),
+                &format!("licence/{}", &licence_digest[7..]),
                 "text/plain; charset=utf-8",
                 &licence,
             ),

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pos_plugin_release::{
-    verify_oci_closure_v1, BundleAddressV1, LocalOciPublisherV1, PublishOutcomeV1,
-    ReleaseSourceErrorV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
+    verify_oci_closure_v1, BundleAddressV1, LocalOciPublicationErrorV1, LocalOciPublisherV1,
+    PublishOutcomeV1, ReleaseSourceErrorV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -76,7 +76,7 @@ fn bundle() -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
         layer("provenance", "application/vnd.in-toto+json", &provenance),
         layer("sbom", "application/spdx+json", &sbom),
         layer(
-            &format!("licence:{}", &digest(&licence)[7..]),
+            &format!("licence/{}", &digest(&licence)[7..]),
             "text/plain; charset=utf-8",
             &licence,
         ),
@@ -106,6 +106,21 @@ fn bundle() -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
         blobs.insert(digest(&bytes), bytes);
     }
     Ok(verify_oci_closure_v1(address, manifest, blobs)?)
+}
+
+fn create_private_dir(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn write_private_file(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::write(path, bytes)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 #[test]
@@ -150,5 +165,126 @@ fn local_publication_roundtrip_and_index_shape() -> Result<(), Box<dyn std::erro
     }
     fs::write(&index_path, valid)?;
     assert_eq!(publisher.read_verified(&address)?, bundle);
+    fs::set_permissions(&index_path, fs::Permissions::from_mode(0o644))?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    fs::set_permissions(&index_path, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(&root.0, fs::Permissions::from_mode(0o755))?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::InvalidLayout)
+    );
+    fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[test]
+fn recovery_revalidates_indexed_and_unindexed_finals() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let bundle = bundle()?;
+    let address = bundle.address().clone();
+    assert_eq!(
+        publisher.publish(&bundle)?,
+        PublishOutcomeV1::Published(address.clone())
+    );
+
+    let final_path = root.0.join("releases").join(&address.digest()[7..]);
+    let layout = final_path.join("oci-layout");
+    fs::write(&layout, b"bad")?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    fs::write(&layout, b"{\"imageLayoutVersion\":\"1.0.0\"}\n")?;
+
+    let release_index = final_path.join("index.json");
+    let valid_release_index = fs::read(&release_index)?;
+    fs::write(&release_index, b"{}")?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    fs::write(&release_index, valid_release_index)?;
+
+    let owner_marker = final_path.join("OWNER");
+    let valid_owner = fs::read(&owner_marker)?;
+    fs::write(&owner_marker, b"bad owner")?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    fs::write(&owner_marker, valid_owner)?;
+
+    let root_index = root.0.join("published.json");
+    fs::write(&root_index, b"{\"addresses\":[],\"version\":1}")?;
+    let report = publisher.recover_all()?;
+    assert_eq!(report.committed, vec![address.clone()]);
+    assert_eq!(publisher.read_verified(&address)?, bundle);
+    Ok(())
+}
+
+#[test]
+fn partial_owned_staging_is_removed_and_bad_owner_is_quarantined(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let address = bundle()?.address().clone();
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let staging = root
+        .0
+        .join("releases")
+        .join(format!(".{}.staging.{nonce}", &address.digest()[7..]));
+    create_private_dir(&staging)?;
+    write_private_file(
+        &staging.join("OWNER"),
+        format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes(),
+    )?;
+    let blobs = staging.join("blobs");
+    create_private_dir(&blobs)?;
+    let sha256 = blobs.join("sha256");
+    create_private_dir(&sha256)?;
+    write_private_file(&sha256.join("0".repeat(64)), b"partial")?;
+    let report = publisher.recover_all()?;
+    assert_eq!(report.removed_staging, 1);
+    assert!(!staging.exists());
+
+    create_private_dir(&staging)?;
+    write_private_file(&staging.join("OWNER"), b"wrong owner")?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::RecoveryRequired)
+    );
+    let quarantine = root.0.join("quarantine");
+    let mut retained = fs::read_dir(&quarantine)?;
+    let retained_path = retained
+        .next()
+        .ok_or("missing quarantined staging")??
+        .path();
+    assert!(retained.next().is_none());
+    fs::remove_dir_all(retained_path)?;
+    assert_eq!(publisher.recover_all()?.removed_staging, 0);
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::NotFound)
+    );
     Ok(())
 }
