@@ -3196,7 +3196,7 @@ mod tests {
                 let _result = sender.with_protected_effect_fence(
                     timeline,
                     super::ErasureProtectedOperationV1::ProposedAction,
-                    &mut |_sender| panic!("poison this test host"),
+                    &mut |_sender| std::panic::resume_unwind(Box::new("poison this test host")),
                 );
             }))
         };
