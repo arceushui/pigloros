@@ -316,8 +316,9 @@ pub use world_dependency_directory::{
     MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1, MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
 };
 pub use world_history::{
-    WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1, WorldHistoryBranchInputV1,
-    WorldHistoryBranchV1, WorldHistoryChildRecordRefV1, WorldHistoryChildV1, WorldHistoryErrorV1,
+    WorldEventOccurrenceV1, WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1,
+    WorldHistoryBranchInputV1, WorldHistoryBranchV1, WorldHistoryChildRecordRefV1,
+    WorldHistoryChildV1, WorldHistoryErrorV1, MAX_WORLD_EVENT_OCCURRENCE_BYTES_V1,
     MAX_WORLD_EVENT_PAGE_BYTES_V1, MAX_WORLD_EVENT_PAGE_ROWS_V1, MAX_WORLD_EVENT_TYPE_BYTES_V1,
     MAX_WORLD_HISTORY_BRANCH_BYTES_V1, MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1,
     MAX_WORLD_HISTORY_HEIGHT_V1,
