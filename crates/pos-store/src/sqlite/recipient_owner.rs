@@ -851,26 +851,33 @@ mod tests {
     #[test]
     fn recipient_custody_sync_failures_leave_enrollment_and_destruction_unfinalized(
     ) -> Result<(), CoreError> {
-        let (_temporary, mut store, owner) = owner_fixture()?;
-        fail_fsync_at(0);
-        assert!(store.enroll_recipient_key(&owner).is_err());
-        clear_fsync_fault();
-        assert!(store.recover_recipient_keys(&owner)?.is_empty());
+        for failure in [0, 1] {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            fail_fsync_at(failure);
+            assert!(store.enroll_recipient_key(&owner).is_err());
+            clear_fsync_fault();
+            assert!(store.recover_recipient_keys(&owner)?.is_empty());
+        }
 
-        let descriptor = store.enroll_recipient_key(&owner)?;
-        fail_fsync_at(0);
-        assert!(store
-            .destroy_recipient_key(
-                &owner,
-                descriptor.identity().epoch,
-                pos_core::Hash::from_bytes([47; 32])
-            )
-            .is_err());
-        clear_fsync_fault();
-        let registry = store
-            .load_key_registry()?
-            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
-        assert!(registry.tombstone(descriptor.identity()).is_none());
+        for failure in [0, 1] {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            let descriptor = store.enroll_recipient_key(&owner)?;
+            let authorization = pos_core::Hash::from_bytes([47; 32]);
+            fail_fsync_at(failure);
+            assert!(store
+                .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
+                .is_err());
+            clear_fsync_fault();
+            let registry = store
+                .load_key_registry()?
+                .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+            assert!(registry.tombstone(descriptor.identity()).is_none());
+            if failure == 1 {
+                assert!(store
+                    .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
+                    .is_err());
+            }
+        }
         Ok(())
     }
 }
