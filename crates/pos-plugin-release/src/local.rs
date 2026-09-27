@@ -49,6 +49,7 @@ enum PublicationFaultPointV1 {
     QuarantineDirectorySync,
     QuarantineRootSync,
     RecoveryCleanupSync,
+    NthSync(usize),
 }
 
 #[cfg(test)]
@@ -56,6 +57,7 @@ thread_local! {
     static PUBLICATION_FAULT: std::cell::Cell<Option<PublicationFaultPointV1>> = const {
         std::cell::Cell::new(None)
     };
+    static SYNC_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -74,6 +76,28 @@ fn injected_fault(point: PublicationFaultPointV1) -> Result<(), LocalOciPublicat
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn fault_selected(point: PublicationFaultPointV1) -> bool {
     PUBLICATION_FAULT.with(|fault| fault.get() == Some(point))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn sync_fault_selected(point: Option<PublicationFaultPointV1>) -> bool {
+    if point.is_some_and(fault_selected) {
+        return true;
+    }
+    PUBLICATION_FAULT.with(|fault| match fault.get() {
+        Some(PublicationFaultPointV1::NthSync(target)) => SYNC_ATTEMPTS.with(|attempts| {
+            let current = attempts.get();
+            attempts.set(current + 1);
+            current == target
+        }),
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn reset_sync_attempts() {
+    SYNC_ATTEMPTS.with(|attempts| attempts.set(0));
 }
 
 #[cfg(test)]
@@ -101,6 +125,17 @@ macro_rules! faulted_io {
             $operation
         }
     }};
+}
+
+macro_rules! faulted_sync {
+    ($point:expr_2021, $file:expr_2021, $error:expr_2021) => {
+        faulted_io!(
+            sync_fault_selected($point),
+            rustix::io::Errno::IO,
+            fs::fsync($file)
+        )
+        .map_err(|_| $error)
+    };
 }
 
 fn random_nonce_hex() -> Result<String, LocalOciPublicationErrorV1> {
@@ -315,9 +350,17 @@ impl LocalOciPublisherV1 {
         let indexed =
             parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let removed_staging = self.recover_staging(&releases, &indexed)?;
-        fs::fsync(&releases).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        faulted_sync!(
+            None,
+            &releases,
+            LocalOciPublicationErrorV1::RecoveryRequired
+        )?;
         let removed_next_index = self.recover_next_index()?;
-        fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        faulted_sync!(
+            None,
+            &self.root,
+            LocalOciPublicationErrorV1::RecoveryRequired
+        )?;
         let finals = directory_entries(&releases)?
             .filter(|name| !name.starts_with('.'))
             .collect::<Vec<_>>();
@@ -440,7 +483,7 @@ impl LocalOciPublisherV1 {
             }
             #[cfg(test)]
             injected_fault(PublicationFaultPointV1::RecoveryCleanupSync)?;
-            fs::fsync(releases).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            faulted_sync!(None, releases, LocalOciPublicationErrorV1::RecoveryRequired)?;
             Ok(1)
         } else {
             Ok(0)
@@ -469,10 +512,18 @@ impl LocalOciPublisherV1 {
             }
             #[cfg(test)]
             injected_fault(PublicationFaultPointV1::RecoveryRootSyncBeforeNextIndexRemoval)?;
-            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            faulted_sync!(
+                None,
+                &self.root,
+                LocalOciPublicationErrorV1::RecoveryRequired
+            )?;
             fs::unlinkat(&self.root, name, AtFlags::empty())
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            faulted_sync!(
+                None,
+                &self.root,
+                LocalOciPublicationErrorV1::RecoveryRequired
+            )?;
             Ok(true)
         } else {
             Ok(false)
@@ -1336,9 +1387,24 @@ mod tests {
         bundle: &VerifiedReleaseBundleV1,
         point: PublicationFaultPointV1,
     ) -> Result<PublishOutcomeV1, LocalOciPublicationErrorV1> {
+        reset_sync_attempts();
         PUBLICATION_FAULT.with(|fault| fault.set(Some(point)));
         let outcome = publisher.publish(bundle);
         PUBLICATION_FAULT.with(|fault| fault.set(None));
+        reset_sync_attempts();
+        outcome
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recover_with_nth_sync_fault(
+        publisher: &LocalOciPublisherV1,
+        target: usize,
+    ) -> Result<RecoveryReportV1, LocalOciPublicationErrorV1> {
+        reset_sync_attempts();
+        PUBLICATION_FAULT.with(|fault| fault.set(Some(PublicationFaultPointV1::NthSync(target))));
+        let outcome = publisher.recover_all();
+        PUBLICATION_FAULT.with(|fault| fault.set(None));
+        reset_sync_attempts();
         outcome
     }
 
@@ -1426,6 +1492,28 @@ mod tests {
             PublishOutcomeV1::Published(address)
         );
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recovery_sync_failures_are_fail_closed_and_retryable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for target in 0..2 {
+            let root = private_root("recovery-nth-sync")?;
+            let publisher = LocalOciPublisherV1::open(&root)?;
+            let bundle = bundle()?;
+            assert_eq!(
+                publish_with_fault(&publisher, &bundle, PublicationFaultPointV1::ReadyWrite),
+                Err(LocalOciPublicationErrorV1::Io)
+            );
+            assert_eq!(
+                recover_with_nth_sync_fault(&publisher, target),
+                Err(LocalOciPublicationErrorV1::RecoveryRequired)
+            );
+            assert!(publisher.recover_all()?.committed.is_empty());
+            std::fs::remove_dir_all(root)?;
+        }
         Ok(())
     }
 
