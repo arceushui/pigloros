@@ -345,8 +345,9 @@ impl Drop for FixtureGuard {
     }
 }
 
-fn replay_registry(erasure_gate: Arc<dyn pos_core::ErasureGate>) -> ProjectionRegistry {
-    let mut registry = ProjectionRegistry::new().with_erasure_gate(erasure_gate);
+fn replay_registry() -> ProjectionRegistry {
+    let mut registry = ProjectionRegistry::new()
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     registry.register("observation", Box::new(EntityStateProjection));
     registry.register("society", Box::new(SocietyReducer));
     registry.register("agent", Box::new(AgentReducer));
@@ -451,7 +452,6 @@ struct MultiRateScenario {
     fast_entity: EntityId,
     slow_entity: EntityId,
     pinned_wall_time: WallTime,
-    erasure_gate: Arc<dyn pos_core::ErasureGate>,
     fast_decisions: Arc<AtomicUsize>,
     slow_decisions: Arc<AtomicUsize>,
     probe_log: Arc<Mutex<Vec<u64>>>,
@@ -479,7 +479,6 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
-    let erasure_gate = host.containment_gate();
     let timeline = {
         let mut sender = host.command_sender().test_ok()?;
         let timeline = sender.create_timeline("multi-rate-e2e").test_ok()?;
@@ -544,7 +543,6 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         fast_entity,
         slow_entity,
         pinned_wall_time,
-        erasure_gate,
         fast_decisions: Arc::new(AtomicUsize::new(0)),
         slow_decisions: Arc::new(AtomicUsize::new(0)),
         probe_log: Arc::new(Mutex::new(Vec::new())),
@@ -873,7 +871,7 @@ fn assert_projection_state(
         Some(EVENT_TYPE_ACTION)
     );
     let events = session.source_events().test_ok()?;
-    let mut replayed = replay_registry(Arc::clone(&scenario.erasure_gate));
+    let mut replayed = replay_registry();
     replayed.fold_events(&events);
     snapshot_json(&replayed, scenario.timeline)
 }
@@ -902,7 +900,7 @@ fn assert_replay(
         stored[1].wall_time > stored[2].wall_time,
         "sequence order must deliberately conflict with wall-clock order"
     );
-    let mut first_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
+    let mut first_replay = replay_registry();
     first_replay.fold_events(&stored);
     let second_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
@@ -912,7 +910,7 @@ fn assert_replay(
     second_store
         .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok()?;
-    let mut second_replay = replay_registry(Arc::clone(&scenario.erasure_gate));
+    let mut second_replay = replay_registry();
     let second_events = second_store
         .read(scenario.timeline, SeqRange::all())
         .test_ok()?;
