@@ -19266,114 +19266,113 @@ mod tests {
         assert_eq!(reopened.load_key_registry().test_ok(), Some(registry));
     }
 
+    #[derive(Clone, Copy)]
+    enum CompetingMutation {
+        Rotate,
+        BeginDestruction,
+    }
+
     #[test]
     fn historical_decryption_holds_registry_lock_through_callback() {
-        #[derive(Clone, Copy)]
-        enum CompetingMutation {
-            Rotate,
-            BeginDestruction,
-        }
-
-        let old = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
-        let current = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2);
         for mutation in [
             CompetingMutation::Rotate,
             CompetingMutation::BeginDestruction,
         ] {
-            let database = tempfile::NamedTempFile::new().test_ok();
-            let path = database.path().to_str().test_ok();
-            let mut registry = KeyRegistryStateV1::new();
-            registry
-                .register_key(KeyRegistrationV1::new(old, Hash::from_bytes([1; 32]), None))
-                .test_ok();
-            let mut rotated = registry.clone();
-            rotated
-                .register_key(KeyRegistrationV1::new(
-                    current,
-                    Hash::from_bytes([2; 32]),
-                    None,
-                ))
-                .test_ok();
-            let request = KeyDestructionRequestV1::new(
-                old,
-                Hash::from_bytes([1; 32]),
-                Hash::from_bytes([3; 32]),
-            );
-            let mut setup = open_store_at(path);
-            setup.save_key_registry(&registry).test_ok();
-            drop(setup);
+            check_historical_decryption_lock(mutation);
+        }
+    }
 
-            let mut decrypting_store = open_store_at(path);
-            let mut mutating_store = open_store_at(path);
-            mutating_store.conn.busy_timeout(Duration::ZERO).test_ok();
-            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            let (mutation_tx, mutation_rx) = std::sync::mpsc::channel();
-            let rotated_for_mutation = &rotated;
-            let (decryption_result, mutation_result) = std::thread::scope(|scope| {
-                let decryption = scope.spawn(move || {
-                    decrypting_store.with_decryption_authorization(
-                        old,
-                        Hash::from_bytes([1; 32]),
-                        || {
-                            entered_tx.send(()).test_ok();
-                            release_rx.recv().test_ok();
-                            "plaintext"
-                        },
-                    )
-                });
-                let entered = entered_rx.recv_timeout(Duration::from_secs(5));
-                if entered.is_err() {
-                    assert!(release_tx.send(()).is_ok(), "callback must be released");
-                }
-                assert!(
-                    entered.is_ok(),
-                    "decryption callback did not start: {entered:?}"
-                );
+    fn check_historical_decryption_lock(mutation: CompetingMutation) {
+        let old = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
+        let current = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2);
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok();
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(old, Hash::from_bytes([1; 32]), None))
+            .test_ok();
+        let mut rotated = registry.clone();
+        rotated
+            .register_key(KeyRegistrationV1::new(
+                current,
+                Hash::from_bytes([2; 32]),
+                None,
+            ))
+            .test_ok();
+        let request =
+            KeyDestructionRequestV1::new(old, Hash::from_bytes([1; 32]), Hash::from_bytes([3; 32]));
+        let mut setup = open_store_at(path);
+        setup.save_key_registry(&registry).test_ok();
+        drop(setup);
 
-                let mutation = scope.spawn(move || {
-                    let result = match mutation {
-                        CompetingMutation::Rotate => {
-                            mutating_store.save_key_registry(rotated_for_mutation)
-                        }
-                        CompetingMutation::BeginDestruction => mutating_store
-                            .begin_key_registry_destruction(request)
-                            .map(|_| ()),
-                    };
-                    mutation_tx.send(result).test_ok();
-                });
-                let mutation_result = mutation_rx.recv_timeout(Duration::from_secs(5));
-                release_tx.send(()).test_ok();
-                let decryption_result = decryption.join().test_ok();
-                mutation.join().test_ok();
-                (decryption_result, mutation_result)
+        let mut decrypting_store = open_store_at(path);
+        let mut mutating_store = open_store_at(path);
+        mutating_store.conn.busy_timeout(Duration::ZERO).test_ok();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (mutation_tx, mutation_rx) = std::sync::mpsc::channel();
+        let rotated_for_mutation = &rotated;
+        let (decryption_result, mutation_result) = std::thread::scope(|scope| {
+            let decryption = scope.spawn(move || {
+                decrypting_store.with_decryption_authorization(
+                    old,
+                    Hash::from_bytes([1; 32]),
+                    || {
+                        entered_tx.send(()).test_ok();
+                        release_rx.recv().test_ok();
+                        "plaintext"
+                    },
+                )
             });
-            assert_eq!(decryption_result, Ok("plaintext"));
-            assert!(mutation_result
-                .test_ok()
-                .is_err_and(|error| error.to_string().contains("database is locked")));
+            let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+            if entered.is_err() {
+                assert!(release_tx.send(()).is_ok(), "callback must be released");
+            }
+            assert!(
+                entered.is_ok(),
+                "decryption callback did not start: {entered:?}"
+            );
 
-            let mut verify = open_store_at(path);
-            assert_eq!(verify.load_key_registry().test_ok(), Some(registry));
-            match mutation {
-                CompetingMutation::Rotate => {
-                    verify.save_key_registry(&rotated).test_ok();
-                    assert_eq!(
-                        verify.with_decryption_authorization(
-                            old,
-                            Hash::from_bytes([1; 32]),
-                            || { "old plaintext" }
-                        ),
-                        Ok("old plaintext")
-                    );
-                }
-                CompetingMutation::BeginDestruction => {
-                    verify.begin_key_registry_destruction(request).test_ok();
-                    assert_eq!(
-                        verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {}),
-                        Err(KeyRegistryErrorV1::DestructionPending)
-                    );
-                }
+            let mutation = scope.spawn(move || {
+                let result = match mutation {
+                    CompetingMutation::Rotate => {
+                        mutating_store.save_key_registry(rotated_for_mutation)
+                    }
+                    CompetingMutation::BeginDestruction => mutating_store
+                        .begin_key_registry_destruction(request)
+                        .map(|_| ()),
+                };
+                mutation_tx.send(result).test_ok();
+            });
+            let mutation_result = mutation_rx.recv_timeout(Duration::from_secs(5));
+            release_tx.send(()).test_ok();
+            let decryption_result = decryption.join().test_ok();
+            mutation.join().test_ok();
+            (decryption_result, mutation_result)
+        });
+        assert_eq!(decryption_result, Ok("plaintext"));
+        assert!(mutation_result
+            .test_ok()
+            .is_err_and(|error| error.to_string().contains("database is locked")));
+
+        let mut verify = open_store_at(path);
+        assert_eq!(verify.load_key_registry().test_ok(), Some(registry));
+        match mutation {
+            CompetingMutation::Rotate => {
+                verify.save_key_registry(&rotated).test_ok();
+                assert_eq!(
+                    verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {
+                        "old plaintext"
+                    }),
+                    Ok("old plaintext")
+                );
+            }
+            CompetingMutation::BeginDestruction => {
+                verify.begin_key_registry_destruction(request).test_ok();
+                assert_eq!(
+                    verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {}),
+                    Err(KeyRegistryErrorV1::DestructionPending)
+                );
             }
         }
     }
