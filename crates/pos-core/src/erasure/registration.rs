@@ -14,6 +14,17 @@ pub const MAX_ARTIFACT_REGISTRATION_KEYS_V1: usize = 2_048;
 /// Maximum direct child edges in one ARD1 record.
 pub const MAX_ARTIFACT_REGISTRATION_CHILDREN_V1: usize = 2_048;
 
+// Under the direct-list and OwnerIdV1 bounds, even the maximum encoding fits
+// the one-MiB record ceiling. The decoder still rejects overlong input first.
+const _: () = assert!(
+    1 + 5 + 1 + 1 + 34 + 34 + 1 + 1 + 1 + 1 + 5
+        + 3
+        + (1 + 2 + 128 + 1 + 9 + 34 + 1) * MAX_ARTIFACT_REGISTRATION_KEYS_V1
+        + 3
+        + (1 + 1 + 34 + 34 + 1) * MAX_ARTIFACT_REGISTRATION_CHILDREN_V1
+        <= MAX_ARTIFACT_REGISTRATION_BYTES_V1
+);
+
 /// A closed structural failure; it carries no protected artifact data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ArtifactRegistrationErrorV1 {
@@ -69,9 +80,6 @@ impl ArtifactRegistrationV1 {
     pub fn new(fields: ArtifactRegistrationFieldsV1) -> Result<Self, ArtifactRegistrationErrorV1> {
         validate_fields(&fields)?;
         let canonical_cbor = encode_registration(&fields);
-        if canonical_cbor.len() > MAX_ARTIFACT_REGISTRATION_BYTES_V1 {
-            return Err(ArtifactRegistrationErrorV1::FieldOutOfBounds);
-        }
         let address = domain_hash(b"PiglorOS.ArtifactRegistration.v1\0", &canonical_cbor);
         Ok(Self {
             fields,
@@ -209,7 +217,7 @@ fn validate_fields(
     Ok(())
 }
 
-fn child_sort_key(edge: &ArtifactChildEdgeV1) -> (u64, Hash, Hash) {
+const fn child_sort_key(edge: &ArtifactChildEdgeV1) -> (u64, Hash, Hash) {
     (
         edge.artifact_class.code(),
         edge.artifact_digest,
@@ -282,19 +290,19 @@ fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     match value {
         0..=23 => out.push((major << 5) | bytes[7]),
         24..=255 => {
-            out.push((major << 5) | 24);
+            out.push((major << 5) | 0x18);
             out.push(bytes[7]);
         }
         256..=65_535 => {
-            out.push((major << 5) | 25);
+            out.push((major << 5) | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
         65_536..=4_294_967_295 => {
-            out.push((major << 5) | 26);
+            out.push((major << 5) | 0x1a);
             out.extend_from_slice(&bytes[4..]);
         }
         _ => {
-            out.push((major << 5) | 27);
+            out.push((major << 5) | 0x1b);
             out.extend_from_slice(&bytes);
         }
     }
