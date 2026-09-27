@@ -2,14 +2,10 @@
 
 use super::{
     ErasureArtifactClassV1, ErasureErrorV1, ErasureKeyRoleV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ERASURE_MAX_TARGETS,
+    ErasureReplayClaimV1, ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS, ERASURE_MAX_TARGETS,
 };
 use crate::{Hash, KeyIdentityV1, KeyTombstoneV1};
 use std::collections::BTreeMap;
-
-// Pure diagnostic inputs have their own work bound; ARD1 registration applies
-// its separate per-record and graph bounds before any authoritative release.
-const MAX_DIAGNOSTIC_KEY_INPUTS: usize = 4_096;
 
 /// Data classification fixed before an artifact is committed.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -437,8 +433,8 @@ impl ReplayClaimEvaluatorV1 {
         dependencies: &[ArtifactKeyDependencyV1],
         committed_facts: &[KeyTombstoneV1],
     ) -> Result<ArtifactDestructionDispositionV1, ErasureErrorV1> {
-        if dependencies.len() > MAX_DIAGNOSTIC_KEY_INPUTS
-            || committed_facts.len() > MAX_DIAGNOSTIC_KEY_INPUTS
+        if dependencies.len() > ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS
+            || committed_facts.len() > ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }

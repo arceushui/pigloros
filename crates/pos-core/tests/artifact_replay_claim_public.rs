@@ -3,7 +3,8 @@ use pos_core::{
     ArtifactRedactionStateV1, ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1,
     ErasureErrorV1, ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
-    KeyTombstoneV1, PublicKey, RegisteredArtifactV1, ReplayClaimEvaluatorV1, ERASURE_MAX_TARGETS,
+    KeyTombstoneV1, PublicKey, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
+    ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS, ERASURE_MAX_TARGETS,
 };
 
 trait TestValueExt<T> {
@@ -279,7 +280,7 @@ fn pure_policy_accepts_multiple_dependencies_and_bounds_input() {
     assert_eq!(
         ReplayClaimEvaluatorV1::evaluate_artifact_destruction(
             artifact,
-            &vec![required; 4_097],
+            &vec![required; ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS + 1],
             &[]
         ),
         Err(ErasureErrorV1::ScopeInvalid)
@@ -288,7 +289,7 @@ fn pure_policy_accepts_multiple_dependencies_and_bounds_input() {
         ReplayClaimEvaluatorV1::evaluate_artifact_destruction(
             artifact,
             &[required],
-            &vec![required_fact; 4_097]
+            &vec![required_fact; ERASURE_MAX_DIAGNOSTIC_KEY_INPUTS + 1]
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
