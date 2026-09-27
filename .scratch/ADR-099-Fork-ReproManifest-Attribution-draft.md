@@ -1,4 +1,4 @@
-**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 5
+**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 6
 
 Related: #400 · #201 · #292 · [[ADR-041_Scenario_Room_Configuration_and_Reproducible_Fork_Inputs]] · [[ADR-065_KeyRegistry_Authorized_Signing_After_Destruction]] · [[ADR-091_Subject_Key_Custody_and_Historical_Decryption]] · [[ADR-060_Subject_Erasure_and_Replay_Claim_Degradation]]
 
@@ -334,6 +334,101 @@ creator signing identity, private-material fingerprint, derived public key,
 and an expected durable registry snapshot. It does not give it manifest
 provenance fields or signed bytes.
 
+The publication authority consists of exactly three immutable deterministic-
+CBOR records plus one derived public receipt:
+
+```cddl
+fork-publication-operation-v1 = [
+  "FPO1",                      ; 0: marker
+  1,                           ; 1: version
+  bstr .size 32,               ; 2: publication operation_id
+  bstr .size 16,               ; 3: child Fork TimelineId
+  uint,                        ; 4: final logical_head
+  bstr .size 32,               ; 5: final chain head hash
+  bstr .size 32,               ; 6: ForkAdmissionRecordV1 digest
+  tstr .size (1..128),         ; 7: creator OwnerIdV1
+  1,                           ; 8: SubjectAttributionSigning role code
+  1..18446744073709551615,    ; 9: signing epoch
+  bstr .size 32,               ; 10: private-material digest
+  bstr .size 32,               ; 11: Ed25519 public verification key
+  bstr .size 32,               ; 12: authorized registry snapshot digest
+  bstr .size 32,               ; 13: signed-manifest record_id
+  authority-origin-v1          ; 14: local / verified-import origin
+]
+
+fork-publication-binding-v1 = [
+  "FPB1",                      ; 0: marker
+  1,                           ; 1: version
+  bstr .size 16,               ; 2: child Fork TimelineId
+  uint,                        ; 3: final logical_head
+  bstr .size 32,               ; 4: publication operation_id
+  bstr .size 32                ; 5: signed-manifest record_id
+]
+
+fork-publication-artifact-v1 = [
+  "FPA1",                      ; 0: marker
+  1,                           ; 1: version
+  bstr .size 32,               ; 2: signed-manifest record_id
+  bstr .size 32,               ; 3: publication operation_id
+  bstr .size (1..16640)        ; 4: complete canonical FSM1 outer bytes
+]
+
+publication-receipt-v1 = [
+  "FPR1",                      ; 0: marker
+  1,                           ; 1: version
+  bstr .size 32,               ; 2: publication operation_id
+  bstr .size 16,               ; 3: child Fork TimelineId
+  uint,                        ; 4: final logical_head
+  bstr .size 32                ; 5: signed-manifest record_id
+]
+```
+
+All arrays use the strict encoding rules already defined. FPO1, FPB1, FPA1,
+and FPR1 are bounded to 1,024, 192, 17,024, and 192 bytes respectively. The
+registry snapshot digest is
+`BLAKE3(ASCII("pigloros/key-registry-snapshot/v1") ||
+canonical_KeyRegistryStateV1_bytes)`; the publication prerequisite must provide
+one strict deterministic codec for those complete validated persistence bytes.
+The signed-manifest `record_id` remains exactly the digest over complete FSM1
+bytes defined above. FPO1/FPB1/FPA1 do not participate in that digest and none
+is signed or nested in FSM1, so the dependency graph is acyclic:
+
+```text
+FAR1 -> FRM1 -> FSM1 outer bytes -> record_id
+                                  -> FPA1
+record_id + operation_id + Fork/head -> FPO1 + FPB1 -> derived FPR1
+```
+
+The durable keys are: FPO1 primary key `operation_id`; FPB1 primary/unique key
+`(child_id, final_logical_head)`; FPA1 primary key `record_id`. FPO1 also has a
+unique `record_id`; FPA1 has a unique `operation_id`; FPB1's `operation_id` and
+`record_id` each reference the one matching FPO1/FPA1 pair. For every committed
+operation, all duplicate fields across the three records must be byte-equal.
+The complete FSM1 bytes exist only in FPA1. FPB1 stores no manifest bytes.
+FPR1 is constructed from committed FPO1/FPB1 fields after commit; it is not a
+fourth authority row and a caller-supplied FPR1 is never trusted. Operation and
+record IDs are nonzero. The three rows are append-only: update and deletion are
+forbidden while the child Fork or any Replay evidence exists.
+
+Before new authorization, `commit_authorized` performs the recovery lookup by
+operation ID described below. A complete exact match returns derived FPR1
+without checking current active status and without invoking the callback; this
+is recovery of an issuance already authorized and committed, not new signing.
+An existing unequal operation or occupied `(child_id, final_logical_head)` key
+is `Conflict`; an orphan/partial graph is `CorruptOrConflicting`. Only a wholly
+absent graph proceeds to the new-publication sequence.
+
+```text
+commit request(operation_id, child, head, identity, material, key, snapshot)
+  -> complete matching FPO1 + FPB1 + FPA1 -> derive/return FPR1 (0 callbacks)
+  -> partial, orphaned, or unequal graph -> fail closed (0 callbacks)
+  -> wholly absent graph -> held registry authorization -> sign -> atomic insert
+                                                     -> commit -> derive FPR1
+indeterminate commit -> repeat the same operation-id lookup; never accept FPR1
+                       supplied by the caller and never re-sign a found graph
+Replay(child, head) -> FPB1 -> matching FPO1 + FPA1 -> locally derived FPR1
+```
+
 `commit_authorized` owns the transaction and callback. Under the same
 serialization domain used by registration, rotation, and destruction, it:
 
@@ -358,10 +453,12 @@ serialization domain used by registration, rotation, and destruction, it:
    with the held authorization and complete canonical inner bytes;
 5. the callback signs ADR-065's exact preimage for the held identity and
    returns only the signature;
-6. validates the outer bytes and inserts the immutable artifact, its record ID,
-   and a unique `(Fork TimelineId, final logical_head)` binding; and
-7. commits before returning only a publication receipt containing the record
-   ID. The caller reads committed bytes through a separate receipt-bound read.
+6. validates the outer bytes, computes `record_id`, constructs exact FPO1,
+   FPB1, and FPA1 bytes, validates every duplicate and unique-key relation, and
+   inserts all three rows; and
+7. atomically commits all three rows before constructing and returning exact
+   `PublicationReceiptV1` (FPR1). The caller reads committed FSM1 bytes only
+   through the publication read below.
 
 `HeldRegistryAuthorizationV1` exposes only identity, public key,
 private-material digest, and immutable snapshot digest. It has no store handle
@@ -381,16 +478,21 @@ The publisher does not collapse these into `SigningFailed`. A callback error is
 `SigningFailed` only after active authorization succeeded.
 
 No signature or uncommitted bytes escape on callback, validation, insertion,
-or commit failure. Rollback leaves no artifact or binding. The operation ID is
-idempotent only when creator identity, admission digest, final Fork head/hash,
-inner bytes, outer bytes, record ID, and binding all match exactly; any partial,
-missing, or conflicting state fails closed. Recovery looks up that stable
-operation ID and returns the existing receipt only after revalidating every
-binding. It never signs again to repair an ambiguous result.
+or commit failure. Rollback leaves no FPO1, FPB1, or FPA1. Retry/recovery first
+looks up FPO1 by operation ID under a consistent snapshot. If absent, it also
+requires no FPB1/FPA1 references before a fresh attempt. If present, it joins
+the single FPB1 and FPA1, strictly decodes all three records, recomputes FPA1's
+record ID, and returns derived FPR1 only when the caller's operation ID,
+child/head, identity, material/public key, expected registry snapshot digest,
+and every stored duplicate match. It never invokes the callback during this
+committed recovery. Missing, partial, orphaned, duplicate, or unequal records
+are `CorruptOrConflicting`; operation-ID reuse with different request fields is
+`Conflict`. Recovery never signs to repair ambiguous state.
 
-The exact registry errors above precede head/provenance errors; those precede
-callback `SigningFailed`; signing precedes outer validation/insertion;
-commit/rollback errors are last and never become success. Recovery states are exactly `Absent`,
+After the operation/binding recovery preflight, the exact registry errors above
+precede head/provenance errors; those precede callback `SigningFailed`;
+signing precedes outer validation/insertion; commit/rollback errors are last
+and never become success. Recovery states are exactly `Absent`,
 `Committed(receipt)`, or `CorruptOrConflicting`; there is no durable `Pending`
 because operation, binding, and artifact share one transaction. An
 indeterminate commit is recovered by operation-ID lookup and full validation.
@@ -422,6 +524,10 @@ The public boundary vectors are normative:
 | Signer failure | authorization and provenance valid; callback fails | `SigningFailed`; 1, rollback |
 | Destruction wins lock | pending/destruction state committed before publisher acquires the boundary | `DestructionPending` or `Destroyed`; 0 |
 | Publication wins lock | publisher acquires boundary first and commits | committed receipt; callback exactly once; later destruction retains verification key |
+| Exact committed retry | FPO1/FPB1/FPA1 graph and request all match | derive the same FPR1; callback 0 |
+| Operation conflict | operation ID exists but any request/stored field differs | `Conflict`; callback 0 |
+| Partial/orphan graph | any one of FPO1/FPB1/FPA1 is missing or independently present | `CorruptOrConflicting`; callback 0 |
+| Indeterminate commit | first call loses commit outcome | operation-ID recovery yields exact FPR1 or fail closed; never re-signs a found graph |
 
 The signed manifest is a sidecar artifact, **outside the Fork Timeline whose
 head hash it records**. Appending it to that Fork would make the signed head
@@ -432,15 +538,19 @@ reject conflicting replacement. A separate audit Timeline may reference the
 record ID after publication without altering the signed Fork head.
 
 `ForkManifestPublicationPortV1::read_committed(child_id, final_logical_head)` is
-the sole authorized-issuance read. It returns
-`CommittedForkManifestV1 { receipt, child_id, final_logical_head, record_id,
-outer_bytes }` only from the same immutable local publication tables written by
-`commit_authorized`. Under one consistent read snapshot it requires exactly one
-binding for the key, exactly one artifact for its record ID, equality of the
-binding and artifact operation IDs, and the receipt's exact operation ID,
-record ID, child ID, and final head. Zero rows is `PublicationMissing`; more
-than one, an orphan, or any unequal field is `PublicationConflict`. No API can
-manufacture this committed result from caller bytes or a bare record ID.
+the sole authorized-issuance read. It accepts only that lookup key, not bytes,
+record ID, operation ID, or receipt. Under one consistent read snapshot it
+loads the unique FPB1, follows its exact operation ID to FPO1 and record ID to
+FPA1, strictly decodes all three canonical records, requires every duplicated
+operation/record/Fork/head field to match, recomputes the record ID from FPA1's
+complete FSM1 bytes, and accepts only local authority origin or a #202-verified
+import origin. It then derives FPR1 and returns
+`CommittedForkManifestV1 { receipt, operation, binding, record_id,
+outer_bytes }`; `operation` and `binding` are the validated canonical FPO1 and
+FPB1 values and `outer_bytes` is exactly FPA1 field 4. Zero FPB1 rows is
+`PublicationMissing`; a missing join, extra row, invalid origin, noncanonical
+record, or unequal/recomputed field is `PublicationConflict`. No public
+constructor can manufacture this result.
 
 Human-subject Replay first obtains the authoritative current final logical head
 for the requested child Fork, then calls `read_committed(child_id, head)`. The
@@ -449,11 +559,13 @@ claim is accepted, Replay:
 
 1. recomputes
    `BLAKE3(ASCII("pigloros/fork-signed-manifest/v1") || outer_bytes)` and
-   requires exact equality with both the stored artifact ID and receipt ID;
+   requires exact equality with FPA1 field 2, FPO1 field 13, FPB1 field 5, and
+   FPR1 field 5;
 2. strictly parses and re-encodes FSM1 to the exact stored `outer_bytes`, then
    strictly parses/re-encodes its embedded FRM1 bytes;
-3. requires FSM1's exact stored bytes, FRM1 final Fork ID, and FRM1 final head
-   to equal the committed binding's bytes, child ID, and head; and
+3. requires the parsed stored FSM1 to be FPA1's exact bytes and FRM1's
+   final Fork ID/head to equal FPB1 fields 2/3, FPO1 fields 3/4, and FPR1
+   fields 3/4; and
 4. only then resolves `ForkAdmissionRecordV1` and checks its digest, creator,
    parent/cut/boundary/composition/policy, retained identity-bound public key,
    ADR-065 role signature, authoritative parent/final chain hashes, and total
@@ -464,9 +576,10 @@ untrusted, imported-without-#202-verification, orphaned, byte-mismatched,
 record-ID-mismatched, receipt-mismatched, Fork/head-mismatched, malformed, or
 cryptographically/provenance-invalid sidecar. Structural artifact import and a
 caller-supplied publication receipt are never trusted. A future #202 import
-must authenticate and atomically install the publication binding, exact
-artifact bytes, record ID, receipt, admission, and intervention/origin authority
-under an identity-preserving envelope before this read can return them.
+must authenticate and atomically install exact FPO1, FPB1, and FPA1 records
+together with the admission and intervention/origin authority under an
+identity-preserving envelope; FPR1 is then derived locally from those validated
+rows.
 
 `verify_fork_manifest_signature_only(outer_bytes, public_key)` may be exposed
 for diagnostics and interoperability. It returns only a mathematical result
