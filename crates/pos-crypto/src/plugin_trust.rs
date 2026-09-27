@@ -1010,9 +1010,9 @@ mod tests {
         Value::Bytes(value.to_vec())
     }
 
-    fn encode(value: Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut encoded = Vec::new();
-        ciborium::into_writer(&value, &mut encoded)?;
+        ciborium::into_writer(value, &mut encoded)?;
         Ok(encoded)
     }
 
@@ -1022,7 +1022,7 @@ mod tests {
         signers: &[&SigningKey],
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut message = domain.to_vec();
-        message.extend_from_slice(&encode(Value::Array(fields.clone()))?);
+        message.extend_from_slice(&encode(&Value::Array(fields.clone()))?);
         let mut signatures = signers
             .iter()
             .map(|signer| {
@@ -1038,7 +1038,7 @@ mod tests {
                 .map(|(id, signature)| Value::Array(vec![bytes(id), bytes(signature)]))
                 .collect(),
         ));
-        encode(Value::Array(fields))
+        encode(&Value::Array(fields))
     }
 
     fn root(
@@ -1122,7 +1122,9 @@ mod tests {
         ]
     }
 
-    fn fixture() -> Result<(SigningKey, [u8; 32], Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    type TrustFixture = (SigningKey, [u8; 32], Vec<u8>, Vec<u8>);
+
+    fn fixture() -> Result<TrustFixture, Box<dyn std::error::Error>> {
         let signer = SigningKey::from_bytes(&[7; 32]);
         let publisher = SigningKey::from_bytes(&[8; 32]).verifying_key().to_bytes();
         let root = root(&signer, publisher, 1, None)?;
@@ -1236,7 +1238,7 @@ mod tests {
             verify_plugin_trust_v1(&tampered_anchor, &[&tampered], &[&revocation], 50, 0),
             Err(PluginTrustErrorV1::InvalidSignature)
         ));
-        let mut trailing = root.clone();
+        let mut trailing = root;
         trailing.push(0);
         assert!(matches!(
             PluginTrustRootRecordV1::decode(&trailing),
@@ -1370,7 +1372,7 @@ mod tests {
             PluginRevocationRecordV1::decode(&over_capacity),
             Err(PluginTrustErrorV1::RevocationCapacityExhausted)
         ));
-        let mut noncanonical = root.clone();
+        let mut noncanonical = root;
         assert_eq!(
             &noncanonical[..7],
             &[0x8c, 0x64, b'P', b'T', b'R', b'1', 0x01]
