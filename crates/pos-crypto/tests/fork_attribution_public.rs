@@ -7,8 +7,7 @@ use pos_crypto::{
     fork_attribution::{
         sign_local_fork_manifest_for_identity_from_admission_signature_only,
         sign_local_fork_manifest_from_admission_signature_only,
-        sign_local_fork_manifest_signature_only, verify_local_fork_manifest_signature_only,
-        ForkAttributionSigningErrorV1,
+        verify_local_fork_manifest_signature_only, ForkAttributionSigningErrorV1,
     },
     key_roles::SigningKeyMaterial,
     signing::{generate_keypair, public_key_from_verifying_key, verifying_key_from_public_key},
@@ -206,19 +205,25 @@ fn signature_only_rejects_non_attribution_roles_and_absent_registry_identity(
     let (private, _) = generate_keypair();
     let private = SigningKeyMaterial::new(private);
     let mut registry = KeyRegistryStateV1::new();
-    assert!(sign_local_fork_manifest_signature_only(
-        &mut registry,
-        &private,
-        KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1),
-        manifest.clone(),
-    )
-    .is_err());
-    assert!(sign_local_fork_manifest_signature_only(
-        &mut registry,
-        &private,
-        KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
-        manifest,
-    )
-    .is_err());
+    assert!(
+        sign_local_fork_manifest_for_identity_from_admission_signature_only(
+            &mut registry,
+            &private,
+            KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1),
+            &admission,
+            manifest.clone(),
+        )
+        .is_err()
+    );
+    assert!(
+        sign_local_fork_manifest_for_identity_from_admission_signature_only(
+            &mut registry,
+            &private,
+            KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
+            &admission,
+            manifest,
+        )
+        .is_err()
+    );
     Ok(())
 }

@@ -436,6 +436,13 @@ impl SignedForkReproManifestV1 {
     pub const fn signature(&self) -> Signature {
         self.signature
     }
+    /// Replace the mathematical signature after the admission-bound fields
+    /// have been validated. This does not grant publication authority.
+    #[must_use]
+    pub fn with_signature(mut self, signature: Signature) -> Self {
+        self.signature = signature;
+        self
+    }
     /// Return canonical inner `FRM1` bytes used by ADR-065 role signing.
     #[must_use]
     pub fn manifest_bytes(&self) -> Vec<u8> {
