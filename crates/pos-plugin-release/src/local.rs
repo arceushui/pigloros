@@ -1992,12 +1992,12 @@ mod tests {
             );
             let report = publisher.recover_all()?;
             assert_eq!(report.committed, vec![address.clone()]);
-            let expected_removed_next_index = match point {
+            let expected_removed_next_index = matches!(
+                point,
                 PublicationFaultPointV1::NextIndexWrite
-                | PublicationFaultPointV1::NextIndexSync
-                | PublicationFaultPointV1::IndexRename => true,
-                _ => false,
-            };
+                    | PublicationFaultPointV1::NextIndexSync
+                    | PublicationFaultPointV1::IndexRename
+            );
             assert_eq!(report.removed_next_index, expected_removed_next_index);
             assert_eq!(publisher.read_verified(&address)?, bundle);
             std::fs::remove_dir_all(root)?;
