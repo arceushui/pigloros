@@ -1159,9 +1159,15 @@ fn sqlite_identified_fork_requires_admitted_lineage() -> Result<(), Box<dyn std:
     assert_identified_fork_requires_admitted_lineage(StoreConfig::SqliteInMemory)
 }
 
-#[test]
-fn sqlite_reopen_after_peer_request_reconciles_topology() -> Result<(), Box<dyn std::error::Error>>
-{
+struct SqlitePeerRequestFixture {
+    path: std::path::PathBuf,
+    path_text: String,
+    authority: Arc<TestAuthority>,
+    first_host: ErasureExecutionHostV1,
+    second_host: ErasureExecutionHostV1,
+}
+
+fn sqlite_peer_request_fixture() -> Result<SqlitePeerRequestFixture, Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(
         "pigloros-erasure-topology-request-count-{}.sqlite",
         TimelineId::new()
@@ -1234,13 +1240,39 @@ fn sqlite_reopen_after_peer_request_reconciles_topology() -> Result<(), Box<dyn 
             commands.authorize_erasure_request(request_reference, reference(33)),
         )?;
     }
+    Ok(SqlitePeerRequestFixture {
+        path,
+        path_text,
+        authority,
+        first_host,
+        second_host,
+    })
+}
 
+#[test]
+fn sqlite_reopen_after_peer_request_reconciles_topology() -> Result<(), Box<dyn std::error::Error>>
+{
+    let SqlitePeerRequestFixture {
+        path,
+        path_text,
+        authority,
+        mut first_host,
+        mut second_host,
+    } = sqlite_peer_request_fixture()?;
     {
         let mut commands = test_stage("open stale first host sender", first_host.command_sender())?;
         assert_eq!(
             commands.create_timeline("request-count-refresh-root"),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
+    }
+    assert_eq!(first_host.status(), ErasureHostStatusV1::Poisoned);
+    {
+        let mut reads = test_stage(
+            "read current host after stale root",
+            second_host.read_sender(),
+        )?;
+        assert!(test_stage("confirm stale root was not persisted", reads.timelines())?.is_empty());
     }
     drop(first_host);
     let mut refreshed_host = test_stage(
@@ -1249,7 +1281,7 @@ fn sqlite_reopen_after_peer_request_reconciles_topology() -> Result<(), Box<dyn 
             StoreConfig::Sqlite {
                 path: path_text.clone(),
             },
-            authority,
+            authority.clone(),
             reference(30),
             ERASURE_MAX_INVENTORY_REQUESTS,
         ),
@@ -1265,6 +1297,10 @@ fn sqlite_reopen_after_peer_request_reconciles_topology() -> Result<(), Box<dyn 
         )?
         .id()
     };
+    test_stage(
+        "publish new root in authority",
+        authority.set_timeline(root),
+    )?;
     {
         let mut reads = test_stage(
             "read through refreshed first host",
@@ -1279,6 +1315,26 @@ fn sqlite_reopen_after_peer_request_reconciles_topology() -> Result<(), Box<dyn 
 
     drop(second_host);
     drop(refreshed_host);
+    let mut recovered_host = test_stage(
+        "reopen after root publication",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    {
+        let mut reads = test_stage("read recovered topology", recovered_host.read_sender())?;
+        assert_eq!(
+            test_stage("read root after recovery", reads.timeline(root))?
+                .map(|timeline| timeline.id()),
+            Some(root)
+        );
+    }
+    drop(recovered_host);
     remove_sqlite_store_files(path, &path_text)?;
     Ok(())
 }
