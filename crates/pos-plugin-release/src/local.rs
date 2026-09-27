@@ -1448,6 +1448,24 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recovery_rejects_shape(
+        label: &str,
+        expected: LocalOciPublicationErrorV1,
+        setup: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root(label)?;
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        setup(&root)?;
+        assert_eq!(publisher.recover_all(), Err(expected));
+        let quarantine = root.join("quarantine");
+        for entry in std::fs::read_dir(&quarantine)? {
+            std::fs::remove_dir_all(entry?.path())?;
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn initialization_faults_retry_from_private_root_without_partial_index(
@@ -1666,6 +1684,77 @@ mod tests {
                         .join("sha256")
                         .join(&address.digest()[7..]),
                     b"{\"layers\":[{}]}",
+                )
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recovery_rejects_malformed_staging_and_final_shapes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        recovery_rejects_shape(
+            "recovery-invalid-stage-name",
+            LocalOciPublicationErrorV1::RecoveryRequired,
+            |root| std::fs::create_dir(root.join("releases").join(".invalid-staging")),
+        )?;
+        recovery_rejects_shape(
+            "recovery-invalid-stage-owner",
+            LocalOciPublicationErrorV1::RecoveryRequired,
+            |root| {
+                std::fs::create_dir(root.join("releases").join(format!(
+                    ".{}.staging.{}",
+                    "a".repeat(64),
+                    "b".repeat(32)
+                )))
+            },
+        )?;
+        recovery_rejects_shape(
+            "recovery-invalid-final-name",
+            LocalOciPublicationErrorV1::RecoveryRequired,
+            |root| std::fs::create_dir(root.join("releases").join("invalid-final")),
+        )?;
+        recovery_rejects_shape(
+            "recovery-incomplete-final",
+            LocalOciPublicationErrorV1::RecoveryRequired,
+            |root| std::fs::create_dir(root.join("releases").join("a".repeat(64))),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recovery_rejects_multiple_private_entries_and_bad_next_index(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        recovery_rejects_shape(
+            "recovery-multiple-staging",
+            LocalOciPublicationErrorV1::BoundsExceeded,
+            |root| {
+                std::fs::create_dir(root.join("releases").join(".first"))?;
+                std::fs::create_dir(root.join("releases").join(".second"))
+            },
+        )?;
+        recovery_rejects_shape(
+            "recovery-multiple-final",
+            LocalOciPublicationErrorV1::BoundsExceeded,
+            |root| {
+                std::fs::create_dir(root.join("releases").join("a".repeat(64)))?;
+                std::fs::create_dir(root.join("releases").join("b".repeat(64)))
+            },
+        )?;
+        recovery_rejects_shape(
+            "recovery-invalid-next-index",
+            LocalOciPublicationErrorV1::RecoveryRequired,
+            |root| std::fs::write(root.join(".published.invalid.next"), b"invalid"),
+        )?;
+        recovery_rejects_shape(
+            "recovery-insecure-next-index",
+            LocalOciPublicationErrorV1::RecoveryRequired,
+            |root| {
+                std::fs::write(
+                    root.join(format!(".published.{}.next", "a".repeat(32))),
+                    b"insecure",
                 )
             },
         )?;
