@@ -56,8 +56,14 @@ fn layer(member: &str, media_type: &str, bytes: &[u8]) -> serde_json::Value {
 }
 
 fn bundle() -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
+    bundle_with_component(b"component")
+}
+
+fn bundle_with_component(
+    component: &[u8],
+) -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
     let pmf1 = b"pmf1".to_vec();
-    let component = b"component".to_vec();
+    let component = component.to_vec();
     let wit = b"wit".to_vec();
     let provenance = b"provenance".to_vec();
     let sbom = b"sbom".to_vec();
@@ -124,6 +130,13 @@ fn write_private_file(
     Ok(())
 }
 
+fn assert_one_quarantined(root: &PrivateRoot) -> Result<(), Box<dyn std::error::Error>> {
+    let mut entries = fs::read_dir(root.0.join("quarantine"))?;
+    assert!(entries.next().is_some());
+    assert!(entries.next().is_none());
+    Ok(())
+}
+
 #[test]
 fn local_publication_roundtrip_and_index_shape() -> Result<(), Box<dyn std::error::Error>> {
     let root = PrivateRoot::new()?;
@@ -135,7 +148,7 @@ fn local_publication_roundtrip_and_index_shape() -> Result<(), Box<dyn std::erro
         Err(ReleaseSourceErrorV1::NotFound)
     );
     assert_eq!(
-        publisher.recover(address.clone())?,
+        publisher.recover(&address)?,
         RecoveryOutcomeV1::Unpublished(address.clone())
     );
     assert_eq!(
@@ -144,7 +157,7 @@ fn local_publication_roundtrip_and_index_shape() -> Result<(), Box<dyn std::erro
     );
     assert_eq!(publisher.read_verified(&address)?, bundle);
     assert_eq!(
-        publisher.recover(address.clone())?,
+        publisher.recover(&address)?,
         RecoveryOutcomeV1::Committed(address.clone())
     );
     assert_eq!(
@@ -190,7 +203,8 @@ fn local_publication_roundtrip_and_index_shape() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn recovery_revalidates_indexed_and_unindexed_finals() -> Result<(), Box<dyn std::error::Error>> {
+fn recovery_quarantines_malformed_indexed_and_unindexed_finals(
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = PrivateRoot::new()?;
     let publisher = LocalOciPublisherV1::open(&root.0)?;
     let bundle = bundle()?;
@@ -211,43 +225,90 @@ fn recovery_revalidates_indexed_and_unindexed_finals() -> Result<(), Box<dyn std
         publisher.recover_all(),
         Err(LocalOciPublicationErrorV1::RecoveryRequired)
     );
-    assert_eq!(
-        publisher.recover(address.clone()),
-        Err(LocalOciPublicationErrorV1::RecoveryRequired)
-    );
-    fs::write(&layout, b"{\"imageLayoutVersion\":\"1.0.0\"}\n")?;
+    assert_one_quarantined(&root)?;
 
-    let release_index = final_path.join("index.json");
-    let valid_release_index = fs::read(&release_index)?;
-    fs::write(&release_index, b"{}")?;
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let bundle = bundle()?;
+    let address = bundle.address().clone();
     assert_eq!(
-        publisher.read_verified(&address),
-        Err(ReleaseSourceErrorV1::InvalidLayout)
+        publisher.publish(&bundle)?,
+        PublishOutcomeV1::Published(address.clone())
     );
-    assert_eq!(
-        publisher.recover_all(),
-        Err(LocalOciPublicationErrorV1::RecoveryRequired)
-    );
-    fs::write(&release_index, valid_release_index)?;
-
-    let owner_marker = final_path.join("OWNER");
-    let valid_owner = fs::read(&owner_marker)?;
-    fs::write(&owner_marker, b"bad owner")?;
-    assert_eq!(
-        publisher.read_verified(&address),
-        Err(ReleaseSourceErrorV1::InvalidLayout)
-    );
-    assert_eq!(
-        publisher.recover_all(),
-        Err(LocalOciPublicationErrorV1::RecoveryRequired)
-    );
-    fs::write(&owner_marker, valid_owner)?;
-
     let root_index = root.0.join("published.json");
     fs::write(&root_index, b"{\"addresses\":[],\"version\":1}")?;
+    let final_path = root.0.join("releases").join(&address.digest()[7..]);
+    fs::write(final_path.join("oci-layout"), b"bad")?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_one_quarantined(&root)?;
+    Ok(())
+}
+
+#[test]
+fn recovery_quarantines_malformed_and_unowned_next_indexes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    write_private_file(&root.0.join(".published.bad.next"), b"next")?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_one_quarantined(&root)?;
+
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let next = root
+        .0
+        .join(".published.0123456789abcdef0123456789abcdef.next");
+    write_private_file(&next, b"next")?;
+    fs::set_permissions(&next, fs::Permissions::from_mode(0o644))?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_one_quarantined(&root)?;
+    Ok(())
+}
+
+#[test]
+fn recovery_removes_owned_next_index_after_validation() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let next = root
+        .0
+        .join(".published.0123456789abcdef0123456789abcdef.next");
+    write_private_file(&next, b"next")?;
     let report = publisher.recover_all()?;
-    assert_eq!(report.committed, vec![address.clone()]);
-    assert_eq!(publisher.read_verified(&address)?, bundle);
+    assert!(report.removed_next_index);
+    assert!(!next.exists());
+    Ok(())
+}
+
+#[test]
+fn read_fails_closed_when_a_different_indexed_final_is_invalid(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let requested = bundle()?;
+    let invalid = bundle_with_component(b"different component")?;
+    let requested_address = requested.address().clone();
+    let invalid_address = invalid.address().clone();
+    publisher.publish(&requested)?;
+    publisher.publish(&invalid)?;
+    let invalid_layout = root
+        .0
+        .join("releases")
+        .join(&invalid_address.digest()[7..])
+        .join("oci-layout");
+    fs::write(invalid_layout, b"bad")?;
+    assert_eq!(
+        publisher.read_verified(&requested_address),
+        Err(ReleaseSourceErrorV1::RecoveryRequired)
+    );
     Ok(())
 }
 

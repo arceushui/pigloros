@@ -183,7 +183,7 @@ impl LocalOciPublisherV1 {
     /// or durable root synchronization cannot be validated.
     pub fn recover(
         &self,
-        address: BundleAddressV1,
+        address: &BundleAddressV1,
     ) -> Result<RecoveryOutcomeV1, LocalOciPublicationErrorV1> {
         self.verify_root()?;
         let lock = open_private_file(&self.root, LOCK_NAME)?;
@@ -191,7 +191,7 @@ impl LocalOciPublisherV1 {
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         let result = self.recover_locked().and_then(|_| {
             fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            match self.read_locked(&address) {
+            match self.read_locked(address) {
                 Ok(_) => Ok(RecoveryOutcomeV1::Committed(address.clone())),
                 Err(ReleaseSourceErrorV1::NotFound) => {
                     let releases = open_directory(&self.root, RELEASES_NAME)?;
@@ -230,6 +230,15 @@ impl LocalOciPublisherV1 {
         }
         let unindexed = finals
             .into_iter()
+            .map(|name| {
+                if !lowercase_hex(&name, 64) {
+                    self.quarantine_entry(&releases, &name, "final")?;
+                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+                }
+                Ok(name)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter(|name| {
                 !indexed
                     .iter()
@@ -240,43 +249,54 @@ impl LocalOciPublisherV1 {
             return Err(LocalOciPublicationErrorV1::BoundsExceeded);
         }
         for address in &indexed {
-            let directory = open_directory(&releases, &address.digest()[7..])
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            Self::read_release(&directory, address)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            let name = &address.digest()[7..];
+            let valid = open_directory(&releases, name).and_then(|directory| {
+                Self::read_release(&directory, address)
+                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
+            });
+            if valid.is_err() {
+                self.quarantine_entry(&releases, name, "final")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
         }
         let mut committed = Vec::new();
         if let Some(name) = unindexed.first() {
-            let final_directory = open_directory(&releases, name)?;
-            let ready = read_limited(open_private_file(&final_directory, "READY")?, 256)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            let ready = std::str::from_utf8(&ready)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            let mut lines = ready.lines();
-            if lines.next() != Some("pigloros-local-oci-ready-v1") {
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
-            let digest = lines
-                .next()
-                .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?;
-            let size = lines
-                .next()
-                .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?
-                .parse::<u64>()
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            if lines.next().is_some() || digest != format!("sha256:{name}") {
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
-            let address = BundleAddressV1::new(digest.to_owned(), size)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            Self::read_release(&final_directory, &address)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            self.publish_index(&address).map_err(|error| match error {
-                LocalOciPublicationErrorV1::OutcomeUnknown(_) => {
-                    LocalOciPublicationErrorV1::RecoveryRequired
+            let recovered = (|| {
+                let final_directory = open_directory(&releases, name)?;
+                let ready = read_limited(open_private_file(&final_directory, "READY")?, 256)
+                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+                let ready = std::str::from_utf8(&ready)
+                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+                let mut lines = ready.lines();
+                if lines.next() != Some("pigloros-local-oci-ready-v1") {
+                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
                 }
-                other => other,
-            })?;
+                let digest = lines
+                    .next()
+                    .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?;
+                let size = lines
+                    .next()
+                    .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?
+                    .parse::<u64>()
+                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+                if lines.next().is_some() || digest != format!("sha256:{name}") {
+                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+                }
+                let address = BundleAddressV1::new(digest.to_owned(), size)
+                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+                Self::read_release(&final_directory, &address)
+                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+                Ok(address)
+            })();
+            let address = match recovered {
+                Ok(address) => address,
+                Err(_) => {
+                    self.quarantine_entry(&releases, name, "final")?;
+                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+                }
+            };
+            self.publish_index(&address)
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             committed.push(address);
         }
         Ok(RecoveryReportV1 {
@@ -325,7 +345,7 @@ impl LocalOciPublisherV1 {
                 self.quarantine_entry(releases, name, "staging")?;
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             }
-            fs::fsync(releases).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+            fs::fsync(releases).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             Ok(1)
         } else {
             Ok(0)
@@ -334,29 +354,28 @@ impl LocalOciPublisherV1 {
 
     fn recover_next_index(&self) -> Result<bool, LocalOciPublicationErrorV1> {
         let next = directory_entries(&self.root)?
-            .filter(|name| {
-                name.starts_with(".published.")
-                    && Path::new(name).extension().is_some_and(|ext| ext == "next")
-            })
+            .filter(|name| name.starts_with(".published."))
             .collect::<Vec<_>>();
         if next.len() > 1 {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
         if let Some(name) = next.first() {
-            let file = open_private_file(&self.root, name)?;
-            let metadata = file
-                .metadata()
-                .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-            if !metadata.is_file()
-                || metadata.uid() != self.owner
-                || metadata.mode() & 0o7777 != 0o600
-            {
+            let valid_name = name
+                .strip_prefix(".published.")
+                .and_then(|suffix| suffix.strip_suffix(".next"))
+                .is_some_and(|nonce| lowercase_hex(nonce, 32));
+            if !valid_name {
                 self.quarantine_entry(&self.root, name, "next-index")?;
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             }
+            if open_private_file(&self.root, name).is_err() {
+                self.quarantine_entry(&self.root, name, "next-index")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
+            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             fs::unlinkat(&self.root, name, AtFlags::empty())
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             Ok(true)
         } else {
             Ok(false)
@@ -437,11 +456,15 @@ impl LocalOciPublisherV1 {
         name: &str,
         kind: &str,
     ) -> Result<(), LocalOciPublicationErrorV1> {
-        let quarantine = open_directory(&self.root, QUARANTINE_NAME)?;
+        let quarantine = open_directory(&self.root, QUARANTINE_NAME)
+            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         if directory_entries(&quarantine)?.next().is_some() {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
-        let destination = format!("{kind}.{}", random_nonce_hex()?);
+        let destination = format!(
+            "{kind}.{}",
+            random_nonce_hex().map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?
+        );
         fs::renameat_with(
             source,
             name,
@@ -450,9 +473,9 @@ impl LocalOciPublisherV1 {
             RenameFlags::NOREPLACE,
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        fs::fsync(source).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        fs::fsync(&quarantine).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::Sync)
+        fs::fsync(source).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        fs::fsync(&quarantine).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
     }
 
     fn publish_index(&self, address: &BundleAddressV1) -> Result<(), LocalOciPublicationErrorV1> {
@@ -602,8 +625,10 @@ impl ReleaseSourceV1 for LocalOciPublisherV1 {
         &self,
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
-        self.verify_root().map_err(map_publication_to_source)?;
-        let lock = open_private_file(&self.root, LOCK_NAME).map_err(map_publication_to_source)?;
+        self.verify_root()
+            .map_err(|error| map_publication_to_source(&error))?;
+        let lock = open_private_file(&self.root, LOCK_NAME)
+            .map_err(|error| map_publication_to_source(&error))?;
         fs::flock(&lock, FlockOperation::LockShared)
             .map_err(|_| ReleaseSourceErrorV1::LockUnavailable)?;
         let result = self
@@ -617,10 +642,10 @@ impl ReleaseSourceV1 for LocalOciPublisherV1 {
 
 impl LocalOciPublisherV1 {
     fn reader_recovery_floor(&self) -> Result<(), ReleaseSourceErrorV1> {
-        let quarantine =
-            open_directory(&self.root, QUARANTINE_NAME).map_err(map_publication_to_source)?;
+        let quarantine = open_directory(&self.root, QUARANTINE_NAME)
+            .map_err(|error| map_publication_to_source(&error))?;
         if directory_entries(&quarantine)
-            .map_err(map_publication_to_source)?
+            .map_err(|error| map_publication_to_source(&error))?
             .next()
             .is_some()
         {
@@ -637,7 +662,8 @@ impl LocalOciPublisherV1 {
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let index = read_limited(
-            open_private_file(&self.root, INDEX_NAME).map_err(map_publication_to_source)?,
+            open_private_file(&self.root, INDEX_NAME)
+                .map_err(|error| map_publication_to_source(&error))?,
             64 * 1024,
         )?;
         let addresses = parse_root_index(&index)?;
@@ -645,11 +671,18 @@ impl LocalOciPublisherV1 {
         if !indexed {
             return Err(ReleaseSourceErrorV1::NotFound);
         }
-        let releases =
-            open_directory(&self.root, RELEASES_NAME).map_err(map_publication_to_source)?;
-        let release =
-            open_directory(&releases, &address.digest()[7..]).map_err(map_publication_to_source)?;
-        Self::read_release(&release, address)
+        let releases = open_directory(&self.root, RELEASES_NAME)
+            .map_err(|error| map_publication_to_source(&error))?;
+        let release = open_directory(&releases, &address.digest()[7..])
+            .map_err(|error| map_publication_to_source(&error))?;
+        let requested = Self::read_release(&release, address)?;
+        for indexed_address in addresses.iter().filter(|entry| *entry != address) {
+            let other_release = open_directory(&releases, &indexed_address.digest()[7..])
+                .map_err(|_| ReleaseSourceErrorV1::RecoveryRequired)?;
+            Self::read_release(&other_release, indexed_address)
+                .map_err(|_| ReleaseSourceErrorV1::RecoveryRequired)?;
+        }
+        Ok(requested)
     }
 
     fn read_release(
@@ -657,7 +690,7 @@ impl LocalOciPublisherV1 {
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let mut entries = directory_entries(release)
-            .map_err(map_publication_to_source)?
+            .map_err(|error| map_publication_to_source(&error))?
             .collect::<Vec<_>>();
         entries.sort();
         if !entries.iter().map(String::as_str).eq([
@@ -670,7 +703,8 @@ impl LocalOciPublisherV1 {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
         let owner = read_limited(
-            open_private_file(release, "OWNER").map_err(map_publication_to_source)?,
+            open_private_file(release, "OWNER")
+                .map_err(|error| map_publication_to_source(&error))?,
             128,
         )?;
         let owner = std::str::from_utf8(&owner).map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
@@ -682,14 +716,16 @@ impl LocalOciPublisherV1 {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
         let layout = read_limited(
-            open_private_file(release, "oci-layout").map_err(map_publication_to_source)?,
+            open_private_file(release, "oci-layout")
+                .map_err(|error| map_publication_to_source(&error))?,
             64,
         )?;
         if layout != b"{\"imageLayoutVersion\":\"1.0.0\"}\n" {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
         let index = read_limited(
-            open_private_file(release, "index.json").map_err(map_publication_to_source)?,
+            open_private_file(release, "index.json")
+                .map_err(|error| map_publication_to_source(&error))?,
             512,
         )?;
         let expected_index = format!("{{\"manifests\":[{{\"digest\":\"{}\",\"mediaType\":\"{}\",\"size\":{}}}],\"schemaVersion\":2}}", address.digest(), address.media_type(), address.size());
@@ -697,7 +733,8 @@ impl LocalOciPublisherV1 {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
         let ready = read_limited(
-            open_private_file(release, "READY").map_err(map_publication_to_source)?,
+            open_private_file(release, "READY")
+                .map_err(|error| map_publication_to_source(&error))?,
             256,
         )?;
         let expected_ready = format!(
@@ -715,17 +752,19 @@ impl LocalOciPublisherV1 {
         release: &File,
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
-        let blobs = open_directory(release, "blobs").map_err(map_publication_to_source)?;
+        let blobs =
+            open_directory(release, "blobs").map_err(|error| map_publication_to_source(&error))?;
         let blob_directories = directory_entries(&blobs)
-            .map_err(map_publication_to_source)?
+            .map_err(|error| map_publication_to_source(&error))?
             .collect::<Vec<_>>();
         if !blob_directories.iter().map(String::as_str).eq(["sha256"]) {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
-        let sha256 = open_directory(&blobs, "sha256").map_err(map_publication_to_source)?;
+        let sha256 =
+            open_directory(&blobs, "sha256").map_err(|error| map_publication_to_source(&error))?;
         let manifest = read_limited(
             open_private_file(&sha256, &address.digest()[7..])
-                .map_err(map_publication_to_source)?,
+                .map_err(|error| map_publication_to_source(&error))?,
             64 * 1024,
         )?;
         let manifest_value = crate::oci::parse_jcs_object(&manifest)?;
@@ -747,7 +786,8 @@ impl LocalOciPublisherV1 {
                 .strip_prefix("sha256:")
                 .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
             let blob = read_limited(
-                open_private_file(&sha256, hex).map_err(map_publication_to_source)?,
+                open_private_file(&sha256, hex)
+                    .map_err(|error| map_publication_to_source(&error))?,
                 32 * 1024 * 1024,
             )?;
             bytes.insert(digest, blob);
@@ -762,7 +802,7 @@ impl LocalOciPublisherV1 {
             )
             .collect::<BTreeSet<_>>();
         let actual_blobs = directory_entries(&sha256)
-            .map_err(map_publication_to_source)?
+            .map_err(|error| map_publication_to_source(&error))?
             .collect::<BTreeSet<_>>();
         if actual_blobs != expected_blobs {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
@@ -853,7 +893,7 @@ fn read_limited(mut file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceEr
     }
 }
 
-fn map_publication_to_source(error: LocalOciPublicationErrorV1) -> ReleaseSourceErrorV1 {
+fn map_publication_to_source(error: &LocalOciPublicationErrorV1) -> ReleaseSourceErrorV1 {
     match error {
         LocalOciPublicationErrorV1::InvalidLayout => ReleaseSourceErrorV1::InvalidLayout,
         LocalOciPublicationErrorV1::Sync | LocalOciPublicationErrorV1::Io => {
