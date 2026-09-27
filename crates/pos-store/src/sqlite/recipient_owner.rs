@@ -166,6 +166,9 @@ impl SqliteStore {
         validate_owner_directory(owner)?;
         let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is unavailable".to_owned()))?;
         let mut statement = self.conn.prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let rows = statement
@@ -189,6 +192,29 @@ impl SqliteStore {
             {
                 return Err(CoreError::Storage(
                     "recipient key inventory is invalid".to_owned(),
+                ));
+            }
+            let inventory_digest = pos_core::Hash::from_bytes(
+                inventory
+                    .material_digest
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| {
+                        CoreError::Storage(
+                            "recipient key inventory material digest is invalid".to_owned(),
+                        )
+                    })?,
+            );
+            let identity = descriptor.identity();
+            if registry
+                .active_key(&identity.owner_id, identity.role)
+                .is_none_or(|active| {
+                    active.identity != identity
+                        || active.private_material_digest != Some(inventory_digest)
+                })
+            {
+                return Err(CoreError::Storage(
+                    "recipient key inventory is not an exact active registry identity".to_owned(),
                 ));
             }
             let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
@@ -376,7 +402,7 @@ fn read_bound_private_key(
     owner: &RecipientKeyOwnerV1,
     path: &Path,
     expected: RecipientPrivateFileIdentityV1,
-) -> Result<[u8; 32], CoreError> {
+) -> Result<Zeroizing<[u8; 32]>, CoreError> {
     use std::os::unix::fs::OpenOptionsExt;
 
     validate_owner_directory(owner)?;
@@ -396,6 +422,7 @@ fn read_bound_private_key(
     material
         .as_slice()
         .try_into()
+        .map(Zeroizing::new)
         .map_err(|_| CoreError::Storage("recipient private key width is invalid".to_owned()))
 }
 
