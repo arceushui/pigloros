@@ -767,22 +767,22 @@ fn assert_event_order(
     human_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
-    polled: &[Value],
+    events: &[Value],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for (index, event) in polled.iter().enumerate() {
+    for (index, event) in events.iter().enumerate() {
         assert_eq!(
             event["seq"].as_u64().test_ok()?,
             u64::try_from(index + 1).test_ok()?
         );
     }
-    let human_seq = polled
+    let human_seq = events
         .iter()
         .find(|event| {
             event["event_type"] == "world.action.v1" && event["entity"] == human_entity.to_string()
         })
         .and_then(|event| event["seq"].as_u64())
         .test_ok()?;
-    let blocked_fast_seq = polled
+    let blocked_fast_seq = events
         .iter()
         .filter(|event| {
             event["event_type"] == EVENT_TYPE_ACTION && event["entity"] == fast_entity.to_string()
@@ -791,7 +791,7 @@ fn assert_event_order(
         .find(|seq| *seq > human_seq)
         .test_ok()?;
     assert!(human_seq < blocked_fast_seq);
-    let agent_order = polled
+    let agent_order = events
         .iter()
         .filter(|event| event["event_type"] == EVENT_TYPE_ACTION)
         .map(
@@ -957,7 +957,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
             format!("run_tick_boundaries: {error}").into()
         },
     )?;
-    let polled = read_session_events_after_gateway_fail_closed(
+    let events = read_session_events_after_gateway_fail_closed(
         scenario.address,
         scenario.timeline,
         scenario.human_entity,
@@ -971,7 +971,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         scenario.human_entity,
         scenario.fast_entity,
         scenario.slow_entity,
-        &polled,
+        &events,
     )?;
 
     let live_snapshot = assert_projection_state(&scenario, &session, &authority).map_err(
