@@ -1829,41 +1829,41 @@ impl SqliteStore {
     ) -> Result<Vec<Event>, CoreError> {
         let mut selected = Vec::new();
         for plan in plans {
-            #[cfg(test)]
-            bounded_read_delay_for_test(6);
-            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-            if elapsed_micros > bounds.max_elapsed_micros() {
-                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
-            }
-            #[cfg(test)]
-            BOUNDED_EVENT_QUERIES.with(|queries| queries.set(queries.get() + 1));
-            let mut events = Self::read_own_events_limited_on(
-                conn,
-                plan.id,
-                plan.raw_from,
-                Some(plan.raw_to),
-                Some(plan.take),
-                Some(started),
-                plan.bounds.max_elapsed_micros(),
-            )?;
-            for event in &mut events {
-                event.seq = Seq::from_u64(plan.logical_offset.saturating_add(event.seq.as_u64()));
-            }
-            selected.extend(events);
+            selected.extend(Self::materialize_bounded_page(conn, plan, bounds, started)?);
             #[cfg(test)]
             bounded_materialization_delay_for_test();
-            let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-            if elapsed_micros > bounds.max_elapsed_micros() {
-                return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
-            }
+            ensure_read_time_bound(Some(started), bounds.max_elapsed_micros())?;
         }
         #[cfg(test)]
         bounded_read_delay_for_test(7);
-        let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        if elapsed_micros > bounds.max_elapsed_micros() {
-            return Err(CoreError::ReadTimeTooLarge { elapsed_micros });
-        }
+        ensure_read_time_bound(Some(started), bounds.max_elapsed_micros())?;
         Ok(selected)
+    }
+
+    fn materialize_bounded_page(
+        conn: &Connection,
+        plan: &BoundedSegmentPage,
+        bounds: EventReadBounds,
+        started: Instant,
+    ) -> Result<Vec<Event>, CoreError> {
+        #[cfg(test)]
+        bounded_read_delay_for_test(6);
+        ensure_read_time_bound(Some(started), bounds.max_elapsed_micros())?;
+        #[cfg(test)]
+        BOUNDED_EVENT_QUERIES.with(|queries| queries.set(queries.get() + 1));
+        let mut events = Self::read_own_events_limited_on(
+            conn,
+            plan.id,
+            plan.raw_from,
+            Some(plan.raw_to),
+            Some(plan.take),
+            Some(started),
+            plan.bounds.max_elapsed_micros(),
+        )?;
+        for event in &mut events {
+            event.seq = Seq::from_u64(plan.logical_offset.saturating_add(event.seq.as_u64()));
+        }
+        Ok(events)
     }
 
     /// Walk the fork chain for a timeline, returning [root, ..., leaf].

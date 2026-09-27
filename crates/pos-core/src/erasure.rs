@@ -2998,6 +2998,29 @@ impl ErasureVerifiedInventoryV1 {
         input: ErasureForkAdmissionInputV1,
         mut admissions: Vec<PreparedErasureForkAdmissionV1>,
     ) -> Result<PreparedErasureForkBatchV1, ErasureErrorV1> {
+        let parent_index = self.validate_fork_batch_input(&input)?;
+        self.validate_prepared_fork_admissions(&input, &mut admissions)?;
+
+        let Self {
+            members,
+            classifications,
+            limits,
+            ..
+        } = self;
+        Self::prepare_successor_fork_batch(
+            members,
+            classifications,
+            limits,
+            input,
+            admissions,
+            parent_index,
+        )
+    }
+
+    fn validate_fork_batch_input(
+        &self,
+        input: &ErasureForkAdmissionInputV1,
+    ) -> Result<usize, ErasureErrorV1> {
         let (parent, _) = input
             .child
             .fork_point
@@ -3018,22 +3041,7 @@ impl ErasureVerifiedInventoryV1 {
             .binary_search_by_key(&parent, |(timeline, _)| *timeline)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
         self.validate_fork_child_scope_admission(parent, input.child_scope)?;
-        self.validate_prepared_fork_admissions(&input, &mut admissions)?;
-
-        let Self {
-            members,
-            classifications,
-            limits,
-            ..
-        } = self;
-        Self::prepare_successor_fork_batch(
-            members,
-            classifications,
-            limits,
-            input,
-            admissions,
-            parent_index,
-        )
+        Ok(parent_index)
     }
 
     fn validate_fork_child_scope_admission(
