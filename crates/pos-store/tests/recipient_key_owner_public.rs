@@ -324,6 +324,23 @@ fn recipient_owner_public_contract_rejects_unsafe_owner_directories(
 }
 
 #[test]
+fn recipient_owner_public_contract_rejects_a_missing_live_inventory_identity(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, descriptor) = enrolled_owner()?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "DELETE FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
+        rusqlite::params![
+            descriptor.identity().owner_id.as_str(),
+            i64::try_from(descriptor.identity().epoch)?,
+        ],
+    )?;
+
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_fails_closed_for_corrupt_durable_inventory(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (column, value) in [

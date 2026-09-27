@@ -227,6 +227,16 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         quarantine_unregistered_staged_material(owner, &inventories)?;
+        let expected_identities = registry
+            .key_records()
+            .filter(|record| {
+                record.identity.owner_id == owner_id
+                    && record.identity.role == KeyRoleV1::ExportRecipientEncryption
+                    && record.private_material_digest.is_some()
+            })
+            .map(|record| record.identity)
+            .collect::<BTreeSet<_>>();
+        let mut inventory_identities = BTreeSet::new();
         let mut descriptors = Vec::new();
         for inventory in inventories {
             let descriptor = RecipientKeyDescriptorV1::decode(&inventory.descriptor)
@@ -241,6 +251,11 @@ impl SqliteStore {
             inventory_digest.copy_from_slice(&inventory.material_digest);
             let inventory_digest = pos_core::Hash::from_bytes(inventory_digest);
             let identity = descriptor.identity();
+            if !inventory_identities.insert(identity) {
+                return Err(CoreError::Storage(
+                    "recipient key inventory repeats an identity".to_owned(),
+                ));
+            }
             if registry.key_record(identity).is_none_or(|record| {
                 record.private_material_digest != Some(inventory_digest)
                     || registry.tombstone(identity).is_some()
@@ -276,6 +291,11 @@ impl SqliteStore {
                 ));
             }
             descriptors.push(descriptor);
+        }
+        if inventory_identities != expected_identities {
+            return Err(CoreError::Storage(
+                "recipient key inventory does not cover live registry identities".to_owned(),
+            ));
         }
         Ok(descriptors)
     }
