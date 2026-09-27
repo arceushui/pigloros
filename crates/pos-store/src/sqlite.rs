@@ -8986,15 +8986,17 @@ mod tests {
         let mut transaction = new_store();
         let timeline = transaction.create_timeline("transaction").test_ok();
         transaction.conn.execute_batch("BEGIN IMMEDIATE").test_ok();
-        assert!(transaction
-            .append_or_duplicate(
-                timeline.id(),
-                append_identity(9, 9),
-                WallTime::from_micros(1),
-                make_draft(entity, b"x")
-            )
-            .test_ok()
-            .is_some());
+        assert!(matches!(
+            transaction
+                .append_or_duplicate(
+                    timeline.id(),
+                    append_identity(9, 9),
+                    WallTime::from_micros(1),
+                    make_draft(entity, b"x")
+                )
+                .test_ok(),
+            AppendOrDuplicateOutcome::Appended(_)
+        ));
         transaction.conn.execute_batch("ROLLBACK").test_ok();
         assert!(transaction
             .read_own(timeline.id(), SeqRange::all())
