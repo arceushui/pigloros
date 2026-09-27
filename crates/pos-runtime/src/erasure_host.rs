@@ -1426,6 +1426,18 @@ impl ErasureExecutionHostV1 {
         }
     }
 
+    fn verify_published_inventory(
+        &mut self,
+        inventory: ErasureVerifiedInventoryV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureHostErrorV1> {
+        self.verify_current_inventory(inventory, limits)
+            .map_err(|error| {
+                self.poison();
+                map_erasure_error(error)
+            })
+    }
+
     /// Borrow the mutation-capable sender for the installed generation.
     ///
     /// # Errors
@@ -1813,6 +1825,7 @@ impl ErasureExecutionHostV1 {
         };
         match publication {
             Ok((inventory, transition)) => {
+                let inventory = self.verify_published_inventory(inventory, limits)?;
                 let generation = inventory.generation();
                 let refreshed_request_count = inventory.request_count();
                 self.inventory = Some(Arc::new(inventory));
@@ -5070,11 +5083,9 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let current_inventory = Arc::clone(
-            host.inventory
-                .as_ref()
-                .unwrap_or_else(|| panic!("empty recovery installs its inventory")),
-        );
+        let current_inventory = Arc::clone(host.inventory.as_ref().unwrap_or_else(|| {
+            std::panic::resume_unwind(Box::new("empty recovery installs its inventory"))
+        }));
         let candidate = TimelineMeta::root("candidate-without-authority");
         let limits = ErasureRecoveryLimitsV1::compiled_maximum();
 
@@ -8097,18 +8108,19 @@ mod tests {
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("read-effect-panic"))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let mut reads = host
-            .read_sender()
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            reads.with_protected_effect_fence(
-                timeline.id(),
-                ErasureProtectedOperationV1::Read,
-                &mut |_| panic!("injected protected read panic"),
-            )
-        }));
+        let panic_result = {
+            let mut reads = host
+                .read_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reads.with_protected_effect_fence(
+                    timeline.id(),
+                    ErasureProtectedOperationV1::Read,
+                    &mut |_| std::panic::resume_unwind(Box::new("injected protected read panic")),
+                )
+            }))
+        };
         assert!(panic_result.is_err());
-        drop(reads);
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
     }
 
