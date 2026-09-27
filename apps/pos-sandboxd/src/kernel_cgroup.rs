@@ -11,6 +11,13 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::{CgroupRoot, TransientServiceUnitName};
 
+mod limit_events;
+
+pub use limit_events::{
+    AttemptLimitEventCounter, AttemptLimitEventDelta, AttemptLimitEventSnapshot,
+    AttemptLimitEventSource,
+};
+
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
 const MAX_CONTROL_GROUP_BYTES: usize = 4096;
@@ -62,6 +69,35 @@ pub enum AttemptCgroupError {
     /// A missing path did not prove that the retained cgroup itself was deleted.
     #[error("the attempt cgroup path disappeared without proven deletion")]
     DeletionUnproven,
+    /// An exact limit-event source could not be opened beneath the retained cgroup.
+    #[error("failed to open attempt cgroup limit-event source {property}")]
+    LimitEventOpen {
+        property: &'static str,
+        #[source]
+        error: Errno,
+    },
+    /// An exact limit-event source could not be read completely.
+    #[error("failed to read attempt cgroup limit-event source {property}")]
+    LimitEventRead {
+        property: &'static str,
+        #[source]
+        error: std::io::Error,
+    },
+    /// An exact limit-event source exceeded the closed read bound.
+    #[error("attempt cgroup limit-event source {property} exceeded the read bound")]
+    LimitEventTooLong { property: &'static str },
+    /// A source had malformed, duplicate, or missing required counters.
+    #[error("attempt cgroup limit-event source {property} was malformed")]
+    MalformedLimitEvents { property: &'static str },
+    /// Two snapshots did not refer to the exact same bound attempt cgroup.
+    #[error("attempt cgroup limit-event snapshots have different identities")]
+    LimitEventIdentityMismatch,
+    /// A later snapshot carried an earlier monotonic observation time.
+    #[error("attempt cgroup limit-event observation time moved backwards")]
+    LimitEventTimeReversed,
+    /// A kernel event counter decreased between the two snapshots.
+    #[error("attempt cgroup limit-event counter {counter:?} decreased")]
+    LimitEventCounterDecreased { counter: AttemptLimitEventCounter },
 }
 
 impl CgroupRoot {
@@ -115,11 +151,7 @@ pub enum AttemptCgroupEmptyBasis {
 /// Read-only process-emptiness evidence, never full attempt cleanup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptCgroupEmptyObservation {
-    unit_name: TransientServiceUnitName,
-    unit_path: OwnedObjectPath,
-    control_group: String,
-    device: u64,
-    inode: u64,
+    identity: BoundCgroupIdentity,
     basis: AttemptCgroupEmptyBasis,
     raw_events: Option<Vec<u8>>,
     monotonic_seconds: i64,
@@ -130,25 +162,25 @@ impl AttemptCgroupEmptyObservation {
     /// Return the exact deterministic unit name.
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {
-        &self.unit_name
+        &self.identity.unit_name
     }
 
     /// Return the exact systemd object path bound before termination.
     #[must_use]
     pub fn unit_path(&self) -> &str {
-        self.unit_path.as_str()
+        self.identity.unit_path.as_str()
     }
 
     /// Return the manager-reported cgroup path, not a locally inferred path.
     #[must_use]
     pub fn control_group(&self) -> &str {
-        &self.control_group
+        &self.identity.control_group
     }
 
     /// Return the device and inode of the cgroup opened before termination.
     #[must_use]
     pub const fn cgroup_identity(&self) -> (u64, u64) {
-        (self.device, self.inode)
+        (self.identity.device, self.identity.inode)
     }
 
     /// Distinguish a kernel populated=0 read from deletion of the bound path.
@@ -170,17 +202,27 @@ impl AttemptCgroupEmptyObservation {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BoundCgroupIdentity {
+    unit_name: TransientServiceUnitName,
+    unit_path: OwnedObjectPath,
+    control_group: String,
+    device: u64,
+    inode: u64,
+}
+
+enum BoundCgroupPath {
+    Present,
+    Missing { retained_unlinked: bool },
+}
+
 /// A retained descriptor-bound attempt cgroup, without termination authority.
 #[derive(Debug)]
 pub struct BoundAttemptCgroup {
     root: CgroupRoot,
     directory: File,
     events: File,
-    unit_name: TransientServiceUnitName,
-    unit_path: OwnedObjectPath,
-    control_group: String,
-    device: u64,
-    inode: u64,
+    identity: BoundCgroupIdentity,
 }
 
 impl BoundAttemptCgroup {
@@ -224,11 +266,13 @@ impl BoundAttemptCgroup {
             root,
             directory,
             events,
-            unit_name,
-            unit_path,
-            control_group,
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            identity: BoundCgroupIdentity {
+                unit_name,
+                unit_path,
+                control_group,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
         };
         let initial = bound.read_events()?;
         parse_populated(&initial)?;
@@ -238,7 +282,38 @@ impl BoundAttemptCgroup {
     /// Return the exact manager-reported cgroup path retained before termination.
     #[must_use]
     pub fn control_group(&self) -> &str {
-        &self.control_group
+        &self.identity.control_group
+    }
+
+    fn inspect_path_with_metadata(
+        &self,
+        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+    ) -> Result<BoundCgroupPath, AttemptCgroupError> {
+        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
+        if retained.dev() != self.identity.device || retained.ino() != self.identity.inode {
+            return Err(AttemptCgroupError::PathReused);
+        }
+        let relative = relative_cgroup_path(&self.identity.control_group)?;
+        match openat2(
+            &self.root.0,
+            relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            RESOLVE_CHILD,
+        ) {
+            Err(Errno::NOENT) => Ok(BoundCgroupPath::Missing {
+                retained_unlinked: retained.nlink() == 0,
+            }),
+            Err(error) => Err(AttemptCgroupError::PathOpen(error)),
+            Ok(current) => {
+                let metadata =
+                    read_metadata(&File::from(current)).map_err(AttemptCgroupError::Metadata)?;
+                if metadata.dev() != self.identity.device || metadata.ino() != self.identity.inode {
+                    return Err(AttemptCgroupError::PathReused);
+                }
+                Ok(BoundCgroupPath::Present)
+            }
+        }
     }
 
     /// Return a process-empty observation for only this bound cgroup.
@@ -254,33 +329,16 @@ impl BoundAttemptCgroup {
 
     fn observe_empty_with_metadata(
         &mut self,
-        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+        read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
     ) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
-        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
-        if retained.dev() != self.device || retained.ino() != self.inode {
-            return Err(AttemptCgroupError::PathReused);
-        }
-        let relative = relative_cgroup_path(&self.control_group)?;
-        let basis_and_raw = match openat2(
-            &self.root.0,
-            relative,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-            RESOLVE_CHILD,
-        ) {
-            Err(Errno::NOENT) => {
-                if retained.nlink() != 0 {
-                    return Err(AttemptCgroupError::DeletionUnproven);
-                }
-                (AttemptCgroupEmptyBasis::Deleted, None)
-            }
-            Err(error) => return Err(AttemptCgroupError::PathOpen(error)),
-            Ok(current) => {
-                let metadata =
-                    read_metadata(&File::from(current)).map_err(AttemptCgroupError::Metadata)?;
-                if metadata.dev() != self.device || metadata.ino() != self.inode {
-                    return Err(AttemptCgroupError::PathReused);
-                }
+        let basis_and_raw = match self.inspect_path_with_metadata(read_metadata)? {
+            BoundCgroupPath::Missing {
+                retained_unlinked: true,
+            } => (AttemptCgroupEmptyBasis::Deleted, None),
+            BoundCgroupPath::Missing {
+                retained_unlinked: false,
+            } => return Err(AttemptCgroupError::DeletionUnproven),
+            BoundCgroupPath::Present => {
                 let raw = self.read_events()?;
                 if parse_populated(&raw)? {
                     return Err(AttemptCgroupError::StillPopulated);
@@ -290,11 +348,7 @@ impl BoundAttemptCgroup {
         };
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptCgroupEmptyObservation {
-            unit_name: self.unit_name.clone(),
-            unit_path: self.unit_path.clone(),
-            control_group: self.control_group.clone(),
-            device: self.device,
-            inode: self.inode,
+            identity: self.identity.clone(),
             basis: basis_and_raw.0,
             raw_events: basis_and_raw.1,
             monotonic_seconds: observed.tv_sec,
@@ -497,19 +551,19 @@ mod tests {
             OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/test")?,
             "/system.slice/test.service".to_owned(),
         )?;
-        let original_device = bound.device;
-        bound.device = original_device.wrapping_add(1);
+        let original_device = bound.identity.device;
+        bound.identity.device = original_device.wrapping_add(1);
         assert!(matches!(
             bound.observe_empty(),
             Err(AttemptCgroupError::PathReused)
         ));
-        bound.device = original_device;
-        bound.control_group = "/".to_owned();
+        bound.identity.device = original_device;
+        bound.identity.control_group = "/".to_owned();
         assert!(matches!(
             bound.observe_empty(),
             Err(AttemptCgroupError::InvalidPath)
         ));
-        bound.control_group = "/system.slice/test.service".to_owned();
+        bound.identity.control_group = "/system.slice/test.service".to_owned();
         fs::rename(&directory, parent.join("moved.service"))?;
         assert!(matches!(
             bound.observe_empty(),
