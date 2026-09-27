@@ -2552,8 +2552,8 @@ impl ErasureReadSenderV1<'_> {
         if expected.is_some_and(|expected| expected != self.generation) {
             return Err(ErasureHostErrorV1::StaleGeneration);
         }
-        let events = self.read_bounded(timeline, range, bounds)?;
-        Ok((events, self.generation))
+        self.read_bounded(timeline, range, bounds)
+            .map(|events| (events, self.generation))
     }
 
     /// Recover one authoritative, payload-free ERS1 state through the
