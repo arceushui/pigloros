@@ -289,3 +289,40 @@ fn recipient_owner_public_contract_rejects_a_tampered_file_owner_binding(
     assert!(store.recover_recipient_keys(&owner).is_err());
     Ok(())
 }
+
+#[test]
+fn recipient_owner_public_contract_rejects_unsafe_owner_directories(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = temporary.path().join("unsafe");
+    std::fs::create_dir(&directory)?;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))?;
+    assert!(RecipientKeyOwnerV1::open(&directory, EntityId::new()).is_err());
+    std::fs::remove_dir(&directory)?;
+    assert!(RecipientKeyOwnerV1::open(&directory, EntityId::new()).is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_fails_closed_for_corrupt_durable_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (column, value) in [
+        ("descriptor", rusqlite::types::Value::Blob(vec![0])),
+        ("material_digest", rusqlite::types::Value::Blob(vec![0; 31])),
+        (
+            "private_path",
+            rusqlite::types::Value::Blob(b"foreign.key".to_vec()),
+        ),
+        ("file_device", rusqlite::types::Value::Blob(vec![0; 7])),
+        ("file_inode", rusqlite::types::Value::Blob(vec![0; 7])),
+    ] {
+        let (temporary, store, owner, _) = enrolled_owner()?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+        connection.execute(
+            &format!("UPDATE recipient_key_inventory_v1 SET {column} = ?1"),
+            [value],
+        )?;
+        assert!(store.recover_recipient_keys(&owner).is_err(), "{column}");
+    }
+    Ok(())
+}
