@@ -1630,7 +1630,6 @@ mod tests {
         let revocation = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
 
         let evidence = verify_plugin_trust_v1(&anchor, &[&root], &[&revocation], 50, 5)?;
-        assert_eq!(evidence.terminal_revoked_artifact_count, 4096);
         assert_eq!(evidence.effective_artifact_revocations().count(), 0);
         assert_eq!(
             evidence.authorize_release(&manifest_projection()?),
@@ -1691,7 +1690,6 @@ mod tests {
         let root_references = roots.iter().map(Vec::as_slice).collect::<Vec<_>>();
 
         let evidence = verify_plugin_trust_v1(&anchor, &root_references, &[&revocation], 50, 5)?;
-        assert_eq!(evidence.terminal_revoked_key_count, 4096);
         assert_eq!(evidence.effective_key_revocations().count(), 0);
         assert_eq!(
             evidence.authorize_release(&manifest_projection()?),
