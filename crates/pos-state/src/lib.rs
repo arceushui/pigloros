@@ -18,12 +18,12 @@ use std::{
 };
 
 use pos_core::{
-    AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
-    CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
-    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
-    Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
-    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
-    Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1,
+    AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener,
+    ConsentRevokedV1, EntityId, ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1,
+    ErasureReferenceV1, Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1,
+    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
+    PersistedAuthorityV1, Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 
@@ -120,14 +120,15 @@ impl AuthorizationCacheV1 {
     /// Cache an active decision until its derived shortest expiry, bound to
     /// the exact installed erasure inventory generation.
     ///
-    /// Returns the exact cache key, or `None` when the decision is denied, the
-    /// request does not match the persisted authority state, an expiry is not in
-    /// the request's future, or no capability chain is identified.
+    /// Returns the exact cache key, or `None` when the decision differs from
+    /// a fresh evaluation of the supplied authority and registry, is denied,
+    /// is expired, or has no capability chain.
     pub fn insert_active(
         &mut self,
         decision: AuthorizationDecisionV1,
         request: &AuthorizationRequestV1,
         authority: &PersistedAuthorityV1,
+        registry: &AuthorityRegistrySnapshotV1,
         inventory_generation: ErasureReferenceV1,
     ) -> Option<AuthorizationCacheKeyV1> {
         let grants = authority.chain().grants();
@@ -162,8 +163,11 @@ impl AuthorizationCacheV1 {
             }
             _ => authentication_expiry,
         };
+        let current_decision =
+            AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
         let digest_matches = decision.request_digest() == request.binding_digest();
         let request_matches = digest_matches
+            && decision == current_decision
             && decision.grant_chain_bindings() == chain_bindings.as_slice()
             && decision.authority_timeline() == request.authority_timeline()
             && decision.at_position() == request.at_position()
@@ -197,18 +201,28 @@ impl AuthorizationCacheV1 {
         Some(key)
     }
 
-    /// Read an unexpired decision only for the exact installed erasure
-    /// inventory generation. A generation mismatch evicts the stale entry.
+    /// Read an unexpired decision only when current authority and registry
+    /// evidence reproduces the same active decision for this generation.
+    /// Stale or denied entries are evicted before their decision is returned.
     pub fn get(
         &mut self,
         key: &AuthorizationCacheKeyV1,
         at_time: WallTime,
         at_position: Seq,
+        request: &AuthorizationRequestV1,
+        authority: &PersistedAuthorityV1,
+        registry: &AuthorityRegistrySnapshotV1,
         inventory_generation: ErasureReferenceV1,
     ) -> Option<&AuthorizationDecisionV1> {
         let expired = self.entries.get(key).is_some_and(|entry| {
+            let current_decision =
+                AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
             key.inventory_generation() != inventory_generation
                 || !entry.is_current(at_time, at_position, inventory_generation)
+                || authority.revocation_epoch() != key.revocation_epoch()
+                || request.revocation_epoch() != key.revocation_epoch()
+                || current_decision != entry.decision
+                || !current_decision.is_allowed()
         });
         if expired {
             self.entries.remove(key);
@@ -1147,6 +1161,7 @@ mod tests {
 
     struct CacheFixture {
         decision: AuthorizationDecisionV1,
+        registry: AuthorityRegistrySnapshotV1,
         request: AuthorizationRequestV1,
         authority: PersistedAuthorityV1,
         parent_grant_id: Hash,
@@ -1392,6 +1407,7 @@ mod tests {
         test_ok(state.issue_grant(test_ok(host.authorize_grant(&child)), child));
         CacheFixture {
             decision,
+            registry,
             request,
             authority: test_ok(state.resolve(grant_id)),
             parent_grant_id,
@@ -1570,6 +1586,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
@@ -1578,6 +1595,9 @@ mod tests {
                 &key,
                 WallTime::from_micros(99),
                 Seq::from_u64(79),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_some());
@@ -1586,6 +1606,9 @@ mod tests {
                 &key,
                 WallTime::from_micros(100),
                 Seq::from_u64(79),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_none());
@@ -1597,6 +1620,7 @@ mod tests {
                 fixture.decision,
                 &fixture.request,
                 &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
@@ -1605,6 +1629,9 @@ mod tests {
                 &key,
                 WallTime::from_micros(99),
                 Seq::from_u64(80),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_none());
@@ -1628,6 +1655,7 @@ mod tests {
                 fixture.decision,
                 &request,
                 &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_none());
@@ -1644,6 +1672,7 @@ mod tests {
                 fixture.decision,
                 &fixture.request,
                 &fixture.authority,
+                &fixture.registry,
                 installed,
             )
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
@@ -1654,6 +1683,9 @@ mod tests {
                 &key,
                 WallTime::from_micros(99),
                 Seq::from_u64(79),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
                 successor,
             )
             .is_none());
@@ -1674,6 +1706,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_some());
@@ -1686,6 +1719,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_some());
@@ -1700,6 +1734,7 @@ mod tests {
                 fixture.decision,
                 &fixture.request,
                 &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_some());
@@ -1708,6 +1743,7 @@ mod tests {
                 other.decision,
                 &other.request,
                 &other.authority,
+                &other.registry,
                 cache_generation(1),
             )
             .is_some());
@@ -1729,6 +1765,7 @@ mod tests {
                 fixture.decision.clone(),
                 &mismatched.request,
                 &fixture.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_none());
@@ -1737,6 +1774,7 @@ mod tests {
                 fixture.decision.clone(),
                 &fixture.request,
                 &mismatched_chain.authority,
+                &fixture.registry,
                 cache_generation(1),
             )
             .is_none());
@@ -1748,6 +1786,46 @@ mod tests {
                 denied.decision,
                 &denied.request,
                 &denied.authority,
+                &denied.registry,
+                cache_generation(1),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn authorization_cache_rechecks_current_authority_before_exposure() {
+        let timeline = TimelineId::new();
+        let fixture = active_decision(timeline);
+        let changed = decision_with_capability_trust(timeline, test_hash(15), true);
+        let denied = decision_with_capability_trust(timeline, test_hash(5), false);
+        let mut cache = AuthorizationCacheV1::new();
+        let key = cache
+            .insert_active(
+                fixture.decision.clone(),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+                cache_generation(1),
+            )
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+        assert!(cache
+            .get(
+                &key,
+                WallTime::from_micros(99),
+                Seq::from_u64(79),
+                &fixture.request,
+                &changed.authority,
+                &fixture.registry,
+                cache_generation(1),
+            )
+            .is_none());
+        assert!(cache.is_empty());
+        assert!(cache
+            .insert_active(
+                fixture.decision,
+                &fixture.request,
+                &fixture.authority,
+                &denied.registry,
                 cache_generation(1),
             )
             .is_none());
