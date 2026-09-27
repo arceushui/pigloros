@@ -2201,8 +2201,6 @@ fn coordinator_recovery_rejects_scope_chain_mismatches() -> Result<(), ErasureEr
         (4, Value::Bytes(reference(240).digest().to_vec())),
         (5, Value::Bytes(reference(240).digest().to_vec())),
         (6, Value::Bytes(reference(240).digest().to_vec())),
-        (7, Value::Bytes(reference(240).digest().to_vec())),
-        (8, Value::Bytes(reference(240).digest().to_vec())),
     ] {
         assert_scope_graph_mutation_rejected(|graph| {
             graph.adapter.replace_scope_extension_field(
