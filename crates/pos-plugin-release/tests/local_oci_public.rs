@@ -468,3 +468,154 @@ fn unindexed_final_recovery_quarantines_bad_ready_evidence(
     }
     Ok(())
 }
+
+#[test]
+fn root_discovery_index_rejects_noncanonical_and_malformed_entries(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let address = bundle()?.address().clone();
+    let entry = serde_json::json!({
+        "digest": address.digest(),
+        "mediaType": address.media_type(),
+        "size": address.size(),
+    });
+    let invalid = [
+        (serde_json::json!([]), ReleaseSourceErrorV1::InvalidLayout),
+        (
+            serde_json::json!({"version": 1}),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            serde_json::json!({"addresses": 1, "version": 1}),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            serde_json::json!({"addresses": [null], "version": 1}),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            serde_json::json!({"addresses": [{"digest": address.digest(), "mediaType": "wrong", "size": address.size()}], "version": 1}),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            serde_json::json!({"addresses": [{"digest": "sha256:bad", "mediaType": address.media_type(), "size": address.size()}], "version": 1}),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            serde_json::json!({"addresses": [{"digest": address.digest(), "mediaType": address.media_type(), "size": "bad"}], "version": 1}),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            serde_json::json!({"addresses": [entry.clone(), entry.clone()], "version": 1}),
+            ReleaseSourceErrorV1::InvalidLayout,
+        ),
+        (
+            serde_json::json!({"addresses": vec![entry.clone(); 257], "version": 1}),
+            ReleaseSourceErrorV1::BoundsExceeded,
+        ),
+    ];
+    for (value, expected) in invalid {
+        fs::write(root.0.join("published.json"), serde_json::to_vec(&value)?)?;
+        assert_eq!(publisher.read_verified(&address), Err(expected), "{value}");
+    }
+    fs::write(
+        root.0.join("published.json"),
+        b"{\"addresses\":[],\"version\":1} ",
+    )?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    fs::write(
+        root.0.join("published.json"),
+        b"{\"addresses\":[],\"addresses\":[],\"version\":1}",
+    )?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_enforces_bounded_inventory_before_adopting_any_final(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    for index in 0..257_u16 {
+        create_private_dir(&root.0.join("releases").join(format!("{index:064x}")))?;
+    }
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::BoundsExceeded)
+    );
+
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    create_private_dir(&root.0.join("releases").join(".first"))?;
+    create_private_dir(&root.0.join("releases").join(".second"))?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::BoundsExceeded)
+    );
+
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    write_private_file(
+        &root
+            .0
+            .join(".published.00000000000000000000000000000000.next"),
+        b"next",
+    )?;
+    write_private_file(
+        &root
+            .0
+            .join(".published.11111111111111111111111111111111.next"),
+        b"next",
+    )?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    Ok(())
+}
+
+#[test]
+fn owned_staging_with_unrecognized_members_is_quarantined() -> Result<(), Box<dyn std::error::Error>>
+{
+    for defect in ["unexpected", "bad-blob-group", "bad-blob-name"] {
+        let root = PrivateRoot::new()?;
+        let publisher = LocalOciPublisherV1::open(&root.0)?;
+        let address = bundle()?.address().clone();
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let staging = root
+            .0
+            .join("releases")
+            .join(format!(".{}.staging.{nonce}", &address.digest()[7..]));
+        create_private_dir(&staging)?;
+        write_private_file(
+            &staging.join("OWNER"),
+            format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes(),
+        )?;
+        match defect {
+            "unexpected" => write_private_file(&staging.join("unexpected"), b"x")?,
+            "bad-blob-group" => {
+                create_private_dir(&staging.join("blobs"))?;
+                create_private_dir(&staging.join("blobs").join("other"))?;
+            }
+            "bad-blob-name" => {
+                create_private_dir(&staging.join("blobs"))?;
+                create_private_dir(&staging.join("blobs").join("sha256"))?;
+                write_private_file(&staging.join("blobs").join("sha256").join("bad"), b"x")?;
+            }
+            _ => return Err("unknown fixture defect".into()),
+        }
+        assert_eq!(
+            publisher.recover_all(),
+            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+        );
+        assert_one_quarantined(&root)?;
+    }
+    Ok(())
+}
