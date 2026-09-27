@@ -3221,7 +3221,10 @@ impl PluginRegistry {
         Ok(())
     }
 
-    fn validate_reserved_owned_event_types(name: &str, cap: &Capability) -> Result<(), RuntimeError> {
+    fn validate_reserved_owned_event_types(
+        name: &str,
+        cap: &Capability,
+    ) -> Result<(), RuntimeError> {
         if let Some(kind) = cap
             .owned_event_types
             .iter()
