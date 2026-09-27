@@ -662,6 +662,38 @@ fn recipient_owner_public_contract_keeps_pending_when_private_material_changes(
 }
 
 #[test]
+fn recipient_owner_public_contract_keeps_pending_when_receipt_insert_rolls_back(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let authorization = Hash::from_bytes([49; 32]);
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_recipient_receipt
+         BEFORE INSERT ON recipient_key_destruction_receipts_v1
+         BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;",
+    )?;
+
+    assert!(store
+        .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
+        .is_err());
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    assert!(registry.tombstone(descriptor.identity()).is_none());
+    assert!(registry
+        .pending_destruction_requests()
+        .any(|request| request.identity == descriptor.identity()));
+    let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
+        .query_row(
+            "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+    assert_eq!(receipt_count, 0);
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_rejects_destruction_after_receipt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_temporary, mut store, owner, descriptor) = enrolled_owner()?;
