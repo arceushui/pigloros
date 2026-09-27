@@ -3046,7 +3046,10 @@ impl PluginRegistry {
         registration: PluginRegistrationV1,
         reducer: Option<Box<dyn Reducer>>,
     ) -> Result<(), RuntimeError> {
-        if !binding.verifies_erased_owner_instance(plugin) {
+        if !binding.has_installed_profile_provenance() {
+            return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
+        }
+        if !binding.verifies_owner_instance(plugin) {
             return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
         }
         let id = plugin.id();
@@ -4560,6 +4563,38 @@ mod tests {
         assert!(matches!(
             registry.register_with_verified_output_policy(&plugin, incomplete_binding, None, None),
             Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(!registry.contains(&plugin.id()));
+    }
+
+    #[test]
+    fn generated_profile_cannot_enter_installed_registration() {
+        let plugin = simple_plugin("fixture-profile", &["fixture.output"]);
+        let binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let pin = crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![crate::reviewed_policy::installed_plugin_role_v1(&plugin)],
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_installed_output(
+                &plugin,
+                binding,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                None,
+            ),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            ))
         ));
         assert!(!registry.contains(&plugin.id()));
     }
