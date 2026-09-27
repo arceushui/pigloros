@@ -20,6 +20,38 @@ use zeroize::Zeroizing;
 
 use super::{begin_immediate_sql, finish_immediate_transaction, CoreError, SqliteStore};
 
+#[cfg(test)]
+thread_local! {
+    static RECIPIENT_FSYNC_FAILURE: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
+    };
+    static RECIPIENT_FSYNC_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
+    let fail = RECIPIENT_FSYNC_FAILURE.with(|failure| {
+        RECIPIENT_FSYNC_CALLS.with(|calls| {
+            let call = calls.get();
+            calls.set(call + 1);
+            failure.get() == Some(call)
+        })
+    });
+    if fail {
+        Err(rustix::io::Errno::IO)
+    } else {
+        fsync(fd)
+    }
+}
+
+#[cfg(not(test))]
+fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
+    fsync(fd)
+}
+
 /// An owner-managed Unix directory for one consent grantee's role-4 keys.
 #[derive(Debug)]
 pub struct RecipientKeyOwnerV1 {
@@ -570,7 +602,8 @@ fn quarantine_unregistered_staged_material(
             RenameFlags::NOREPLACE,
         )
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-        fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))?;
+        recipient_fsync(&owner.directory_file)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
     }
     Ok(())
 }
@@ -730,11 +763,11 @@ fn delete_bound_private_key(
             "recipient private key digest differs from pending destruction".to_owned(),
         ));
     }
-    fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
+    recipient_fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
     verify_bound_entry(owner, name, expected)?;
     unlinkat(&owner.directory_file, name, AtFlags::empty())
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-    fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))
+    recipient_fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))
 }
 
 fn write_private_key(
@@ -770,12 +803,74 @@ fn write_private_key(
     validate_new_private_file(&metadata, identity)?;
     file.write_all(private_key)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-    fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
+    recipient_fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
     let metadata = file
         .metadata()
         .map_err(|error| CoreError::Storage(error.to_string()))?;
     validate_private_file(&metadata, identity)?;
-    fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))?;
+    recipient_fsync(&owner.directory_file)
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
     verify_bound_entry(owner, name, identity)?;
     Ok(identity)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn owner_fixture() -> Result<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1), CoreError> {
+        let temporary =
+            tempfile::tempdir().map_err(|error| CoreError::Storage(error.to_string()))?;
+        let directory = temporary.path().join("recipient-private");
+        std::fs::create_dir(&directory).map_err(|error| CoreError::Storage(error.to_string()))?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let store = SqliteStore::open(
+            temporary
+                .path()
+                .join("recipient.sqlite")
+                .to_str()
+                .ok_or_else(|| CoreError::Storage("database path is not UTF-8".to_owned()))?,
+        )?;
+        let owner = RecipientKeyOwnerV1::open(directory, EntityId::new())?;
+        Ok((temporary, store, owner))
+    }
+
+    fn fail_fsync_at(call: usize) {
+        RECIPIENT_FSYNC_CALLS.with(|calls| calls.set(0));
+        RECIPIENT_FSYNC_FAILURE.with(|failure| failure.set(Some(call)));
+    }
+
+    fn clear_fsync_fault() {
+        RECIPIENT_FSYNC_FAILURE.with(|failure| failure.set(None));
+        RECIPIENT_FSYNC_CALLS.with(|calls| calls.set(0));
+    }
+
+    #[test]
+    fn recipient_custody_sync_failures_leave_enrollment_and_destruction_unfinalized(
+    ) -> Result<(), CoreError> {
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        fail_fsync_at(0);
+        assert!(store.enroll_recipient_key(&owner).is_err());
+        clear_fsync_fault();
+        assert!(store.recover_recipient_keys(&owner)?.is_empty());
+
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        fail_fsync_at(0);
+        assert!(store
+            .destroy_recipient_key(
+                &owner,
+                descriptor.identity().epoch,
+                pos_core::Hash::from_bytes([47; 32])
+            )
+            .is_err());
+        clear_fsync_fault();
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        assert!(registry.tombstone(descriptor.identity()).is_none());
+        Ok(())
+    }
 }
