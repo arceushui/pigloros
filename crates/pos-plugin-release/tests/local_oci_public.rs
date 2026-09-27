@@ -229,7 +229,7 @@ fn recovery_quarantines_malformed_indexed_and_unindexed_finals(
 
     let root = PrivateRoot::new()?;
     let publisher = LocalOciPublisherV1::open(&root.0)?;
-    let bundle = bundle()?;
+    let bundle = self::bundle()?;
     let address = bundle.address().clone();
     assert_eq!(
         publisher.publish(&bundle)?,

@@ -19,6 +19,7 @@ const INDEX_NAME: &str = "published.json";
 const RELEASES_NAME: &str = "releases";
 const QUARANTINE_NAME: &str = "quarantine";
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationFaultPointV1 {
     RecoveryRootSyncBeforeNextIndexRemoval,
@@ -31,12 +32,8 @@ thread_local! {
     };
 }
 
+#[cfg(test)]
 fn injected_fault(point: PublicationFaultPointV1) -> Result<(), LocalOciPublicationErrorV1> {
-    #[cfg(not(test))]
-    let _ = point;
-    #[cfg(not(test))]
-    return Ok(());
-    #[cfg(test)]
     PUBLICATION_FAULT.with(|fault| {
         if fault.get() == Some(point) {
             Err(LocalOciPublicationErrorV1::RecoveryRequired)
@@ -217,6 +214,7 @@ impl LocalOciPublisherV1 {
         fs::flock(&lock, FlockOperation::LockExclusive)
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         let result = self.recover_locked().and_then(|_| {
+            #[cfg(test)]
             injected_fault(PublicationFaultPointV1::RecoveryRootSyncBeforeNextIndexRemoval)?;
             fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             match self.read_locked(address) {
@@ -316,12 +314,9 @@ impl LocalOciPublisherV1 {
                     .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
                 Ok(address)
             })();
-            let address = match recovered {
-                Ok(address) => address,
-                Err(_) => {
-                    self.quarantine_entry(&releases, name, "final")?;
-                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-                }
+            let Ok(address) = recovered else {
+                self.quarantine_entry(&releases, name, "final")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             };
             self.publish_index(&address)
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
@@ -920,7 +915,7 @@ fn read_limited(mut file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceEr
     }
 }
 
-fn map_publication_to_source(error: &LocalOciPublicationErrorV1) -> ReleaseSourceErrorV1 {
+const fn map_publication_to_source(error: &LocalOciPublicationErrorV1) -> ReleaseSourceErrorV1 {
     match error {
         LocalOciPublicationErrorV1::InvalidLayout => ReleaseSourceErrorV1::InvalidLayout,
         LocalOciPublicationErrorV1::Sync | LocalOciPublicationErrorV1::Io => {
