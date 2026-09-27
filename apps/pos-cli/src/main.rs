@@ -1005,6 +1005,7 @@ mod tests {
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
+                eprintln!("unexpected pos-cli test error: {error:?}");
                 std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
             })
         }
@@ -2254,6 +2255,7 @@ mod fault_injection_tests {
     impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
         fn test_ok(self) -> T {
             self.unwrap_or_else(|error| {
+                eprintln!("unexpected pos-cli fault-test error: {error:?}");
                 std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
             })
         }
