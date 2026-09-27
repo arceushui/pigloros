@@ -156,8 +156,7 @@ impl RecipientKeyDescriptorV1 {
     #[must_use]
     pub fn is_for_grantee(self, grantee_id: EntityId) -> bool {
         recipient_owner_id_from_grantee(grantee_id)
-            .map(|owner| owner == self.identity.owner_id)
-            .unwrap_or(false)
+            .is_ok_and(|owner| owner == self.identity.owner_id)
     }
 
     /// Return the display fingerprint over exact canonical RKP1 bytes.
@@ -203,26 +202,15 @@ fn is_recipient_owner(owner: &OwnerIdV1) -> bool {
 
 fn encode_unsigned(value: u64, bytes: &mut Vec<u8>) {
     match value {
-        0..=23 => bytes.push(u8::try_from(value).expect("CBOR immediate fits in u8")),
-        24..=0xff => bytes.extend_from_slice(&[
-            0x18,
-            u8::try_from(value).expect("CBOR one-byte unsigned integer fits in u8"),
-        ]),
+        0..=23 => bytes.push(value.to_be_bytes()[7]),
+        24..=0xff => bytes.extend_from_slice(&[0x18, value.to_be_bytes()[7]]),
         0x100..=0xffff => {
             bytes.push(0x19);
-            bytes.extend_from_slice(
-                &u16::try_from(value)
-                    .expect("CBOR two-byte unsigned integer fits in u16")
-                    .to_be_bytes(),
-            );
+            bytes.extend_from_slice(&value.to_be_bytes()[6..]);
         }
         0x1_0000..=0xffff_ffff => {
             bytes.push(0x1a);
-            bytes.extend_from_slice(
-                &u32::try_from(value)
-                    .expect("CBOR four-byte unsigned integer fits in u32")
-                    .to_be_bytes(),
-            );
+            bytes.extend_from_slice(&value.to_be_bytes()[4..]);
         }
         _ => {
             bytes.push(0x1b);

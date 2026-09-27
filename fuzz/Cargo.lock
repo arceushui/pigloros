@@ -1066,6 +1066,7 @@ dependencies = [
  "pos-core",
  "pos-crypto",
  "rand",
+ "rustix 1.1.5",
  "rusqlite",
  "serde_json",
  "thiserror",
