@@ -2,7 +2,7 @@
 //!
 //! A caller-provided catalog is not proof that an artifact owner committed its
 //! bytes or that a format-specific extractor found every dependency. This
-//! inspection cannot authorize Replay or ReproManifest release.
+//! inspection cannot authorize Replay or `ReproManifest` release.
 
 use super::{ArtifactOptionalityV1, ArtifactRegistrationV1, ErasureArtifactClassV1};
 use crate::{Hash, KeyIdentityV1, OwnerIdV1};
