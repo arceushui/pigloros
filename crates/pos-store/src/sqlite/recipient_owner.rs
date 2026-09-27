@@ -393,6 +393,22 @@ impl SqliteStore {
             registry
                 .complete_key_destruction(request, receipt)
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let removed = self
+                .conn
+                .execute(
+                    "DELETE FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
+                    rusqlite::params![
+                        request.identity.owner_id.as_str(),
+                        i64::try_from(request.identity.epoch)
+                            .map_err(|error| CoreError::Storage(error.to_string()))?
+                    ],
+                )
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if removed != 1 {
+                return Err(CoreError::Storage(
+                    "recipient key inventory changed during destruction".to_owned(),
+                ));
+            }
             self.save_key_registry_in_transaction(&registry)
         })();
         finish_immediate_transaction(&self.conn, result)

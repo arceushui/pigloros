@@ -104,7 +104,7 @@ fn recipient_owner_public_contract_recovers_and_destroys_the_bound_file(
             |row| row.get::<_, i64>(0),
         )?;
     assert_eq!(receipt_count, 1);
-    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner)?.is_empty());
     Ok(())
 }
 
@@ -221,6 +221,96 @@ fn recipient_owner_public_contract_recovers_retained_epoch_after_rotation_and_re
         reopened.recover_recipient_keys(&reopened_owner)?,
         vec![first, second]
     );
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_recovers_live_epoch_after_old_epoch_destruction(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let grantee = EntityId::new();
+    let database = temporary.path().join("recipient.sqlite");
+    let database_path = database.to_str().ok_or("database path is not UTF-8")?;
+    let mut store = SqliteStore::open(database_path)?;
+    let owner = RecipientKeyOwnerV1::open(directory.clone(), grantee)?;
+    let first = store.enroll_recipient_key(&owner)?;
+    let first_path = only_private_file(&directory)?;
+    let second = store.enroll_recipient_key(&owner)?;
+
+    store.destroy_recipient_key(&owner, first.identity().epoch, Hash::from_bytes([71; 32]))?;
+    assert!(!first_path.exists());
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![second]);
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    assert!(registry.tombstone(first.identity()).is_some());
+    drop(store);
+    drop(owner);
+
+    let connection = rusqlite::Connection::open(&database)?;
+    let inventory_count = connection.query_row(
+        "SELECT COUNT(*) FROM recipient_key_inventory_v1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let receipt_count = connection.query_row(
+        "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!((inventory_count, receipt_count), (1, 1));
+
+    let reopened = SqliteStore::open(database_path)?;
+    let reopened_owner = RecipientKeyOwnerV1::open(directory, grantee)?;
+    assert_eq!(
+        reopened.recover_recipient_keys(&reopened_owner)?,
+        vec![second]
+    );
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_keeps_destruction_pending_if_inventory_removal_fails(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for trigger_action in ["RAISE(IGNORE)", "RAISE(ABORT, 'delete refused')"] {
+        let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+        let path = only_private_file(&temporary.path().join("recipient-private"))?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+        connection.execute_batch(&format!(
+            "CREATE TRIGGER refuse_recipient_inventory_delete
+             BEFORE DELETE ON recipient_key_inventory_v1
+             BEGIN SELECT {trigger_action}; END;"
+        ))?;
+
+        assert!(store
+            .destroy_recipient_key(
+                &owner,
+                descriptor.identity().epoch,
+                Hash::from_bytes([72; 32])
+            )
+            .is_err());
+        assert!(!path.exists());
+        let registry = store
+            .load_key_registry()?
+            .ok_or("recipient registry is absent")?;
+        assert!(registry.tombstone(descriptor.identity()).is_none());
+        assert!(registry
+            .pending_destruction_requests()
+            .any(|pending| pending.identity == descriptor.identity()));
+        let inventory_count = connection.query_row(
+            "SELECT COUNT(*) FROM recipient_key_inventory_v1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let receipt_count = connection.query_row(
+            "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!((inventory_count, receipt_count), (1, 0));
+        assert!(store.recover_recipient_keys(&owner).is_err());
+    }
     Ok(())
 }
 
@@ -528,6 +618,6 @@ fn recipient_owner_public_contract_rejects_destruction_after_receipt(
     assert!(store
         .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
         .is_err());
-    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner)?.is_empty());
     Ok(())
 }
