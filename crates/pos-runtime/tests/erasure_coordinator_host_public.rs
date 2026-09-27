@@ -1266,7 +1266,15 @@ fn remove_sqlite_store_files(
     path_text: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = path.into();
-    remove_sqlite_store_files(path, &path_text)?;
+    for candidate in [
+        path,
+        std::path::PathBuf::from(format!("{path_text}-wal")),
+        std::path::PathBuf::from(format!("{path_text}-shm")),
+    ] {
+        if candidate.exists() {
+            std::fs::remove_file(candidate)?;
+        }
+    }
     Ok(())
 }
 
@@ -2946,7 +2954,7 @@ fn sqlite_read_effect_serializes_with_a_concurrent_access_freeze(
         (host, result, read_succeeded)
     });
     if let Err(error) = effect_started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        drop(release_effect_tx.send(()));
+        let _release_result = release_effect_tx.send(());
         drop(read_thread.join());
         remove_sqlite_store_files(path, &path_text)?;
         return Err(error.into());
@@ -2962,7 +2970,7 @@ fn sqlite_read_effect_serializes_with_a_concurrent_access_freeze(
         (host, result)
     });
     if let Err(error) = freeze_started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        drop(release_effect_tx.send(()));
+        let _release_result = release_effect_tx.send(());
         drop(read_thread.join());
         drop(freeze_thread.join());
         remove_sqlite_store_files(path, &path_text)?;

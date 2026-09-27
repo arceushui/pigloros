@@ -1727,6 +1727,24 @@ impl ErasureExecutionHostV1 {
         Ok((candidate, transition))
     }
 
+    fn require_unaffected_topology_preconditions(
+        &self,
+        inventory: &ErasureVerifiedInventoryV1,
+        parent: Option<TimelineId>,
+    ) -> Result<(), ErasureHostErrorV1> {
+        if let Some(parent) = parent {
+            inventory
+                .require_unaffected_topology(parent)
+                .map_err(map_erasure_error)?;
+        }
+        if inventory.request_count() != 0
+            && (self.authority.is_none() || self.coordinator.is_none())
+        {
+            return Err(ErasureHostErrorV1::AuthorizationDenied);
+        }
+        Ok(())
+    }
+
     fn apply_unaffected_topology_change(
         &mut self,
         parent: Option<TimelineId>,
@@ -1741,17 +1759,8 @@ impl ErasureExecutionHostV1 {
         ) -> Result<TopologyTransitionResultV1, CoreError>,
     ) -> Result<(Timeline, ErasureReferenceV1), ErasureHostErrorV1> {
         let (_generation, maximum_requests, inventory) = self.ready_state()?;
-        if let Some(parent) = parent {
-            inventory
-                .require_unaffected_topology(parent)
-                .map_err(map_erasure_error)?;
-        }
+        self.require_unaffected_topology_preconditions(&inventory, parent)?;
         let limits = self.recovery_limits;
-        if inventory.request_count() != 0
-            && (self.authority.is_none() || self.coordinator.is_none())
-        {
-            return Err(ErasureHostErrorV1::AuthorizationDenied);
-        }
         let gate = Arc::clone(&self.gate);
         let mut transition_failure = None;
         let mut candidate_verification = CandidateInventoryVerificationV1::NotVerified;
@@ -2455,7 +2464,7 @@ impl ErasureCommandSenderV1<'_> {
         let fence_result = match fence_result {
             Ok(result) => result,
             Err(payload) => {
-                let _ = finish_protected_effect_interval(
+                let _rollback_result = finish_protected_effect_interval(
                     self.host,
                     interval,
                     ErasureProtectedEffectDispositionV1::Rollback,
@@ -3324,7 +3333,7 @@ impl ErasureReadSenderV1<'_> {
         let fence_result = match fence_result {
             Ok(result) => result,
             Err(payload) => {
-                let _ = finish_protected_effect_interval(
+                let _rollback_result = finish_protected_effect_interval(
                     self.host,
                     interval,
                     ErasureProtectedEffectDispositionV1::Rollback,
