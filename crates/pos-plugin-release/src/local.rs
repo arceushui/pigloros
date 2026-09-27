@@ -204,7 +204,7 @@ impl LocalOciPublisherV1 {
         })
     }
 
-    fn recover_staging(&self, releases: &File) -> Result<usize, LocalOciPublicationErrorV1> {
+    fn recover_staging(&self, releases: &File) -> Result<u8, LocalOciPublicationErrorV1> {
         let staging = directory_entries(releases)?
             .filter(|name| name.starts_with('.'))
             .collect::<Vec<_>>();
