@@ -22,6 +22,9 @@ pub enum PluginTrustErrorV1 {
     /// A signature or public key is invalid.
     #[error("invalid Plugin trust record signature")]
     InvalidSignature,
+    /// A signature names no root key authorized by the relevant PTR1 record.
+    #[error("Plugin trust record signature names an unknown root key")]
+    UnknownRootKey,
     /// Too few authorized, distinct root keys signed.
     #[error("Plugin trust root threshold is not met")]
     ThresholdNotMet,
@@ -46,24 +49,6 @@ pub enum PluginTrustErrorV1 {
     /// A cumulative revocation set cannot grow beyond 4096 entries.
     #[error("Plugin revocation capacity exhausted")]
     RevocationCapacityExhausted,
-    /// The supplied PMF1 facts are not a complete, canonical projection.
-    #[error("Plugin manifest projection is incomplete or invalid")]
-    IncompleteManifestProjection,
-    /// The manifest publisher identity is not authorized by the terminal PTR1.
-    #[error("Plugin manifest publisher key is not authorized")]
-    PublisherKeyNotAuthorized,
-    /// The manifest Plugin ID is not granted to its publisher owner.
-    #[error("Plugin manifest Plugin ID is not authorized")]
-    PluginIdNotAuthorized,
-    /// The manifest validity interval does not contain the evidence UTC second.
-    #[error("Plugin manifest is expired or not yet valid")]
-    ManifestExpired,
-    /// The resolved publisher key is effectively revoked at the evidence Tick.
-    #[error("Plugin manifest publisher key is revoked")]
-    PublisherKeyRevoked,
-    /// The release or a reachable descriptor is effectively revoked at the evidence Tick.
-    #[error("Plugin manifest artifact is revoked")]
-    ArtifactRevoked,
 }
 
 /// A caller-pinned genesis digest and exact policy scope. #424 authenticates its source.
@@ -162,66 +147,6 @@ pub struct PluginRevocationRecordV1 {
     digest: [u8; 32],
 }
 
-/// Complete facts parsed from one canonical PMF1 release by #401.
-///
-/// The fields and constructor stay private until #401 supplies the complete
-/// canonical PMF1 parser that can prove this projection includes every
-/// digest-bearing descriptor. Callers cannot construct partial release facts.
-#[derive(Clone, Debug)]
-pub struct ValidatedPluginManifestProjectionV1 {
-    complete: bool,
-    pmf1_digest: [u8; 32],
-    plugin_id: String,
-    owner: OwnerIdV1,
-    role: u64,
-    epoch: u64,
-    not_before: i64,
-    expires: i64,
-    release_digest: [u8; 32],
-    descriptor_digests: Vec<[u8; 32]>,
-}
-
-/// A release authorization fact bound to one PMF1 and one trust evaluation.
-///
-/// This resolves a Plugin publisher key. It does not verify the PMF1
-/// publisher signature, admit a release, authenticate TPS1, persist a floor,
-/// or activate a Plugin.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResolvedPluginTrustAuthorizationV1 {
-    public_key: [u8; 32],
-    pmf1_digest: [u8; 32],
-    root_digest: [u8; 32],
-    revocation_digest: [u8; 32],
-    evaluation_utc_second: i64,
-    evaluation_tick: u64,
-}
-
-impl ResolvedPluginTrustAuthorizationV1 {
-    /// The terminal PTR1 publisher key authorized for the complete PMF1.
-    #[must_use]
-    pub const fn resolved_public_key(&self) -> [u8; 32] {
-        self.public_key
-    }
-
-    /// The complete canonical PMF1 digest bound to this authorization fact.
-    #[must_use]
-    pub const fn pmf1_digest(&self) -> [u8; 32] {
-        self.pmf1_digest
-    }
-
-    /// Terminal PTR1 and PRV1 complete-record digests bound to this fact.
-    #[must_use]
-    pub const fn terminal_digests(&self) -> ([u8; 32], [u8; 32]) {
-        (self.root_digest, self.revocation_digest)
-    }
-
-    /// The UTC second and Tick of the verified trust evidence.
-    #[must_use]
-    pub const fn evaluation_coordinates(&self) -> (i64, u64) {
-        (self.evaluation_utc_second, self.evaluation_tick)
-    }
-}
-
 /// Facts authenticated at one explicit UTC second and host Tick.
 #[derive(Clone, Debug)]
 pub struct VerifiedPluginTrustEvidenceV1 {
@@ -309,78 +234,18 @@ impl VerifiedPluginTrustEvidenceV1 {
         self.revoked_artifacts.iter().copied()
     }
 
-    /// Resolve one complete PMF1 projection against this terminal trust evidence.
+    /// Exact entry counts in the terminal cumulative PRV1 collections,
+    /// including entries that become effective after the bound Tick.
     ///
-    /// # Errors
-    /// Returns a closed error when the projection is incomplete, its exact
-    /// publisher or Plugin ID is unauthorized, the terminal revocation record
-    /// is capacity-bound, its interval is invalid at this evidence's UTC
-    /// second, or a key or digest is effectively revoked.
-    pub fn authorize_release(
-        &self,
-        manifest: &ValidatedPluginManifestProjectionV1,
-    ) -> Result<ResolvedPluginTrustAuthorizationV1, PluginTrustErrorV1> {
-        if self.terminal_revoked_key_count == 4096 || self.terminal_revoked_artifact_count == 4096 {
-            return Err(PluginTrustErrorV1::RevocationCapacityExhausted);
-        }
-        validate_manifest_projection(manifest)?;
-        if self.evaluation_utc_second < manifest.not_before
-            || self.evaluation_utc_second >= manifest.expires
-        {
-            return Err(PluginTrustErrorV1::ManifestExpired);
-        }
-        let publisher = self
-            .publishers
-            .iter()
-            .find(|publisher| {
-                publisher.owner == manifest.owner && publisher.epoch == manifest.epoch
-            })
-            .ok_or(PluginTrustErrorV1::PublisherKeyNotAuthorized)?;
-        if !self
-            .grants
-            .iter()
-            .any(|grant| grant.plugin_id == manifest.plugin_id && grant.owner == manifest.owner)
-        {
-            return Err(PluginTrustErrorV1::PluginIdNotAuthorized);
-        }
-        if self.revoked_keys.contains(publisher) {
-            return Err(PluginTrustErrorV1::PublisherKeyRevoked);
-        }
-        if self.revoked_artifacts.contains(&manifest.release_digest)
-            || manifest
-                .descriptor_digests
-                .iter()
-                .any(|digest| self.revoked_artifacts.contains(digest))
-        {
-            return Err(PluginTrustErrorV1::ArtifactRevoked);
-        }
-        Ok(ResolvedPluginTrustAuthorizationV1 {
-            public_key: publisher.public,
-            pmf1_digest: manifest.pmf1_digest,
-            root_digest: self.root_digest,
-            revocation_digest: self.revocation_digest,
-            evaluation_utc_second: self.evaluation_utc_second,
-            evaluation_tick: self.evaluation_tick,
-        })
+    /// #401 must fail closed before admitting a new release when either count
+    /// is 4096, because V1 cannot represent a successor with another entry.
+    #[must_use]
+    pub const fn terminal_revocation_entry_counts(&self) -> (usize, usize) {
+        (
+            self.terminal_revoked_key_count,
+            self.terminal_revoked_artifact_count,
+        )
     }
-}
-
-fn validate_manifest_projection(
-    manifest: &ValidatedPluginManifestProjectionV1,
-) -> Result<(), PluginTrustErrorV1> {
-    if !manifest.complete
-        || manifest.role != 3
-        || manifest.epoch == 0
-        || manifest.not_before >= manifest.expires
-        || validate_plugin_id(&manifest.plugin_id).is_err()
-        || manifest
-            .descriptor_digests
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-    {
-        return Err(PluginTrustErrorV1::IncompleteManifestProjection);
-    }
-    Ok(())
 }
 
 fn validate_plugin_id(value: &str) -> Result<(), PluginTrustErrorV1> {
@@ -917,7 +782,7 @@ fn verify_signature_set(
         let current_key = current.0.iter().find(|key| key.id == signature.id);
         let public = current_key
             .or(old_key)
-            .ok_or(PluginTrustErrorV1::InvalidSignature)?;
+            .ok_or(PluginTrustErrorV1::UnknownRootKey)?;
         let verifier = VerifyingKey::from_bytes(&public.public)
             .map_err(|_| PluginTrustErrorV1::InvalidSignature)?;
         verifier
@@ -1325,22 +1190,6 @@ mod tests {
         Ok((signer, publisher, root, revocation))
     }
 
-    fn manifest_projection(
-    ) -> Result<ValidatedPluginManifestProjectionV1, Box<dyn std::error::Error>> {
-        Ok(ValidatedPluginManifestProjectionV1 {
-            complete: true,
-            pmf1_digest: [0x11; 32],
-            plugin_id: "plugin-a".to_owned(),
-            owner: OwnerIdV1::new("publisher".to_owned())?,
-            role: 3,
-            epoch: 1,
-            not_before: 0,
-            expires: 100,
-            release_digest: [0x22; 32],
-            descriptor_digests: vec![[0x33; 32]],
-        })
-    }
-
     fn revoked_artifact(digest: [u8; 32], tick: u64) -> Value {
         Value::Array(vec![
             bytes(digest),
@@ -1494,122 +1343,6 @@ mod tests {
     }
 
     #[test]
-    fn release_authorization_binds_exact_complete_manifest_facts(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (_, publisher, root, revocation) = fixture()?;
-        let root_digest = *blake3::hash(&root).as_bytes();
-        let revocation_digest = *blake3::hash(&revocation).as_bytes();
-        let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
-        let evidence = verify_plugin_trust_v1(&anchor, &[&root], &[&revocation], 50, 4)?;
-        let manifest = manifest_projection()?;
-
-        let authorization = evidence.authorize_release(&manifest)?;
-        assert_eq!(authorization.resolved_public_key(), publisher);
-        assert_eq!(authorization.pmf1_digest(), [0x11; 32]);
-        assert_eq!(
-            authorization.terminal_digests(),
-            (root_digest, revocation_digest)
-        );
-        assert_eq!(authorization.evaluation_coordinates(), (50, 4));
-
-        let mut incomplete = manifest.clone();
-        incomplete.complete = false;
-        assert_eq!(
-            evidence.authorize_release(&incomplete),
-            Err(PluginTrustErrorV1::IncompleteManifestProjection)
-        );
-        let mut unsorted = manifest.clone();
-        unsorted.descriptor_digests = vec![[0x34; 32], [0x33; 32]];
-        assert_eq!(
-            evidence.authorize_release(&unsorted),
-            Err(PluginTrustErrorV1::IncompleteManifestProjection)
-        );
-        let mut wrong_role = manifest.clone();
-        wrong_role.role = 2;
-        assert_eq!(
-            evidence.authorize_release(&wrong_role),
-            Err(PluginTrustErrorV1::IncompleteManifestProjection)
-        );
-        let mut zero_epoch = manifest.clone();
-        zero_epoch.epoch = 0;
-        assert_eq!(
-            evidence.authorize_release(&zero_epoch),
-            Err(PluginTrustErrorV1::IncompleteManifestProjection)
-        );
-        let mut invalid_interval = manifest.clone();
-        invalid_interval.not_before = 100;
-        assert_eq!(
-            evidence.authorize_release(&invalid_interval),
-            Err(PluginTrustErrorV1::IncompleteManifestProjection)
-        );
-        let mut invalid_plugin_id = manifest.clone();
-        invalid_plugin_id.plugin_id = "-invalid".to_owned();
-        assert_eq!(
-            evidence.authorize_release(&invalid_plugin_id),
-            Err(PluginTrustErrorV1::IncompleteManifestProjection)
-        );
-        let mut wrong_owner = manifest.clone();
-        wrong_owner.owner = OwnerIdV1::new("other")?;
-        assert_eq!(
-            evidence.authorize_release(&wrong_owner),
-            Err(PluginTrustErrorV1::PublisherKeyNotAuthorized)
-        );
-        let mut wrong_epoch = manifest.clone();
-        wrong_epoch.epoch = 2;
-        assert_eq!(
-            evidence.authorize_release(&wrong_epoch),
-            Err(PluginTrustErrorV1::PublisherKeyNotAuthorized)
-        );
-        let mut wrong_plugin_id = manifest.clone();
-        wrong_plugin_id.plugin_id = "plugin-b".to_owned();
-        assert_eq!(
-            evidence.authorize_release(&wrong_plugin_id),
-            Err(PluginTrustErrorV1::PluginIdNotAuthorized)
-        );
-        let mut expired = manifest;
-        expired.expires = 50;
-        assert_eq!(
-            evidence.authorize_release(&expired),
-            Err(PluginTrustErrorV1::ManifestExpired)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn release_authorization_rejects_effective_key_release_and_descriptor_revocations(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (signer, publisher, root, _) = fixture()?;
-        let root_digest = *blake3::hash(&root).as_bytes();
-        let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
-
-        let mut key_fields = revocation_fields(root_digest, 1, None, Vec::new());
-        key_fields[9] = Value::Array(vec![revoked_key(publisher, 5)]);
-        let key_revocation = signed_record(key_fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
-        let key_evidence = verify_plugin_trust_v1(&anchor, &[&root], &[&key_revocation], 50, 5)?;
-        assert_eq!(
-            key_evidence.authorize_release(&manifest_projection()?),
-            Err(PluginTrustErrorV1::PublisherKeyRevoked)
-        );
-
-        for revoked in [[0x22; 32], [0x33; 32]] {
-            let artifact_revocation = revocation(
-                &signer,
-                root_digest,
-                1,
-                None,
-                vec![revoked_artifact(revoked, 5)],
-            )?;
-            let evidence =
-                verify_plugin_trust_v1(&anchor, &[&root], &[&artifact_revocation], 50, 5)?;
-            assert_eq!(
-                evidence.authorize_release(&manifest_projection()?),
-                Err(PluginTrustErrorV1::ArtifactRevoked)
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn verifier_keeps_terminal_artifact_capacity_when_entries_are_future_effective(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (signer, _, root, _) = fixture()?;
@@ -1628,10 +1361,7 @@ mod tests {
 
         let evidence = verify_plugin_trust_v1(&anchor, &[&root], &[&revocation], 50, 5)?;
         assert_eq!(evidence.effective_artifact_revocations().count(), 0);
-        assert_eq!(
-            evidence.authorize_release(&manifest_projection()?),
-            Err(PluginTrustErrorV1::RevocationCapacityExhausted)
-        );
+        assert_eq!(evidence.terminal_revocation_entry_counts(), (0, 4096));
         Ok(())
     }
 
@@ -1688,10 +1418,7 @@ mod tests {
 
         let evidence = verify_plugin_trust_v1(&anchor, &root_references, &[&revocation], 50, 5)?;
         assert_eq!(evidence.effective_key_revocations().count(), 0);
-        assert_eq!(
-            evidence.authorize_release(&manifest_projection()?),
-            Err(PluginTrustErrorV1::RevocationCapacityExhausted)
-        );
+        assert_eq!(evidence.terminal_revocation_entry_counts(), (4096, 0));
         Ok(())
     }
 
