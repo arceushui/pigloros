@@ -2041,8 +2041,8 @@ fn sqlite_rejects_child_scope_already_in_an_unaffected_request(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn std::error::Error>>
-{
+fn sqlite_fork_retry_checks_appended_child_origin_after_reopen(
+) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()
@@ -2076,6 +2076,22 @@ fn sqlite_fork_retry_accepts_appended_child_after_reopen() -> Result<(), Box<dyn
     assert_eq!(
         commit_fork_admission_direct(&mut reopened, &reopened_gate, &batch)?,
         pos_core::ErasureCasOutcomeV1::ExactRetry
+    );
+    drop(reopened);
+    let connection = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        connection.execute(
+            "UPDATE events SET origin_logical_seq=origin_logical_seq+1
+             WHERE timeline_id=?1 AND seq=1",
+            rusqlite::params![child.to_string()],
+        )?,
+        1
+    );
+    drop(connection);
+    let mut corrupted = SqliteStore::open(path)?;
+    assert_eq!(
+        recover_fork_admission(&mut corrupted, operation, successor_inventory),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
@@ -3079,8 +3095,8 @@ fn sqlite_fork_recovery_rejects_malformed_child_event_rows(
             connection.execute(
                 "INSERT INTO events
                  (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                  schema_version, payload_hash)
-                 VALUES (?1, -1, ?2, ?3, 'test.fork.corrupt', X'00', 0, 1, zeroblob(32))",
+                  schema_version, payload_hash, origin_timeline_id, origin_logical_seq)
+                 VALUES (?1, -1, ?2, ?3, 'test.fork.corrupt', X'00', 0, 1, zeroblob(32), ?1, 1)",
                 rusqlite::params![
                     prepared.child().id.to_string(),
                     pos_core::EventId::new().to_string(),
@@ -3095,9 +3111,9 @@ fn sqlite_fork_recovery_rejects_malformed_child_event_rows(
             connection.execute(
                 "INSERT INTO events
                  (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                  schema_version, payload_hash)
+                  schema_version, payload_hash, origin_timeline_id, origin_logical_seq)
                  VALUES (?1, 1, 'not-an-event-id', ?2, 'test.fork.corrupt', X'00', 0, 1,
-                         zeroblob(32))",
+                         zeroblob(32), ?1, 1)",
                 rusqlite::params![
                     prepared.child().id.to_string(),
                     pos_core::EntityId::new().to_string(),
@@ -3111,9 +3127,9 @@ fn sqlite_fork_recovery_rejects_malformed_child_event_rows(
             connection.execute(
                 "INSERT INTO events
                  (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                  schema_version, payload_hash)
+                  schema_version, payload_hash, origin_timeline_id, origin_logical_seq)
                  VALUES (?1, 1, ?2, ?3, 'test.fork.corrupt', 'not-a-blob', 0, 1,
-                         zeroblob(32))",
+                         zeroblob(32), ?1, 1)",
                 rusqlite::params![
                     prepared.child().id.to_string(),
                     pos_core::EventId::new().to_string(),

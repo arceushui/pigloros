@@ -5870,11 +5870,13 @@ fn sqlite_timeline_is_exact(
     else {
         return Ok(false);
     };
+    let inherited_prefix = child.fork_point.map_or(0, |(_, at_seq)| at_seq.as_u64());
     let mut statement = conn
         .prepare(
             "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
                     causation_id, correlation_id, schema_version, payload_hash, signature,
-                    signature_owner_id, signature_role, signature_epoch
+                    signature_owner_id, signature_role, signature_epoch,
+                    origin_timeline_id, origin_logical_seq
              FROM events
              WHERE timeline_id=?1
              ORDER BY seq",
@@ -5886,6 +5888,16 @@ fn sqlite_timeline_is_exact(
     let events = std::iter::from_fn(|| match event_rows.next() {
         Ok(Some(row)) => Some((|| {
             let event = decode_event_row(row).map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            let logical_seq = crate::checked_logical_head(inherited_prefix, event.seq.as_u64())
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            if event.origin
+                != Some(EventOriginV1 {
+                    origin_timeline_id: child.id,
+                    origin_logical_seq: Seq::from_u64(logical_seq),
+                })
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             if hasher.hash_payload(&event.payload) != event.payload_hash {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
@@ -6852,7 +6864,7 @@ struct AppendContext {
 }
 
 fn read_append_context(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     timeline: TimelineId,
     missing_timeline: CoreError,
 ) -> Result<AppendContext, CoreError> {
@@ -15007,6 +15019,11 @@ mod tests {
         subject: ErasureReferenceV1,
         indexes: [ErasureReferenceV1; 3],
         operation: ErasureReferenceV1,
+        expected_inventory_generation: ErasureReferenceV1,
+        child_scope: ErasureReferenceV1,
+        next_manifest_bytes_digest: ErasureReferenceV1,
+        binding_digest: ErasureReferenceV1,
+        successor_generation: ErasureReferenceV1,
         replacement: ErasureReferenceV1,
     }
 
@@ -15024,6 +15041,11 @@ mod tests {
                 subject: reference(54),
                 indexes: [reference(55), reference(56), reference(57)],
                 operation: reference(58),
+                expected_inventory_generation: reference(59),
+                child_scope: reference(60),
+                next_manifest_bytes_digest: reference(61),
+                binding_digest: reference(62),
+                successor_generation: reference(63),
                 replacement: reference(64),
             }
         }
@@ -15033,7 +15055,6 @@ mod tests {
         use ciborium::value::Value;
 
         let refs = SqliteRecoveryProofTestRefs::new();
-        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
         let digest = |reference: ErasureReferenceV1| Value::Bytes(reference.digest().to_vec());
         let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
             receipt: refs.subject,
@@ -15041,13 +15062,13 @@ mod tests {
         let effect_bytes = effect.to_canonical_cbor().test_ok();
         let mutation = Value::Array(vec![
             digest(refs.operation),
-            digest(reference(59)),
-            digest(reference(60)),
+            digest(refs.expected_inventory_generation),
+            digest(refs.child_scope),
             digest(refs.extension),
             digest(refs.request),
             Value::Null,
             digest(refs.manifest),
-            digest(reference(61)),
+            digest(refs.next_manifest_bytes_digest),
             Value::Array(vec![Value::Array(vec![
                 digest(refs.extension),
                 digest(ErasureForkRecoveryProofV1::bytes_digest(
@@ -15080,16 +15101,16 @@ mod tests {
             digest(effect.identity()),
             digest(ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)),
             digest(refs.subject),
-            digest(reference(62)),
+            digest(refs.binding_digest),
         ]);
         Value::Array(vec![
             Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
             Value::Integer(1.into()),
             digest(refs.operation),
-            digest(reference(62)),
-            digest(reference(59)),
-            digest(reference(60)),
-            digest(reference(63)),
+            digest(refs.binding_digest),
+            digest(refs.expected_inventory_generation),
+            digest(refs.child_scope),
+            digest(refs.successor_generation),
             Value::Array(vec![mutation]),
         ])
     }
