@@ -2387,6 +2387,92 @@ fn execute_read_page_command(
 }
 
 #[cfg(test)]
+mod read_page_coverage_tests {
+    use super::*;
+    use pos_core::ErasureContainmentGateV1;
+    use pos_store::memory::MemoryStore;
+
+    fn page_range() -> SeqRange {
+        SeqRange {
+            from: Seq::from_u64(1),
+            to: None,
+        }
+    }
+
+    fn page_bounds() -> EventReadBounds {
+        EventReadBounds::new(1024, 128, 64, 2)
+    }
+
+    #[test]
+    fn test_store_variants_return_pages_and_propagate_read_errors() {
+        for gateway_store in [false, true] {
+            let mut store = MemoryStore::new();
+            let bound =
+                store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+            assert!(bound.is_ok());
+            let timeline = store
+                .create_timeline("read-page-coverage")
+                .unwrap_or_else(|error| panic!("timeline fixture failed: {error:?}"));
+            let mut state = ExecutorState {
+                store: if gateway_store {
+                    ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store)))
+                } else {
+                    ExecutorStore::Generic(Box::new(store))
+                },
+                owntracks_owner_key: None,
+                owntracks_rate_limiter: OwnTracksRateLimiter {
+                    buckets: HashMap::new(),
+                },
+            };
+            let (reply, result) = oneshot::channel();
+            execute_read_page_command(
+                &mut state,
+                timeline.id(),
+                page_range(),
+                page_bounds(),
+                None,
+                reply,
+            );
+            let Ok(Ok(page)) = result.blocking_recv() else {
+                panic!("expected an empty test-store page");
+            };
+            assert!(page.events.is_empty());
+            assert_eq!(page.generation, None);
+
+            let (reply, result) = oneshot::channel();
+            execute_read_page_command(
+                &mut state,
+                TimelineId::new(),
+                page_range(),
+                page_bounds(),
+                None,
+                reply,
+            );
+            assert!(matches!(
+                result.blocking_recv(),
+                Ok(Err(StoreExecutorError::Store(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn expired_read_page_reports_deadline() {
+        let (reply, result) = oneshot::channel();
+        expire_command(Command::ReadPage {
+            timeline: TimelineId::new(),
+            range: page_range(),
+            bounds: page_bounds(),
+            expected_generation: None,
+            reply,
+        });
+        assert!(matches!(
+            result.blocking_recv(),
+            Ok(Err(StoreExecutorError::DeadlineExceeded))
+        ));
+    }
+}
+
+#[cfg(test)]
 fn execute_read_one_command(
     state: &mut ExecutorState,
     timeline: TimelineId,

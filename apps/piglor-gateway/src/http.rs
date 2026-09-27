@@ -1375,6 +1375,10 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(second["events"][0]["seq"], 2);
 
         let other = gateway.create_timeline("cursor-other").await.test_ok();
+        assert!(gateway
+            .read_events_page(&TimelineId::new().to_string(), 0, 1)
+            .await
+            .is_err());
         drop(gateway);
         let (status, _) = json_request(
             app.clone(),
@@ -1392,6 +1396,7 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(parse_event_cursor(&format!("v1.aé{}.{id}.2", "a".repeat(61)), &id).is_err());
         for invalid in [
             "bad".to_owned(),
             format!("v1.{}.{id}.2", "z".repeat(64)),
@@ -1415,6 +1420,43 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn host_cursor_tracks_the_response_byte_limit() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let timeline = gateway.create_timeline("cursor-byte-limit").await.test_ok();
+        let id = timeline.id().to_string();
+        let actor = EntityId::new().to_string();
+        let payload = "x".repeat(180 * 1024);
+        for _ in 0..3 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor,
+                    crate::EVENT_TYPE_ACTION,
+                    &json!({"data": &payload}),
+                )
+                .await
+                .test_ok();
+        }
+        let app = router(AppState {
+            gateway: gateway.clone(),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        drop(gateway);
+        let (status, first) =
+            json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["events"].as_array().test_ok().len(), 2);
+        assert!(first["next_cursor"].is_string());
+        assert_eq!(first["next_from_seq"], 3);
     }
 
     #[tokio::test]
