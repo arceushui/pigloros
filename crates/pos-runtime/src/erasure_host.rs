@@ -4585,6 +4585,25 @@ mod tests {
                 .store(true, std::sync::atomic::Ordering::Release);
         }
 
+        fn topology_observation(
+            &self,
+            manifest_digest: ErasureReferenceV1,
+            timelines: Vec<TimelineId>,
+        ) -> ErasureVerifiedTopologyObservationV1 {
+            if self.frozen.load(std::sync::atomic::Ordering::Acquire) {
+                ErasureVerifiedTopologyObservationV1::new(
+                    manifest_digest,
+                    timelines
+                        .into_iter()
+                        .map(|timeline| (timeline, reference(9)))
+                        .collect(),
+                    Vec::new(),
+                )
+            } else {
+                ErasureVerifiedTopologyObservationV1::new(manifest_digest, Vec::new(), timelines)
+            }
+        }
+
         fn freeze_admission(
             &self,
             request: ErasureReferenceV1,
@@ -4716,22 +4735,7 @@ mod tests {
                 .lock()
                 .map_err(|_| ErasureErrorV1::ProvenanceMissing)?
                 .clone();
-            if self.frozen.load(std::sync::atomic::Ordering::Acquire) {
-                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
-                    manifest_digest,
-                    timelines
-                        .into_iter()
-                        .map(|timeline| (timeline, reference(9)))
-                        .collect(),
-                    Vec::new(),
-                )))
-            } else {
-                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
-                    manifest_digest,
-                    Vec::new(),
-                    timelines,
-                )))
-            }
+            Ok(Some(self.topology_observation(manifest_digest, timelines)))
         }
 
         fn verified_topology_observation_for_candidate(
@@ -4752,22 +4756,7 @@ mod tests {
             if !timelines.contains(&candidate.id) {
                 timelines.push(candidate.id);
             }
-            if self.frozen.load(std::sync::atomic::Ordering::Acquire) {
-                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
-                    manifest_digest,
-                    timelines
-                        .into_iter()
-                        .map(|timeline| (timeline, reference(9)))
-                        .collect(),
-                    Vec::new(),
-                )))
-            } else {
-                Ok(Some(ErasureVerifiedTopologyObservationV1::new(
-                    manifest_digest,
-                    Vec::new(),
-                    timelines,
-                )))
-            }
+            Ok(Some(self.topology_observation(manifest_digest, timelines)))
         }
 
         fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
@@ -6084,7 +6073,7 @@ mod tests {
     }
 
     #[test]
-    fn active_root_topology_changes_reject_an_affected_candidate_before_persistence() {
+    fn active_root_rejects_invalid_candidate_binding_before_persistence() {
         let authority = Arc::new(ActiveTopologyAuthorityV1::default());
         let (mut store, _) = fault_store_with_control(FaultModeV1::Recovery);
         let authority_for_creation = Arc::clone(&authority);
@@ -6093,7 +6082,7 @@ mod tests {
         }));
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(authority);
+        host.authority = Some(Arc::clone(&authority));
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -6134,12 +6123,20 @@ mod tests {
         let result = host
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("affected-root"));
-        assert_eq!(result, Err(ErasureHostErrorV1::Conflict));
-        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+        assert_eq!(result, Err(ErasureHostErrorV1::RecoveryUnavailable));
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+        assert_eq!(
+            authority
+                .timelines
+                .lock()
+                .map(|timelines| timelines.len())
+                .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("poisoned test fixture"))),
+            1
+        );
     }
 
     #[test]
-    fn active_root_topology_rejection_does_not_depend_on_rollback() {
+    fn invalid_root_candidate_binding_does_not_attempt_rollback() {
         let authority = Arc::new(ActiveTopologyAuthorityV1::default());
         let (mut store, _) = fault_store_with_control(FaultModeV1::DeleteTimeline);
         let authority_for_creation = Arc::clone(&authority);
@@ -6148,7 +6145,7 @@ mod tests {
         }));
         let mut host = ErasureExecutionHostV1::new_closed(Box::new(store))
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        host.authority = Some(authority);
+        host.authority = Some(Arc::clone(&authority));
         host.coordinator = Some(reference(30));
         host.install_inventory_from_coordinator(4)
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
@@ -6189,9 +6186,17 @@ mod tests {
         assert_eq!(
             host.command_sender()
                 .and_then(|mut sender| sender.create_timeline("rollback-failure-root")),
-            Err(ErasureHostErrorV1::Conflict)
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
-        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+        assert_eq!(
+            authority
+                .timelines
+                .lock()
+                .map(|timelines| timelines.len())
+                .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("poisoned test fixture"))),
+            1
+        );
     }
 
     #[test]
