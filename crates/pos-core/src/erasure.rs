@@ -5915,6 +5915,22 @@ mod coverage_paths {
         ErasureReferenceV1::from_digest([value; 32])
     }
 
+    #[test]
+    fn bounded_recovery_array_rejects_excess_and_wrong_shape() {
+        let array = Value::Array(vec![
+            Value::Text("a".to_owned()),
+            Value::Text("b".to_owned()),
+        ]);
+        assert_eq!(
+            bounded_value_array(&array, 1),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        assert_eq!(
+            bounded_value_array(&Value::Text("not-an-array".to_owned()), 1),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+
     fn frozen_state_with_manifest_and_timelines(
         manifest_digest: ErasureReferenceV1,
         scope_timeline_ids: Vec<TimelineId>,
@@ -6072,6 +6088,10 @@ mod coverage_paths {
         missing_request.classifications[0].1.clear();
         assert_eq!(
             current.validate_frozen_membership_successor(&missing_request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            missing_request.validate_fork_parent_has_admitted_lineage(timeline),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 

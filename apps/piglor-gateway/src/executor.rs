@@ -3193,7 +3193,7 @@ mod tests {
         let panic_result = {
             let mut sender = host.command_sender()?;
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = sender.with_protected_effect_fence(
+                let _result = sender.with_protected_effect_fence(
                     timeline,
                     super::ErasureProtectedOperationV1::ProposedAction,
                     &mut |_sender| panic!("poison this test host"),
