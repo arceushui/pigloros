@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use pos_core::{
     event::{CanonicalBytes, EventDraft, Kind},
     Capability, Plugin, PluginId,

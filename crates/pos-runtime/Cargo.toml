@@ -15,12 +15,14 @@ test-support = []
 [dependencies]
 blake3 = { workspace = true }
 pos-core = { path = "../pos-core" }
-pos-conformance = { path = "../pos-conformance" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pos-conformance = { path = "../pos-conformance" }
 
 [dev-dependencies]
 ciborium = { workspace = true }
@@ -47,6 +49,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "recovery_evidence"
+required-features = ["test-support"]
+
+[[test]]
+name = "non_linux_profile"
 required-features = ["test-support"]
 
 [lints]

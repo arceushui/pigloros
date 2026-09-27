@@ -20,7 +20,7 @@ use pos_core::{
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
 #[cfg(any(test, feature = "test-support"))]
-use crate::output_admission::InstalledOutputPolicySourceV1;
+use crate::output_admission::{draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1};
 use crate::{
     composition::{
         PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
@@ -2818,7 +2818,7 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
-        let profile_artifact = pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+        let profile_artifact = draft_execution_profile_artifact_v1(profile_id)
             .map_err(|error| RuntimeError::CapabilityMismatch {
                 name: plugin.name().to_owned(),
                 reason: error.to_string(),

@@ -1,6 +1,5 @@
 //! Host-owned admission of Plugin output against one recorded policy identity.
 
-use pos_conformance::ExecutionProfileV1;
 use pos_core::{
     event::EventDraft,
     output_policy::{OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_POLICY_BYTES_V1},
@@ -11,10 +10,16 @@ use pos_core::{
 };
 use std::sync::Mutex;
 
+const MAX_EXECUTION_PROFILE_BYTES_V1: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
+const _: () = assert!(
+    MAX_EXECUTION_PROFILE_BYTES_V1 == pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1
+);
+
 /// Maximum aggregate bytes retained by one output-policy closure envelope.
 pub const MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1: usize = 2 * 65_536
     + 2 * crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1
-    + pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1
+    + MAX_EXECUTION_PROFILE_BYTES_V1
     + MAX_WORLD_RETENTION_RECORD_BYTES_V1
     + 4
     + 6 * 8;
@@ -683,8 +688,7 @@ impl OutputPolicyClosureV1 {
                 kind: "configuration",
             });
         }
-        ExecutionProfileV1::from_canonical_cbor(execution_profile_artifact)
-            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
+        validate_execution_profile_artifact_v1(execution_profile_artifact)?;
         let retention_policy =
             WorldRetentionPolicyV1::from_canonical_cbor(retention_policy_artifact)
                 .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })?;
@@ -962,7 +966,7 @@ const fn validate_leaf_lengths(
             kind: "configuration",
         });
     }
-    if execution_profile_artifact.len() > pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1 {
+    if execution_profile_artifact.len() > MAX_EXECUTION_PROFILE_BYTES_V1 {
         return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" });
     }
     if retention_policy_artifact.len() > MAX_WORLD_RETENTION_RECORD_BYTES_V1 {
@@ -971,18 +975,52 @@ const fn validate_leaf_lengths(
     Ok(())
 }
 
-fn execution_profile_artifact_v1(
+fn validate_execution_profile_artifact_v1(bytes: &[u8]) -> Result<(), OutputAdmissionErrorV1> {
+    #[cfg(target_os = "linux")]
+    {
+        pos_conformance::ExecutionProfileV1::from_canonical_cbor(bytes)
+            .map(|_| ())
+            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = bytes;
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn draft_execution_profile_artifact_v1(
     profile_id: &str,
-) -> Result<Vec<u8>, pos_conformance::BundleContractErrorV1> {
+) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
+    #[cfg(target_os = "linux")]
+    {
+        pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = profile_id;
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    }
+}
+
+fn execution_profile_artifact_v1(profile_id: &str) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
     #[cfg(any(test, feature = "test-support"))]
     {
         // `test-support` deliberately permits unsigned draft artifacts for
         // fixtures; deployable builds must not enable that feature.
-        pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+        draft_execution_profile_artifact_v1(profile_id)
     }
-    #[cfg(not(any(test, feature = "test-support")))]
+    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
     {
         pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
+            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    }
+    #[cfg(all(not(target_os = "linux"), not(any(test, feature = "test-support"))))]
+    {
+        let _ = profile_id;
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
     }
 }
 
@@ -1683,7 +1721,7 @@ mod tests {
                 kind: "configuration"
             })
         ));
-        let too_large = vec![0_u8; pos_conformance::MAX_EXECUTION_PROFILE_BYTES_V1 + 1];
+        let too_large = vec![0_u8; MAX_EXECUTION_PROFILE_BYTES_V1 + 1];
         assert!(matches!(
             OutputPolicyArtifactInputV1::from_slices(
                 b"implementation",

@@ -398,6 +398,8 @@ jobs:
           toolchain: 1.97.1
       - name: Exercise the unsupported owned-key signing boundary
         run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
+      - name: Exercise the unsupported non-Linux EPF1 boundary
+        run: cargo test -p pos-runtime --features test-support --test non_linux_profile --locked -- --include-ignored
 
   clippy:
     name: clippy
