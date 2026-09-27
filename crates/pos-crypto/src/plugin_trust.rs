@@ -1522,6 +1522,95 @@ mod tests {
     }
 
     #[test]
+    fn truncated_multi_byte_cbor_lengths_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (_, _, root, _) = fixture()?;
+        for length_marker in [0x19, 0x1a, 0x1b] {
+            let mut truncated = root[..6].to_vec();
+            truncated.push(length_marker);
+            assert!(PluginTrustRootRecordV1::decode(&truncated).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn revocation_member_type_errors_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, root, revocation) = fixture()?;
+        let root_digest = *blake3::hash(&root).as_bytes();
+        let valid_key = revoked_key(publisher, 5);
+        for (index, replacement) in [
+            (1, Value::Text("role".to_owned())),
+            (2, Value::Text("epoch".to_owned())),
+            (3, Value::Text("public".to_owned())),
+            (4, Value::Text("tick".to_owned())),
+            (5, Value::Text("reason".to_owned())),
+        ] {
+            let Value::Array(mut entry) = valid_key.clone() else {
+                return Err("expected revoked key array".into());
+            };
+            entry[index] = replacement;
+            let mut fields = revocation_fields(root_digest, 1, None, Vec::new());
+            fields[9] = Value::Array(vec![Value::Array(entry)]);
+            let encoded = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
+            assert!(PluginRevocationRecordV1::decode(&encoded).is_err());
+        }
+
+        let mut fields = revocation_fields(root_digest, 1, None, Vec::new());
+        fields[9] = Value::Array(vec![unsigned(1)]);
+        let invalid_key = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(PluginRevocationRecordV1::decode(&invalid_key).is_err());
+
+        let valid_artifact = revoked_artifact([1; 32], 5);
+        let Value::Array(mut artifact) = valid_artifact else {
+            return Err("expected revoked artifact array".into());
+        };
+        artifact[1] = Value::Text("tick".to_owned());
+        let invalid_artifact =
+            revocation(&signer, root_digest, 1, None, vec![Value::Array(artifact)])?;
+        assert!(PluginRevocationRecordV1::decode(&invalid_artifact).is_err());
+
+        let invalid_artifact = signed_record(
+            revocation_fields(root_digest, 1, None, vec![unsigned(1)]),
+            REVOCATION_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        assert!(PluginRevocationRecordV1::decode(&invalid_artifact).is_err());
+        let mut trailing = signed_record(
+            revocation_fields(root_digest, 1, None, Vec::new()),
+            REVOCATION_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        trailing.push(0);
+        assert!(PluginRevocationRecordV1::decode(&trailing).is_err());
+        assert!(PluginRevocationRecordV1::decode(&revocation).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn root_version_increment_overflow_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, _, _) = fixture()?;
+        let first = root(&signer, publisher, u64::MAX, None)?;
+        let anchor = TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&first).as_bytes())?;
+        let second = root(
+            &signer,
+            publisher,
+            1,
+            Some(*blake3::hash(&first).as_bytes()),
+        )?;
+        let revocation = self::revocation(
+            &signer,
+            *blake3::hash(&second).as_bytes(),
+            1,
+            None,
+            Vec::new(),
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&first, &second], &[&revocation], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn signed_schema_and_type_vectors_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let (signer, _, root, revocation) = fixture()?;
         let anchor = TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&root).as_bytes())?;
