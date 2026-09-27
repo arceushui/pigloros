@@ -4769,25 +4769,34 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
     where
         F: FnOnce() -> T,
     {
-        identity.validate_historical_subject_decryption()?;
         // A read-only decryption still takes the writer lock: rotation and
         // destruction must serialize before or after the held callback.
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
-        let result = self
-            .load_key_registry()
-            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
-            .and_then(|registry| registry.ok_or(KeyRegistryErrorV1::RegistryUnavailable))
-            .and_then(|mut registry| {
-                registry.with_decryption_authorization(identity, private_material_digest, operation)
-            });
-        finish_transaction(
-            &self.conn,
-            result,
-            |_, _| KeyRegistryErrorV1::RegistryUnavailable,
-            |_, _| KeyRegistryErrorV1::RegistryUnavailable,
-        )
+        identity
+            .validate_historical_subject_decryption()
+            .and_then(|()| {
+                self.conn
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+            })
+            .and_then(|()| {
+                let result = self
+                    .load_key_registry()
+                    .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+                    .and_then(|registry| registry.ok_or(KeyRegistryErrorV1::RegistryUnavailable))
+                    .and_then(|mut registry| {
+                        registry.with_decryption_authorization(
+                            identity,
+                            private_material_digest,
+                            operation,
+                        )
+                    });
+                finish_transaction(
+                    &self.conn,
+                    result,
+                    |_, _| KeyRegistryErrorV1::RegistryUnavailable,
+                    |_, _| KeyRegistryErrorV1::RegistryUnavailable,
+                )
+            })
     }
 }
 
@@ -19259,9 +19268,18 @@ mod tests {
 
     #[test]
     fn historical_decryption_holds_registry_lock_through_callback() {
+        #[derive(Clone, Copy)]
+        enum CompetingMutation {
+            Rotate,
+            BeginDestruction,
+        }
+
         let old = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
         let current = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2);
-        for rotate in [true, false] {
+        for mutation in [
+            CompetingMutation::Rotate,
+            CompetingMutation::BeginDestruction,
+        ] {
             let database = tempfile::NamedTempFile::new().test_ok();
             let path = database.path().to_str().test_ok();
             let mut registry = KeyRegistryStateV1::new();
@@ -19314,12 +19332,13 @@ mod tests {
                 );
 
                 let mutation = scope.spawn(move || {
-                    let result = if rotate {
-                        mutating_store.save_key_registry(rotated_for_mutation)
-                    } else {
-                        mutating_store
+                    let result = match mutation {
+                        CompetingMutation::Rotate => {
+                            mutating_store.save_key_registry(rotated_for_mutation)
+                        }
+                        CompetingMutation::BeginDestruction => mutating_store
                             .begin_key_registry_destruction(request)
-                            .map(|_| ())
+                            .map(|_| ()),
                     };
                     mutation_tx.send(result).test_ok();
                 });
@@ -19336,20 +19355,25 @@ mod tests {
 
             let mut verify = open_store_at(path);
             assert_eq!(verify.load_key_registry().test_ok(), Some(registry));
-            if rotate {
-                verify.save_key_registry(&rotated).test_ok();
-                assert_eq!(
-                    verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {
-                        "old plaintext"
-                    }),
-                    Ok("old plaintext")
-                );
-            } else {
-                verify.begin_key_registry_destruction(request).test_ok();
-                assert_eq!(
-                    verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {}),
-                    Err(KeyRegistryErrorV1::DestructionPending)
-                );
+            match mutation {
+                CompetingMutation::Rotate => {
+                    verify.save_key_registry(&rotated).test_ok();
+                    assert_eq!(
+                        verify.with_decryption_authorization(
+                            old,
+                            Hash::from_bytes([1; 32]),
+                            || { "old plaintext" }
+                        ),
+                        Ok("old plaintext")
+                    );
+                }
+                CompetingMutation::BeginDestruction => {
+                    verify.begin_key_registry_destruction(request).test_ok();
+                    assert_eq!(
+                        verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {}),
+                        Err(KeyRegistryErrorV1::DestructionPending)
+                    );
+                }
             }
         }
     }

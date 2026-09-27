@@ -4484,14 +4484,18 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
     where
         F: FnOnce() -> T,
     {
-        identity.validate_historical_subject_decryption()?;
         // The mutable store owner is held through the callback, as it is for
         // signing and destruction on this single-process adapter.
-        let mut registry = self
-            .load_key_registry()
-            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?
-            .ok_or(KeyRegistryErrorV1::RegistryUnavailable)?;
-        registry.with_decryption_authorization(identity, private_material_digest, operation)
+        identity
+            .validate_historical_subject_decryption()
+            .and_then(|()| {
+                self.load_key_registry()
+                    .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+            })
+            .and_then(|registry| registry.ok_or(KeyRegistryErrorV1::RegistryUnavailable))
+            .and_then(|mut registry| {
+                registry.with_decryption_authorization(identity, private_material_digest, operation)
+            })
     }
 }
 
