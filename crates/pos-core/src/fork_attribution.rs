@@ -542,7 +542,12 @@ impl<'a> Reader<'a> {
         self.take(length)
     }
     fn text(&mut self, maximum: usize) -> Result<&'a str, ForkAttributionCodecErrorV1> {
-        let value = self.bytes(maximum)?;
+        let length = usize::try_from(self.head(3)?)
+            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
+        if length > maximum {
+            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
+        }
+        let value = self.take(length)?;
         if value.is_empty() {
             return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
         }
