@@ -2190,7 +2190,7 @@ impl SqliteStore {
     }
 
     fn append_or_duplicate_with_limit(
-        &mut self,
+        &self,
         timeline: TimelineId,
         identity: AppendIdentity,
         admitted_at: WallTime,
@@ -3872,7 +3872,7 @@ impl SqliteStore {
     }
 
     fn initialize_timeline_with_key_registry_in_transaction(
-        &mut self,
+        &self,
         name: &str,
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<(Timeline, bool), CoreError> {
@@ -3884,7 +3884,7 @@ impl SqliteStore {
     }
 
     fn initialize_timeline_with_key_registry_in_transaction_with_meta(
-        &mut self,
+        &self,
         meta: &TimelineMeta,
         expected_registry: &KeyRegistryStateV1,
         host_transition: bool,
