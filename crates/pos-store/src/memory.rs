@@ -1183,14 +1183,7 @@ impl MemoryStore {
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&mut Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
-        let Some(gate) = self.erasure_gate.clone() else {
-            return Err(CoreError::ErasureContainmentUnavailable);
-        };
-        crate::validate_bound_erasure_inventory_generation(
-            self.erasure_gate_bound,
-            &gate,
-            self.erasure_inventory_generation,
-        )?;
+        let gate = self.validated_erasure_gate()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
@@ -1208,14 +1201,7 @@ impl MemoryStore {
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
-        let Some(gate) = self.erasure_gate.clone() else {
-            return Err(CoreError::ErasureContainmentUnavailable);
-        };
-        crate::validate_bound_erasure_inventory_generation(
-            self.erasure_gate_bound,
-            &gate,
-            self.erasure_inventory_generation,
-        )?;
+        let gate = self.validated_erasure_gate()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
@@ -1223,13 +1209,7 @@ impl MemoryStore {
             result = effect(self);
         };
         let fenced = gate.with_fence(timeline, operation, &mut run);
-        crate::validate_bound_erasure_inventory_generation(
-            self.erasure_gate_bound,
-            &gate,
-            self.erasure_inventory_generation,
-        )?;
-        fenced.map_err(pos_core::store::erasure_containment_error)?;
-        result
+        self.complete_erasure_read_fence(&gate, fenced, result)
     }
 
     fn with_erasure_read_filter<T>(
@@ -1238,14 +1218,7 @@ impl MemoryStore {
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&Self) -> Result<T, CoreError>,
     ) -> Result<Option<T>, CoreError> {
-        let Some(gate) = self.erasure_gate.clone() else {
-            return Err(CoreError::ErasureContainmentUnavailable);
-        };
-        crate::validate_bound_erasure_inventory_generation(
-            self.erasure_gate_bound,
-            &gate,
-            self.erasure_inventory_generation,
-        )?;
+        let gate = self.validated_erasure_gate()?;
         let mut result = Err(CoreError::Storage(
             "erasure fence did not execute the protected operation".to_owned(),
         ));
@@ -1253,9 +1226,46 @@ impl MemoryStore {
             result = effect(self);
         };
         let fenced = gate.with_fence(timeline, operation, &mut run);
+        self.complete_erasure_read_filter(&gate, fenced, result)
+    }
+
+    fn validated_erasure_gate(&self) -> Result<Arc<ErasureContainmentGateV1>, CoreError> {
+        let gate = self
+            .erasure_gate
+            .clone()
+            .ok_or(CoreError::ErasureContainmentUnavailable)?;
         crate::validate_bound_erasure_inventory_generation(
             self.erasure_gate_bound,
             &gate,
+            self.erasure_inventory_generation,
+        )?;
+        Ok(gate)
+    }
+
+    fn complete_erasure_read_fence<T>(
+        &self,
+        gate: &ErasureContainmentGateV1,
+        fenced: Result<(), pos_core::ErasureContainmentErrorV1>,
+        result: Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        crate::validate_bound_erasure_inventory_generation(
+            self.erasure_gate_bound,
+            gate,
+            self.erasure_inventory_generation,
+        )?;
+        fenced.map_err(pos_core::store::erasure_containment_error)?;
+        result
+    }
+
+    fn complete_erasure_read_filter<T>(
+        &self,
+        gate: &ErasureContainmentGateV1,
+        fenced: Result<(), pos_core::ErasureContainmentErrorV1>,
+        result: Result<T, CoreError>,
+    ) -> Result<Option<T>, CoreError> {
+        crate::validate_bound_erasure_inventory_generation(
+            self.erasure_gate_bound,
+            gate,
             self.erasure_inventory_generation,
         )?;
         match fenced {
@@ -1510,9 +1520,7 @@ impl ErasureInventoryPersistencePortV1 for MemoryStore {
         &mut self,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-        if !limits.admits(self.erasure_records.len(), self.timelines.len()) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
+        self.ensure_inventory_snapshot_limits(limits)?;
         let mut request_heads = Vec::new();
         let snapshot = request_heads
             .try_reserve(self.erasure_records.len())
@@ -1908,9 +1916,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
             })
             .transpose()
             .and_then(|current_digest| apply_memory_erasure_cas(self, &mutation, current_digest));
-        if matches!(&result, Ok(ErasureCasOutcomeV1::Applied)) {
-            self.erasure_inventory_generation = None;
-        }
+        self.invalidate_inventory_generation_after_cas(&result);
         result
     }
 }
@@ -2772,12 +2778,53 @@ impl GeographicReplayVerifier for MemoryStore {
 }
 
 impl MemoryStore {
+    fn ensure_inventory_snapshot_limits(
+        &self,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if limits.admits(self.erasure_records.len(), self.timelines.len()) {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::ScopeInvalid)
+        }
+    }
+
+    fn invalidate_inventory_generation_after_cas(
+        &mut self,
+        result: &Result<ErasureCasOutcomeV1, ErasureErrorV1>,
+    ) {
+        if matches!(result, Ok(ErasureCasOutcomeV1::Applied)) {
+            self.erasure_inventory_generation = None;
+        }
+    }
+
+    fn ensure_key_registry_write_allowed(&self) -> Result<(), CoreError> {
+        if let Some(gate) = self.erasure_gate.as_deref() {
+            crate::validate_bound_erasure_inventory_generation(
+                self.erasure_gate_bound,
+                gate,
+                self.erasure_inventory_generation,
+            )?;
+        } else if self.erasure_gate_bound {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        }
+        Ok(())
+    }
+
     const fn ensure_direct_topology_mutation_allowed(&self) -> Result<(), CoreError> {
         if self.erasure_topology_requires_permit {
             Err(CoreError::ErasureContainmentUnavailable)
         } else {
             Ok(())
         }
+    }
+
+    fn with_direct_topology_mutation<T>(
+        &mut self,
+        effect: impl FnOnce(&mut Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
+        effect(self)
     }
 
     fn ensure_host_transition_permit(
@@ -2991,14 +3038,15 @@ impl EventStore for MemoryStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        let meta = TimelineMeta::root(name);
-        let timeline = Timeline::new(meta);
-        self.timelines.insert(
-            timeline.id(),
-            TimelineState::new(timeline.clone(), self.hasher.genesis_hash()),
-        );
-        Ok(timeline)
+        self.with_direct_topology_mutation(|store| {
+            let meta = TimelineMeta::root(name);
+            let timeline = Timeline::new(meta);
+            store.timelines.insert(
+                timeline.id(),
+                TimelineState::new(timeline.clone(), store.hasher.genesis_hash()),
+            );
+            Ok(timeline)
+        })
     }
 
     fn create_timeline_for_host_transition_with_meta(
@@ -3037,16 +3085,8 @@ impl EventStore for MemoryStore {
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
-        if let Some(gate) = self.erasure_gate.as_deref() {
-            crate::validate_bound_erasure_inventory_generation(
-                self.erasure_gate_bound,
-                gate,
-                self.erasure_inventory_generation,
-            )?;
-        } else if self.erasure_gate_bound {
-            return Err(CoreError::ErasureContainmentUnavailable);
-        }
-        self.save_key_registry_unchecked(registry)
+        self.ensure_key_registry_write_allowed()
+            .and_then(|()| self.save_key_registry_unchecked(registry))
     }
 
     fn initialize_timeline_with_key_registry_for_host_transition_with_meta(
@@ -3392,11 +3432,12 @@ impl EventStore for MemoryStore {
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
-            store
-                .ensure_generic_timeline_visibility(parent)
-                .and_then(|()| store.fork_timeline_unchecked(parent, at_seq, name))
+        self.with_direct_topology_mutation(|store| {
+            store.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
+                store
+                    .ensure_generic_timeline_visibility(parent)
+                    .and_then(|()| store.fork_timeline_unchecked(parent, at_seq, name))
+            })
         })
     }
 
@@ -3481,8 +3522,9 @@ impl EventStore for MemoryStore {
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        self.create_timeline_with_meta_with_erasure_fence(&meta)
+        self.with_direct_topology_mutation(|store| {
+            store.create_timeline_with_meta_with_erasure_fence(&meta)
+        })
     }
 
     fn append_committed(
@@ -3538,8 +3580,7 @@ impl EventStore for MemoryStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        delete_timeline(self, id)
+        self.with_direct_topology_mutation(|store| delete_timeline(store, id))
     }
 
     fn chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
@@ -3555,8 +3596,9 @@ impl EventStore for MemoryStore {
         meta: TimelineMeta,
         events: &[Event],
     ) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        pos_core::store::import_committed_with_rollback(self, meta, events)
+        self.with_direct_topology_mutation(|store| {
+            pos_core::store::import_committed_with_rollback(store, meta, events)
+        })
     }
 }
 
