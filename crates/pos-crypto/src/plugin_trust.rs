@@ -1347,6 +1347,61 @@ mod tests {
             verify_plugin_trust_v1(&anchor, &[&root], &[&first, &changed_old], 50, 5),
             Err(PluginTrustErrorV1::ChainDiscontinuity)
         ));
+        let wrong_new_tick = revocation(
+            &signer,
+            root_digest,
+            2,
+            Some(first_digest),
+            vec![revoked_artifact([1; 32], 4), revoked_artifact([2; 32], 5)],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&first, &wrong_new_tick], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cumulative_publisher_revocations_require_retention_and_current_tick(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, root, _) = fixture()?;
+        let root_digest = *blake3::hash(&root).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
+        let mut first_fields = revocation_fields(root_digest, 1, None, Vec::new());
+        first_fields[9] = Value::Array(vec![revoked_key(publisher, 5)]);
+        let first = signed_record(first_fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
+        let first_digest = *blake3::hash(&first).as_bytes();
+        let second_fields = revocation_fields(root_digest, 2, Some(first_digest), Vec::new());
+        let missing = signed_record(
+            second_fields.clone(),
+            REVOCATION_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&first, &missing], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        let mut changed_fields = second_fields;
+        changed_fields[9] = Value::Array(vec![revoked_key(publisher, 4)]);
+        let changed = signed_record(changed_fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&first, &changed], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+
+        let empty_first = revocation(&signer, root_digest, 1, None, Vec::new())?;
+        let mut new_fields = revocation_fields(
+            root_digest,
+            2,
+            Some(*blake3::hash(&empty_first).as_bytes()),
+            Vec::new(),
+        );
+        new_fields[9] = Value::Array(vec![revoked_key(publisher, 4)]);
+        let wrong_new_tick = signed_record(new_fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&empty_first, &wrong_new_tick], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
         Ok(())
     }
 
@@ -1934,6 +1989,55 @@ mod tests {
         let bad_next = signed_record(bad_next, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
         assert!(matches!(
             verify_plugin_trust_v1(&anchor, &[&root, &bad_next], &[&revocation], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+
+        let wrong_version = signed_record(
+            root_fields(&signer, publisher, 3, Some(digest)),
+            ROOT_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root, &wrong_version], &[&revocation], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+
+        let alias_public = signer.verifying_key().to_bytes();
+        let alias_root = signed_record(
+            root_fields(&signer, alias_public, 1, None),
+            ROOT_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        let alias_digest = *blake3::hash(&alias_root).as_bytes();
+        let alias_anchor = TrustedPluginRootAnchorV1::new("scope", alias_digest)?;
+        let alias_revocation = revocation(&signer, alias_digest, 1, None, Vec::new())?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&alias_anchor, &[&alias_root], &[&alias_revocation], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+
+        let bad_initial_previous = revocation(&signer, digest, 1, Some([0; 32]), Vec::new())?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&bad_initial_previous], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+
+        let repeated_epoch = revocation(
+            &signer,
+            digest,
+            1,
+            Some(*blake3::hash(&revocation).as_bytes()),
+            Vec::new(),
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&revocation, &repeated_epoch], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+
+        let new_signer = SigningKey::from_bytes(&[9; 32]);
+        let rotated = rotated_root(&new_signer, publisher, digest, &[&signer, &new_signer])?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root, &rotated], &[&revocation], 50, 5),
             Err(PluginTrustErrorV1::ChainDiscontinuity)
         ));
         Ok(())
