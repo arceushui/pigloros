@@ -14999,66 +14999,93 @@ mod tests {
         );
     }
 
+    struct SqliteRecoveryProofTestRefs {
+        extension: ErasureReferenceV1,
+        request: ErasureReferenceV1,
+        state: ErasureReferenceV1,
+        manifest: ErasureReferenceV1,
+        subject: ErasureReferenceV1,
+        indexes: [ErasureReferenceV1; 3],
+        operation: ErasureReferenceV1,
+        replacement: ErasureReferenceV1,
+    }
+
+    impl SqliteRecoveryProofTestRefs {
+        const OBJECT_BYTES: &[u8] = b"extension";
+        const STATE_BYTES: &[u8] = b"state";
+
+        fn new() -> Self {
+            let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+            Self {
+                extension: reference(50),
+                request: reference(51),
+                state: reference(52),
+                manifest: reference(53),
+                subject: reference(54),
+                indexes: [reference(55), reference(56), reference(57)],
+                operation: reference(58),
+                replacement: reference(64),
+            }
+        }
+    }
+
     fn sqlite_recovery_proof_test_value() -> ciborium::value::Value {
         use ciborium::value::Value;
 
+        let refs = SqliteRecoveryProofTestRefs::new();
         let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
         let digest = |reference: ErasureReferenceV1| Value::Bytes(reference.digest().to_vec());
-        let extension = reference(50);
-        let request = reference(51);
-        let state_reference = reference(52);
-        let manifest = reference(53);
-        let effect_subject = reference(54);
-        let object_bytes = b"extension";
-        let state_bytes = b"state";
         let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
-            receipt: effect_subject,
+            receipt: refs.subject,
         };
         let effect_bytes = effect.to_canonical_cbor().test_ok();
-        let index_references = [reference(55), reference(56), reference(57)];
         let mutation = Value::Array(vec![
-            digest(reference(58)),
+            digest(refs.operation),
             digest(reference(59)),
             digest(reference(60)),
-            digest(extension),
-            digest(request),
+            digest(refs.extension),
+            digest(refs.request),
             Value::Null,
-            digest(manifest),
+            digest(refs.manifest),
             digest(reference(61)),
             Value::Array(vec![Value::Array(vec![
-                digest(extension),
-                digest(ErasureForkRecoveryProofV1::bytes_digest(object_bytes)),
+                digest(refs.extension),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(
+                    SqliteRecoveryProofTestRefs::OBJECT_BYTES,
+                )),
             ])]),
             Value::Array(vec![Value::Array(vec![
-                digest(state_reference),
-                digest(ErasureForkRecoveryProofV1::bytes_digest(state_bytes)),
+                digest(refs.state),
+                digest(ErasureForkRecoveryProofV1::bytes_digest(
+                    SqliteRecoveryProofTestRefs::STATE_BYTES,
+                )),
             ])]),
             Value::Array(vec![
                 Value::Array(vec![
                     Value::Integer(0.into()),
                     Value::Integer(0.into()),
-                    digest(index_references[0]),
+                    digest(refs.indexes[0]),
                 ]),
                 Value::Array(vec![
                     Value::Integer(1.into()),
                     Value::Integer(1.into()),
-                    digest(index_references[1]),
+                    digest(refs.indexes[1]),
                 ]),
                 Value::Array(vec![
                     Value::Integer(2.into()),
                     Value::Integer(2.into()),
-                    digest(index_references[2]),
+                    digest(refs.indexes[2]),
                 ]),
             ]),
             digest(effect.identity()),
             digest(ErasureForkRecoveryProofV1::bytes_digest(&effect_bytes)),
-            digest(effect_subject),
+            digest(refs.subject),
             digest(reference(62)),
         ]);
         Value::Array(vec![
             Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
             Value::Integer(1.into()),
-            digest(reference(58)),
+            digest(refs.operation),
             digest(reference(62)),
             digest(reference(59)),
             digest(reference(60)),
@@ -15068,36 +15095,33 @@ mod tests {
     }
 
     fn seed_sqlite_recovery_proof_test_rows(store: &SqliteStore) {
-        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
-        let extension = reference(50);
-        let request = reference(51);
-        let state_reference = reference(52);
-        let manifest = reference(53);
-        let effect_subject = reference(54);
-        let index_references = [reference(55), reference(56), reference(57)];
+        let refs = SqliteRecoveryProofTestRefs::new();
         let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
-            receipt: effect_subject,
+            receipt: refs.subject,
         };
         let effect_bytes = effect.to_canonical_cbor().test_ok();
-        let object_bytes = b"extension";
-        let state_bytes = b"state";
-        insert_sqlite_exact(&store.conn, extension, object_bytes).test_ok();
+        insert_sqlite_exact(
+            &store.conn,
+            refs.extension,
+            SqliteRecoveryProofTestRefs::OBJECT_BYTES,
+        )
+        .test_ok();
         store
             .conn
             .execute(
                 "INSERT INTO erasure_states(state_digest,request_digest,state_cbor)
                  VALUES(?1,?2,?3)",
                 params![
-                    state_reference.digest().as_slice(),
-                    request.digest().as_slice(),
-                    state_bytes,
+                    refs.state.digest().as_slice(),
+                    refs.request.digest().as_slice(),
+                    SqliteRecoveryProofTestRefs::STATE_BYTES,
                 ],
             )
             .test_ok();
         for (index, (ordinal, reference)) in [
-            (0, index_references[0]),
-            (1, index_references[1]),
-            (2, index_references[2]),
+            (0, refs.indexes[0]),
+            (1, refs.indexes[1]),
+            (2, refs.indexes[2]),
         ]
         .into_iter()
         .enumerate()
@@ -15107,7 +15131,7 @@ mod tests {
                 1 => ErasureIndexInsertV1::ScopeNode { ordinal, reference },
                 _ => ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
             };
-            insert_sqlite_index(&store.conn, request, index).test_ok();
+            insert_sqlite_index(&store.conn, refs.request, index).test_ok();
         }
         store
             .conn
@@ -15115,9 +15139,9 @@ mod tests {
                 "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor)
                  VALUES(?1,?2,?3,?4)",
                 params![
-                    manifest.digest().as_slice(),
+                    refs.manifest.digest().as_slice(),
                     effect.identity().digest().as_slice(),
-                    effect_subject.digest().as_slice(),
+                    refs.subject.digest().as_slice(),
                     effect_bytes.as_slice(),
                 ],
             )
@@ -15126,7 +15150,7 @@ mod tests {
 
     #[test]
     fn sqlite_recovery_proof_checks_objects_states_all_indexes_and_subject() {
-        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let refs = SqliteRecoveryProofTestRefs::new();
         let proof_value = sqlite_recovery_proof_test_value();
         let mut proof_bytes = Vec::new();
         ciborium::into_writer(&proof_value, &mut proof_bytes).test_ok();
@@ -15145,14 +15169,14 @@ mod tests {
                 "INSERT INTO erasure_fork_recovery_proofs(operation_digest,proof_digest,proof_cbor)
                  VALUES(?1,?2,?3)",
                 params![
-                    reference(58).digest().as_slice(),
+                    refs.operation.digest().as_slice(),
                     proof.content_digest().test_ok().digest().as_slice(),
                     proof_bytes.as_slice(),
                 ],
             )
             .test_ok();
         assert_eq!(
-            sqlite_fork_recovery_proof(&store.conn, reference(58)).test_ok(),
+            sqlite_fork_recovery_proof(&store.conn, refs.operation).test_ok(),
             proof
         );
         store
@@ -15161,24 +15185,24 @@ mod tests {
                 "UPDATE erasure_fork_recovery_proofs SET proof_digest=?1
                  WHERE operation_digest=?2",
                 params![
-                    reference(64).digest().as_slice(),
-                    reference(58).digest().as_slice(),
+                    refs.replacement.digest().as_slice(),
+                    refs.operation.digest().as_slice(),
                 ],
             )
             .test_ok();
         assert_eq!(
-            sqlite_fork_recovery_proof(&store.conn, reference(58)),
+            sqlite_fork_recovery_proof(&store.conn, refs.operation),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         store
             .conn
             .execute(
                 "DELETE FROM erasure_fork_recovery_proofs WHERE operation_digest=?1",
-                params![reference(58).digest().as_slice()],
+                params![refs.operation.digest().as_slice()],
             )
             .test_ok();
         assert_eq!(
-            sqlite_fork_recovery_proof(&store.conn, reference(58)),
+            sqlite_fork_recovery_proof(&store.conn, refs.operation),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
@@ -15193,9 +15217,7 @@ mod tests {
     ) {
         use ciborium::value::Value;
 
-        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
-        let effect_subject = reference(54);
-        let manifest = reference(53);
+        let refs = SqliteRecoveryProofTestRefs::new();
         let proof_mutation = proof.admissions().first().test_ok();
         let mut missing_extension = proof_value.clone();
         let Value::Array(fields) = &mut missing_extension else {
@@ -15225,8 +15247,8 @@ mod tests {
             .execute(
                 "UPDATE erasure_effects SET manifest_digest=?1 WHERE subject_digest=?2",
                 params![
-                    reference(64).digest().as_slice(),
-                    effect_subject.digest().as_slice(),
+                    refs.replacement.digest().as_slice(),
+                    refs.subject.digest().as_slice(),
                 ],
             )
             .test_ok();
@@ -15239,8 +15261,8 @@ mod tests {
             .execute(
                 "UPDATE erasure_effects SET manifest_digest=?1 WHERE subject_digest=?2",
                 params![
-                    manifest.digest().as_slice(),
-                    effect_subject.digest().as_slice(),
+                    refs.manifest.digest().as_slice(),
+                    refs.subject.digest().as_slice(),
                 ],
             )
             .test_ok();
@@ -15250,18 +15272,14 @@ mod tests {
         store: &SqliteStore,
         proof: &ErasureForkRecoveryProofV1,
     ) {
-        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
-        let extension = reference(50);
-        let request = reference(51);
-        let state_reference = reference(52);
-        let manifest = reference(53);
+        let refs = SqliteRecoveryProofTestRefs::new();
         let proof_mutation = proof.admissions().first().test_ok();
 
         store
             .conn
             .execute(
                 "UPDATE erasure_evidence SET object_cbor=X'00' WHERE reference_digest=?1",
-                params![extension.digest().as_slice()],
+                params![refs.extension.digest().as_slice()],
             )
             .test_ok();
         assert_eq!(
@@ -15274,8 +15292,8 @@ mod tests {
             .execute(
                 "UPDATE erasure_states SET request_digest=?1 WHERE state_digest=?2",
                 params![
-                    reference(64).digest().as_slice(),
-                    state_reference.digest().as_slice(),
+                    refs.replacement.digest().as_slice(),
+                    refs.state.digest().as_slice(),
                 ],
             )
             .test_ok();
@@ -15289,8 +15307,8 @@ mod tests {
                 "UPDATE erasure_states SET request_digest=?1,state_cbor=X'00'
                  WHERE state_digest=?2",
                 params![
-                    request.digest().as_slice(),
-                    state_reference.digest().as_slice(),
+                    refs.request.digest().as_slice(),
+                    refs.state.digest().as_slice(),
                 ],
             )
             .test_ok();
@@ -15305,8 +15323,8 @@ mod tests {
                 "UPDATE erasure_attempt_pages SET reference_digest=?1
                  WHERE request_digest=?2 AND ordinal=0",
                 params![
-                    reference(64).digest().as_slice(),
-                    request.digest().as_slice(),
+                    refs.replacement.digest().as_slice(),
+                    refs.request.digest().as_slice(),
                 ],
             )
             .test_ok();
@@ -15319,7 +15337,7 @@ mod tests {
             .conn
             .execute(
                 "UPDATE erasure_effects SET effect_cbor=X'FF' WHERE manifest_digest=?1",
-                params![manifest.digest().as_slice()],
+                params![refs.manifest.digest().as_slice()],
             )
             .test_ok();
         assert_eq!(
