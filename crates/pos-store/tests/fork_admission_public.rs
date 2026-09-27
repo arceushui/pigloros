@@ -220,3 +220,30 @@ fn sqlite_corrupt_far1_or_pob1_rows_fail_closed_at_the_public_read_port() -> Tes
     );
     Ok(())
 }
+
+#[test]
+fn sqlite_corrupt_far1_bytes_fail_closed_at_the_public_read_port() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission.db");
+    let mut store = SqliteStore::open(&path)?;
+    let parent = store.create_timeline("parent")?;
+    let authenticated = authenticated()?;
+    store.bind_principal_owner_trust(trust(&authenticated)?)?;
+    store.commit_local_binding(
+        Hash::from_bytes([1; 32]),
+        &authenticated,
+        OwnerIdV1::new("creator")?,
+        WallTime::from_micros(20),
+    )?;
+    let receipt = store.create_fork_admitted(
+        &request(parent.id(), authenticated),
+        WallTime::from_micros(20),
+    )?;
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute("UPDATE fork_admissions SET far1_cbor = zeroblob(1)", [])?;
+    assert_eq!(
+        store.read_fork_admission(receipt.child_id),
+        Err(ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
