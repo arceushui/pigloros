@@ -61,6 +61,11 @@ impl StateRegistry {
         self.states.get(id).cloned().unwrap_or_default()
     }
 
+    /// Return the entity identifiers with cached state.
+    pub fn entity_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.states.keys().copied()
+    }
+
     pub fn apply(&mut self, reducer: &dyn Reducer, event: &Event) {
         // Geographic evidence is owned by the Core visibility boundary.  A
         // generic StateRegistry must never hand it to a plugin reducer, even

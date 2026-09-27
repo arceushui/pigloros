@@ -37,6 +37,7 @@ pub mod reviewed_policy;
 pub mod scheduler;
 pub mod schema;
 pub mod world_profile;
+pub mod world_replay;
 
 pub use authorization_cache::AuthorizationCacheKeyV1;
 pub use composition::{
@@ -73,3 +74,6 @@ pub use reviewed_policy::{
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
 pub use world_profile::HostWorldProfileV1;
+pub use world_replay::{
+    VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+};
