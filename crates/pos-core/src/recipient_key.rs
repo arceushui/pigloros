@@ -416,11 +416,11 @@ mod coverage_tests {
     use super::*;
 
     #[test]
-    fn rkp1_public_api_covers_all_canonical_epoch_widths_and_rejection_classes() {
+    fn rkp1_public_api_covers_all_canonical_epoch_widths_and_rejection_classes(
+    ) -> Result<(), RecipientKeyDescriptorErrorV1> {
         let grantee = EntityId::from_ulid(ulid::Ulid::from(1));
         for epoch in [1, 24, 0x100, 0x1_0000, 0x1_0000_0000] {
-            let descriptor = RecipientKeyDescriptorV1::for_grantee(grantee, epoch, [9; 32])
-                .expect("nonzero epoch is valid");
+            let descriptor = RecipientKeyDescriptorV1::for_grantee(grantee, epoch, [9; 32])?;
             assert_eq!(
                 RecipientKeyDescriptorV1::decode(&descriptor.encode()),
                 Ok(descriptor)
@@ -431,9 +431,7 @@ mod coverage_tests {
             Err(RecipientKeyDescriptorErrorV1::InvalidEpoch)
         );
 
-        let valid = RecipientKeyDescriptorV1::for_grantee(grantee, 1, [9; 32])
-            .expect("descriptor is valid")
-            .encode();
+        let valid = RecipientKeyDescriptorV1::for_grantee(grantee, 1, [9; 32])?.encode();
         for (offset, value, expected) in [
             (0, 0, RecipientKeyDescriptorErrorV1::InvalidEncoding),
             (6, 2, RecipientKeyDescriptorErrorV1::UnsupportedVersion),
@@ -465,5 +463,6 @@ mod coverage_tests {
         for length in 0..valid.len() {
             assert!(RecipientKeyDescriptorV1::decode(&valid[..length]).is_err());
         }
+        Ok(())
     }
 }
