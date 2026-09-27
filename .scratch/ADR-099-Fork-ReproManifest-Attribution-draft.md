@@ -1,6 +1,6 @@
-**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 8
+**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 9
 
-Related: #400 · #201 · #292 · [[ADR-041_Scenario_Room_Configuration_and_Reproducible_Fork_Inputs]] · [[ADR-065_KeyRegistry_Authorized_Signing_After_Destruction]] · [[ADR-091_Subject_Key_Custody_and_Historical_Decryption]] · [[ADR-060_Subject_Erasure_and_Replay_Claim_Degradation]]
+Related: #400 · #447 · #201 · #292 · [[ADR-041_Scenario_Room_Configuration_and_Reproducible_Fork_Inputs]] · [[ADR-065_KeyRegistry_Authorized_Signing_After_Destruction]] · [[ADR-091_Subject_Key_Custody_and_Historical_Decryption]] · [[ADR-060_Subject_Erasure_and_Replay_Claim_Degradation]]
 
 ---
 
@@ -149,7 +149,7 @@ principal-owner-binding-v1 = [
   authority-origin-v1          ; 5: trust anchor
 ]
 authority-origin-v1 = [1] / [2, bstr .size 32]
-                               ; local / #202 verified-envelope digest
+                               ; local / #447 attribution-authority envelope digest
 fork-admission-record-v1 = [
   "FAR1",                      ; 0: marker
   1,                           ; 1: version
@@ -175,7 +175,9 @@ Both use the strict deterministic-CBOR rules above and are bounded to 320 and
 Binding and admission digests use domains
 `pigloros/principal-owner-binding/v1` and `pigloros/fork-admission/v1`, followed
 by complete canonical bytes. Operation IDs and digests are nonzero 32-byte
-values. Imported origin code 2 is invalid until #202 authenticates its envelope.
+values. Imported origin code 2 is invalid until #447's purpose-specific
+attribution-authority import contract is accepted, implemented, and
+independently reviewed.
 
 `PrincipalOwnerAuthorityPortV1::resolve_authenticated` consumes a still-valid
 `AuthenticatedPrincipalResultV1`, validates its adapter, expiry, assurance and
@@ -197,7 +199,7 @@ The record's digest is
 field 4 of `ForkReproManifestV1`. The authoritative store provides a
 `ForkAdmissionAuthorityPortV1` read that returns the exact immutable record by
 child Fork ID. Verification trusts only a locally committed record or a record
-accepted through the future #202 identity-preserving verified-import boundary.
+accepted through the future #447 identity-preserving authority-import boundary.
 A caller-supplied record, a structurally imported record, a digest without its
 record, or a second record for the same child fails closed. The wrapper creator
 must equal the admission creator, and every duplicated manifest field must
@@ -293,7 +295,8 @@ The producer encodes all such sequences in increasing order and rejects rows
 outside the suffix or more than 1,024 interventions. Verification repeats this
 total derivation and requires byte-exact equality to field 10. Omitted,
 inserted, reordered, duplicated, relabelled, or unclassified external input
-fails closed. Import remains unavailable until #202 verifies both authorities.
+fails closed. Import remains unavailable until #447 authenticates and atomically
+installs both authorities and their complete referenced closure.
 
 The three authority writes return only committed receipts:
 `ForkAdmissionReceiptV1 { child_id, admission_digest }`,
@@ -352,7 +355,7 @@ fork-publication-operation-v1 = [
   bstr .size 32,               ; 10: private-material digest
   bstr .size 32,               ; 11: Ed25519 public verification key
   bstr .size 32,               ; 12: signed-manifest record_id
-  authority-origin-v1          ; 13: local / verified-import origin
+  authority-origin-v1          ; 13: local / #447 authority-import origin
 ]
 
 fork-publication-binding-v1 = [
@@ -423,8 +426,46 @@ claims. Its fields have exactly these sources and equality requirements:
 No caller, callback, import envelope, or decoded FSM1 may select an FPO1 field.
 Local publication derives all fields from the sources above. Trusted read,
 committed recovery, and Replay enforce the same equalities before returning or
-accepting the artifact. A #202-authenticated import proves transport authority
+accepting the artifact. A #447-authenticated import proves envelope authority
 but does not waive any equality or cryptographic check.
+
+### Imported authority activation blocker
+
+Resolved #202 authenticates `TimelineEventEnvelopeV1` Events and signed ranges
+only. It supplies no creator binding, Fork admission, intervention
+classification, publication, registry, or tombstone import authority. Its
+success is required evidence for imported Timeline history but can never select
+origin code 2 or authenticate POB1, FAR1, EOR1, FIA1, FPO1, FPB1, FPA1, or key
+evidence.
+
+Ticket #447 is the mandatory unresolved prerequisite and blocks #400. Until its
+purpose-specific `ForkAttributionAuthorityEnvelopeV1` contract is accepted and
+implemented, decoders MUST reject authority-origin code 2 and every imported
+human-subject sidecar before trusted read or Replay. There is no structural,
+event-verified, administrator-approved, or local-relabel fallback.
+
+The #447 contract must define one bounded, versioned deterministic codec with
+unknown-version rejection, authenticated issuer/trust-root policy, anti-replay
+operation identity, and a signature/digest over the complete atomic payload.
+That payload closure is exactly: the POB1 establishing FAR1 field 4's creator;
+FAR1; one EOR1 for every child-segment Event; exactly the FIA1 records implied
+by those EOR1 classifications; FPO1, FPB1, and FPA1; the exact retained
+`KeyRecordV1`; a matching `KeyTombstoneV1` when material was destroyed; and the
+exact #202-verified Event/range evidence. Omitting POB1 or substituting an
+unbound creator proof is forbidden in V1.
+
+Before any imported row becomes visible, #447 must authenticate the envelope,
+strictly decode and byte-exactly re-encode every record, reject missing/extra/
+duplicate/orphan/conflicting records, recompute every digest and reference,
+validate POB1-to-FAR1 creator ownership, validate the total EOR1/FIA1
+classification, validate the exact retained registry identity/public-key/
+material-or-tombstone invariants, enforce the complete FPO1 source table, and
+verify the ADR-065 FSM1 signature. It then installs the entire closure and the
+envelope digest in one transaction. Failure exposes no row; stable operation-ID
+retry accepts only the byte-identical closure; unequal reuse conflicts; partial
+state is corruption and is never repaired by retry. The code-2 digest domain
+and exact envelope field schema belong to #447's accepted design; ADR-099 does
+not invent them or permit code 2 before that design exists.
 
 Before new authorization, `commit_authorized` performs the recovery lookup by
 operation ID described below. A complete exact match of the durable request
@@ -583,7 +624,7 @@ retained key record; requires FPO1 material digest to equal the live record
 fingerprint or, after destruction, the matching tombstone
 `destroyed_material_digest`; and verifies the FSM1 signature under that exact
 public key and ADR-065 owner/role/epoch preimage. It accepts only local authority
-origin or a #202-verified import origin, and authenticated import remains
+origin or an activated #447-verified import origin, and authenticated import remains
 subject to every preceding check. It then derives FPR1 and returns
 `CommittedForkManifestV1 { receipt, operation, binding, record_id,
 outer_bytes }`; `operation` and `binding` are the validated canonical FPO1 and
@@ -616,17 +657,17 @@ claim is accepted, Replay:
    authoritative parent/final chain hashes, and the total intervention vector.
 
 The read and Replay verifier reject before execution on an absent, duplicate,
-untrusted, imported-without-#202-verification, orphaned, byte-mismatched,
+untrusted, imported-without-activated-#447-verification, orphaned, byte-mismatched,
 record-ID-mismatched, receipt-mismatched, Fork/head-mismatched, malformed, or
 cryptographically/provenance-invalid sidecar. Structural artifact import and a
-caller-supplied publication receipt are never trusted. A future #202 import
-must authenticate and atomically install exact FPO1, FPB1, and FPA1 records
-together with the admission, intervention/origin authority, and exact retained
-key record plus any destruction tombstone needed to compare FPO1 fields 10–11,
-under an identity-preserving envelope. The imported registry evidence must pass
-the same `KeyRegistryStateV1` identity, public-key, material-retention, and
-tombstone invariants as local evidence; FPR1 is then derived locally from those
-validated rows.
+caller-supplied publication receipt are never trusted. A future #447 import
+must authenticate and atomically install the complete closure defined above,
+including the exact POB1 behind FAR1 field 3, FAR1, EOR1/FIA1 sets,
+FPO1/FPB1/FPA1 graph, retained key/tombstone evidence, and #202 Event/range
+evidence. The imported registry evidence must pass the same
+`KeyRegistryStateV1` identity, public-key, material-retention, and tombstone
+invariants as local evidence; FPR1 is then derived locally from those validated
+rows.
 
 `verify_fork_manifest_signature_only(outer_bytes, public_key)` may be exposed
 for diagnostics and interoperability. It returns only a mathematical result
@@ -650,8 +691,8 @@ Replay boundary vectors are also normative:
 | Wrong Fork/head | FSM1 inner fields differ from lookup key | publication mismatch; Replay rejects |
 | Substituted FPO1 provenance/key | any FPO1 chain hash, FAR1 digest, creator, role, epoch, material fingerprint, or public key differs from its trusted source | `PublicationConflict` before execution |
 | Valid FSM1, inconsistent FPO1 | FSM1 signature is valid but any FPO1 authorization/provenance field differs | `PublicationConflict` before execution |
-| Structural import | artifact/binding was imported without #202 verified authority envelope | untrusted publication; Replay rejects |
-| Authenticated inconsistent import | #202 envelope is valid but imported FPO1/FAR1/FSM1/key provenance fails any source-table equality | `PublicationConflict` before execution |
+| Structural or #202-only import | artifact/binding lacks an activated #447 authority envelope, even when all Events/ranges pass #202 | untrusted publication; Replay rejects |
+| Authenticated inconsistent import | #447 envelope is valid but imported POB1/FAR1/FSM1/FPO1/key provenance fails any closure or source-table equality | `PublicationConflict` before execution |
 
 For a human-subject Fork, a missing, malformed, untrusted, conflicting, or
 mismatched committed sidecar aborts Replay **before execution**. The ADR-041 Replay grant and
@@ -659,9 +700,10 @@ consent token are checked separately; erasure can still weaken ReplayClaim
 without invalidating the historical mathematics of a retained signature.
 Non-human-subject Forks may omit the signature as ADR-041 already permits, but
 the descriptor and parent-head checks still apply. Trusted identity-preserving
-import of an external Timeline remains closed until #202 supplies the
-normative Timeline envelope verifier; a structurally imported Event is not
-authenticated evidence. [S6, S7]
+import of an external Timeline requires #202's delivered Timeline envelope and
+range verification, while imported human-subject attribution authority remains
+closed behind #447. A verified Event is not authenticated creator/publication
+authority. [S6, S7]
 
 ## Consequences and risks
 
@@ -706,6 +748,10 @@ authenticated evidence. [S6, S7]
    human-subject claim. Human-subject Replay requires the new record after
    rollout; unknown versions fail closed. A format or signer-claim change
    requires a new ADR. [S6, S7, S9]
+4. Keep every code-2 authority record and imported human-subject sidecar
+   rejected until blocking ticket #447 has an accepted purpose-specific design,
+   implementation, independent review, and atomic-import evidence. Delivered
+   #202 Event/range verification does not satisfy this activation gate.
 
 This proposal does not assert that current Gateway authentication, Scenario
 Room admission, Fork provenance, or durable sidecar publication already exists.
@@ -720,8 +766,8 @@ must be implemented and independently reviewed before #400 can be resolved.
   recipient encryption.
 - COSE compatibility, unsigned human-subject fallback, legacy
   `ReproManifest` signing, or retroactive attestation of old unsigned Forks.
-- Treating a signature as proof that external Timeline data is authentic
-  before #202's verifier.
+- Treating #202 Event/range verification as creator, admission, intervention,
+  publication, or retained-key import authority.
 
 ## Sources
 
