@@ -23,14 +23,31 @@ const QUARANTINE_NAME: &str = "quarantine";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationFaultPointV1 {
     RecoveryRootSyncBeforeNextIndexRemoval,
+    InitializeReleases,
+    InitializeQuarantine,
+    InitializeLock,
+    InitializeIndex,
+    InitializeRootSync,
     OwnerWrite,
+    OwnerSync,
     ManifestWrite,
+    BlobWrite,
+    BlobSync,
+    DirectorySync,
     ReadyWrite,
+    ReadySync,
     FinalRename,
     ReleasesSync,
+    NextIndexCreate,
     NextIndexWrite,
+    NextIndexSync,
     IndexRename,
     RootSync,
+    QuarantineRename,
+    QuarantineSourceSync,
+    QuarantineDirectorySync,
+    QuarantineRootSync,
+    RecoveryCleanupSync,
 }
 
 #[cfg(test)]
@@ -160,10 +177,20 @@ impl LocalOciPublisherV1 {
         let root = File::open(root_path).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let owner = rustix::process::geteuid().as_raw();
         validate_private_directory(&root, owner)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::InitializeReleases)?;
         create_private_directory(&root, RELEASES_NAME, owner)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::InitializeQuarantine)?;
         create_private_directory(&root, QUARANTINE_NAME, owner)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::InitializeLock)?;
         create_private_file(&root, LOCK_NAME, &[], owner)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::InitializeIndex)?;
         create_private_file(&root, INDEX_NAME, EMPTY_INDEX, owner)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::InitializeRootSync)?;
         fs::fsync(&root).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         Ok(Self { root, owner })
     }
@@ -222,8 +249,6 @@ impl LocalOciPublisherV1 {
         fs::flock(&lock, FlockOperation::LockExclusive)
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         let result = self.recover_locked().and_then(|_| {
-            #[cfg(test)]
-            injected_fault(PublicationFaultPointV1::RecoveryRootSyncBeforeNextIndexRemoval)?;
             fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             match self.read_locked(address) {
                 Ok(_) => Ok(RecoveryOutcomeV1::Committed(address.clone())),
@@ -255,7 +280,9 @@ impl LocalOciPublisherV1 {
         let indexed =
             parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let removed_staging = self.recover_staging(&releases, &indexed)?;
+        fs::fsync(&releases).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         let removed_next_index = self.recover_next_index()?;
+        fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         let finals = directory_entries(&releases)?
             .filter(|name| !name.starts_with('.'))
             .collect::<Vec<_>>();
@@ -376,6 +403,8 @@ impl LocalOciPublisherV1 {
                 self.quarantine_entry(releases, name, "staging")?;
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             }
+            #[cfg(test)]
+            injected_fault(PublicationFaultPointV1::RecoveryCleanupSync)?;
             fs::fsync(releases).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             Ok(1)
         } else {
@@ -403,6 +432,8 @@ impl LocalOciPublisherV1 {
                 self.quarantine_entry(&self.root, name, "next-index")?;
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             }
+            #[cfg(test)]
+            injected_fault(PublicationFaultPointV1::RecoveryRootSyncBeforeNextIndexRemoval)?;
             fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             fs::unlinkat(&self.root, name, AtFlags::empty())
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
@@ -463,6 +494,8 @@ impl LocalOciPublisherV1 {
         }
         let index = format!("{{\"manifests\":[{{\"digest\":\"{}\",\"mediaType\":\"{}\",\"size\":{}}}],\"schemaVersion\":2}}", address.digest(), address.media_type(), address.size());
         write_private_file(&staging, "index.json", index.as_bytes())?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::DirectorySync)?;
         fs::fsync(&sha256).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         fs::fsync(&blobs).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         let ready = format!(
@@ -506,6 +539,8 @@ impl LocalOciPublisherV1 {
             "{kind}.{}",
             random_nonce_hex().map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?
         );
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::QuarantineRename)?;
         fs::renameat_with(
             source,
             name,
@@ -514,8 +549,14 @@ impl LocalOciPublisherV1 {
             RenameFlags::NOREPLACE,
         )
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::QuarantineSourceSync)?;
         fs::fsync(source).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::QuarantineDirectorySync)?;
         fs::fsync(&quarantine).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::QuarantineRootSync)?;
         fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
     }
 
@@ -547,7 +588,7 @@ impl LocalOciPublisherV1 {
             serde_json::to_vec(&value).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let next = format!(".published.{}.next", &address.digest()[7..39]);
         #[cfg(test)]
-        injected_fault(PublicationFaultPointV1::NextIndexWrite)?;
+        injected_fault(PublicationFaultPointV1::NextIndexCreate)?;
         write_private_file(&self.root, &next, &bytes)?;
         #[cfg(test)]
         injected_fault(PublicationFaultPointV1::IndexRename)?;
@@ -988,8 +1029,24 @@ fn write_private_file(
     )
     .map(File::from)
     .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    #[cfg(test)]
+    if name.starts_with(".published.") {
+        injected_fault(PublicationFaultPointV1::NextIndexWrite)?;
+    } else if lowercase_hex(name, 64) {
+        injected_fault(PublicationFaultPointV1::BlobWrite)?;
+    }
     file.write_all(bytes)
         .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    #[cfg(test)]
+    if name == "OWNER" {
+        injected_fault(PublicationFaultPointV1::OwnerSync)?;
+    } else if name == "READY" {
+        injected_fault(PublicationFaultPointV1::ReadySync)?;
+    } else if name.starts_with(".published.") {
+        injected_fault(PublicationFaultPointV1::NextIndexSync)?;
+    } else if lowercase_hex(name, 64) {
+        injected_fault(PublicationFaultPointV1::BlobSync)?;
+    }
     fs::fsync(&file).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
     fs::fsync(root).map_err(|_| LocalOciPublicationErrorV1::Sync)
 }
@@ -1199,11 +1256,100 @@ mod tests {
     }
 
     #[test]
+    fn initialization_faults_retry_from_private_root_without_partial_index(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for point in [
+            PublicationFaultPointV1::InitializeReleases,
+            PublicationFaultPointV1::InitializeQuarantine,
+            PublicationFaultPointV1::InitializeLock,
+            PublicationFaultPointV1::InitializeIndex,
+            PublicationFaultPointV1::InitializeRootSync,
+        ] {
+            let root = private_root("initialize")?;
+            PUBLICATION_FAULT.with(|fault| fault.set(Some(point)));
+            let failed = LocalOciPublisherV1::open(&root);
+            PUBLICATION_FAULT.with(|fault| fault.set(None));
+            assert!(matches!(
+                failed,
+                Err(LocalOciPublicationErrorV1::RecoveryRequired)
+            ));
+            let publisher = LocalOciPublisherV1::open(&root)?;
+            assert!(publisher.recover_all()?.committed.is_empty());
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn quarantine_move_and_sync_faults_keep_unsafe_stage_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for point in [
+            PublicationFaultPointV1::QuarantineRename,
+            PublicationFaultPointV1::QuarantineSourceSync,
+            PublicationFaultPointV1::QuarantineDirectorySync,
+            PublicationFaultPointV1::QuarantineRootSync,
+        ] {
+            let root = private_root("quarantine-fault")?;
+            let publisher = LocalOciPublisherV1::open(&root)?;
+            std::fs::create_dir(root.join("releases").join(".invalid-stage"))?;
+            PUBLICATION_FAULT.with(|fault| fault.set(Some(point)));
+            let failed = publisher.recover_all();
+            PUBLICATION_FAULT.with(|fault| fault.set(None));
+            assert_eq!(failed, Err(LocalOciPublicationErrorV1::RecoveryRequired));
+            assert_eq!(
+                publisher.recover_all(),
+                Err(LocalOciPublicationErrorV1::RecoveryRequired)
+            );
+            let quarantine = root.join("quarantine");
+            let entries = std::fs::read_dir(&quarantine)?.collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(entries.len(), 1);
+            std::fs::remove_dir_all(entries[0].path())?;
+            assert!(publisher.recover_all()?.committed.is_empty());
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_cleanup_sync_fault_requires_retry_before_publication(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root("cleanup-sync")?;
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        let bundle = bundle()?;
+        let address = bundle.address().clone();
+        assert_eq!(
+            publish_with_fault(&publisher, &bundle, PublicationFaultPointV1::ReadyWrite),
+            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+        );
+        PUBLICATION_FAULT
+            .with(|fault| fault.set(Some(PublicationFaultPointV1::RecoveryCleanupSync)));
+        let failed = publisher.recover_all();
+        PUBLICATION_FAULT.with(|fault| fault.set(None));
+        assert_eq!(failed, Err(LocalOciPublicationErrorV1::RecoveryRequired));
+        assert_eq!(
+            publisher.read_verified(&address),
+            Err(ReleaseSourceErrorV1::NotFound)
+        );
+        assert!(publisher.recover_all()?.committed.is_empty());
+        assert_eq!(
+            publisher.publish(&bundle)?,
+            PublishOutcomeV1::Published(address)
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn pre_final_publication_faults_leave_only_owned_recoverable_staging(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for point in [
+            PublicationFaultPointV1::OwnerSync,
             PublicationFaultPointV1::ManifestWrite,
+            PublicationFaultPointV1::BlobWrite,
+            PublicationFaultPointV1::BlobSync,
+            PublicationFaultPointV1::DirectorySync,
             PublicationFaultPointV1::ReadyWrite,
+            PublicationFaultPointV1::ReadySync,
             PublicationFaultPointV1::FinalRename,
         ] {
             let root = private_root("pre-final")?;
@@ -1267,7 +1413,9 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         for point in [
             PublicationFaultPointV1::ReleasesSync,
+            PublicationFaultPointV1::NextIndexCreate,
             PublicationFaultPointV1::NextIndexWrite,
+            PublicationFaultPointV1::NextIndexSync,
             PublicationFaultPointV1::IndexRename,
         ] {
             let root = private_root("post-final")?;
@@ -1286,7 +1434,12 @@ mod tests {
             assert_eq!(report.committed, vec![address.clone()]);
             assert_eq!(
                 report.removed_next_index,
-                point == PublicationFaultPointV1::IndexRename
+                matches!(
+                    point,
+                    PublicationFaultPointV1::NextIndexWrite
+                        | PublicationFaultPointV1::NextIndexSync
+                        | PublicationFaultPointV1::IndexRename
+                )
             );
             assert_eq!(publisher.read_verified(&address)?, bundle);
             std::fs::remove_dir_all(root)?;
