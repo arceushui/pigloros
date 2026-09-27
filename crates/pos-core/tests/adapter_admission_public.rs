@@ -194,7 +194,7 @@ fn invalid_identity_count_entry_and_order_reject() -> TestResult<()> {
     let mut same_plugin_later_version = good.clone();
     same_plugin_later_version.protocol_version = 2;
     assert!(AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
-        entries: vec![good.clone(), same_plugin_later_version],
+        entries: vec![good, same_plugin_later_version],
         ..input()?
     })
     .is_ok());
@@ -287,6 +287,8 @@ fn malformed_noncanonical_and_oversized_maa1_reject() -> TestResult<()> {
         (2, b'X'),
         (6, 2),
         (7, 0x57),
+        (41, 0x20),
+        (41, 0x1c),
         (42, 0x57),
         (76, 0x81),
     ] {
