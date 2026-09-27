@@ -632,3 +632,101 @@ impl DuplicateKeyScanner<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(bytes: &[u8]) -> String {
+        sha256_digest(bytes)
+    }
+
+    fn layer(member: &str, media_type: &str, bytes: &[u8]) -> serde_json::Value {
+        let digest = digest(bytes);
+        serde_json::json!({
+            "annotations": {"org.pigloros.plugin.member": member},
+            "digest": digest,
+            "mediaType": media_type,
+            "size": bytes.len(),
+        })
+    }
+
+    fn closure() -> (BundleAddressV1, Vec<u8>, BTreeMap<String, Vec<u8>>) {
+        let pmf1 = b"pmf1".to_vec();
+        let component = b"component".to_vec();
+        let wit = b"wit".to_vec();
+        let provenance = b"provenance".to_vec();
+        let sbom = b"sbom".to_vec();
+        let licence = b"licence".to_vec();
+        let licence_digest = digest(&licence);
+        let layers = vec![
+            layer(
+                "pmf1",
+                "application/vnd.pigloros.plugin.manifest.v1+cbor",
+                &pmf1,
+            ),
+            layer(
+                "component",
+                "application/vnd.pigloros.plugin.component.v1+wasm",
+                &component,
+            ),
+            layer("wit", "application/vnd.pigloros.plugin.wit.v1+tar", &wit),
+            layer("provenance", "application/vnd.in-toto+json", &provenance),
+            layer("sbom", "application/spdx+json", &sbom),
+            layer(
+                &format!("licence:{}", &licence_digest[7..]),
+                "text/plain; charset=utf-8",
+                &licence,
+            ),
+        ];
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "artifactType": ARTIFACT_TYPE,
+            "config": {"digest": EMPTY_CONFIG_DIGEST, "mediaType": EMPTY_CONFIG_MEDIA_TYPE, "size": 2},
+            "layers": layers,
+            "mediaType": MANIFEST_MEDIA_TYPE,
+            "schemaVersion": 2,
+        })).unwrap();
+        let address = BundleAddressV1::new(digest(&manifest), manifest.len() as u64).unwrap();
+        let mut blobs = BTreeMap::new();
+        for bytes in [
+            EMPTY_CONFIG_BYTES.to_vec(),
+            pmf1,
+            component,
+            wit,
+            provenance,
+            sbom,
+            licence,
+        ] {
+            blobs.insert(digest(&bytes), bytes);
+        }
+        (address, manifest, blobs)
+    }
+
+    #[test]
+    fn verifies_complete_public_oci_closure() {
+        let (address, manifest, blobs) = closure();
+        let verified = verify_oci_closure_v1(address.clone(), manifest, blobs).unwrap();
+        assert_eq!(verified.address(), &address);
+        assert_eq!(verified.members().len(), 6);
+        assert_eq!(verified.blobs().len(), 7);
+    }
+
+    #[test]
+    fn rejects_missing_closure_blob() {
+        let (address, manifest, mut blobs) = closure();
+        let removed = blobs.keys().next().cloned().unwrap();
+        blobs.remove(&removed);
+        assert_eq!(
+            verify_oci_closure_v1(address, manifest, blobs),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_address() {
+        assert_eq!(
+            BundleAddressV1::new("sha256:ABC".to_owned(), 1),
+            Err(ReleaseSourceErrorV1::InvalidAddress)
+        );
+    }
+}
