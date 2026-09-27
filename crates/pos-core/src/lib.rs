@@ -41,8 +41,8 @@ pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
-pub mod recipient_key;
 pub mod plugin;
+pub mod recipient_key;
 pub mod retention;
 pub mod state;
 pub mod store;
@@ -266,9 +266,6 @@ pub use owntracks_ingress::{
     OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
     PreparedOwnTracksIngressV1,
 };
-pub use recipient_key::{
-    recipient_owner_id_from_grantee, RecipientKeyDescriptorErrorV1, RecipientKeyDescriptorV1,
-};
 pub use pipeline::{
     CommittedPipelineEventV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
     PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
@@ -280,6 +277,9 @@ pub use pipeline::{
 pub use plugin::{
     ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+};
+pub use recipient_key::{
+    recipient_owner_id_from_grantee, RecipientKeyDescriptorErrorV1, RecipientKeyDescriptorV1,
 };
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
