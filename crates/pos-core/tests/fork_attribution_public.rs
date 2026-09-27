@@ -142,3 +142,250 @@ fn manifest_rejects_unordered_out_of_range_and_mismatched_provenance() {
     );
     assert_eq!(matching.validate_against_admission(&admission), Ok(()));
 }
+
+#[test]
+fn admission_constructor_rejects_each_required_cut_invariant() {
+    let valid = admission().input().clone();
+    let mut operation = valid.clone();
+    operation.operation_id = Hash::zero();
+    assert_eq!(
+        ForkAdmissionRecordV1::new(operation),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut binding = valid.clone();
+    binding.principal_owner_binding_digest = Hash::zero();
+    assert_eq!(
+        ForkAdmissionRecordV1::new(binding),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut descriptor = valid.clone();
+    descriptor.room_revision_descriptor_hash = Hash::zero();
+    assert_eq!(
+        ForkAdmissionRecordV1::new(descriptor),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut composition = valid.clone();
+    composition.plugin_composition_hash = Hash::zero();
+    assert_eq!(
+        ForkAdmissionRecordV1::new(composition),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut timelines = valid.clone();
+    timelines.child_timeline_id = timelines.parent_timeline_id;
+    assert_eq!(
+        ForkAdmissionRecordV1::new(timelines),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut fold = valid.clone();
+    fold.completed_fold_cursor += 1;
+    assert_eq!(
+        ForkAdmissionRecordV1::new(fold),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut tick = valid;
+    tick.post_fold_tick_boundary += 1;
+    assert_eq!(
+        ForkAdmissionRecordV1::new(tick),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn far1_decoder_rejects_malformed_fields_and_limits() {
+    let admission = admission();
+    let canonical = admission.to_canonical_cbor();
+    let cases = [
+        (0, 0x8e, ForkAttributionCodecErrorV1::InvalidEncoding),
+        (2, b'X', ForkAttributionCodecErrorV1::InvalidEncoding),
+        (6, 2, ForkAttributionCodecErrorV1::UnsupportedVersion),
+        (
+            canonical.len() - 3,
+            2,
+            ForkAttributionCodecErrorV1::InvalidEncoding,
+        ),
+        (
+            canonical.len() - 1,
+            3,
+            ForkAttributionCodecErrorV1::InvalidEncoding,
+        ),
+    ];
+    for (at, replacement, expected) in cases {
+        let mut malformed = canonical.clone();
+        malformed[at] = replacement;
+        assert_eq!(
+            ForkAdmissionRecordV1::from_canonical_cbor(&malformed),
+            Err(expected)
+        );
+    }
+    let mut trailing = canonical;
+    trailing.push(0);
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&trailing),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&[0x8f, 0x44, b'F']),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&vec![
+            0;
+            pos_core::MAX_FORK_ADMISSION_RECORD_BYTES_V1
+                + 1
+        ]),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn manifest_constructor_and_decoder_enforce_bounds() {
+    let admission = admission();
+    let valid = manifest(&admission).input().clone();
+    let mut timelines = valid.clone();
+    timelines.fork_timeline_id = timelines.parent_timeline_id;
+    assert_eq!(
+        ForkReproManifestV1::new(timelines),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut digest = valid.clone();
+    digest.admission_digest = Hash::zero();
+    assert_eq!(
+        ForkReproManifestV1::new(digest),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut descriptor = valid.clone();
+    descriptor.room_revision_descriptor_hash = Hash::zero();
+    assert_eq!(
+        ForkReproManifestV1::new(descriptor),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut composition = valid.clone();
+    composition.plugin_composition_hash = Hash::zero();
+    assert_eq!(
+        ForkReproManifestV1::new(composition),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut final_head = valid.clone();
+    final_head.final_fork_logical_head = final_head.parent_logical_head - 1;
+    assert_eq!(
+        ForkReproManifestV1::new(final_head),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut lower_bound = valid.clone();
+    lower_bound.intervention_sequences = vec![lower_bound.parent_logical_head];
+    assert_eq!(
+        ForkReproManifestV1::new(lower_bound),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut upper_bound = valid.clone();
+    upper_bound.intervention_sequences = vec![upper_bound.final_fork_logical_head + 1];
+    assert_eq!(
+        ForkReproManifestV1::new(upper_bound),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut too_many = valid;
+    too_many.parent_logical_head = 0;
+    too_many.post_fold_tick_boundary = 0;
+    too_many.final_fork_logical_head = 1_025;
+    too_many.intervention_sequences = (1..=1_025).collect();
+    assert_eq!(
+        ForkReproManifestV1::new(too_many),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        ForkReproManifestV1::from_canonical_cbor(&vec![
+            0;
+            pos_core::MAX_FORK_REPRO_MANIFEST_BYTES_V1
+                + 1
+        ]),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn wide_cbor_coordinates_round_trip_at_the_public_seam() {
+    let parent = TimelineId::new();
+    let child = TimelineId::new();
+    let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+        operation_id: hash(1),
+        principal_owner_binding_digest: hash(2),
+        creator: "creator-with-an-owner-id-24".into(),
+        parent_timeline_id: parent,
+        child_timeline_id: child,
+        room_revision_descriptor_hash: hash(3),
+        parent_logical_head: 24,
+        parent_chain_head_hash: hash(4),
+        completed_fold_cursor: 24,
+        post_fold_tick_boundary: 24,
+        plugin_composition_hash: hash(5),
+        attribution_required: false,
+        origin: ForkAttributionOriginV1::Local,
+    })
+    .expect("valid admission");
+    let manifest = ForkReproManifestV1::new(ForkReproManifestInputV1 {
+        parent_timeline_id: parent,
+        fork_timeline_id: child,
+        admission_digest: admission.digest(),
+        room_revision_descriptor_hash: hash(3),
+        parent_logical_head: 24,
+        parent_chain_head_hash: hash(4),
+        post_fold_tick_boundary: 24,
+        plugin_composition_hash: hash(5),
+        intervention_sequences: vec![25, 256, 65_536],
+        final_fork_logical_head: 4_294_967_296,
+        final_fork_chain_head_hash: hash(6),
+    })
+    .expect("valid manifest");
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&admission.to_canonical_cbor()),
+        Ok(admission.clone())
+    );
+    assert_eq!(
+        ForkReproManifestV1::from_canonical_cbor(&manifest.to_canonical_cbor()),
+        Ok(manifest.clone())
+    );
+    let signed = SignedForkReproManifestV1::new(
+        KeyIdentityV1::new(
+            "creator-with-an-owner-id-24",
+            KeyRoleV1::SubjectAttributionSigning,
+            u64::MAX,
+        ),
+        manifest,
+        pos_core::Signature::from_bytes([9; 64]),
+    )
+    .expect("valid signature wrapper");
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&signed.to_canonical_cbor()),
+        Ok(signed)
+    );
+}
+
+#[test]
+fn fsm1_rejects_non_attribution_identities_and_outer_limits() {
+    let admission = admission();
+    let manifest = manifest(&admission);
+    assert_eq!(
+        SignedForkReproManifestV1::new(
+            KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1),
+            manifest.clone(),
+            pos_core::Signature::from_bytes([9; 64]),
+        ),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        SignedForkReproManifestV1::new(
+            KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 0),
+            manifest,
+            pos_core::Signature::from_bytes([9; 64]),
+        ),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&vec![
+            0;
+            pos_core::MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1
+                + 1
+        ]),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+}
