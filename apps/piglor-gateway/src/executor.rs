@@ -2343,6 +2343,7 @@ fn execute_read_command(
     );
 }
 
+#[inline(never)]
 fn execute_read_page_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
@@ -2387,6 +2388,7 @@ fn execute_read_page_command(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod read_page_coverage_tests {
     use super::*;
     use pos_core::ErasureContainmentGateV1;
