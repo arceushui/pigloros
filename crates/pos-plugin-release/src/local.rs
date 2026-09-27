@@ -19,6 +19,33 @@ const INDEX_NAME: &str = "published.json";
 const RELEASES_NAME: &str = "releases";
 const QUARANTINE_NAME: &str = "quarantine";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationFaultPointV1 {
+    RecoveryRootSyncBeforeNextIndexRemoval,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PUBLICATION_FAULT: std::cell::Cell<Option<PublicationFaultPointV1>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+fn injected_fault(point: PublicationFaultPointV1) -> Result<(), LocalOciPublicationErrorV1> {
+    #[cfg(not(test))]
+    let _ = point;
+    #[cfg(not(test))]
+    return Ok(());
+    #[cfg(test)]
+    PUBLICATION_FAULT.with(|fault| {
+        if fault.get() == Some(point) {
+            Err(LocalOciPublicationErrorV1::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    })
+}
+
 fn random_nonce_hex() -> Result<String, LocalOciPublicationErrorV1> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut source = File::open("/dev/urandom").map_err(|_| LocalOciPublicationErrorV1::Io)?;
@@ -190,6 +217,7 @@ impl LocalOciPublisherV1 {
         fs::flock(&lock, FlockOperation::LockExclusive)
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         let result = self.recover_locked().and_then(|_| {
+            injected_fault(PublicationFaultPointV1::RecoveryRootSyncBeforeNextIndexRemoval)?;
             fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             match self.read_locked(address) {
                 Ok(_) => Ok(RecoveryOutcomeV1::Committed(address.clone())),
@@ -1042,4 +1070,44 @@ const fn resolution() -> ResolveFlags {
         .union(ResolveFlags::NO_SYMLINKS)
         .union(ResolveFlags::NO_MAGICLINKS)
         .union(ResolveFlags::NO_XDEV)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn recovery_fault_before_next_index_removal_fails_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "pigloros-oci-fault-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root)?;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+        {
+            let publisher = LocalOciPublisherV1::open(&root)?;
+            let next = ".published.0123456789abcdef0123456789abcdef.next";
+            write_private_file(&publisher.root, next, b"next")?;
+            PUBLICATION_FAULT.with(|fault| {
+                fault.set(Some(
+                    PublicationFaultPointV1::RecoveryRootSyncBeforeNextIndexRemoval,
+                ));
+            });
+            assert_eq!(
+                publisher.recover_all(),
+                Err(LocalOciPublicationErrorV1::RecoveryRequired)
+            );
+            PUBLICATION_FAULT.with(|fault| fault.set(None));
+            assert!(root.join(next).exists());
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
