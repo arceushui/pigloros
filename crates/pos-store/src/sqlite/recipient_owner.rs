@@ -142,7 +142,6 @@ impl SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let mut staged_path = None;
         let result = (|| {
             validate_owner_directory(owner)?;
             let registry = self
@@ -169,7 +168,6 @@ impl SqliteStore {
                 RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
                     .map_err(|error| CoreError::Storage(error.to_string()))?;
             let private_path = recipient_private_path(&owner.directory, descriptor);
-            staged_path = Some(private_path.clone());
             let file_identity = write_private_key(owner, &private_path, &private_key)?;
             let material_digest = pos_crypto::key_roles::key_material_digest(&private_key);
             let mut next = registry;
@@ -181,13 +179,7 @@ impl SqliteStore {
             self.save_key_registry_in_transaction(&next)?;
             Ok(descriptor)
         })();
-        let result = finish_immediate_transaction(&self.conn, result);
-        if result.is_err() {
-            if let Some(path) = staged_path {
-                quarantine_staged_private_key(owner, &path)?;
-            }
-        }
-        result
+        finish_immediate_transaction(&self.conn, result)
     }
 
     /// Reopen every registered recipient key that is still safe and complete.
@@ -499,33 +491,6 @@ fn record_recipient_destruction_receipt(
         )
         .map(|_| ())
         .map_err(|error| CoreError::Storage(error.to_string()))
-}
-
-fn quarantine_staged_private_key(
-    owner: &RecipientKeyOwnerV1,
-    path: &Path,
-) -> Result<(), CoreError> {
-    validate_owner_directory(owner)?;
-    let name = bound_name(path)?;
-    let Some(name) = name.to_str() else {
-        return Err(CoreError::Storage(
-            "recipient staged private key name is not UTF-8".to_owned(),
-        ));
-    };
-    let quarantine_name = format!(".{name}.orphan");
-    match renameat_with(
-        &owner.directory_file,
-        name,
-        &owner.directory_file,
-        &quarantine_name,
-        RenameFlags::NOREPLACE,
-    ) {
-        Ok(()) => {
-            fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(CoreError::Storage(error.to_string())),
-    }
 }
 
 fn quarantine_unregistered_staged_material(

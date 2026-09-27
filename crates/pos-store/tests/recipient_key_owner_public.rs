@@ -171,13 +171,13 @@ fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
     )?;
 
     assert!(store.enroll_recipient_key(&owner).is_err());
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
     let names = std::fs::read_dir(temporary.path().join("recipient-private"))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|entry| entry.file_name().into_string())
         .collect::<Result<Vec<_>, _>>()?;
     assert!(names.iter().any(|name| name.ends_with(".orphan")));
-    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
     Ok(())
 }
 
