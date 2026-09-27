@@ -12,7 +12,7 @@ use pos_core::{
 };
 use pos_plugin_world::{WorldDriver, WorldPlugin, WorldReducer, EVENT_TYPE_ACTION_V1};
 use pos_runtime::{
-    installed_plugin_role_v1, validate_output_policy_artifacts_v1, DomainImplementationKindV1,
+    installed_plugin_role_v1, DomainImplementationKindV1, HostWorldProfileV1,
     InstalledOutputPolicySourceV1, ManifestRegistrationErrorV1, OutputPolicyBindingV1,
     PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
     RuntimeError,
@@ -33,7 +33,10 @@ fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn
         configuration,
         "deterministic-local-v1",
     )?
-    .with_installed_driver(WorldDriver::default())?
+    .with_installed_driver(WorldDriver::new_live(
+        Vec::new(),
+        HostWorldProfileV1::standard(),
+    )?)?
     .with_installed_plugin_action_approver(&plugin, [Kind::new(EVENT_TYPE_ACTION_V1)])?;
     let pin = PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
@@ -42,14 +45,7 @@ fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn
         vec![installed_plugin_role_v1(&plugin)],
     )?;
     let registration = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
-    let closure = validate_output_policy_artifacts_v1(
-        &binding.policy().to_canonical_cbor(),
-        &binding.budget().to_canonical_cbor(),
-        binding.implementation_artifact(),
-        binding.configuration_artifact(),
-        binding.execution_profile_artifact(),
-        binding.retention_policy_artifact(),
-    )?;
+    let closure_hash = binding.manifest_closure_hash()?;
     let row = ManifestAdmissionCatalogRowV1 {
         stable_slot: slot.to_owned(),
         plugin_id: plugin.id(),
@@ -57,7 +53,7 @@ fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn
         plugin_version: plugin.version().to_owned(),
         implementation_hash: binding.policy().fields().implementation_hash,
         eop1_native_digest: binding.policy().digest(),
-        closure_hash: closure.manifest_closure_hash(),
+        closure_hash,
     };
     Ok(InstalledFixture {
         plugin,
@@ -265,7 +261,10 @@ fn preparation_and_capability_invalidation_are_fail_closed() -> Result<(), Box<d
         Err(ManifestRegistrationErrorV1::IncompleteBatch)
     ));
     assert!(!PluginRegistry::new().is_admitted_composition_current(&admitted));
-    registry.register_driver(Box::new(WorldDriver::default()));
+    registry.register_driver(Box::new(WorldDriver::new_live(
+        Vec::new(),
+        HostWorldProfileV1::standard(),
+    )?));
     assert!(!registry.is_admitted_composition_current(&admitted));
     assert!(matches!(
         registry.admit_complete_manifest_registration(),

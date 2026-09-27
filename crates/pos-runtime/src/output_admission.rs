@@ -846,6 +846,25 @@ impl OutputPolicyBindingV1 {
     pub fn retention_policy_artifact(&self) -> &[u8] {
         self.artifacts.retention_policy_artifact()
     }
+
+    /// ADR-088 OPC1 identity of this exact installed source binding.
+    ///
+    /// This is a structural hash, not owner authentication or permission to
+    /// release retained bytes.
+    ///
+    /// # Errors
+    /// Rejects an incomplete or noncanonical installed closure.
+    pub fn manifest_closure_hash(&self) -> Result<Hash, OutputAdmissionErrorV1> {
+        let closure = OutputPolicyClosureV1::from_artifacts(
+            &self.policy.to_canonical_cbor(),
+            &self.budget.to_canonical_cbor(),
+            self.implementation_artifact(),
+            self.configuration_artifact(),
+            self.execution_profile_artifact(),
+            self.retention_policy_artifact(),
+        )?;
+        Ok(closure.manifest_closure_hash())
+    }
 }
 
 /// The immutable artifact closure required to activate one output policy.

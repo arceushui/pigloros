@@ -1128,7 +1128,7 @@ impl PluginRegistry {
     /// Fix the complete owner-supplied PluginId/slot batch before registration.
     ///
     /// This records a structural candidate only. It does not authenticate an
-    /// owner transaction or make the batch eligible for a WorldCut claim.
+    /// owner transaction or make the batch eligible for a `WorldCut` claim.
     ///
     /// # Errors
     /// Rejects a reused or nonempty registry, nonlocal mode, or empty batch.
@@ -1152,7 +1152,7 @@ impl PluginRegistry {
         Ok(())
     }
 
-    /// Verify the complete pre-registered batch against actual PluginId keys.
+    /// Verify the complete pre-registered batch against actual `PluginId` keys.
     ///
     /// # Errors
     /// Rejects any missing, extra, changed, unpinned or unverified Plugin.
@@ -3094,11 +3094,16 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            driver,
-            approver,
-            approver_event_types,
-            Some(registration),
-            None,
+            InstalledCallbacksV1 {
+                driver,
+                approver,
+                approver_event_types: approver_event_types.into_iter().collect(),
+            },
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: None,
+                manifest_slot: None,
+            },
         )
     }
 
@@ -3174,11 +3179,16 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            driver,
-            approver,
-            approver_event_types,
-            None,
-            None,
+            InstalledCallbacksV1 {
+                driver,
+                approver,
+                approver_event_types: approver_event_types.into_iter().collect(),
+            },
+            RegistrationOptions {
+                registration: None,
+                output_admission: None,
+                manifest_slot: None,
+            },
         )
     }
 
@@ -3240,20 +3250,17 @@ impl PluginRegistry {
             return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
         }
         self.validate_installed_registration_details(plugin, &binding, &registration)?;
-        let InstalledCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = binding.take_callbacks();
+        let callbacks = binding.take_callbacks();
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,
             reducer,
-            driver,
-            approver,
-            approver_event_types,
-            Some(registration),
-            stable_slot,
+            callbacks,
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: None,
+                manifest_slot: stable_slot.map(str::to_owned),
+            },
         )
     }
 
@@ -3306,13 +3313,10 @@ impl PluginRegistry {
         plugin: &dyn Plugin,
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-        approver: Option<Box<dyn ActionApprover>>,
-        approver_event_types: impl IntoIterator<Item = Kind>,
-        registration: Option<PluginRegistrationV1>,
-        stable_slot: Option<&str>,
+        callbacks: InstalledCallbacksV1,
+        mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
-        match (self.manifest_batch.as_ref(), stable_slot) {
+        match (self.manifest_batch.as_ref(), options.manifest_slot.as_deref()) {
             (Some(_), None) | (None, Some(_)) => {
                 return Err(ManifestRegistrationErrorV1::BatchState.into());
             }
@@ -3324,13 +3328,13 @@ impl PluginRegistry {
                 crate::OutputAdmissionErrorV1::PluginMismatch,
             ));
         }
-        if let Some(registration) = registration.as_ref() {
+        if let Some(registration) = options.registration.as_ref() {
             self.validate_registration_roles(registration)?;
         }
         let (output_policy, executable_budget, artifacts, source, owner_token) =
             binding.into_parts();
         #[cfg(any(test, feature = "test-support"))]
-        if stable_slot.is_some() && source == InstalledOutputPolicySourceV1::Generated {
+        if options.manifest_slot.is_some() && source == InstalledOutputPolicySourceV1::Generated {
             return Err(ManifestRegistrationErrorV1::UnverifiedRegistration.into());
         }
         #[cfg(not(any(test, feature = "test-support")))]
@@ -3385,41 +3389,14 @@ impl PluginRegistry {
             closure,
             owner_token,
         )?;
-        if let Some(slot) = stable_slot {
-            let batch = self
-                .manifest_batch
-                .as_ref()
-                .ok_or(ManifestRegistrationErrorV1::BatchState)?;
-            let row = batch
-                .as_input()
-                .rows
-                .iter()
-                .find(|row| row.plugin_id == plugin.id())
-                .ok_or(ManifestRegistrationErrorV1::PluginMismatch)?;
-            Self::validate_manifest_facts(
-                row,
-                plugin.name(),
-                plugin.version(),
-                registration.as_ref(),
-                Some(&admission),
-                Some(slot),
-            )?;
-            return self.register_with_approver_slice(
-                plugin,
-                reducer,
-                driver,
-                approver,
-                &approver_event_types.into_iter().collect::<Vec<_>>(),
-                context,
-                RegistrationOptions {
-                    registration,
-                    output_admission: Some(admission),
-                    manifest_slot: Some(slot.to_owned()),
-                },
-            );
-        }
+        self.validate_manifest_candidate(plugin, &admission, &options)?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        options.output_admission = Some(admission);
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = callbacks;
         self.register_with_approver_slice(
             plugin,
             reducer,
@@ -3427,15 +3404,52 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
-            RegistrationOptions {
-                registration,
-                output_admission: Some(admission),
-                manifest_slot: None,
-            },
+            options,
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    fn validate_manifest_candidate(
+        &self,
+        plugin: &dyn Plugin,
+        admission: &OutputAdmissionV1,
+        options: &RegistrationOptions,
+    ) -> Result<(), RuntimeError> {
+        let Some(slot) = options.manifest_slot.as_deref() else {
+            return Ok(());
+        };
+        let batch = self
+            .manifest_batch
+            .as_ref()
+            .ok_or(ManifestRegistrationErrorV1::BatchState)?;
+        let row = batch
+            .as_input()
+            .rows
+            .iter()
+            .find(|row| row.plugin_id == plugin.id())
+            .ok_or(ManifestRegistrationErrorV1::PluginMismatch)?;
+        Self::validate_manifest_facts(
+            row,
+            plugin.name(),
+            plugin.version(),
+            options.registration.as_ref(),
+            Some(admission),
+            Some(slot),
+        )
+        .map_err(Into::into)
+    }
+
+    pub(crate) fn validate_required_installed_approver(
+        binding: &OutputPolicyBindingV1,
+    ) -> Result<(), RuntimeError> {
+        if binding.requires_action_approver() && !binding.has_action_approver_route() {
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" },
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn registration_context(
         &self,
         plugin: &dyn Plugin,
