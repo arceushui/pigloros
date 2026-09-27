@@ -1833,6 +1833,113 @@ mod tests {
     }
 
     #[test]
+    fn decoder_bounds_and_structural_edges_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, root, revocation) = fixture()?;
+        for replacement in [[0x1a, 0, 0, 0, 1], [0x1b, 0, 0, 0, 0, 0, 0, 0, 1]] {
+            let mut noncanonical = root.clone();
+            noncanonical.splice(6..7, replacement);
+            assert_eq!(
+                PluginTrustRootRecordV1::decode(&noncanonical),
+                Err(PluginTrustErrorV1::InvalidEncoding)
+            );
+        }
+        for record in [&root, &revocation] {
+            let oversized = vec![0; 1024 * 1024 + 1];
+            let decoded = if record == &root {
+                PluginTrustRootRecordV1::decode(&oversized).map(|_| ())
+            } else {
+                PluginRevocationRecordV1::decode(&oversized).map(|_| ())
+            };
+            assert_eq!(decoded, Err(PluginTrustErrorV1::BoundsExceeded));
+        }
+        for (field, entry) in [
+            (8, Value::Array(vec![Value::Array(vec![unsigned(1)])])),
+            (9, Value::Array(vec![Value::Array(vec![unsigned(1); 3])])),
+            (
+                10,
+                Value::Array(vec![Value::Array(vec![Value::Text("plugin-a".to_owned())])]),
+            ),
+        ] {
+            let mut fields = root_fields(&signer, publisher, 1, None);
+            fields[field] = entry;
+            let encoded = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+            assert_eq!(
+                PluginTrustRootRecordV1::decode(&encoded),
+                Err(PluginTrustErrorV1::InvalidEncoding)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signature_and_public_digest_edges_are_checked() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, root, revocation) = fixture()?;
+        assert_eq!(
+            PluginTrustRootRecordV1::decode(&root)?.digest(),
+            *blake3::hash(&root).as_bytes()
+        );
+        assert_eq!(
+            PluginRevocationRecordV1::decode(&revocation)?.digest(),
+            *blake3::hash(&revocation).as_bytes()
+        );
+        for signatures in [
+            Vec::new(),
+            vec![Value::Array(vec![bytes([0; 32])])],
+            vec![
+                Value::Array(vec![
+                    bytes(root_key_id(signer.verifying_key().to_bytes())),
+                    bytes([0; 64]),
+                ]),
+                Value::Array(vec![
+                    bytes(root_key_id(signer.verifying_key().to_bytes())),
+                    bytes([1; 64]),
+                ]),
+            ],
+        ] {
+            let mut fields = root_fields(&signer, publisher, 1, None);
+            fields.push(Value::Array(signatures));
+            let encoded = encode(&Value::Array(fields))?;
+            assert_eq!(
+                PluginTrustRootRecordV1::decode(&encoded),
+                Err(PluginTrustErrorV1::InvalidEncoding)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn history_discontinuity_edges_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, root, revocation) = fixture()?;
+        let digest = *blake3::hash(&root).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", digest)?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[], &[&revocation], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        let mut wrong_genesis = root_fields(&signer, publisher, 1, Some([0; 32]));
+        wrong_genesis[2] = Value::Text("other".to_owned());
+        let wrong_genesis = signed_record(wrong_genesis, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        let wrong_anchor =
+            TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&wrong_genesis).as_bytes())?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&wrong_anchor, &[&wrong_genesis], &[&revocation], 50, 5),
+            Err(PluginTrustErrorV1::AnchorMismatch)
+        ));
+        let mut bad_next = root_fields(&signer, publisher, 3, Some(digest));
+        bad_next[2] = Value::Text("other".to_owned());
+        let bad_next = signed_record(bad_next, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root, &bad_next], &[&revocation], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn every_truncation_and_selected_single_byte_tamper_fails_closed(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (_, _, root, revocation) = fixture()?;
