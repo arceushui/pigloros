@@ -333,7 +333,7 @@ fn parse_layers(
         if !seen_digests.insert(digest.to_owned()) {
             return Err(ReleaseSourceErrorV1::DuplicateMember);
         }
-        let role = layer_role(member, digest, media_type)?;
+        let (role, _) = layer_role(member, digest, media_type)?;
         *roles.entry(role.to_owned()).or_default() += 1;
         if expected.insert(digest.to_owned(), size).is_some() {
             return Err(ReleaseSourceErrorV1::DuplicateMember);
@@ -353,41 +353,48 @@ fn layer_role<'a>(
     member: &'a str,
     digest: &str,
     media_type: &str,
-) -> Result<&'a str, ReleaseSourceErrorV1> {
+) -> Result<(&'a str, u8), ReleaseSourceErrorV1> {
     let fixed = match member {
-        "pmf1" => Some(("pmf1", "application/vnd.pigloros.plugin.manifest.v1+cbor")),
+        "pmf1" => Some((
+            "pmf1",
+            0,
+            "application/vnd.pigloros.plugin.manifest.v1+cbor",
+        )),
         "component" => Some((
             "component",
+            1,
             "application/vnd.pigloros.plugin.component.v1+wasm",
         )),
-        "wit" => Some(("wit", "application/vnd.pigloros.plugin.wit.v1+tar")),
-        "provenance" => Some(("provenance", "application/vnd.in-toto+json")),
-        "sbom" => Some(("sbom", "application/spdx+json")),
+        "wit" => Some(("wit", 2, "application/vnd.pigloros.plugin.wit.v1+tar")),
+        "provenance" => Some(("provenance", 4, "application/vnd.in-toto+json")),
+        "sbom" => Some(("sbom", 5, "application/spdx+json")),
         _ => None,
     };
-    if let Some((role, required_media_type)) = fixed {
+    if let Some((role, rank, required_media_type)) = fixed {
         return if media_type == required_media_type {
-            Ok(role)
+            Ok((role, rank))
         } else {
             Err(ReleaseSourceErrorV1::UnsupportedMediaType)
         };
     }
-    for (prefix, role, required_media_type) in [
+    for (prefix, role, rank, required_media_type) in [
         (
             "schema/",
             "schema",
+            3,
             "application/vnd.pigloros.plugin.schema.v1+json",
         ),
-        ("licence/", "licence", "text/plain; charset=utf-8"),
+        ("licence/", "licence", 6, "text/plain; charset=utf-8"),
         (
             "migration-fixture/",
             "migration-fixture",
+            7,
             "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
         ),
     ] {
         if let Some(suffix) = member.strip_prefix(prefix) {
             return if suffix == &digest["sha256:".len()..] && media_type == required_media_type {
-                Ok(role)
+                Ok((role, rank))
             } else {
                 Err(ReleaseSourceErrorV1::InvalidDescriptor)
             };
@@ -413,33 +420,21 @@ fn validate_layer_order_and_counts(
     }
     let ranks = members
         .iter()
-        .map(|member| layer_role(&member.member, &member.digest, &member.media_type).map(rank))
+        .map(|member| {
+            layer_role(&member.member, &member.digest, &member.media_type).map(|(_, rank)| rank)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if !ranks.windows(2).all(|pair| pair[0] <= pair[1]) {
         return Err(ReleaseSourceErrorV1::InvalidDescriptor);
     }
     for window in members.windows(2) {
-        let left = layer_role(&window[0].member, &window[0].digest, &window[0].media_type)?;
-        let right = layer_role(&window[1].member, &window[1].digest, &window[1].media_type)?;
+        let (left, _) = layer_role(&window[0].member, &window[0].digest, &window[0].media_type)?;
+        let (right, _) = layer_role(&window[1].member, &window[1].digest, &window[1].media_type)?;
         if left == right && left != "pmf1" && window[0].digest >= window[1].digest {
             return Err(ReleaseSourceErrorV1::InvalidDescriptor);
         }
     }
     Ok(())
-}
-
-fn rank(role: &str) -> u8 {
-    match role {
-        "pmf1" => 0,
-        "component" => 1,
-        "wit" => 2,
-        "schema" => 3,
-        "provenance" => 4,
-        "sbom" => 5,
-        "licence" => 6,
-        "migration-fixture" => 7,
-        _ => u8::MAX,
-    }
 }
 
 fn verify_descriptor_bytes(
