@@ -5,6 +5,7 @@ use pos_core::{
     MAX_ARTIFACT_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_CHILDREN_V1,
     MAX_ARTIFACT_REGISTRATION_KEYS_V1,
 };
+use std::fmt::Write as _;
 
 fn sample_fields() -> Result<ArtifactRegistrationFieldsV1, Box<dyn std::error::Error>> {
     Ok(ArtifactRegistrationFieldsV1 {
@@ -24,7 +25,11 @@ fn sample_fields() -> Result<ArtifactRegistrationFieldsV1, Box<dyn std::error::E
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
 }
 
 #[test]
