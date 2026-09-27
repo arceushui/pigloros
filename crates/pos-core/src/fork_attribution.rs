@@ -71,6 +71,9 @@ pub struct ForkAdmissionRecordV1(ForkAdmissionRecordInputV1);
 
 impl ForkAdmissionRecordV1 {
     /// Validate the local structural and duplicated-cut invariants.
+    ///
+    /// # Errors
+    /// Rejects zero required identifiers, duplicate Timeline IDs, or inconsistent cut coordinates.
     pub fn new(input: ForkAdmissionRecordInputV1) -> Result<Self, ForkAttributionCodecErrorV1> {
         if input.operation_id == Hash::zero()
             || input.principal_owner_binding_digest == Hash::zero()
@@ -109,7 +112,7 @@ impl ForkAdmissionRecordV1 {
         uint(&mut out, value.completed_fold_cursor);
         uint(&mut out, value.post_fold_tick_boundary);
         hash(&mut out, value.plugin_composition_hash);
-        uint(&mut out, if value.attribution_required { 1 } else { 0 });
+        uint(&mut out, u64::from(value.attribution_required));
         array(&mut out, 1);
         uint(&mut out, 1);
         out
@@ -122,6 +125,9 @@ impl ForkAdmissionRecordV1 {
     }
 
     /// Decode only exact canonical local-origin `FAR1` bytes.
+    ///
+    /// # Errors
+    /// Rejects malformed, out-of-bounds, noncanonical, or imported-origin bytes.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_ADMISSION_RECORD_BYTES_V1)?;
         wire.array(15)?;
@@ -189,6 +195,9 @@ pub struct ForkReproManifestV1(ForkReproManifestInputV1);
 
 impl ForkReproManifestV1 {
     /// Validate exact structural coordinate bounds.
+    ///
+    /// # Errors
+    /// Rejects invalid coordinates or intervention ordering and bounds.
     pub fn new(input: ForkReproManifestInputV1) -> Result<Self, ForkAttributionCodecErrorV1> {
         if input.parent_timeline_id == input.fork_timeline_id
             || input.admission_digest == Hash::zero()
@@ -220,6 +229,9 @@ impl ForkReproManifestV1 {
     }
 
     /// Require every duplicated provenance coordinate to equal local `FAR1`.
+    ///
+    /// # Errors
+    /// Rejects any mismatch between the manifest and admission authority.
     pub fn validate_against_admission(
         &self,
         admission: &ForkAdmissionRecordV1,
@@ -266,6 +278,9 @@ impl ForkReproManifestV1 {
     }
 
     /// Decode exact canonical `FRM1` bytes.
+    ///
+    /// # Errors
+    /// Rejects malformed, out-of-bounds, or noncanonical manifest bytes.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_REPRO_MANIFEST_BYTES_V1)?;
         wire.array(13)?;
@@ -318,6 +333,9 @@ pub struct SignedForkReproManifestV1 {
 
 impl SignedForkReproManifestV1 {
     /// Construct a signature-only wrapper for the exact inner canonical bytes.
+    ///
+    /// # Errors
+    /// Rejects an identity without the attribution-signing role or positive epoch.
     pub fn new(
         identity: KeyIdentityV1,
         manifest: ForkReproManifestV1,
@@ -370,6 +388,9 @@ impl SignedForkReproManifestV1 {
         domain_digest(RECORD_DOMAIN, &self.to_canonical_cbor())
     }
     /// Decode exact canonical `FSM1` bytes; this does not verify the signature.
+    ///
+    /// # Errors
+    /// Rejects malformed, out-of-bounds, or noncanonical signed-record bytes.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1)?;
         wire.array(7)?;
@@ -427,15 +448,15 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
     if value < 24 {
         out.push(tag | value.to_be_bytes()[7]);
     } else if let Ok(value) = u8::try_from(value) {
-        out.extend_from_slice(&[tag | 24, value]);
+        out.extend_from_slice(&[tag | 0x18, value]);
     } else if let Ok(value) = u16::try_from(value) {
-        out.push(tag | 25);
+        out.push(tag | 0x19);
         out.extend_from_slice(&value.to_be_bytes());
     } else if let Ok(value) = u32::try_from(value) {
-        out.push(tag | 26);
+        out.push(tag | 0x1a);
         out.extend_from_slice(&value.to_be_bytes());
     } else {
-        out.push(tag | 27);
+        out.push(tag | 0x1b);
         out.extend_from_slice(&value.to_be_bytes());
     }
 }
@@ -452,7 +473,7 @@ struct Reader<'a> {
     offset: usize,
 }
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8], maximum: usize) -> Result<Self, ForkAttributionCodecErrorV1> {
+    const fn new(bytes: &'a [u8], maximum: usize) -> Result<Self, ForkAttributionCodecErrorV1> {
         if bytes.len() > maximum {
             Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
         } else {
@@ -554,7 +575,7 @@ impl<'a> Reader<'a> {
             Err(ForkAttributionCodecErrorV1::UnsupportedVersion)
         }
     }
-    fn finish(&self) -> Result<(), ForkAttributionCodecErrorV1> {
+    const fn finish(&self) -> Result<(), ForkAttributionCodecErrorV1> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
