@@ -144,15 +144,14 @@ evidence_roundtrip!(scope_commitment_roundtrips, ErasureScopeCommitmentV1, {
 #[test]
 fn scope_commitment_accepts_more_than_the_extension_limit_of_scope_references(
 ) -> Result<(), ErasureErrorV1> {
-    let extension_limit = u64::try_from(pos_core::ERASURE_MAX_SCOPE_EXTENSIONS)
-        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-    let members = (0..=extension_limit)
+    let members = (0_u64..=4_096)
         .map(|index| {
             let mut digest = [0_u8; 32];
             digest[24..].copy_from_slice(&index.to_be_bytes());
             pos_core::ErasureReferenceV1::from_digest(digest)
         })
         .collect::<Vec<_>>();
+    assert_eq!(members.len(), pos_core::ERASURE_MAX_SCOPE_EXTENSIONS + 1);
     let commitment = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members: members.clone(),
