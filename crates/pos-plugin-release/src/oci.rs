@@ -814,8 +814,21 @@ mod tests {
             verify_oci_closure_v1(address.clone(), manifest.clone(), extra),
             Err(ReleaseSourceErrorV1::BoundsExceeded)
         );
-        let mut wrong_size = blobs.clone();
         let member = digest(b"component");
+        let mut wrong_key = blobs.clone();
+        let component = wrong_key.remove(&member).ok_or("fixture component")?;
+        wrong_key.insert(digest(b"replacement"), component);
+        assert_eq!(
+            verify_oci_closure_v1(address.clone(), manifest.clone(), wrong_key),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        let mut oversized_blob = blobs.clone();
+        oversized_blob.insert(member.clone(), vec![0; MAX_BLOB_BYTES + 1]);
+        assert_eq!(
+            verify_oci_closure_v1(address.clone(), manifest.clone(), oversized_blob),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        let mut wrong_size = blobs.clone();
         wrong_size.insert(member.clone(), b"short".to_vec());
         assert_eq!(
             verify_oci_closure_v1(address.clone(), manifest.clone(), wrong_size),
