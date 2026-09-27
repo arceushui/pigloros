@@ -4,7 +4,7 @@ use super::{
     ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1,
     ErasureArtifactClassV1,
 };
-use crate::{Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1};
+use crate::{AdapterAdmissionV1, AdapterTranscriptV1, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1};
 use std::collections::BTreeSet;
 
 /// Maximum canonical size of one ARD1 record.
@@ -47,6 +47,24 @@ pub enum ArtifactRegistrationErrorV1 {
     InvalidOrder,
     #[error("ARD1 bytes are not canonical")]
     NonCanonical,
+}
+
+/// Failure while deriving the fixed class-1 registration from ADR-101 bytes.
+///
+/// This is structural extraction only. An installed owner must still verify
+/// admission provenance and recorder closure before a store can publish the
+/// resulting registration in its authoritative catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum AdapterArtifactRegistrationErrorV1 {
+    /// MAA1 bytes are malformed, noncanonical, or outside the accepted profile.
+    #[error("invalid MAA1 artifact bytes")]
+    InvalidAdmission,
+    /// MAT1 bytes are malformed, noncanonical, or violate its admitted call contract.
+    #[error("invalid MAT1 artifact bytes")]
+    InvalidTranscript,
+    /// The supplied MAA1 registration is not exactly derived from its retained bytes.
+    #[error("MAA1 registration does not match its retained artifact bytes")]
+    AdmissionRegistrationMismatch,
 }
 
 /// One immutable child registration address and its parent-fixed membership.
@@ -168,6 +186,89 @@ impl ArtifactRegistrationV1 {
         hasher.update(bytes);
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
+}
+
+/// Derive the fixed ARD1 fields for retained ADR-101 MAA1 bytes.
+///
+/// MAA1 contains only owner-admitted public configuration. Its class-1
+/// registration therefore has no key dependencies or child artifacts. This
+/// function validates and re-encodes the exact retained bytes before deriving
+/// their digest and owner reference.
+///
+/// # Errors
+/// Returns [`AdapterArtifactRegistrationErrorV1::InvalidAdmission`] when the
+/// bytes are not one exact accepted MAA1 record.
+pub fn extract_adapter_admission_registration_v1(
+    bytes: &[u8],
+) -> Result<ArtifactRegistrationV1, AdapterArtifactRegistrationErrorV1> {
+    let admission = AdapterAdmissionV1::from_canonical_cbor(bytes)
+        .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)?;
+    let artifact_digest =
+        ArtifactRegistrationV1::artifact_digest(ErasureArtifactClassV1::ReproManifest, bytes)
+            .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)?;
+    ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+        artifact_class: ErasureArtifactClassV1::ReproManifest,
+        artifact_digest,
+        owner_reference: admission.as_input().owner_reference,
+        data_class: ArtifactDataClassV1::PublicRecord,
+        optionality: ArtifactOptionalityV1::Required,
+        transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+        required_key_roles: Vec::new(),
+        key_dependencies: Vec::new(),
+        child_artifacts: Vec::new(),
+    })
+    .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)
+}
+
+/// Derive the fixed ARD1 fields for retained ADR-101 MAT1 bytes.
+///
+/// The one required child is the exact retained MAA1 registration. The
+/// transcript is checked against that MAA1 before its registration is derived.
+/// This does not certify a closed recorder or authenticated public-record
+/// provenance; those are owner-commit preconditions outside this parser.
+///
+/// # Errors
+/// Returns an error when either byte record is invalid, the calls do not match
+/// the supplied admission, or the supplied ARD1 is not the exact MAA1-derived
+/// registration.
+pub fn extract_adapter_transcript_registration_v1(
+    transcript_bytes: &[u8],
+    admission_bytes: &[u8],
+    admission_registration: &ArtifactRegistrationV1,
+) -> Result<ArtifactRegistrationV1, AdapterArtifactRegistrationErrorV1> {
+    let transcript = AdapterTranscriptV1::from_canonical_cbor(transcript_bytes)
+        .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidTranscript)?;
+    let admission = AdapterAdmissionV1::from_canonical_cbor(admission_bytes)
+        .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)?;
+    let expected_admission = extract_adapter_admission_registration_v1(admission_bytes)?;
+    if admission_registration != &expected_admission {
+        return Err(AdapterArtifactRegistrationErrorV1::AdmissionRegistrationMismatch);
+    }
+    transcript
+        .compare_call_contracts(&admission)
+        .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidTranscript)?;
+    let artifact_digest = ArtifactRegistrationV1::artifact_digest(
+        ErasureArtifactClassV1::ReproManifest,
+        transcript_bytes,
+    )
+    .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidTranscript)?;
+    ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+        artifact_class: ErasureArtifactClassV1::ReproManifest,
+        artifact_digest,
+        owner_reference: transcript.as_input().owner_reference,
+        data_class: ArtifactDataClassV1::PublicRecord,
+        optionality: ArtifactOptionalityV1::Required,
+        transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+        required_key_roles: Vec::new(),
+        key_dependencies: Vec::new(),
+        child_artifacts: vec![ArtifactChildEdgeV1 {
+            artifact_class: ErasureArtifactClassV1::ReproManifest,
+            artifact_digest: expected_admission.fields().artifact_digest,
+            registration_address: expected_admission.address(),
+            required: true,
+        }],
+    })
+    .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidTranscript)
 }
 
 fn domain_hash(domain: &[u8], bytes: &[u8]) -> Hash {
