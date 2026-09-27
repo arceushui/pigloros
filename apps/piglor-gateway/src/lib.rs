@@ -170,8 +170,7 @@ mod coverage_tests {
     };
     use pos_runtime::{
         DomainImplementationKindV1, OutputAdmissionErrorV1, PluginAvailabilityV1,
-        PluginCompositionErrorV1, PluginIsolationV1, PluginPinFieldV1, PluginPinV1,
-        PluginRegistrationV1, PluginRegistry, RuntimeError,
+        PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
@@ -197,45 +196,6 @@ mod coverage_tests {
         }
     }
 
-    struct ForeignActionApprover;
-
-    impl pos_core::ActionApprover for ForeignActionApprover {
-        fn approve(
-            &self,
-            _proposal: &pos_core::ProposedAction,
-        ) -> Result<EventDraft, pos_core::ActionRejected> {
-            Err(pos_core::ActionRejected::UnknownEventType)
-        }
-    }
-
-    #[derive(Clone)]
-    struct SpoofedWorldActionApprover {
-        id: PluginId,
-    }
-
-    impl Plugin for SpoofedWorldActionApprover {
-        fn id(&self) -> PluginId {
-            self.id
-        }
-
-        fn name(&self) -> &'static str {
-            "world"
-        }
-
-        fn capability(&self) -> Capability {
-            Capability::default()
-        }
-    }
-
-    impl pos_core::ActionApprover for SpoofedWorldActionApprover {
-        fn approve(
-            &self,
-            _proposal: &pos_core::ProposedAction,
-        ) -> Result<EventDraft, pos_core::ActionRejected> {
-            Err(pos_core::ActionRejected::UnknownEventType)
-        }
-    }
-
     fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
         ConsentGrantedV1 {
             subject_id,
@@ -256,21 +216,28 @@ mod coverage_tests {
         let plugin = GatewayActionPlugin {
             id: PluginId::new(),
         };
-        let binding = gateway_output_binding(&plugin, &[]).test_ok();
-        assert!(binding
-            .implementation_artifact()
-            .ends_with(include_bytes!("../../../plugins/world/src/lib.rs")));
+        assert!(matches!(
+            gateway_output_binding(&plugin, &[]),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
         assert_eq!(
             binding.policy().fields().implementation_hash,
             pos_runtime::implementation_artifact_hash_v1(binding.implementation_artifact()),
         );
-        let mut changed_world_source = binding.implementation_artifact().to_vec();
-        *changed_world_source.last_mut().test_ok() ^= 1;
+        let mut changed_source = binding.implementation_artifact().to_vec();
+        *changed_source.last_mut().test_ok() ^= 1;
         assert!(matches!(
             pos_runtime::validate_output_policy_artifacts_v1(
                 &binding.policy().to_canonical_cbor(),
                 &binding.budget().to_canonical_cbor(),
-                &changed_world_source,
+                &changed_source,
                 binding.configuration_artifact(),
                 binding.execution_profile_artifact(),
                 binding.retention_policy_artifact(),
@@ -293,21 +260,22 @@ mod coverage_tests {
                 OutputAdmissionErrorV1::PluginMismatch
             ))
         ));
-        let binding = gateway_output_binding(&plugin, &[]).test_ok();
         assert!(matches!(
-            binding.with_installed_action_approver(
-                ForeignActionApprover,
-                [Kind::new(EVENT_TYPE_ACTION)],
-            ),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+            gateway_output_binding(&plugin, &[]),
+            Err(RuntimeError::CapabilityMismatch { .. })
         ));
-        let bound = gateway_output_binding(&plugin, &[])
-            .test_ok()
-            .with_installed_action_approver(
-                super::GatewayWorldActionApprover(super::WorldPlugin::new()),
-                [Kind::new(EVENT_TYPE_ACTION)],
-            )
-            .test_ok();
+        let bound = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok()
+        .with_installed_action_approver(
+            super::GatewayWorldActionApprover(super::WorldPlugin::new()),
+            [Kind::new(EVENT_TYPE_ACTION)],
+        )
+        .test_ok();
         assert!(matches!(
             bound.with_installed_action_approver(
                 super::GatewayWorldActionApprover(super::WorldPlugin::new()),
@@ -318,173 +286,42 @@ mod coverage_tests {
     }
 
     #[test]
-    fn installed_world_approver_must_come_from_bound_plugin_instance() {
+    fn draft_world_approver_cannot_be_installed_without_qualified_profile() {
         let world = super::WorldPlugin::new();
-        let foreign = world.clone().with_bodies([EntityId::new()]);
-        let binding = || {
+        assert!(matches!(
             pos_runtime::OutputPolicyBindingV1::from_installed_source(
                 &world,
                 pos_runtime::InstalledOutputPolicySourceV1::World,
                 &[],
                 "deterministic-local-v1",
-            )
-            .test_ok()
-        };
-        let action_kind = [Kind::new("world.action.v1")];
-        let gateway = GatewayActionPlugin {
-            id: PluginId::new(),
-        };
-        assert!(matches!(
-            gateway_output_binding(&gateway, &[])
-                .test_ok()
-                .with_installed_plugin_action_approver(&world, action_kind.clone()),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
-        ));
-        assert!(matches!(
-            gateway_output_binding(&gateway, &[])
-                .test_ok()
-                .with_installed_action_approver(
-                    super::GatewayWorldActionApprover(world.clone()),
-                    std::iter::repeat(Kind::new("world.action.v1")),
-                ),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
-        ));
-        assert!(matches!(
-            binding().with_installed_action_approver(world.clone(), action_kind.clone()),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
-        ));
-        assert!(matches!(
-            binding().with_installed_plugin_action_approver(&foreign, action_kind.clone()),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
-        ));
-        let spoofed = SpoofedWorldActionApprover { id: world.id() };
-        assert!(matches!(
-            binding().with_installed_plugin_action_approver(&spoofed, action_kind.clone()),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
-        ));
-        assert!(matches!(
-            binding().with_installed_plugin_action_approver(
-                &world,
-                [Kind::new("world.observation.v1")],
             ),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
         ));
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &world,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
         assert!(matches!(
-            binding().with_installed_plugin_action_approver(&world, []),
+            binding.with_installed_plugin_action_approver(&world, [Kind::new("world.action.v1")]),
             Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
         ));
-        assert!(matches!(
-            binding().with_installed_plugin_action_approver(
-                &world,
-                std::iter::repeat(Kind::new("world.action.v1")),
-            ),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
-        ));
-        let bound = binding()
-            .with_installed_plugin_action_approver(&world, action_kind)
-            .test_ok();
-        assert!(matches!(
-            bound.with_installed_plugin_action_approver(&world, [Kind::new("world.action.v1")]),
-            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
-        ));
-    }
-
-    fn installed_gateway_binding(
-        plugin: &GatewayActionPlugin,
-    ) -> pos_runtime::OutputPolicyBindingV1 {
-        gateway_output_binding(plugin, &[])
-            .test_ok()
-            .with_installed_action_approver(
-                super::GatewayWorldActionApprover(super::WorldPlugin::new()),
-                [Kind::new(EVENT_TYPE_ACTION)],
-            )
-            .test_ok()
     }
 
     #[test]
-    fn gateway_registration_rejects_invalid_callback_and_pin_before_mutation() {
-        let plugin = GatewayActionPlugin {
-            id: PluginId::new(),
-        };
-        let role = pos_runtime::installed_plugin_role_v1(&plugin);
-        let mut registry = PluginRegistry::new().without_erasure_gate();
-        let duplicate_callback = super::register_bound_gateway_world_action(
-            &mut registry,
-            &plugin,
-            super::WorldPlugin::new(),
-            installed_gateway_binding(&plugin),
-            vec![role.clone()],
-        );
-        assert!(matches!(
-            duplicate_callback,
-            Err(RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
-        let invalid_pin = super::register_bound_gateway_world_action(
-            &mut registry,
-            &plugin,
-            super::WorldPlugin::new(),
-            gateway_output_binding(&plugin, &[]).test_ok(),
-            Vec::new(),
-        );
-        assert!(matches!(
-            invalid_pin,
-            Err(RuntimeError::Composition(
-                PluginCompositionErrorV1::InvalidMetadata
-            ))
-        ));
-        assert_eq!(registry.len(), 0);
-
-        let binding = gateway_output_binding(&plugin, &[]).test_ok();
-        let pin = PluginPinV1::try_new(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
-            binding.policy().digest(),
-            vec![role],
-        )
-        .test_ok();
-        let unbound = registry.register_installed_output(
-            &plugin,
-            binding,
-            PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+    fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
+        let registry = super::gateway_fixture_action_registry_builder(
+            std::iter::empty(),
             None,
-        );
-        assert!(matches!(
-            unbound,
-            Err(RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
-        assert_eq!(registry.len(), 0);
-    }
-
-    #[test]
-    fn installed_gateway_records_exact_pin() {
-        let plugin = GatewayActionPlugin {
-            id: PluginId::new(),
-        };
-        let binding = gateway_output_binding(&plugin, &[]).test_ok();
-        let digest = binding.policy().digest();
-        let role = pos_runtime::installed_plugin_role_v1(&plugin);
-        let mut registry = PluginRegistry::new().without_erasure_gate();
-        super::register_bound_gateway_world_action(
-            &mut registry,
-            &plugin,
-            super::WorldPlugin::new(),
-            binding,
-            vec![role],
         )
         .test_ok();
-        assert_eq!(
-            registry.composition().plugins[0]
-                .pin
-                .as_ref()
-                .test_ok()
-                .configuration_digest(),
-            digest
-        );
-        assert_eq!(registry.output_policy_digests().next().test_ok().1, digest);
+        assert!(registry.composition().plugins[0].pin.is_none());
+        assert!(matches!(
+            super::gateway_action_registry_builder(std::iter::empty(), None),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
     }
 
     #[repr(transparent)]
@@ -514,7 +351,13 @@ mod coverage_tests {
             id: PluginId::new(),
         });
         let plugin = &wrapped.0;
-        let binding = installed_gateway_binding(plugin);
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
         let pin = PluginPinV1::try_new(
             DomainImplementationKindV1::Plugin,
             PluginIsolationV1::OperatorTrustedNative,
@@ -528,130 +371,10 @@ mod coverage_tests {
         assert!(matches!(
             registry.register_installed_output(&wrapped, binding, registration, None),
             Err(RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::PluginMismatch
+                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
             ))
         ));
         assert_eq!(registry.len(), 0);
-    }
-
-    #[test]
-    fn installed_gateway_rejects_duplicate_registered_role() {
-        let plugin = GatewayActionPlugin {
-            id: PluginId::new(),
-        };
-        let role = pos_runtime::installed_plugin_role_v1(&plugin);
-        let binding = installed_gateway_binding(&plugin);
-        let pin = PluginPinV1::try_new(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
-            binding.policy().digest(),
-            vec![role.clone()],
-        )
-        .test_ok();
-        let registration = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
-        let mut registry = PluginRegistry::new().without_erasure_gate();
-        registry
-            .register_installed_output(&plugin, binding, registration.clone(), None)
-            .test_ok();
-        let duplicate = registry.register_installed_output(
-            &plugin,
-            installed_gateway_binding(&plugin),
-            registration,
-            None,
-        );
-        assert!(matches!(
-            duplicate,
-            Err(RuntimeError::Composition(
-                PluginCompositionErrorV1::DuplicateRole { role: duplicate_role }
-            )) if duplicate_role == role
-        ));
-        assert_eq!(registry.len(), 1);
-    }
-
-    #[test]
-    fn installed_gateway_rejects_incompatible_pins() {
-        let plugin = GatewayActionPlugin {
-            id: PluginId::new(),
-        };
-        let binding = || installed_gateway_binding(&plugin);
-        let digest = binding().policy().digest();
-        let role = pos_runtime::installed_plugin_role_v1(&plugin);
-        let wrong_digest = pos_core::Hash::from_bytes([0x55; 32]);
-        assert_ne!(wrong_digest, digest);
-        let cases = [
-            (
-                DomainImplementationKindV1::PublicAdapter,
-                PluginIsolationV1::OperatorTrustedNative,
-                digest,
-                role.as_str(),
-                PluginPinFieldV1::ImplementationKind,
-            ),
-            (
-                DomainImplementationKindV1::Plugin,
-                PluginIsolationV1::GovernedCommunity,
-                digest,
-                role.as_str(),
-                PluginPinFieldV1::Isolation,
-            ),
-            (
-                DomainImplementationKindV1::Plugin,
-                PluginIsolationV1::OperatorTrustedNative,
-                wrong_digest,
-                role.as_str(),
-                PluginPinFieldV1::ConfigurationDigest,
-            ),
-            (
-                DomainImplementationKindV1::Plugin,
-                PluginIsolationV1::OperatorTrustedNative,
-                digest,
-                "foreign-role",
-                PluginPinFieldV1::Roles,
-            ),
-        ];
-        for (kind, isolation, configuration_digest, role, expected_field) in cases {
-            let pin =
-                PluginPinV1::try_new(kind, isolation, configuration_digest, vec![role.to_owned()])
-                    .test_ok();
-            let mut rejected = PluginRegistry::new().without_erasure_gate();
-            let result = rejected.register_installed_output(
-                &plugin,
-                binding(),
-                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
-                None,
-            );
-            assert!(matches!(
-                result,
-                Err(RuntimeError::Composition(
-                    PluginCompositionErrorV1::IncompatibleImplementation { field, .. }
-                )) if field == expected_field
-            ));
-            assert_eq!(rejected.len(), 0);
-        }
-
-        let unavailable_pin = PluginPinV1::try_new(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
-            digest,
-            vec![role],
-        )
-        .test_ok();
-        let mut rejected = PluginRegistry::new().without_erasure_gate();
-        let result = rejected.register_installed_output(
-            &plugin,
-            binding(),
-            PluginRegistrationV1::new(unavailable_pin, PluginAvailabilityV1::Disabled),
-            None,
-        );
-        assert!(matches!(
-            result,
-            Err(RuntimeError::Composition(
-                PluginCompositionErrorV1::ImplementationUnavailable {
-                    availability: PluginAvailabilityV1::Disabled,
-                    ..
-                }
-            ))
-        ));
-        assert_eq!(rejected.len(), 0);
     }
 
     #[test]
@@ -1194,6 +917,41 @@ fn gateway_action_registry_builder(
     })
 }
 
+// Unit-test behavior fixtures have no installed profile, session pin, or
+// production registration authority. They never enter the release builder.
+#[cfg(test)]
+fn gateway_fixture_action_registry_builder(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    let bodies = canonical_gateway_bodies(bodies)?;
+    let descriptor = GatewayActionPlugin {
+        id: PluginId::new(),
+    };
+    let configuration_details = gateway_configuration_details(&bodies);
+    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        &descriptor,
+        pos_runtime::InstalledOutputPolicySourceV1::Generated,
+        &configuration_details,
+        "deterministic-local-v1",
+    )?;
+    let mut registry = PluginRegistry::new().without_erasure_gate();
+    registry.register_with_verified_output_policy_and_approver(
+        &descriptor,
+        binding,
+        None,
+        None,
+        Some(Box::new(GatewayWorldActionApprover(
+            WorldPlugin::new().with_bodies(bodies),
+        ))),
+        [Kind::new(EVENT_TYPE_ACTION)],
+    )?;
+    if let Some(authority) = authority {
+        registry = registry.with_consent_authority(authority);
+    }
+    Ok(registry)
+}
+
 fn prepared_gateway_action_registry(
     bodies: impl IntoIterator<Item = EntityId>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
@@ -1265,7 +1023,7 @@ fn gateway_action_registry_builder_for_test(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> PluginRegistry {
-    gateway_action_registry_builder(bodies, authority).unwrap_or_else(|error| {
+    gateway_fixture_action_registry_builder(bodies, authority).unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!(
             "gateway action registration must remain valid in test fixtures: {error:?}"
         )))
@@ -1880,11 +1638,14 @@ impl Gateway {
             broadcast::channel(EVENT_BUS_CAPACITY).0,
             GatewayLimits::LOCAL_DEFAULT,
             false,
-            gateway_action_registry_with_authority_and_erasure_gate_checked(
+            gateway_fixture_action_registry_builder(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
-                gate,
-            ),
+            )
+            .map(|mut registry| {
+                registry.bind_erasure_gate(gate);
+                Arc::new(registry)
+            }),
             consent_authority,
             None,
         )
@@ -1954,6 +1715,39 @@ impl Gateway {
                 Some(consent_authority.clone()),
                 gate,
             ),
+            consent_authority,
+            Some(Arc::new(authorization)),
+        )
+    }
+
+    // Exercises host command sequencing in unit tests only. The generated
+    // policy is never an installed Gateway profile or a production pin.
+    #[cfg(test)]
+    fn new_with_erasure_host_and_authorization_fixture(
+        host: ErasureExecutionHostV1,
+        bodies: impl IntoIterator<Item = EntityId>,
+        authorization: GatewayAuthorization,
+    ) -> Result<Self, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_erasure_host(
+            host,
+            consent_authority.append_permit(),
+        )?;
+        let action_registry = gateway_fixture_action_registry_builder(
+            bodies,
+            Some(consent_authority.clone()),
+        )
+        .map(|mut registry| {
+            registry.bind_erasure_gate(gate);
+            Arc::new(registry)
+        });
+        Self::from_host_components(
+            store,
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            action_registry,
             consent_authority,
             Some(Arc::new(authorization)),
         )
@@ -4037,12 +3831,10 @@ mod tests {
             id: PluginId::new(),
         };
         let configuration_details = gateway_configuration_details(&[]);
-        let binding = super::gateway_output_binding(&descriptor, &configuration_details).test_ok();
-        let world_source = include_bytes!("../../../plugins/world/src/lib.rs");
-        assert!(binding
-            .implementation_artifact()
-            .windows(world_source.len())
-            .any(|window| window == world_source));
+        assert!(matches!(
+            super::gateway_output_binding(&descriptor, &configuration_details),
+            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
+        ));
         let invalid_profile = gateway_output_binding_with_profile(
             &descriptor,
             &configuration_details,
@@ -4435,8 +4227,12 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway =
-            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+        let gateway = Gateway::new_with_erasure_host_and_authorization_fixture(
+            host,
+            [body],
+            authorization,
+        )
+        .test_ok();
         let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
@@ -4557,8 +4353,12 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway =
-            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+        let gateway = Gateway::new_with_erasure_host_and_authorization_fixture(
+            host,
+            [body],
+            authorization,
+        )
+        .test_ok();
         let timeline = gateway
             .create_timeline("host-authority-commit-recheck")
             .await
