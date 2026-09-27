@@ -6126,11 +6126,10 @@ mod tests {
         assert_eq!(result, Err(ErasureHostErrorV1::RecoveryUnavailable));
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
         assert_eq!(
-            authority
-                .timelines
-                .lock()
-                .map(|timelines| timelines.len())
-                .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("poisoned test fixture"))),
+            authority.timelines.lock().map_or_else(
+                |_| std::panic::resume_unwind(Box::new("poisoned test fixture")),
+                |timelines| timelines.len(),
+            ),
             1
         );
     }
