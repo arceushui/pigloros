@@ -2353,7 +2353,7 @@ fn execute_read_page_command(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod read_page_coverage_tests {
     use super::*;
-    use pos_core::ErasureContainmentGateV1;
+    use pos_core::{ConsentAuthority, ErasureContainmentGateV1};
     use pos_store::memory::MemoryStore;
 
     fn page_range() -> SeqRange {
@@ -2367,53 +2367,39 @@ mod read_page_coverage_tests {
         EventReadBounds::new(1024, 128, 64, 2)
     }
 
-    #[test]
-    fn test_store_variants_return_pages_and_propagate_read_errors(
+    #[tokio::test]
+    async fn test_store_variants_return_pages_and_propagate_read_errors(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for gateway_store in [false, true] {
             let mut store = MemoryStore::new();
-            let bound =
-                store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-            assert!(bound.is_ok());
-            let timeline = store.create_timeline("read-page-coverage")?;
-            let mut state = ExecutorState {
-                store: if gateway_store {
-                    ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store)))
-                } else {
-                    ExecutorStore::Generic(Box::new(store))
-                },
-                owntracks_owner_key: None,
-                owntracks_rate_limiter: OwnTracksRateLimiter {
-                    buckets: HashMap::new(),
-                },
+            let executor = if gateway_store {
+                assert!(store
+                    .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+                    .is_ok());
+                StoreExecutor::new_with_geo_location_admission(
+                    store,
+                    ConsentAuthority::new().append_permit(),
+                )
+            } else {
+                StoreExecutor::new(Box::new(store))
             };
-            let (reply, result) = oneshot::channel();
-            execute_read_page_command(
-                &mut state,
-                timeline.id(),
-                page_range(),
-                page_bounds(),
-                None,
-                reply,
-            );
-            let Ok(Ok(page)) = result.blocking_recv() else {
+            let Ok(timeline) = executor.create("read-page-coverage".to_owned()).await else {
+                return Err("expected test Timeline creation".into());
+            };
+            let Ok(page) = executor
+                .read_page(timeline.id(), page_range(), page_bounds(), None)
+                .await
+            else {
                 return Err("expected an empty test-store page".into());
             };
             assert!(page.events.is_empty());
             assert_eq!(page.generation, None);
 
-            let (reply, result) = oneshot::channel();
-            execute_read_page_command(
-                &mut state,
-                TimelineId::new(),
-                page_range(),
-                page_bounds(),
-                None,
-                reply,
-            );
             assert!(matches!(
-                result.blocking_recv(),
-                Ok(Err(StoreExecutorError::Store(_)))
+                executor
+                    .read_page(TimelineId::new(), page_range(), page_bounds(), None)
+                    .await,
+                Err(StoreExecutorError::Store(_))
             ));
         }
         Ok(())
@@ -2421,6 +2407,7 @@ mod read_page_coverage_tests {
 
     #[test]
     fn expired_read_page_reports_deadline() {
+        // An expired queued command is a scheduler fault state, so inject it here.
         let (reply, result) = oneshot::channel();
         expire_command(Command::Read {
             timeline: TimelineId::new(),

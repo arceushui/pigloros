@@ -2847,6 +2847,17 @@ fn serialized_json_len(value: &serde_json::Value) -> usize {
     bytes.len()
 }
 
+pub(crate) fn event_cursor(
+    generation: ErasureReferenceV1,
+    timeline_id: &str,
+    from_seq: u64,
+) -> String {
+    format!(
+        "v1.{}.{timeline_id}.{from_seq}",
+        hex_encode(&generation.digest())
+    )
+}
+
 /// Serialize the exact wire fields derived from a draft, using the longest
 /// possible sequence number and fixed-width ULID placeholders.
 fn draft_event_response_len(draft: &EventDraft) -> usize {
@@ -2862,6 +2873,11 @@ fn draft_event_response_len(draft: &EventDraft) -> usize {
     let value = serde_json::json!({
         "events": [view],
         "next_from_seq": u64::MAX,
+        "next_cursor": event_cursor(
+            ErasureReferenceV1::from_digest([0xff; 32]),
+            &"0".repeat(26),
+            u64::MAX,
+        ),
     });
     serialized_json_len(&value)
 }
