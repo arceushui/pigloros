@@ -201,10 +201,8 @@ impl AdapterTranscriptV1 {
         }
         let mut next_per_plugin = BTreeMap::<PluginId, u64>::new();
         for (global_index, call) in input.calls.iter().enumerate() {
-            if call.input.as_input().global_call_index
-                != u64::try_from(global_index)
-                    .map_err(|_| AdapterTranscriptErrorV1::FieldOutOfBounds)?
-            {
+            // The checked call-count ceiling bounds this index below 2^20.
+            if call.input.as_input().global_call_index != global_index as u64 {
                 return Err(AdapterTranscriptErrorV1::InvalidOrder);
             }
             let next = next_per_plugin.entry(call.plugin_id).or_insert(0);
@@ -469,14 +467,10 @@ impl Reader<'_> {
         major: u8,
         maximum: usize,
     ) -> Result<&[u8], AdapterTranscriptErrorV1> {
-        let length = u32::try_from(self.head(major)?)
-            .map_err(|_| AdapterTranscriptErrorV1::FieldOutOfBounds)?;
-        if usize::try_from(length).map_err(|_| AdapterTranscriptErrorV1::FieldOutOfBounds)?
-            > maximum
-        {
-            return Err(AdapterTranscriptErrorV1::FieldOutOfBounds);
+        match usize::try_from(self.head(major)?) {
+            Ok(length) if length <= maximum => self.take(length),
+            _ => Err(AdapterTranscriptErrorV1::FieldOutOfBounds),
         }
-        self.take(usize::try_from(length).map_err(|_| AdapterTranscriptErrorV1::FieldOutOfBounds)?)
     }
 
     fn head(&mut self, major: u8) -> Result<u64, AdapterTranscriptErrorV1> {
