@@ -1701,12 +1701,20 @@ impl SqliteStore {
         bounds: EventReadBounds,
         started: Instant,
     ) -> Result<Vec<Event>, CoreError> {
-        let tx = match self.conn.unchecked_transaction() {
-            Ok(tx) => tx,
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
+        // A host protected-effect interval already owns an IMMEDIATE
+        // transaction. Reuse that snapshot instead of starting a nested one.
+        let tx = if self.conn.is_autocommit() {
+            Some(
+                self.conn
+                    .unchecked_transaction()
+                    .map_err(|error| CoreError::Storage(error.to_string()))?,
+            )
+        } else {
+            None
         };
+        let conn = tx.as_deref().unwrap_or(&self.conn);
         let chain = Self::fork_chain_bounded_on(
-            &tx,
+            conn,
             timeline_id,
             bounds.max_fork_depth(),
             started,
@@ -1714,12 +1722,12 @@ impl SqliteStore {
         )?;
         let from = range.from.as_u64().max(1);
         let to = range.to.map_or(u64::MAX, Seq::as_u64);
-        Self::plan_bounded_pages(&tx, &chain, from, to, bounds, started)
-            .and_then(|plans| Self::materialize_bounded_pages(&tx, &plans, bounds, started))
+        Self::plan_bounded_pages(conn, &chain, from, to, bounds, started)
+            .and_then(|plans| Self::materialize_bounded_pages(conn, &plans, bounds, started))
     }
 
     fn plan_bounded_pages(
-        conn: &rusqlite::Transaction<'_>,
+        conn: &Connection,
         chain: &[BoundedForkSegment],
         from: u64,
         to: u64,
@@ -1805,7 +1813,7 @@ impl SqliteStore {
     }
 
     fn materialize_bounded_pages(
-        conn: &rusqlite::Transaction<'_>,
+        conn: &Connection,
         plans: &[BoundedSegmentPage],
         bounds: EventReadBounds,
         started: Instant,

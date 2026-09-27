@@ -188,10 +188,13 @@ mod hosted_cli_store_tests {
     fn sqlite_replay_read_stays_inside_the_host_fence() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::TempDir::new()?;
         let path = directory.path().join("cli-replay.db");
-        let mut store = HostedCliStore::open(StoreConfig::Sqlite {
+        let config = StoreConfig::Sqlite {
             path: path.to_string_lossy().into_owned(),
-        })?;
+        };
+        let mut store = HostedCliStore::open(config.clone())?;
         let timeline = store.create_timeline("cli-replay")?;
+        drop(store);
+        let store = HostedCliStore::open(config)?;
         let mut host = store.host.lock().map_err(|_| "CLI host lock is poisoned")?;
         let mut sender = host.read_sender()?;
         let mut read_result = None;
