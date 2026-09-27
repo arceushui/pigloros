@@ -472,6 +472,80 @@ fn signature_message(domain: &[u8], bytes: &[u8], prefix_end: usize) -> Vec<u8> 
     message
 }
 
+fn read_root_keys(
+    reader: &mut Reader<'_>,
+    threshold: usize,
+) -> Result<Vec<RootKey>, PluginTrustErrorV1> {
+    let key_count = reader.array(32)?;
+    if key_count == 0 || threshold == 0 || threshold > key_count {
+        return Err(PluginTrustErrorV1::InvalidEncoding);
+    }
+    let mut keys = Vec::with_capacity(key_count);
+    let mut root_publics = BTreeSet::new();
+    for _ in 0..key_count {
+        if reader.array(2)? != 2 {
+            return Err(PluginTrustErrorV1::InvalidEncoding);
+        }
+        let id = reader.bytes()?;
+        let public = reader.bytes()?;
+        VerifyingKey::from_bytes(&public).map_err(|_| PluginTrustErrorV1::InvalidEncoding)?;
+        if id != root_key_id(public)
+            || keys.last().is_some_and(|old: &RootKey| old.id >= id)
+            || !root_publics.insert(public)
+        {
+            return Err(PluginTrustErrorV1::InvalidEncoding);
+        }
+        keys.push(RootKey { id, public });
+    }
+    Ok(keys)
+}
+
+fn read_publishers(reader: &mut Reader<'_>) -> Result<Vec<PublisherKey>, PluginTrustErrorV1> {
+    let publisher_count = reader.array(256)?;
+    let mut publishers = Vec::with_capacity(publisher_count);
+    let mut publisher_publics = BTreeSet::new();
+    let mut publisher_identities = BTreeSet::new();
+    for _ in 0..publisher_count {
+        let publisher = read_publisher(reader)?;
+        if publishers.last().is_some_and(|old| old >= &publisher)
+            || !publisher_publics.insert(publisher.public)
+            || !publisher_identities.insert((publisher.owner, publisher.epoch))
+        {
+            return Err(PluginTrustErrorV1::InvalidEncoding);
+        }
+        publishers.push(publisher);
+    }
+    Ok(publishers)
+}
+
+fn read_grants(
+    reader: &mut Reader<'_>,
+    publishers: &[PublisherKey],
+) -> Result<Vec<Grant>, PluginTrustErrorV1> {
+    let grant_count = reader.array(256)?;
+    let mut grants = Vec::with_capacity(grant_count);
+    for _ in 0..grant_count {
+        if reader.array(2)? != 2 {
+            return Err(PluginTrustErrorV1::InvalidEncoding);
+        }
+        let plugin_id = reader.text(128)?;
+        validate_plugin_id(plugin_id)?;
+        let owner = read_owner(reader)?;
+        if grants
+            .last()
+            .is_some_and(|old: &Grant| old.plugin_id.as_str() >= plugin_id)
+            || !publishers.iter().any(|publisher| publisher.owner == owner)
+        {
+            return Err(PluginTrustErrorV1::InvalidEncoding);
+        }
+        grants.push(Grant {
+            plugin_id: plugin_id.to_owned(),
+            owner,
+        });
+    }
+    Ok(grants)
+}
+
 impl PluginTrustRootRecordV1 {
     /// Decode one exact, bounded PTR1 record.
     ///
@@ -491,62 +565,9 @@ impl PluginTrustRootRecordV1 {
         let previous = reader.optional_bytes()?;
         let threshold =
             usize::try_from(reader.unsigned()?).map_err(|_| PluginTrustErrorV1::InvalidEncoding)?;
-        let key_count = reader.array(32)?;
-        if key_count == 0 || threshold == 0 || threshold > key_count {
-            return Err(PluginTrustErrorV1::InvalidEncoding);
-        }
-        let mut keys = Vec::with_capacity(key_count);
-        let mut root_publics = BTreeSet::new();
-        for _ in 0..key_count {
-            if reader.array(2)? != 2 {
-                return Err(PluginTrustErrorV1::InvalidEncoding);
-            }
-            let id = reader.bytes()?;
-            let public = reader.bytes()?;
-            VerifyingKey::from_bytes(&public).map_err(|_| PluginTrustErrorV1::InvalidEncoding)?;
-            if id != root_key_id(public)
-                || keys.last().is_some_and(|old: &RootKey| old.id >= id)
-                || !root_publics.insert(public)
-            {
-                return Err(PluginTrustErrorV1::InvalidEncoding);
-            }
-            keys.push(RootKey { id, public });
-        }
-        let publisher_count = reader.array(256)?;
-        let mut publishers = Vec::with_capacity(publisher_count);
-        let mut publisher_publics = BTreeSet::new();
-        let mut publisher_identities = BTreeSet::new();
-        for _ in 0..publisher_count {
-            let publisher = read_publisher(&mut reader)?;
-            if publishers.last().is_some_and(|old| old >= &publisher)
-                || !publisher_publics.insert(publisher.public)
-                || !publisher_identities.insert((publisher.owner, publisher.epoch))
-            {
-                return Err(PluginTrustErrorV1::InvalidEncoding);
-            }
-            publishers.push(publisher);
-        }
-        let grant_count = reader.array(256)?;
-        let mut grants = Vec::with_capacity(grant_count);
-        for _ in 0..grant_count {
-            if reader.array(2)? != 2 {
-                return Err(PluginTrustErrorV1::InvalidEncoding);
-            }
-            let plugin_id = reader.text(128)?;
-            validate_plugin_id(plugin_id)?;
-            let owner = read_owner(&mut reader)?;
-            if grants
-                .last()
-                .is_some_and(|old: &Grant| old.plugin_id.as_str() >= plugin_id)
-                || !publishers.iter().any(|publisher| publisher.owner == owner)
-            {
-                return Err(PluginTrustErrorV1::InvalidEncoding);
-            }
-            grants.push(Grant {
-                plugin_id: plugin_id.to_owned(),
-                owner,
-            });
-        }
+        let keys = read_root_keys(&mut reader, threshold)?;
+        let publishers = read_publishers(&mut reader)?;
+        let grants = read_grants(&mut reader, &publishers)?;
         let prefix_end = reader.offset;
         let signatures = read_signatures(&mut reader)?;
         reader.finish()?;
