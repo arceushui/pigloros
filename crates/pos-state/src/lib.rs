@@ -509,11 +509,7 @@ impl ProjectionRegistry {
         })
     }
 
-    fn unique_observation_slot_for_plugin(
-        &self,
-        name: &str,
-        plugin_id: PluginId,
-    ) -> Option<&Slot> {
+    fn unique_observation_slot_for_plugin(&self, name: &str, plugin_id: PluginId) -> Option<&Slot> {
         let mut matches = self.slots.iter().filter(|(registered, slot)| {
             registered == name && slot.plugin_id.is_none_or(|id| id == plugin_id)
         });
@@ -546,7 +542,8 @@ impl ProjectionRegistry {
         else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
-        let Some(slot) = self.unique_observation_slot_for_plugin(&context.reducer, plugin_id) else {
+        let Some(slot) = self.unique_observation_slot_for_plugin(&context.reducer, plugin_id)
+        else {
             return Err(AuthorityErrorV1::SourceUnavailable);
         };
         let Some(policy) = slot.observation_policy.as_ref() else {
