@@ -161,20 +161,28 @@ pub(crate) fn bind_owned_secret_key(
                     "owned key file identity differs from durable binding",
                 ));
             }
-            #[cfg(test)]
-            swap_binding_target_for_test(&absolute, FaultStage::BindSwapBeforeFinalInspect);
-            fault!(&absolute, FaultStage::BindInspectFinal)
-                .and_then(|()| std::fs::symlink_metadata(&absolute))
-                .map_err(binding_error)
-                .and_then(|current| {
-                    if BoundFileIdentity::from_metadata(&current) != file_identity {
-                        Err(binding_error("owned key changed during binding"))
-                    } else {
-                        Ok(())
-                    }
-                })
+            verify_owned_secret_key_path_after_binding(&absolute, file_identity)
         },
     )
+}
+
+#[cfg(unix)]
+fn verify_owned_secret_key_path_after_binding(
+    absolute: &Path,
+    expected: BoundFileIdentity,
+) -> Result<(), pos_core::CoreError> {
+    #[cfg(test)]
+    swap_binding_target_for_test(absolute, FaultStage::BindSwapBeforeFinalInspect);
+    fault!(absolute, FaultStage::BindInspectFinal)
+        .and_then(|()| std::fs::symlink_metadata(absolute))
+        .map_err(binding_error)
+        .and_then(|current| {
+            if BoundFileIdentity::from_metadata(&current) == expected {
+                Ok(())
+            } else {
+                Err(binding_error("owned key changed during binding"))
+            }
+        })
 }
 
 #[cfg(unix)]
