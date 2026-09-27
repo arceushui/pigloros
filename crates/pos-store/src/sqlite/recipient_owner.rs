@@ -886,7 +886,8 @@ mod tests {
             fail_fsync_at(failure);
             assert!(store.enroll_recipient_key(&owner).is_err());
             clear_fsync_fault();
-            assert!(store.recover_recipient_keys(&owner)?.is_empty());
+            assert!(store.load_key_registry()?.is_none());
+            assert!(store.recover_recipient_keys(&owner).is_err());
         }
 
         for failure in [0, 1] {
