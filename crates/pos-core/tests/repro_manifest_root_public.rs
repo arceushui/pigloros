@@ -185,7 +185,7 @@ fn malformed_noncanonical_and_oversized_roots_reject() -> TestResult<()> {
     overbound_handle[42] = 0x01;
     overbound_handle.insert(43, 0x01);
     cases.push((overbound_handle, ReproManifestRootErrorV1::FieldOutOfBounds));
-    let mut enormous_label = good.clone();
+    let mut enormous_label = good;
     enormous_label[308] = 0x7a;
     enormous_label.extend_from_slice(&65_536_u32.to_be_bytes());
     cases.push((enormous_label, ReproManifestRootErrorV1::FieldOutOfBounds));
