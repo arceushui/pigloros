@@ -1,9 +1,47 @@
 //! Immutable structural descriptions and fail-closed resolution of effective
 //! Plugin runtime composition.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
-use pos_core::{Hash, PluginId};
+use pos_core::{manifest_owner_link::ManifestAdmissionCatalogV1, Hash, PluginId};
+
+/// Closed failures of the host's complete pre-registration manifest batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ManifestRegistrationErrorV1 {
+    #[error("manifest registration batch is missing or already prepared")]
+    BatchState,
+    #[error("manifest registration requires an empty live local registry")]
+    RegistryState,
+    #[error("manifest registration batch has no admitted Plugins")]
+    EmptyBatch,
+    #[error("manifest registration does not match the installed Plugin")]
+    PluginMismatch,
+    #[error("manifest registration slot is missing, duplicated or mismatched")]
+    SlotMismatch,
+    #[error("manifest registration requires an available installed pin and retained output closure")]
+    UnverifiedRegistration,
+    #[error("manifest registration batch is incomplete or changed")]
+    IncompleteBatch,
+}
+
+/// Private registry-issued proof of one complete, identity-bound Plugin batch.
+///
+/// This is not a native owner receipt, serializable authority, or Replay permit.
+/// Only the actual owner transaction can consume a current capability and
+/// commit the catalog and scoped policy copies under ADR-089.
+pub struct AdmittedCompositionV1 {
+    pub(crate) registry_identity: Arc<()>,
+    pub(crate) registration_revision: u64,
+    pub(crate) catalog: ManifestAdmissionCatalogV1,
+}
+
+impl AdmittedCompositionV1 {
+    /// The checked catalog proposed for the later native owner transaction.
+    #[must_use]
+    pub const fn catalog(&self) -> &ManifestAdmissionCatalogV1 {
+        &self.catalog
+    }
+}
 
 /// Maximum number of explicitly required Plugin implementations in one V1 composition.
 pub const MAX_REQUIRED_PLUGINS_V1: usize = 32;

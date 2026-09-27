@@ -1034,6 +1034,18 @@ impl OutputPolicyClosureV1 {
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
+    /// ADR-088's exact OPC1 identity for the later scoped native closure leaf.
+    ///
+    /// This hash identifies retained bytes; it does not prove owner admission,
+    /// native retention, or permission to release protected material.
+    #[must_use]
+    pub fn manifest_closure_hash(&self) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
+        hasher.update(&self.to_canonical_bytes());
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+
     /// Stable identity for comparing this closure across fresh Plugin IDs.
     ///
     /// The exact EOP1/EBP1 bytes remain available through the retrieval

@@ -13,6 +13,7 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
+    manifest_owner_link::{ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1},
     ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentErrorV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, KnowledgeSnapshotV1,
@@ -27,10 +28,11 @@ use crate::output_admission::{
 };
 use crate::{
     composition::{
+        AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
         PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
-        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
-        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
-        ResolvedPluginV1,
+        PluginIsolationV1, PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema,
+        RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1,
+        ResolvedPluginCompositionV1, ResolvedPluginV1,
     },
     driver::{
         CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
@@ -1001,6 +1003,7 @@ struct PluginEntry {
     event_cursor: Seq,
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
+    manifest_slot: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1028,6 +1031,7 @@ impl Plugin for GeneratedDriverPlugin {
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
+    manifest_slot: Option<String>,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -1101,6 +1105,9 @@ impl AuthorizedDriverTargetV1 {
 pub struct PluginRegistry {
     /// `IndexMap` preserves insertion order — `step_all` / `plugin_names` are stable.
     plugins: IndexMap<PluginId, PluginEntry>,
+    manifest_batch: Option<ManifestAdmissionCatalogV1>,
+    manifest_identity: Arc<()>,
+    registration_revision: u64,
     approver_map: IndexMap<Kind, PluginId>,
     pub schemas: SchemaRegistry,
     projections: ProjectionRegistry,
@@ -1118,6 +1125,158 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// Fix the complete owner-supplied PluginId/slot batch before registration.
+    ///
+    /// This records a structural candidate only. It does not authenticate an
+    /// owner transaction or make the batch eligible for a WorldCut claim.
+    ///
+    /// # Errors
+    /// Rejects a reused or nonempty registry, nonlocal mode, or empty batch.
+    pub fn prepare_manifest_registration(
+        &mut self,
+        batch: ManifestAdmissionCatalogV1,
+    ) -> Result<(), ManifestRegistrationErrorV1> {
+        if !self.plugins.is_empty()
+            || self.run_mode != RunMode::Live
+            || self.composition_mode != PluginExecutionModeV1::Local
+        {
+            return Err(ManifestRegistrationErrorV1::RegistryState);
+        }
+        if self.manifest_batch.is_some() {
+            return Err(ManifestRegistrationErrorV1::BatchState);
+        }
+        if batch.as_input().rows.is_empty() {
+            return Err(ManifestRegistrationErrorV1::EmptyBatch);
+        }
+        self.manifest_batch = Some(batch);
+        Ok(())
+    }
+
+    /// Verify the complete pre-registered batch against actual PluginId keys.
+    ///
+    /// # Errors
+    /// Rejects any missing, extra, changed, unpinned or unverified Plugin.
+    pub fn admit_complete_manifest_registration(
+        &self,
+    ) -> Result<AdmittedCompositionV1, ManifestRegistrationErrorV1> {
+        let batch = self
+            .manifest_batch
+            .as_ref()
+            .ok_or(ManifestRegistrationErrorV1::BatchState)?;
+        self.validate_complete_manifest_batch(batch)?;
+        Ok(AdmittedCompositionV1 {
+            registry_identity: Arc::clone(&self.manifest_identity),
+            registration_revision: self.registration_revision,
+            catalog: batch.clone(),
+        })
+    }
+
+    /// Revalidate the same static batch for a later owner generation.
+    ///
+    /// The native owner still authenticates the generation and performs its
+    /// own CAS; this method only proves the registry's unchanged static facts.
+    ///
+    /// # Errors
+    /// Rejects another owner or any static Plugin/slot/policy/closure change.
+    pub fn revalidate_manifest_registration(
+        &self,
+        batch: ManifestAdmissionCatalogV1,
+    ) -> Result<AdmittedCompositionV1, ManifestRegistrationErrorV1> {
+        let original = self
+            .manifest_batch
+            .as_ref()
+            .ok_or(ManifestRegistrationErrorV1::BatchState)?;
+        if batch.as_input().owner_id != original.as_input().owner_id
+            || batch.as_input().rows != original.as_input().rows
+        {
+            return Err(ManifestRegistrationErrorV1::IncompleteBatch);
+        }
+        self.validate_complete_manifest_batch(&batch)?;
+        Ok(AdmittedCompositionV1 {
+            registry_identity: Arc::clone(&self.manifest_identity),
+            registration_revision: self.registration_revision,
+            catalog: batch,
+        })
+    }
+
+    /// Whether the capability still belongs to this unmodified registry.
+    #[must_use]
+    pub fn is_admitted_composition_current(&self, admitted: &AdmittedCompositionV1) -> bool {
+        Arc::ptr_eq(&self.manifest_identity, &admitted.registry_identity)
+            && self.registration_revision == admitted.registration_revision
+            && self.manifest_batch.as_ref().is_some_and(|batch| {
+                batch.as_input().owner_id == admitted.catalog.as_input().owner_id
+                    && batch.as_input().rows == admitted.catalog.as_input().rows
+            })
+    }
+
+    fn validate_complete_manifest_batch(
+        &self,
+        batch: &ManifestAdmissionCatalogV1,
+    ) -> Result<(), ManifestRegistrationErrorV1> {
+        if self.plugins.len() != batch.as_input().rows.len() {
+            return Err(ManifestRegistrationErrorV1::IncompleteBatch);
+        }
+        for row in &batch.as_input().rows {
+            let entry = self
+                .plugins
+                .get(&row.plugin_id)
+                .ok_or(ManifestRegistrationErrorV1::IncompleteBatch)?;
+            Self::validate_manifest_entry(row, entry)?;
+        }
+        Ok(())
+    }
+
+    fn validate_manifest_entry(
+        row: &ManifestAdmissionCatalogRowV1,
+        entry: &PluginEntry,
+    ) -> Result<(), ManifestRegistrationErrorV1> {
+        Self::validate_manifest_facts(
+            row,
+            &entry.name,
+            &entry.version,
+            entry.registration.as_ref(),
+            entry.output_admission.as_ref(),
+            entry.manifest_slot.as_deref(),
+        )
+    }
+
+    fn validate_manifest_facts(
+        row: &ManifestAdmissionCatalogRowV1,
+        name: &str,
+        version: &str,
+        registration: Option<&PluginRegistrationV1>,
+        admission: Option<&OutputAdmissionV1>,
+        stable_slot: Option<&str>,
+    ) -> Result<(), ManifestRegistrationErrorV1> {
+        let registration = registration.ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+        let admission = admission.ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+        let Some(closure) = admission.closure() else {
+            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
+        };
+        if admission.owner_token().is_none()
+            || registration.availability() != PluginAvailabilityV1::Available
+            || registration.pin().implementation_kind() != DomainImplementationKindV1::Plugin
+            || registration.pin().isolation() != PluginIsolationV1::OperatorTrustedNative
+            || registration.pin().configuration_digest() != admission.policy_digest()
+        {
+            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
+        }
+        if stable_slot != Some(row.stable_slot.as_str()) {
+            return Err(ManifestRegistrationErrorV1::SlotMismatch);
+        }
+        if name != row.plugin_name
+            || version != row.plugin_version
+            || admission.plugin_id() != row.plugin_id
+            || admission.policy().fields().implementation_hash != row.implementation_hash
+            || admission.policy_digest() != row.eop1_native_digest
+            || closure.manifest_closure_hash() != row.closure_hash
+        {
+            return Err(ManifestRegistrationErrorV1::PluginMismatch);
+        }
+        Ok(())
+    }
+
     /// Return an immutable, deterministic description of the effective
     /// registration topology.
     ///
@@ -1437,6 +1596,9 @@ impl PluginRegistry {
         });
         Self {
             plugins: IndexMap::new(),
+            manifest_batch: None,
+            manifest_identity: Arc::new(()),
+            registration_revision: 0,
             approver_map: IndexMap::new(),
             schemas,
             // Keep both defaults fail-closed. The composition root must bind a
@@ -2935,6 +3097,7 @@ impl PluginRegistry {
             approver,
             approver_event_types,
             Some(registration),
+            None,
         )
     }
 
@@ -3014,6 +3177,7 @@ impl PluginRegistry {
             approver,
             approver_event_types,
             None,
+            None,
         )
     }
 
@@ -3030,12 +3194,109 @@ impl PluginRegistry {
     /// `EPF1` without mutating the registry.
     pub fn register_installed_output<P: Plugin>(
         &mut self,
-        _plugin: &P,
-        _binding: OutputPolicyBindingV1,
-        _registration: PluginRegistrationV1,
-        _reducer: Option<Box<dyn Reducer>>,
+        plugin: &P,
+        binding: OutputPolicyBindingV1,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
     ) -> Result<(), RuntimeError> {
-        Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
+        self.register_installed_output_inner(plugin, binding, registration, reducer, None)
+    }
+
+    /// Register one installed Plugin in its owner-preassigned stable slot.
+    ///
+    /// The complete batch must have been prepared before the first Plugin was
+    /// registered. This method does not mint an owner receipt or claim Replay.
+    ///
+    /// # Errors
+    /// Rejects absent/mismatched batch rows, test-support sources, or any
+    /// installed callback/pin/policy mismatch before mutating the registry.
+    pub fn register_installed_output_in_manifest_slot<P: Plugin>(
+        &mut self,
+        plugin: &P,
+        binding: OutputPolicyBindingV1,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        stable_slot: &str,
+    ) -> Result<(), RuntimeError> {
+        self.register_installed_output_inner(
+            plugin,
+            binding,
+            registration,
+            reducer,
+            Some(stable_slot),
+        )
+    }
+
+    fn register_installed_output_inner<P: Plugin>(
+        &mut self,
+        plugin: &P,
+        mut binding: OutputPolicyBindingV1,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        stable_slot: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        if !binding.has_installed_profile_provenance() {
+            return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
+        }
+        self.validate_installed_registration_details(plugin, &binding, &registration)?;
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            Some(registration),
+            stable_slot,
+        )
+    }
+
+    // Pure validation is also exercised by nonproduction structural fixtures.
+    // It never installs a profile, registers a Plugin, or mints a pin.
+    fn validate_installed_registration_details<P: Plugin>(
+        &self,
+        plugin: &P,
+        binding: &OutputPolicyBindingV1,
+        registration: &PluginRegistrationV1,
+    ) -> Result<(), RuntimeError> {
+        if !binding.verifies_owner_instance(plugin) {
+            return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
+        }
+        let id = plugin.id();
+        let pin = registration.pin();
+        let incompatible = if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
+            Some(PluginPinFieldV1::ImplementationKind)
+        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
+            Some(PluginPinFieldV1::Isolation)
+        } else if pin.configuration_digest() != binding.policy().digest() {
+            Some(PluginPinFieldV1::ConfigurationDigest)
+        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
+            Some(PluginPinFieldV1::Roles)
+        } else {
+            None
+        };
+        if let Some(field) = incompatible {
+            return Err(PluginCompositionErrorV1::IncompatibleImplementation {
+                plugin_id: id,
+                field,
+            }
+            .into());
+        }
+        if registration.availability() != PluginAvailabilityV1::Available {
+            return Err(PluginCompositionErrorV1::ImplementationUnavailable {
+                plugin_id: id,
+                availability: registration.availability(),
+            }
+            .into());
+        }
+        Self::validate_required_installed_approver(binding)?;
+        self.validate_registration_roles(registration)?;
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3048,7 +3309,14 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
         registration: Option<PluginRegistrationV1>,
+        stable_slot: Option<&str>,
     ) -> Result<(), RuntimeError> {
+        match (self.manifest_batch.as_ref(), stable_slot) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ManifestRegistrationErrorV1::BatchState.into());
+            }
+            _ => {}
+        }
         let context = self.registration_context(plugin)?;
         if !binding.verifies_erased_owner_instance(plugin) {
             return Err(RuntimeError::OutputAdmission(
@@ -3058,8 +3326,14 @@ impl PluginRegistry {
         if let Some(registration) = registration.as_ref() {
             self.validate_registration_roles(registration)?;
         }
-        let (output_policy, executable_budget, artifacts, _source, owner_token) =
+        let (output_policy, executable_budget, artifacts, source, owner_token) =
             binding.into_parts();
+        #[cfg(any(test, feature = "test-support"))]
+        if stable_slot.is_some() && source == InstalledOutputPolicySourceV1::Generated {
+            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration.into());
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = source;
         let closure = OutputPolicyClosureV1::from_artifacts(
             &output_policy.to_canonical_cbor(),
             &executable_budget.to_canonical_cbor(),
@@ -3110,6 +3384,39 @@ impl PluginRegistry {
             closure,
             owner_token,
         )?;
+        if let Some(slot) = stable_slot {
+            let batch = self
+                .manifest_batch
+                .as_ref()
+                .ok_or(ManifestRegistrationErrorV1::BatchState)?;
+            let row = batch
+                .as_input()
+                .rows
+                .iter()
+                .find(|row| row.plugin_id == plugin.id())
+                .ok_or(ManifestRegistrationErrorV1::PluginMismatch)?;
+            Self::validate_manifest_facts(
+                row,
+                plugin.name(),
+                plugin.version(),
+                registration.as_ref(),
+                Some(&admission),
+                Some(slot),
+            )?;
+            return self.register_with_approver_slice(
+                plugin,
+                reducer,
+                driver,
+                approver,
+                &approver_event_types.into_iter().collect::<Vec<_>>(),
+                context,
+                RegistrationOptions {
+                    registration,
+                    output_admission: Some(admission),
+                    manifest_slot: Some(slot.to_owned()),
+                },
+            );
+        }
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
@@ -3122,6 +3429,7 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration,
                 output_admission: Some(admission),
+                manifest_slot: None,
             },
         )
     }
@@ -3329,8 +3637,10 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: options.registration,
                 output_admission: options.output_admission,
+                manifest_slot: options.manifest_slot,
             },
         );
+        self.registration_revision += 1;
         self.restored_binding = None;
         Ok(())
     }
@@ -3498,8 +3808,11 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: Some(admission),
+                manifest_slot: None,
             },
         );
+        self.manifest_batch = None;
+        self.registration_revision += 1;
         Ok(())
     }
 
@@ -3526,8 +3839,11 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                manifest_slot: None,
             },
         );
+        self.manifest_batch = None;
+        self.registration_revision += 1;
     }
 
     #[cfg(test)]
@@ -3565,8 +3881,11 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: Some(admission),
+                manifest_slot: None,
             },
         );
+        self.manifest_batch = None;
+        self.registration_revision += 1;
         Ok(())
     }
 
@@ -4387,6 +4706,7 @@ mod tests {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                manifest_slot: None,
             },
         );
         registry
@@ -4409,6 +4729,7 @@ mod tests {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                manifest_slot: None,
             },
         );
         registry
@@ -4693,6 +5014,7 @@ mod tests {
                         PluginAvailabilityV1::Available,
                     )),
                     output_admission: None,
+                    manifest_slot: None,
                 },
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
@@ -5053,6 +5375,56 @@ mod tests {
 
     fn simple_plugin(name: &'static str, event_types: &[&str]) -> TestPlugin {
         plugin_with_caps(name, event_types, false, false)
+    }
+
+    #[test]
+    fn manifest_batch_rejects_generated_or_unpinned_fixture_registration() {
+        let plugin = simple_plugin("fixture", &[]);
+        let binding = PluginRegistry::generated_output_binding(&plugin).test_ok();
+        let pin = crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![crate::installed_plugin_role_v1(&plugin)],
+        )
+        .test_ok();
+        let batch = ManifestAdmissionCatalogV1::new(
+            pos_core::manifest_owner_link::ManifestAdmissionCatalogInputV1 {
+                owner_id: [1; 32],
+                configuration_generation: 1,
+                rows: vec![ManifestAdmissionCatalogRowV1 {
+                    stable_slot: "fixture".to_owned(),
+                    plugin_id: plugin.id(),
+                    plugin_name: plugin.name().to_owned(),
+                    plugin_version: plugin.version().to_owned(),
+                    implementation_hash: Hash::from_bytes([1; 32]),
+                    eop1_native_digest: Hash::from_bytes([2; 32]),
+                    closure_hash: Hash::from_bytes([3; 32]),
+                }],
+            },
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        registry.prepare_manifest_registration(batch).test_ok();
+        assert!(matches!(
+            registry.register_installed_output_in_manifest_slot(
+                &plugin,
+                binding,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                None,
+                "fixture",
+            ),
+            Err(RuntimeError::ManifestRegistration(
+                ManifestRegistrationErrorV1::UnverifiedRegistration
+            ))
+        ));
+        assert!(matches!(
+            registry.register_generated(&plugin, None, None),
+            Err(RuntimeError::ManifestRegistration(
+                ManifestRegistrationErrorV1::BatchState
+            ))
+        ));
+        assert!(registry.is_empty());
     }
 
     fn plugin_with_caps(
@@ -6196,6 +6568,7 @@ mod tests {
                 event_cursor: Seq::ZERO,
                 registration: None,
                 output_admission: None,
+                manifest_slot: None,
             },
         );
 
