@@ -314,9 +314,11 @@ fn recipient_owner_public_contract_serializes_recovery_with_enrollment_staging(
     writer.execute_batch("BEGIN IMMEDIATE")?;
     let (started_sender, started_receiver) = mpsc::channel();
     let recovery = thread::spawn(move || {
-        started_sender
-            .send(())
-            .expect("recovery start signal reaches test coordinator");
+        if started_sender.send(()).is_err() {
+            return Err(pos_core::CoreError::Storage(
+                "recovery start signal did not reach test coordinator".to_owned(),
+            ));
+        }
         store.recover_recipient_keys(&owner)
     });
     started_receiver.recv()?;
