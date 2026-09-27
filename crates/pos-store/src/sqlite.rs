@@ -16,6 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+mod recipient_owner;
+#[cfg(not(unix))]
+#[path = "sqlite/recipient_owner_unsupported.rs"]
 mod recipient_owner;
 pub use recipient_owner::RecipientKeyOwnerV1;
 

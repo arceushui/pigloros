@@ -10,10 +10,7 @@ use pos_core::{
     recipient_owner_id_from_grantee, EntityId, EventStore, KeyDestructionRequestV1, KeyIdentityV1,
     KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, RecipientKeyDescriptorV1,
 };
-use rand::{
-    rand_core::{Rng, UnwrapErr},
-    rngs::SysRng,
-};
+use rand::{rngs::SysRng, TryRng};
 use zeroize::Zeroizing;
 
 use super::{begin_immediate_sql, finish_immediate_transaction, CoreError, SqliteStore};
@@ -80,18 +77,19 @@ impl SqliteStore {
             let registry = self
                 .load_key_registry()?
                 .unwrap_or_else(KeyRegistryStateV1::new);
-            let epoch =
-                match registry.active_key(&owner_id, KeyRoleV1::ExportRecipientEncryption) {
-                    Some(record) => record.identity.epoch.checked_add(1).ok_or_else(|| {
+            let epoch = registry
+                .highest_epoch(&owner_id, KeyRoleV1::ExportRecipientEncryption)
+                .map_or(Ok(1), |highest| {
+                    highest.checked_add(1).ok_or_else(|| {
                         CoreError::Storage("recipient key epoch overflow".to_owned())
-                    })?,
-                    None => 1,
-                };
+                    })
+                })?;
             let identity =
                 KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
             let mut ikm = Zeroizing::new([0_u8; 32]);
-            let mut csprng = UnwrapErr(SysRng);
-            csprng.fill_bytes(&mut *ikm);
+            SysRng.try_fill_bytes(&mut *ikm).map_err(|error| {
+                CoreError::Storage(format!("recipient key RNG failed: {error}"))
+            })?;
             let (private_key, public_key) =
                 pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm)
                     .map_err(|error| CoreError::Storage(error.to_string()))?;
@@ -99,7 +97,7 @@ impl SqliteStore {
             let descriptor =
                 RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
                     .map_err(|error| CoreError::Storage(error.to_string()))?;
-            let private_path = owner.directory.join(format!("recipient-{epoch}.key"));
+            let private_path = recipient_private_path(&owner.directory, descriptor);
             write_private_key(&private_path, &private_key)?;
             let material_digest = pos_crypto::key_roles::key_material_digest(&private_key);
             let mut next = registry;
@@ -150,9 +148,9 @@ impl SqliteStore {
                 ));
             }
             let path = PathBuf::from(std::ffi::OsString::from_vec(path));
-            if !path.starts_with(&owner.directory) {
+            if path != recipient_private_path(&owner.directory, descriptor) {
                 return Err(CoreError::Storage(
-                    "recipient key inventory path escaped owner directory".to_owned(),
+                    "recipient key inventory path does not match descriptor".to_owned(),
                 ));
             }
             let material =
@@ -183,6 +181,7 @@ impl SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let identity =
             KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
+        let path = self.recipient_inventory_path(owner, identity)?;
         let registry = self
             .load_key_registry()?
             .ok_or_else(|| CoreError::Storage("recipient registry is unavailable".to_owned()))?;
@@ -198,7 +197,6 @@ impl SqliteStore {
             .begin_key_destruction(request)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         self.save_key_registry(&pending)?;
-        let path = owner.directory.join(format!("recipient-{epoch}.key"));
         std::fs::remove_file(&path).map_err(|error| CoreError::Storage(error.to_string()))?;
         std::fs::File::open(&owner.directory)
             .and_then(|directory| directory.sync_all())
@@ -208,6 +206,52 @@ impl SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         self.save_key_registry(&pending)
     }
+
+    fn recipient_inventory_path(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        identity: KeyIdentityV1,
+    ) -> Result<PathBuf, CoreError> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (descriptor, path) = self
+            .conn
+            .query_row(
+                "SELECT descriptor, private_path FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
+                rusqlite::params![
+                    identity.owner_id.as_str(),
+                    i64::try_from(identity.epoch)
+                        .map_err(|error| CoreError::Storage(error.to_string()))?
+                ],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let descriptor = RecipientKeyDescriptorV1::decode(&descriptor)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if descriptor.identity() != identity || !descriptor.is_for_grantee(owner.grantee_id) {
+            return Err(CoreError::Storage(
+                "recipient key inventory identity is invalid".to_owned(),
+            ));
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_vec(path));
+        if path != recipient_private_path(&owner.directory, descriptor) {
+            return Err(CoreError::Storage(
+                "recipient key inventory path does not match descriptor".to_owned(),
+            ));
+        }
+        Ok(path)
+    }
+}
+
+fn recipient_private_path(directory: &Path, descriptor: RecipientKeyDescriptorV1) -> PathBuf {
+    use std::fmt::Write as _;
+
+    let mut name = format!("recipient-{}-", descriptor.identity().epoch);
+    for byte in descriptor.fingerprint().as_bytes() {
+        write!(&mut name, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    name.push_str(".key");
+    directory.join(name)
 }
 
 fn write_private_key(path: &Path, private_key: &[u8; 32]) -> Result<(), CoreError> {
