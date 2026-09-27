@@ -632,8 +632,15 @@ fn sqlite_rotation_waits_until_signed_event_commit() -> Result<(), Box<dyn std::
             Ok((signed, rotation_result, rotation_waited))
         })?;
     let signed = signed?;
-    rotation_result?;
+    assert!(matches!(
+        rotation_result,
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
     assert!(rotation_waited);
+    let mut resumed_rotation_store = SqliteStore::open(path)?;
+    resumed_rotation_store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    resumed_rotation_store.save_key_registry(&rotated)?;
     let mut reopened = SqliteStore::open(path)?;
     reopened.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let persisted = reopened.load_key_registry()?.ok_or("missing registry")?;
