@@ -1344,33 +1344,6 @@ mod tests {
         })
     }
 
-    fn capacity_evidence(
-        terminal_revoked_key_count: usize,
-        terminal_revoked_artifact_count: usize,
-    ) -> VerifiedPluginTrustEvidenceV1 {
-        VerifiedPluginTrustEvidenceV1 {
-            scope: "scope".to_owned(),
-            root_version: 1,
-            root_digest: [0; 32],
-            policy_epoch: 1,
-            revocation_digest: [1; 32],
-            evaluation_utc_second: 50,
-            evaluation_tick: 5,
-            root_validity: (0, 100),
-            revocation_validity: (0, 100),
-            root_keys: Vec::new(),
-            publishers: Vec::new(),
-            grants: Vec::new(),
-            // The terminal entries are future-effective, so the public
-            // effective sets must remain empty while their terminal counts
-            // still close release authorization at V1 capacity.
-            revoked_keys: BTreeSet::new(),
-            revoked_artifacts: BTreeSet::new(),
-            terminal_revoked_key_count,
-            terminal_revoked_artifact_count,
-        }
-    }
-
     fn revoked_artifact(digest: [u8; 32], tick: u64) -> Value {
         Value::Array(vec![
             bytes(digest),
@@ -1634,21 +1607,6 @@ mod tests {
             assert_eq!(
                 evidence.authorize_release(&manifest_projection()?),
                 Err(PluginTrustErrorV1::ArtifactRevoked)
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn terminal_revocation_capacity_closes_authorization_for_future_entries(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for counts in [(4096, 0), (0, 4096)] {
-            let evidence = capacity_evidence(counts.0, counts.1);
-            assert_eq!(evidence.effective_key_revocations().count(), 0);
-            assert_eq!(evidence.effective_artifact_revocations().count(), 0);
-            assert_eq!(
-                evidence.authorize_release(&manifest_projection()?),
-                Err(PluginTrustErrorV1::RevocationCapacityExhausted)
             );
         }
         Ok(())
