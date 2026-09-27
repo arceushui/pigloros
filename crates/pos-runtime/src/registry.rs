@@ -3221,6 +3221,30 @@ impl PluginRegistry {
         Ok(())
     }
 
+    fn validate_reserved_owned_event_types(name: &str, cap: &Capability) -> Result<(), RuntimeError> {
+        if let Some(kind) = cap
+            .owned_event_types
+            .iter()
+            .find(|kind| pos_core::is_geographic_event_type(kind))
+        {
+            return Err(RuntimeError::ReservedGeographicEventType {
+                name: name.to_owned(),
+                event_type: kind.as_str().to_owned(),
+            });
+        }
+        if let Some(kind) = cap
+            .owned_event_types
+            .iter()
+            .find(|kind| pos_core::is_consent_event_type(kind))
+        {
+            return Err(RuntimeError::ReservedConsentEventType {
+                name: name.to_owned(),
+                event_type: kind.as_str().to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     fn install_reducer(
         &mut self,
         id: PluginId,
@@ -3254,26 +3278,7 @@ impl PluginRegistry {
         options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
-        if let Some(kind) = cap
-            .owned_event_types
-            .iter()
-            .find(|kind| pos_core::is_geographic_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedGeographicEventType {
-                name,
-                event_type: kind.as_str().to_owned(),
-            });
-        }
-        if let Some(kind) = cap
-            .owned_event_types
-            .iter()
-            .find(|kind| pos_core::is_consent_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedConsentEventType {
-                name,
-                event_type: kind.as_str().to_owned(),
-            });
-        }
+        Self::validate_reserved_owned_event_types(&name, &cap)?;
 
         if cap.has_driver != driver.is_some() {
             return Err(RuntimeError::CapabilityMismatch {
@@ -4568,6 +4573,95 @@ mod tests {
         ));
         assert!(registry.contains(&first.id()));
         assert!(!registry.contains(&second.id()));
+    }
+
+    #[test]
+    fn same_name_pinned_reducers_preserve_each_plugin_state_after_rejection() {
+        let first = plugin_with_caps("same-name", &["first.output"], false, true);
+        let second = plugin_with_caps("same-name", &["second.output"], false, true);
+        let rejected = plugin_with_caps("same-name", &["third.output"], false, false);
+        let registration = |role: &str| {
+            let pin = crate::composition::PluginPinV1::try_new(
+                crate::composition::DomainImplementationKindV1::Plugin,
+                crate::composition::PluginIsolationV1::OperatorTrustedNative,
+                Hash::from_bytes([1; 32]),
+                vec![role.to_owned()],
+            )
+            .test_ok();
+            PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available)
+        };
+        let mut registry = gated_registry();
+        registry
+            .register_pinned_generated(
+                &first,
+                registration("first-role"),
+                Some(Box::new(CountReducer)),
+                None,
+            )
+            .test_ok();
+        let entity = EntityId::new();
+        registry.projections.apply_event(&Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("first.output"),
+            payload: CanonicalBytes::from_static(b"fixture"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        });
+        registry
+            .register_pinned_generated(
+                &second,
+                registration("second-role"),
+                Some(Box::new(CountReducer)),
+                None,
+            )
+            .test_ok();
+        let count = |registry: &PluginRegistry, id| {
+            registry
+                .projections
+                .state_for_plugin(id, &entity)
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64)
+        };
+        assert_eq!(count(&registry, first.id()), Some(1));
+        assert_eq!(count(&registry, second.id()), None);
+        assert!(matches!(
+            registry.register_pinned_generated(
+                &rejected,
+                registration("third-role"),
+                Some(Box::new(CountReducer)),
+                None,
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert_eq!(count(&registry, first.id()), Some(1));
+        assert_eq!(count(&registry, second.id()), None);
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn installed_reducer_name_check_runs_only_for_installed_reducers() {
+        assert!(matches!(
+            PluginRegistry::validate_installed_reducer_name("", true, true),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(matches!(
+            PluginRegistry::validate_installed_reducer_name(
+                &"x".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1),
+                true,
+                true,
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(PluginRegistry::validate_installed_reducer_name("", false, true).is_ok());
+        assert!(PluginRegistry::validate_installed_reducer_name("", true, false).is_ok());
     }
 
     #[test]
