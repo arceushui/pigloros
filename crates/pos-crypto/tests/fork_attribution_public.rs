@@ -67,3 +67,56 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
     .is_err());
     Ok(())
 }
+
+#[test]
+fn signature_only_rejects_non_attribution_roles_and_absent_registry_identity(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = TimelineId::new();
+    let child = TimelineId::new();
+    let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+        operation_id: hash(1),
+        principal_owner_binding_digest: hash(2),
+        creator: "creator-a".into(),
+        parent_timeline_id: parent,
+        child_timeline_id: child,
+        room_revision_descriptor_hash: hash(3),
+        parent_logical_head: 0,
+        parent_chain_head_hash: hash(4),
+        completed_fold_cursor: 0,
+        post_fold_tick_boundary: 0,
+        plugin_composition_hash: hash(5),
+        attribution_required: true,
+        origin: ForkAttributionOriginV1::Local,
+    })?;
+    let manifest = ForkReproManifestV1::new(ForkReproManifestInputV1 {
+        parent_timeline_id: parent,
+        fork_timeline_id: child,
+        admission_digest: admission.digest(),
+        room_revision_descriptor_hash: hash(3),
+        parent_logical_head: 0,
+        parent_chain_head_hash: hash(4),
+        post_fold_tick_boundary: 0,
+        plugin_composition_hash: hash(5),
+        intervention_sequences: vec![],
+        final_fork_logical_head: 0,
+        final_fork_chain_head_hash: hash(6),
+    })?;
+    let (private, _) = generate_keypair();
+    let private = SigningKeyMaterial::new(private);
+    let mut registry = KeyRegistryStateV1::new();
+    assert!(sign_local_fork_manifest_signature_only(
+        &mut registry,
+        &private,
+        KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1),
+        manifest.clone(),
+    )
+    .is_err());
+    assert!(sign_local_fork_manifest_signature_only(
+        &mut registry,
+        &private,
+        KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
+        manifest,
+    )
+    .is_err());
+    Ok(())
+}
