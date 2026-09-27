@@ -2689,16 +2689,17 @@ fn sqlite_stale_host_refreshes_before_exact_fork_retry() -> Result<(), Box<dyn s
         assert_eq!(retried.id(), original_child);
     }
     assert_eq!(stale_host.status(), ErasureHostStatusV1::Ready);
-    let mut reads = test_stage("read refreshed Fork topology", stale_host.read_sender())?;
-    let timelines = test_stage("list refreshed Fork topology", reads.timelines())?;
-    assert_eq!(timelines.len(), 3);
-    assert!(timelines
-        .iter()
-        .any(|timeline| timeline.id() == original_child));
-    assert!(timelines
-        .iter()
-        .any(|timeline| timeline.id() == intervening.id()));
-    drop(reads);
+    {
+        let mut reads = test_stage("read refreshed Fork topology", stale_host.read_sender())?;
+        let timelines = test_stage("list refreshed Fork topology", reads.timelines())?;
+        assert_eq!(timelines.len(), 3);
+        assert!(timelines
+            .iter()
+            .any(|timeline| timeline.id() == original_child));
+        assert!(timelines
+            .iter()
+            .any(|timeline| timeline.id() == intervening.id()));
+    }
     drop(current_host);
     drop(stale_host);
     remove_sqlite_store_files(path, &path_text)

@@ -973,7 +973,8 @@ async fn host_backed_http_action_and_poll_succeed_without_a_competing_writer(
     let events = page.body["events"].as_array().test_ok()?;
     assert_eq!(events.len(), 3);
     assert_eq!(events[2]["event_type"], "world.action.v1");
-    scenario.guard.shutdown().await
+    scenario.guard.shutdown().await?;
+    Ok(())
 }
 
 async fn multi_rate_human_ai_replay_is_deterministic_impl(
