@@ -2691,6 +2691,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: Hash::from_bytes([0; 32]),
             }
         }
@@ -2786,6 +2787,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: Hash::from_bytes([0; 32]),
             }
         }
@@ -2819,6 +2821,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: Hash::from_bytes([0; 32]),
             }
         }
@@ -2861,6 +2864,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: Hash::from_bytes([0; 32]),
             }
         }
@@ -3310,6 +3314,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let events = vec![event; MAX_CONSENT_HISTORY_EVENTS + 1];
@@ -3336,6 +3341,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let events = vec![event; MAX_CONSENT_HISTORY_EVENTS];
@@ -3526,6 +3532,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: Hash::from_bytes([0; 32]),
             }
         }

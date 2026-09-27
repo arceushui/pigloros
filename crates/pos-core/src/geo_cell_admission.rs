@@ -2853,6 +2853,7 @@ mod tests {
             schema_version: crate::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         };
         let accepted = GeographicAdmissionOutcome::Accepted {

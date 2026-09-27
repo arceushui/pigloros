@@ -25,7 +25,7 @@ use crate::{
     consent::ConsentAppendPermit,
     crypto::Hash,
     error::CoreError,
-    event::{Event, EventDraft},
+    event::{CanonicalBytes, Event, EventDraft},
     hasher::Hasher,
     ids::{EventId, TimelineId},
     timeline::{Timeline, TimelineMeta},
@@ -304,7 +304,10 @@ impl SeqRange {
 }
 
 /// A portable snapshot of a timeline and all its events.
+///
 /// Used for export/import across different `EventStore` backends.
+/// Identity-preserving exports retain each Event's first-commit origin;
+/// flattened Fork exports assign new origin context to reminted Events.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TimelineExport {
     pub timeline: Timeline,
@@ -855,11 +858,13 @@ pub trait EventStore: Send {
         Ok(timeline)
     }
     /// Atomically recheck a registry snapshot, create, and append one
-    /// authorized event.
+    /// authorized non-Timeline or unsigned Event.
     ///
     /// Adapters must hold one serialization boundary from registry recheck
-    /// through Event insertion and commit or rollback. Unsupported adapters
-    /// fail closed instead of composing separate lookup and append calls.
+    /// through Event insertion and commit or rollback. A
+    /// `TimelineIntegritySigning` signature must use
+    /// [`Self::append_timeline_signed_authorized`]. Unsupported adapters fail
+    /// closed instead of composing separate lookup and append calls.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the persisted registry differs from
@@ -872,6 +877,37 @@ pub trait EventStore: Send {
     ) -> Result<(), CoreError> {
         Err(CoreError::Storage(
             "transactional key registry signing is unavailable for this EventStore".to_owned(),
+        ))
+    }
+
+    /// Finalize, authorize, sign, insert, and commit one Timeline Event atomically.
+    ///
+    /// The adapter assigns the Event ID, local and origin sequence, wall time,
+    /// and payload hash before it invokes `sign`. The callback receives only
+    /// the immutable exact envelope and payload, while the adapter holds the
+    /// registry serialization boundary through commit or rollback. A signature
+    /// is returned only as part of a committed Event. Unsupported adapters
+    /// fail closed.
+    ///
+    /// # Errors
+    /// Rejects unavailable or changed registry state, invalid envelope fields,
+    /// failed authorization or signing, and any insertion or commit failure.
+    fn append_timeline_signed_authorized(
+        &mut self,
+        _timeline: TimelineId,
+        _expected_registry: &crate::KeyRegistryStateV1,
+        _draft: EventDraft,
+        _identity: crate::KeyIdentityV1,
+        _material_digest: Hash,
+        _public_verification_key: crate::PublicKey,
+        _sign: &mut dyn FnMut(
+            &mut crate::KeyRegistryStateV1,
+            &crate::TimelineEventEnvelopeV1,
+            &CanonicalBytes,
+        ) -> Result<crate::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        Err(CoreError::Storage(
+            "atomic Timeline signing is unavailable for this EventStore".to_owned(),
         ))
     }
 
@@ -951,8 +987,9 @@ fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
 ///
 /// When the source was a fork, `fork_point` is cleared and every event receives a
 /// **fresh** [`EventId`] (causation links remapped within the export; signatures
-/// cleared). That yields an independent root that will not collide with parent
-/// `EventId`s on import. For `CoW` fork round-trips that must keep `fork_point` and
+/// cleared, origin rebound to the new root). That yields an independent root
+/// that will not collide with parent `EventId`s on import. For `CoW` fork
+/// round-trips that must keep `fork_point` and
 /// original ids, use [`export_timeline_own`].
 ///
 /// # Errors
@@ -1223,6 +1260,10 @@ fn materialize_fork_export_as_root(export: &mut TimelineExport) {
         }
         event.signature = None;
         event.signature_identity = None;
+        event.origin = Some(crate::EventOriginV1 {
+            origin_timeline_id: export.timeline.id(),
+            origin_logical_seq: event.seq,
+        });
     }
 }
 
@@ -1539,6 +1580,7 @@ mod tests {
                         schema_version: d.schema_version,
                         signature: None,
                         signature_identity: None,
+                        origin: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1604,6 +1646,7 @@ mod tests {
                         schema_version: d.schema_version,
                         signature: None,
                         signature_identity: None,
+                        origin: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1760,6 +1803,32 @@ mod tests {
             )
             .test_err()?;
         assert!(error.to_string().contains("unavailable"));
+
+        let identity =
+            crate::KeyIdentityV1::new("test-owner", crate::KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut sign = |_: &mut crate::KeyRegistryStateV1,
+                        _: &crate::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            Err::<crate::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_timeline_signed_authorized(
+                TimelineId::new(),
+                &crate::KeyRegistryStateV1::new(),
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.timeline"),
+                    CanonicalBytes::from_static(b"test"),
+                ),
+                identity,
+                Hash::from_bytes([1; 32]),
+                crate::PublicKey::from_bytes([2; 32]),
+                &mut sign,
+            )
+            .test_err()?;
+        assert!(error
+            .to_string()
+            .contains("atomic Timeline signing is unavailable"));
 
         let error = store
             .begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
@@ -1945,6 +2014,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let meta = TimelineMeta::root("original");
@@ -2089,6 +2159,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -2131,6 +2202,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature,
                 signature_identity,
+                origin: None,
                 payload_hash: Hash::from_bytes([0u8; 32]),
             };
             let export = TimelineExport {
@@ -2209,6 +2281,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -2295,6 +2368,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: Hash::from_bytes([0u8; 32]),
             }],
             parent_fork_hash: None,
@@ -2473,6 +2547,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         }
     }
@@ -3316,6 +3391,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([1u8; 64])),
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         };
         let original_id = event.id;
@@ -3404,6 +3480,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([9u8; 64])),
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -3497,6 +3574,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -3803,6 +3881,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -3844,6 +3923,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -4100,6 +4180,7 @@ mod key_registry_coverage {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         }
     }

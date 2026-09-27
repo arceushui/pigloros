@@ -28,7 +28,9 @@ pub mod geo_cell_admission;
 pub mod hasher;
 pub mod ids;
 pub mod key_registry;
+pub mod local_cut_seal;
 pub mod manifest;
+pub mod manifest_owner_link;
 pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
@@ -38,6 +40,7 @@ pub mod retention;
 pub mod state;
 pub mod store;
 pub mod timeline;
+pub mod timeline_envelope;
 pub mod world_artifact;
 pub mod world_closure_binding;
 pub mod world_consumer_set;
@@ -46,6 +49,19 @@ pub mod world_history;
 pub mod world_recording_receipt;
 pub mod world_transform;
 
+pub use local_cut_seal::{
+    local_cut_tree_scope_v1, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,
+    LocalCutManifestBindingPageV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
+    LocalCutSealErrorV2, LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1,
+    MAX_LOCAL_CUT_SEAL_BYTES_V2, MAX_LOCAL_CUT_TABLE_ROWS_V1,
+};
+pub use manifest_owner_link::{
+    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+    ManifestOwnerLinkErrorV1, ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
+    ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
+    MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
+    MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
 pub use world_artifact::{
     WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
     WorldArtifactLeafInputV1, WorldArtifactLeafV1, MAX_WORLD_ARTIFACT_CHILDREN_V1,
@@ -154,7 +170,9 @@ pub use erasure::{
     ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
 };
 pub use error::CoreError;
-pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
+pub use event::{
+    CanonicalBytes, Determinism, Event, EventDraft, EventOriginV1, Kind, RunMode, SchemaVersion,
+};
 pub use executable_budget::{
     ExecutableBudgetErrorV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
     FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
@@ -210,6 +228,11 @@ pub use store::{
     EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
+pub use timeline_envelope::{
+    TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeInputV1, TimelineEventEnvelopeV1,
+    TimelineEventVerificationV1, MAX_TIMELINE_EVENT_ENVELOPE_BYTES_V1,
+    MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
+};
 pub use world_consumer_set::{
     WorldConsumerSetErrorV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
     WorldProducerV1, WORLD_CONSUMER_SET_MAX_BYTES, WORLD_CONSUMER_SET_MAX_CONSUMERS,

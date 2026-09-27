@@ -20,11 +20,11 @@
 //! |--------|--------|--------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
-//! | Verified identity | [`export_timeline_own`] | Pending `TimelineEventEnvelopeV1` verifier (#202) |
+//! | Verified identity | [`export_timeline_own`] | [`import_timeline_verified_v1`] |
 //!
 //! [`resolve_timeline_import_public_keys_v1`] checks exact owner/role/epoch
-//! trust anchors without importing Events. Verified identity import remains
-//! unavailable until #202 adds the normative Timeline envelope verifier.
+//! trust anchors without importing Events. [`import_timeline_verified_v1`]
+//! additionally verifies every exact Timeline envelope before atomic import.
 //!
 //! # Backend features
 //!
@@ -37,6 +37,11 @@
 
 pub mod memory;
 pub mod stitch;
+mod timeline_range;
+
+pub use timeline_range::{
+    verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,
+};
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
@@ -60,6 +65,111 @@ pub use pos_core::{
     OwnTracksEnrollmentStore, PersistedAuthorityV1, TimelineId, ValidatedGeographicAdmissionV1,
     WallTime,
 };
+
+/// Finalize first-commit context for a local committed batch. A supplied
+/// origin must agree with the owning segment and inherited Fork prefix.
+fn finalize_committed_origins(
+    timeline: TimelineId,
+    inherited_prefix: u64,
+    events: &mut [Event],
+) -> Result<(), CoreError> {
+    for event in events {
+        let logical_seq = checked_logical_head(inherited_prefix, event.seq.as_u64())?;
+        let expected = pos_core::EventOriginV1 {
+            origin_timeline_id: timeline,
+            origin_logical_seq: pos_core::Seq::from_u64(logical_seq),
+        };
+        if event.origin.is_some_and(|origin| origin != expected) {
+            return Err(CoreError::Storage(
+                "committed Event origin does not match its owning Timeline".to_owned(),
+            ));
+        }
+        event.origin = Some(expected);
+    }
+    Ok(())
+}
+
+/// Finalize the exact Event fields while its store adapter owns the append
+/// boundary, before the signing callback can run.
+fn prepare_timeline_signing_event(
+    timeline: TimelineId,
+    local_head: pos_core::Seq,
+    inherited_prefix: u64,
+    draft: EventDraft,
+    identity: pos_core::KeyIdentityV1,
+    hasher: &dyn pos_core::hasher::Hasher,
+) -> Result<(Event, pos_core::TimelineEventEnvelopeV1), CoreError> {
+    let local_seq = local_head
+        .as_u64()
+        .checked_add(1)
+        .ok_or_else(|| CoreError::Storage("local Timeline sequence overflow".to_owned()))?;
+    let origin_seq = inherited_prefix
+        .checked_add(local_seq)
+        .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
+    let event_id = EventId::new();
+    let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
+    let envelope = pos_core::TimelineEventEnvelopeV1::new(
+        pos_core::TimelineEventEnvelopeInputV1 {
+            identity,
+            origin_timeline_id: timeline,
+            event_id,
+            origin_logical_seq: pos_core::Seq::from_u64(origin_seq),
+            entity_id: draft.entity,
+            event_type: draft.event_type.clone(),
+            schema_version: draft.schema_version.as_u32(),
+            wall_time,
+            causation_id: draft.causation_id,
+            correlation_id: draft.correlation_id,
+        },
+        &draft.payload,
+    )
+    .map_err(|error| CoreError::Storage(format!("Timeline envelope validation: {error}")))?;
+    let payload_hash = envelope.payload_hash();
+    if hasher.hash_payload(&draft.payload) != payload_hash {
+        return Err(CoreError::Storage(
+            "store payload hash differs from Timeline envelope BLAKE3 digest".to_owned(),
+        ));
+    }
+    let event = Event {
+        id: event_id,
+        entity: draft.entity,
+        event_type: draft.event_type,
+        payload: draft.payload,
+        wall_time,
+        seq: pos_core::Seq::from_u64(local_seq),
+        causation_id: draft.causation_id,
+        correlation_id: draft.correlation_id,
+        schema_version: draft.schema_version,
+        signature: None,
+        signature_identity: None,
+        origin: Some(pos_core::EventOriginV1 {
+            origin_timeline_id: timeline,
+            origin_logical_seq: pos_core::Seq::from_u64(origin_seq),
+        }),
+        payload_hash,
+    };
+    Ok((event, envelope))
+}
+
+/// Reject a callback result that is not a signature over the finalized
+/// envelope under the exact authorized public key.
+fn verify_new_timeline_signature(
+    public_key: pos_core::PublicKey,
+    identity: pos_core::KeyIdentityV1,
+    envelope: &pos_core::TimelineEventEnvelopeV1,
+    payload: &CanonicalBytes,
+    signature: &pos_core::Signature,
+) -> Result<(), CoreError> {
+    let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&public_key)?;
+    pos_crypto::key_roles::verify_timeline_event_for_role(
+        &verifying_key,
+        identity,
+        envelope,
+        payload,
+        signature,
+    )
+    .map_err(|error| CoreError::Storage(format!("Timeline signature validation: {error}")))
+}
 
 /// Local persistence and admission seam for ADR-060 `ERRJ1` rejoin proofs.
 ///
@@ -541,9 +651,7 @@ pub fn open_store_with_hasher(
 ///
 /// This checks identity and trust resolution only. It does not verify any
 /// signature or import any Event. A host must not treat the result as Timeline
-/// integrity evidence. Verified identity import remains unavailable until
-/// #202 adds the normative `TimelineEventEnvelopeV1` verifier; payload-only
-/// `verify_for_role` is not valid for Timeline Events.
+/// integrity evidence; use [`import_timeline_verified_v1`] for verified import.
 ///
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if any Event is unsigned,
@@ -553,6 +661,20 @@ pub fn resolve_timeline_import_public_keys_v1(
     export: &TimelineExport,
     trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
 ) -> Result<Vec<pos_core::PublicKey>, CoreError> {
+    resolve_import_trust_context(store, export, trust_anchors).map(|(public_keys, _)| public_keys)
+}
+
+fn resolve_import_trust_context(
+    store: &dyn EventStore,
+    export: &TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<
+    (
+        Vec<pos_core::PublicKey>,
+        Option<pos_core::KeyRegistryStateV1>,
+    ),
+    CoreError,
+> {
     let mut anchors = std::collections::BTreeMap::new();
     for (identity, public_key) in trust_anchors {
         if identity.epoch == 0
@@ -572,7 +694,58 @@ pub fn resolve_timeline_import_public_keys_v1(
             registry.as_ref(),
         )?);
     }
-    Ok(public_keys)
+    Ok((public_keys, registry))
+}
+
+/// Verify every exact V1 Timeline envelope before identity-preserving import.
+///
+/// The destination registry and caller-supplied trust set must agree on each
+/// Event's owner/role/epoch public key using one registry snapshot. An Event's
+/// retained first-commit origin must describe its own exported segment,
+/// including the Fork's inherited Timeline Order prefix. The store's
+/// `import_committed` operation then applies
+/// the validated batch atomically or rolls it back. This makes no signed-range
+/// completeness claim or ADR-060 `ReplayClaim`.
+///
+/// # Errors
+/// Rejects missing or mismatched trust context, invalid envelopes or
+/// signatures, origin transplants, and any atomic import failure.
+pub fn import_timeline_verified_v1(
+    store: &mut dyn EventStore,
+    export: TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<pos_core::Timeline, CoreError> {
+    let (public_keys, registry) = resolve_import_trust_context(store, &export, trust_anchors)?;
+    let inherited_prefix = export
+        .timeline
+        .meta
+        .fork_point
+        .map_or(0, |(_, at)| at.as_u64());
+    for (event, public_key) in export.events.iter().zip(public_keys) {
+        let origin_logical_seq = inherited_prefix
+            .checked_add(event.seq.as_u64())
+            .ok_or(CoreError::SignatureVerificationFailed)?;
+        if event.origin
+            != Some(pos_core::EventOriginV1 {
+                origin_timeline_id: export.timeline.id(),
+                origin_logical_seq: pos_core::Seq::from_u64(origin_logical_seq),
+            })
+        {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        let trust_anchor = event
+            .signature_identity
+            .map(|identity| (identity, public_key));
+        if pos_crypto::key_roles::verify_committed_timeline_event_v1(
+            event,
+            registry.as_ref(),
+            trust_anchor,
+        ) != pos_core::TimelineEventVerificationV1::Verified
+        {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+    }
+    pos_core::store::import_timeline_with_id(store, export)
 }
 
 fn load_import_registry(
@@ -697,6 +870,79 @@ mod tests {
             checked_logical_head(u64::MAX, 1),
             Err(CoreError::Storage(_))
         ));
+    }
+
+    #[test]
+    fn committed_origin_rejects_logical_sequence_overflow() {
+        let mut store = open_fixture_store(StoreConfig::Memory);
+        let timeline = store.create_timeline("origin-overflow").test_ok();
+        let mut events = store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.origin"),
+                    CanonicalBytes::from_vec(vec![1]),
+                )],
+            )
+            .test_ok();
+        assert!(finalize_committed_origins(timeline.id(), u64::MAX, &mut events).is_err());
+    }
+
+    #[test]
+    fn finalized_timeline_signing_rejects_sequence_overflow_and_invalid_key() {
+        let identity = pos_core::KeyIdentityV1::new(
+            "test-owner",
+            pos_core::KeyRoleV1::TimelineIntegritySigning,
+            1,
+        );
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("test.timeline"),
+            CanonicalBytes::from_static(b"signed"),
+        );
+        let hasher = pos_crypto::chain::Blake3Hasher;
+        let timeline = TimelineId::new();
+        assert!(prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::from_u64(u64::MAX),
+            0,
+            draft.clone(),
+            identity,
+            &hasher,
+        )
+        .is_err());
+        assert!(prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::ZERO,
+            u64::MAX,
+            draft.clone(),
+            identity,
+            &hasher,
+        )
+        .is_err());
+
+        let (event, envelope) = prepare_timeline_signing_event(
+            timeline,
+            pos_core::Seq::ZERO,
+            0,
+            draft,
+            identity,
+            &hasher,
+        )
+        .test_ok();
+        let invalid_key = (0..=u8::MAX)
+            .map(|byte| pos_core::PublicKey::from_bytes([byte; 32]))
+            .find(|key| pos_crypto::signing::verifying_key_from_public_key(key).is_err())
+            .test_ok();
+        assert!(verify_new_timeline_signature(
+            invalid_key,
+            identity,
+            &envelope,
+            &event.payload,
+            &pos_core::Signature::from_bytes([0; 64]),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1311,10 +1557,11 @@ mod tests {
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
-            // Anchor resolution treats signature bytes as opaque. #202 owns
-            // TimelineEventEnvelopeV1 signature verification.
+            // Anchor resolution treats signature bytes as opaque; the verified
+            // import boundary checks the full Timeline envelope separately.
             signature: Some(pos_core::Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let second_payload = CanonicalBytes::from_vec(b"signed-second".to_vec());
@@ -1511,6 +1758,7 @@ mod tests {
                 schema_version: SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }],
             parent_fork_hash: None,
@@ -1832,6 +2080,7 @@ mod coverage_entrypoints {
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_core::Hash::from_bytes([0; 32]),
             }],
             parent_fork_hash: None,
@@ -1860,6 +2109,7 @@ mod coverage_entrypoints {
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
                 signature_identity: None,
+                origin: None,
                 payload_hash: pos_core::Hash::from_bytes([0; 32]),
             }],
             parent_fork_hash: None,

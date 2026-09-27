@@ -2355,6 +2355,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let effect = Event {
@@ -2369,6 +2370,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let ids = [(cause.id, 1), (effect.id, 2)].into_iter().collect();
@@ -2393,6 +2395,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         assert_eq!(authoritative_events(&[event])[0].tick, 7);
@@ -2453,6 +2456,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let mut driver = ProofAgentDriver::new(entity, 0.5);
@@ -2510,6 +2514,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let reducer = ProofAgentReducer;
@@ -2795,6 +2800,7 @@ mod coverage_entrypoints {
             schema_version: pos_core::event::SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_core::crypto::Hash::from_bytes([0; 32]),
         };
         assert!(matches!(

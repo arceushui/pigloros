@@ -72,6 +72,7 @@ fn public_store_verification_rejects_invalid_signature_role_through_host(
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         }],
     )?;
@@ -136,6 +137,7 @@ fn public_store_verification_rejects_invalid_registry_key_through_host(
             schema_version: SchemaVersion::V1,
             signature: Some(pos_core::Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         }],
     )?;
@@ -242,6 +244,7 @@ fn public_store_verification_uses_production_host_gate_with_rotated_keys(
                 schema_version: SchemaVersion::V1,
                 signature: Some(signature_one),
                 signature_identity: Some(identity_one),
+                origin: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload_one),
             },
             Event {
@@ -256,6 +259,7 @@ fn public_store_verification_uses_production_host_gate_with_rotated_keys(
                 schema_version: SchemaVersion::V1,
                 signature: Some(signature_two),
                 signature_identity: Some(identity_two),
+                origin: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload_two),
             },
         ],
