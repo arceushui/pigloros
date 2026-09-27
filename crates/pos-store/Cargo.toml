@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance", optional = true }

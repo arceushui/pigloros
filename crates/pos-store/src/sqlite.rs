@@ -16,6 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod recipient_owner;
+pub use recipient_owner::RecipientKeyOwnerV1;
+
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     event::{CanonicalBytes, Event, EventDraft, EventOriginV1, Kind, SchemaVersion},
