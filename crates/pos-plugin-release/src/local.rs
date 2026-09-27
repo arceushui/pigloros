@@ -1449,6 +1449,25 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rewrite_manifest(
+        release: &std::path::Path,
+        address: &BundleAddressV1,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) -> std::io::Result<()> {
+        let path = release
+            .join("blobs")
+            .join("sha256")
+            .join(&address.digest()[7..]);
+        let mut manifest =
+            serde_json::from_slice(&std::fs::read(&path)?).map_err(std::io::Error::other)?;
+        mutate(&mut manifest);
+        std::fs::write(
+            path,
+            serde_json::to_vec(&manifest).map_err(std::io::Error::other)?,
+        )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn recovery_rejects_shape(
         label: &str,
         expected: LocalOciPublicationErrorV1,
@@ -1689,6 +1708,79 @@ mod tests {
                         .join("sha256")
                         .join(&address.digest()[7..]),
                     b"{\"layers\":[{}]}",
+                )
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reader_rejects_tampered_blob_closure() -> Result<(), Box<dyn std::error::Error>> {
+        reader_rejects_mutation(
+            "reader-missing-manifest",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, address| {
+                std::fs::remove_file(
+                    release
+                        .join("blobs")
+                        .join("sha256")
+                        .join(&address.digest()[7..]),
+                )
+            },
+        )?;
+        reader_rejects_mutation(
+            "reader-invalid-manifest",
+            ReleaseSourceErrorV1::InvalidDescriptor,
+            |release, address| {
+                std::fs::write(
+                    release
+                        .join("blobs")
+                        .join("sha256")
+                        .join(&address.digest()[7..]),
+                    b"[]",
+                )
+            },
+        )?;
+        reader_rejects_mutation(
+            "reader-invalid-descriptor-digest",
+            ReleaseSourceErrorV1::InvalidDescriptor,
+            |release, address| {
+                rewrite_manifest(release, address, |manifest| {
+                    manifest["config"]["digest"] = serde_json::json!("invalid");
+                })
+            },
+        )?;
+        reader_rejects_mutation(
+            "reader-declared-total-bound",
+            ReleaseSourceErrorV1::BoundsExceeded,
+            |release, address| {
+                rewrite_manifest(release, address, |manifest| {
+                    manifest["layers"][0]["size"] = serde_json::json!(crate::MAX_TOTAL_BYTES);
+                })
+            },
+        )?;
+        reader_rejects_mutation(
+            "reader-missing-declared-blob",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, address| {
+                rewrite_manifest(release, address, |manifest| {
+                    let bytes = b"missing";
+                    let digest = digest(bytes);
+                    manifest["layers"][5]["annotations"]["org.pigloros.plugin.member"] =
+                        serde_json::json!(format!("licence/{}", &digest[7..]));
+                    manifest["layers"][5]["digest"] = serde_json::json!(digest);
+                    manifest["layers"][5]["size"] = serde_json::json!(bytes.len());
+                })
+            },
+        )?;
+        reader_rejects_mutation(
+            "reader-extra-stored-blob",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, _| {
+                std::fs::write(
+                    release.join("blobs").join("sha256").join("a".repeat(64)),
+                    b"extra",
                 )
             },
         )?;
