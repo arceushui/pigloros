@@ -99,7 +99,7 @@ impl ForkAdmissionRecordV1 {
         let value = &self.0;
         let mut out = Vec::with_capacity(320);
         array(&mut out, 15);
-        bytes(&mut out, b"FAR1");
+        text(&mut out, "FAR1");
         uint(&mut out, 1);
         hash(&mut out, value.operation_id);
         hash(&mut out, value.principal_owner_binding_digest);
@@ -131,7 +131,7 @@ impl ForkAdmissionRecordV1 {
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_ADMISSION_RECORD_BYTES_V1)?;
         wire.array(15)?;
-        wire.magic(*b"FAR1")?;
+        wire.magic("FAR1")?;
         wire.version()?;
         let operation_id = wire.hash()?;
         let principal_owner_binding_digest = wire.hash()?;
@@ -289,7 +289,7 @@ impl ForkReproManifestV1 {
         let value = &self.0;
         let mut out = Vec::with_capacity(512 + value.intervention_sequences.len() * 9);
         array(&mut out, 13);
-        bytes(&mut out, b"FRM1");
+        text(&mut out, "FRM1");
         uint(&mut out, 1);
         timeline(&mut out, value.parent_timeline_id);
         timeline(&mut out, value.fork_timeline_id);
@@ -315,7 +315,7 @@ impl ForkReproManifestV1 {
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_REPRO_MANIFEST_BYTES_V1)?;
         wire.array(13)?;
-        wire.magic(*b"FRM1")?;
+        wire.magic("FRM1")?;
         wire.version()?;
         let parent_timeline_id = wire.timeline()?;
         let fork_timeline_id = wire.timeline()?;
@@ -454,7 +454,7 @@ impl SignedForkReproManifestV1 {
         let inner = self.manifest_bytes();
         let mut out = Vec::with_capacity(inner.len() + 192);
         array(&mut out, 7);
-        bytes(&mut out, b"FSM1");
+        text(&mut out, "FSM1");
         uint(&mut out, 1);
         text(&mut out, self.identity.owner_id.as_str());
         uint(&mut out, u64::from(self.identity.role.code()));
@@ -475,7 +475,7 @@ impl SignedForkReproManifestV1 {
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1)?;
         wire.array(7)?;
-        wire.magic(*b"FSM1")?;
+        wire.magic("FSM1")?;
         wire.version()?;
         let owner = OwnerIdV1::new(wire.text(128)?)
             .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
@@ -647,8 +647,8 @@ impl<'a> Reader<'a> {
             _ => Err(ForkAttributionCodecErrorV1::InvalidEncoding),
         }
     }
-    fn magic(&mut self, expected: [u8; 4]) -> Result<(), ForkAttributionCodecErrorV1> {
-        if self.fixed::<4>()? == expected {
+    fn magic(&mut self, expected: &str) -> Result<(), ForkAttributionCodecErrorV1> {
+        if self.text(4)? == expected {
             Ok(())
         } else {
             Err(ForkAttributionCodecErrorV1::InvalidEncoding)
