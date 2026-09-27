@@ -9,6 +9,7 @@ members = [
   "crates/pos-runtime",
   "crates/pos-conformance",
   "crates/pos-reference",
+  "crates/pos-plugin-release",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
