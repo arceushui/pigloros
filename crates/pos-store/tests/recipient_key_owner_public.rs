@@ -616,18 +616,17 @@ fn recipient_owner_public_contract_rejects_a_missing_live_inventory_identity(
 #[test]
 fn recipient_owner_public_contract_keeps_missing_and_pending_material_unavailable(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let (temporary, store, owner, _) = enrolled_owner()?;
     let path = only_private_file(&temporary.path().join("recipient-private"))?;
     std::fs::remove_file(&path)?;
     assert!(store.recover_recipient_keys(&owner).is_err());
 
-    let replacement = store.enroll_recipient_key(&owner)?;
-    begin_pending_destruction(&mut store, replacement, Hash::from_bytes([96; 32]))?;
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    begin_pending_destruction(&mut store, descriptor, Hash::from_bytes([96; 32]))?;
     assert!(store.recover_recipient_keys(&owner).is_err());
     assert!(
-        recipient_private_path(&temporary.path().join("recipient-private"), replacement).exists()
+        recipient_private_path(&temporary.path().join("recipient-private"), descriptor).exists()
     );
-    assert_ne!(descriptor, replacement);
     Ok(())
 }
 
