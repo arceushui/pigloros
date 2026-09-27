@@ -3316,7 +3316,10 @@ impl PluginRegistry {
         callbacks: InstalledCallbacksV1,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
-        match (self.manifest_batch.as_ref(), options.manifest_slot.as_deref()) {
+        match (
+            self.manifest_batch.as_ref(),
+            options.manifest_slot.as_deref(),
+        ) {
             (Some(_), None) | (None, Some(_)) => {
                 return Err(ManifestRegistrationErrorV1::BatchState.into());
             }
