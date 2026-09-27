@@ -313,8 +313,8 @@ fn recipient_owner_public_contract_fails_closed_for_corrupt_durable_inventory(
             "private_path",
             rusqlite::types::Value::Blob(b"foreign.key".to_vec()),
         ),
-        ("file_device", rusqlite::types::Value::Blob(vec![0; 7])),
-        ("file_inode", rusqlite::types::Value::Blob(vec![0; 7])),
+        ("file_device", rusqlite::types::Value::Blob(vec![0; 8])),
+        ("file_inode", rusqlite::types::Value::Blob(vec![0; 8])),
     ] {
         let (temporary, store, owner, _) = enrolled_owner()?;
         let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
