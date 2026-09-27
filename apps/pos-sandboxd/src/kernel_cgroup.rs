@@ -151,11 +151,7 @@ pub enum AttemptCgroupEmptyBasis {
 /// Read-only process-emptiness evidence, never full attempt cleanup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptCgroupEmptyObservation {
-    unit_name: TransientServiceUnitName,
-    unit_path: OwnedObjectPath,
-    control_group: String,
-    device: u64,
-    inode: u64,
+    identity: BoundCgroupIdentity,
     basis: AttemptCgroupEmptyBasis,
     raw_events: Option<Vec<u8>>,
     monotonic_seconds: i64,
@@ -166,25 +162,25 @@ impl AttemptCgroupEmptyObservation {
     /// Return the exact deterministic unit name.
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {
-        &self.unit_name
+        &self.identity.unit_name
     }
 
     /// Return the exact systemd object path bound before termination.
     #[must_use]
     pub fn unit_path(&self) -> &str {
-        self.unit_path.as_str()
+        self.identity.unit_path.as_str()
     }
 
     /// Return the manager-reported cgroup path, not a locally inferred path.
     #[must_use]
     pub fn control_group(&self) -> &str {
-        &self.control_group
+        &self.identity.control_group
     }
 
     /// Return the device and inode of the cgroup opened before termination.
     #[must_use]
     pub const fn cgroup_identity(&self) -> (u64, u64) {
-        (self.device, self.inode)
+        (self.identity.device, self.identity.inode)
     }
 
     /// Distinguish a kernel populated=0 read from deletion of the bound path.
@@ -204,6 +200,20 @@ impl AttemptCgroupEmptyObservation {
     pub const fn observed_monotonic(&self) -> (i64, i64) {
         (self.monotonic_seconds, self.monotonic_nanoseconds)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BoundCgroupIdentity {
+    unit_name: TransientServiceUnitName,
+    unit_path: OwnedObjectPath,
+    control_group: String,
+    device: u64,
+    inode: u64,
+}
+
+enum BoundCgroupPath {
+    Present,
+    Missing { retained_unlinked: bool },
 }
 
 /// A retained descriptor-bound attempt cgroup, without termination authority.
@@ -277,6 +287,47 @@ impl BoundAttemptCgroup {
         &self.control_group
     }
 
+    fn identity(&self) -> BoundCgroupIdentity {
+        BoundCgroupIdentity {
+            unit_name: self.unit_name.clone(),
+            unit_path: self.unit_path.clone(),
+            control_group: self.control_group.clone(),
+            device: self.device,
+            inode: self.inode,
+        }
+    }
+
+    fn inspect_path_with_metadata(
+        &self,
+        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+    ) -> Result<BoundCgroupPath, AttemptCgroupError> {
+        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
+        if retained.dev() != self.device || retained.ino() != self.inode {
+            return Err(AttemptCgroupError::PathReused);
+        }
+        let relative = relative_cgroup_path(&self.control_group)?;
+        match openat2(
+            &self.root.0,
+            relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            RESOLVE_CHILD,
+        ) {
+            Err(Errno::NOENT) => Ok(BoundCgroupPath::Missing {
+                retained_unlinked: retained.nlink() == 0,
+            }),
+            Err(error) => Err(AttemptCgroupError::PathOpen(error)),
+            Ok(current) => {
+                let metadata =
+                    read_metadata(&File::from(current)).map_err(AttemptCgroupError::Metadata)?;
+                if metadata.dev() != self.device || metadata.ino() != self.inode {
+                    return Err(AttemptCgroupError::PathReused);
+                }
+                Ok(BoundCgroupPath::Present)
+            }
+        }
+    }
+
     /// Return a process-empty observation for only this bound cgroup.
     ///
     /// Success does not prove unit absence or cleanup of mounts, namespaces,
@@ -290,33 +341,16 @@ impl BoundAttemptCgroup {
 
     fn observe_empty_with_metadata(
         &mut self,
-        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+        read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
     ) -> Result<AttemptCgroupEmptyObservation, AttemptCgroupError> {
-        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
-        if retained.dev() != self.device || retained.ino() != self.inode {
-            return Err(AttemptCgroupError::PathReused);
-        }
-        let relative = relative_cgroup_path(&self.control_group)?;
-        let basis_and_raw = match openat2(
-            &self.root.0,
-            relative,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-            RESOLVE_CHILD,
-        ) {
-            Err(Errno::NOENT) => {
-                if retained.nlink() != 0 {
-                    return Err(AttemptCgroupError::DeletionUnproven);
-                }
-                (AttemptCgroupEmptyBasis::Deleted, None)
-            }
-            Err(error) => return Err(AttemptCgroupError::PathOpen(error)),
-            Ok(current) => {
-                let metadata =
-                    read_metadata(&File::from(current)).map_err(AttemptCgroupError::Metadata)?;
-                if metadata.dev() != self.device || metadata.ino() != self.inode {
-                    return Err(AttemptCgroupError::PathReused);
-                }
+        let basis_and_raw = match self.inspect_path_with_metadata(read_metadata)? {
+            BoundCgroupPath::Missing {
+                retained_unlinked: true,
+            } => (AttemptCgroupEmptyBasis::Deleted, None),
+            BoundCgroupPath::Missing {
+                retained_unlinked: false,
+            } => return Err(AttemptCgroupError::DeletionUnproven),
+            BoundCgroupPath::Present => {
                 let raw = self.read_events()?;
                 if parse_populated(&raw)? {
                     return Err(AttemptCgroupError::StillPopulated);
@@ -326,11 +360,7 @@ impl BoundAttemptCgroup {
         };
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptCgroupEmptyObservation {
-            unit_name: self.unit_name.clone(),
-            unit_path: self.unit_path.clone(),
-            control_group: self.control_group.clone(),
-            device: self.device,
-            inode: self.inode,
+            identity: self.identity(),
             basis: basis_and_raw.0,
             raw_events: basis_and_raw.1,
             monotonic_seconds: observed.tv_sec,

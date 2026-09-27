@@ -3,20 +3,20 @@
 use std::collections::BTreeMap;
 use std::fs::{File, Metadata};
 use std::io::Read;
-use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{openat2, Mode, OFlags};
+use rustix::io::Errno;
 use rustix::time::{clock_gettime, ClockId};
-use zbus::zvariant::OwnedObjectPath;
 
-use crate::TransientServiceUnitName;
-
-use super::{relative_cgroup_path, AttemptCgroupError, BoundAttemptCgroup, RESOLVE_CHILD};
+use super::{
+    AttemptCgroupError, BoundAttemptCgroup, BoundCgroupIdentity, BoundCgroupPath, RESOLVE_CHILD,
+};
 
 const MAX_SOURCE_BYTES: u64 = 4096;
 
 /// One exact cgroup v2 source of per-attempt operating-limit event evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
 pub enum AttemptLimitEventSource {
     /// Non-hierarchical memory events for the bound cgroup.
     MemoryEventsLocal,
@@ -28,46 +28,21 @@ pub enum AttemptLimitEventSource {
     CpuStat,
 }
 
-const SOURCES: [AttemptLimitEventSource; 4] = [
-    AttemptLimitEventSource::MemoryEventsLocal,
-    AttemptLimitEventSource::MemorySwapEvents,
-    AttemptLimitEventSource::PidsEventsLocal,
-    AttemptLimitEventSource::CpuStat,
-];
-
 impl AttemptLimitEventSource {
     const fn index(self) -> usize {
-        match self {
-            Self::MemoryEventsLocal => 0,
-            Self::MemorySwapEvents => 1,
-            Self::PidsEventsLocal => 2,
-            Self::CpuStat => 3,
-        }
+        self as usize
     }
 
     /// Return the exact kernel filename associated with this raw evidence source.
     #[must_use]
     pub const fn file_name(self) -> &'static str {
-        match self {
-            Self::MemoryEventsLocal => "memory.events.local",
-            Self::MemorySwapEvents => "memory.swap.events",
-            Self::PidsEventsLocal => "pids.events.local",
-            Self::CpuStat => "cpu.stat",
-        }
-    }
-
-    const fn required_counters(self) -> &'static [AttemptLimitEventCounter] {
-        match self {
-            Self::MemoryEventsLocal => &MEMORY_COUNTERS,
-            Self::MemorySwapEvents => &SWAP_COUNTERS,
-            Self::PidsEventsLocal => &PIDS_COUNTERS,
-            Self::CpuStat => &CPU_COUNTERS,
-        }
+        SOURCE_SPECS[self.index()].file_name
     }
 }
 
 /// A counter from the exact bound cgroup; CPU throttling is telemetry only.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
 pub enum AttemptLimitEventCounter {
     /// Processes killed by an out-of-memory killer.
     MemoryOomKill,
@@ -83,44 +58,82 @@ pub enum AttemptLimitEventCounter {
     CpuThrottledUsec,
 }
 
-const MEMORY_COUNTERS: [AttemptLimitEventCounter; 2] = [
-    AttemptLimitEventCounter::MemoryOomKill,
-    AttemptLimitEventCounter::MemoryMax,
+#[derive(Clone, Copy)]
+struct SourceSpec {
+    source: AttemptLimitEventSource,
+    file_name: &'static str,
+    required_counters: &'static [AttemptLimitEventCounter],
+}
+
+const SOURCE_SPECS: [SourceSpec; 4] = [
+    SourceSpec {
+        source: AttemptLimitEventSource::MemoryEventsLocal,
+        file_name: "memory.events.local",
+        required_counters: &[
+            AttemptLimitEventCounter::MemoryOomKill,
+            AttemptLimitEventCounter::MemoryMax,
+        ],
+    },
+    SourceSpec {
+        source: AttemptLimitEventSource::MemorySwapEvents,
+        file_name: "memory.swap.events",
+        required_counters: &[AttemptLimitEventCounter::SwapMax],
+    },
+    SourceSpec {
+        source: AttemptLimitEventSource::PidsEventsLocal,
+        file_name: "pids.events.local",
+        required_counters: &[AttemptLimitEventCounter::PidsMax],
+    },
+    SourceSpec {
+        source: AttemptLimitEventSource::CpuStat,
+        file_name: "cpu.stat",
+        required_counters: &[
+            AttemptLimitEventCounter::CpuNrThrottled,
+            AttemptLimitEventCounter::CpuThrottledUsec,
+        ],
+    },
 ];
-const SWAP_COUNTERS: [AttemptLimitEventCounter; 1] = [AttemptLimitEventCounter::SwapMax];
-const PIDS_COUNTERS: [AttemptLimitEventCounter; 1] = [AttemptLimitEventCounter::PidsMax];
-const CPU_COUNTERS: [AttemptLimitEventCounter; 2] = [
-    AttemptLimitEventCounter::CpuNrThrottled,
-    AttemptLimitEventCounter::CpuThrottledUsec,
-];
-const COUNTERS: [AttemptLimitEventCounter; 6] = [
-    AttemptLimitEventCounter::MemoryOomKill,
-    AttemptLimitEventCounter::MemoryMax,
-    AttemptLimitEventCounter::SwapMax,
-    AttemptLimitEventCounter::PidsMax,
-    AttemptLimitEventCounter::CpuNrThrottled,
-    AttemptLimitEventCounter::CpuThrottledUsec,
+
+#[derive(Clone, Copy)]
+struct CounterSpec {
+    counter: AttemptLimitEventCounter,
+    key: &'static str,
+}
+
+const COUNTER_SPECS: [CounterSpec; 6] = [
+    CounterSpec {
+        counter: AttemptLimitEventCounter::MemoryOomKill,
+        key: "oom_kill",
+    },
+    CounterSpec {
+        counter: AttemptLimitEventCounter::MemoryMax,
+        key: "max",
+    },
+    CounterSpec {
+        counter: AttemptLimitEventCounter::SwapMax,
+        key: "max",
+    },
+    CounterSpec {
+        counter: AttemptLimitEventCounter::PidsMax,
+        key: "max",
+    },
+    CounterSpec {
+        counter: AttemptLimitEventCounter::CpuNrThrottled,
+        key: "nr_throttled",
+    },
+    CounterSpec {
+        counter: AttemptLimitEventCounter::CpuThrottledUsec,
+        key: "throttled_usec",
+    },
 ];
 
 impl AttemptLimitEventCounter {
     const fn index(self) -> usize {
-        match self {
-            Self::MemoryOomKill => 0,
-            Self::MemoryMax => 1,
-            Self::SwapMax => 2,
-            Self::PidsMax => 3,
-            Self::CpuNrThrottled => 4,
-            Self::CpuThrottledUsec => 5,
-        }
+        self as usize
     }
 
     const fn key(self) -> &'static str {
-        match self {
-            Self::MemoryOomKill => "oom_kill",
-            Self::MemoryMax | Self::SwapMax | Self::PidsMax => "max",
-            Self::CpuNrThrottled => "nr_throttled",
-            Self::CpuThrottledUsec => "throttled_usec",
-        }
+        COUNTER_SPECS[self.index()].key
     }
 }
 
@@ -129,13 +142,9 @@ impl AttemptLimitEventCounter {
 /// This is a read-only snapshot, not a claim of resource exhaustion or cleanup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptLimitEventSnapshot {
-    unit_name: TransientServiceUnitName,
-    unit_path: OwnedObjectPath,
-    control_group: String,
-    device: u64,
-    inode: u64,
-    raw: [Vec<u8>; 4],
-    counters: [u64; 6],
+    identity: BoundCgroupIdentity,
+    raw: [Vec<u8>; SOURCE_SPECS.len()],
+    counters: [u64; COUNTER_SPECS.len()],
     monotonic_seconds: i64,
     monotonic_nanoseconds: i64,
 }
@@ -143,26 +152,26 @@ pub struct AttemptLimitEventSnapshot {
 impl AttemptLimitEventSnapshot {
     /// Return the exact deterministic unit name.
     #[must_use]
-    pub const fn unit_name(&self) -> &TransientServiceUnitName {
-        &self.unit_name
+    pub const fn unit_name(&self) -> &crate::TransientServiceUnitName {
+        &self.identity.unit_name
     }
 
     /// Return the verified systemd unit object path.
     #[must_use]
     pub fn unit_path(&self) -> &str {
-        self.unit_path.as_str()
+        self.identity.unit_path.as_str()
     }
 
     /// Return the manager-reported cgroup path.
     #[must_use]
     pub fn control_group(&self) -> &str {
-        &self.control_group
+        &self.identity.control_group
     }
 
     /// Return the device and inode of the retained cgroup directory.
     #[must_use]
     pub const fn cgroup_identity(&self) -> (u64, u64) {
-        (self.device, self.inode)
+        (self.identity.device, self.identity.inode)
     }
 
     /// Return the exact bounded source bytes for later signed evidence.
@@ -193,19 +202,15 @@ impl AttemptLimitEventSnapshot {
     /// Rejects changed identity, reversed observation time, or any decreased
     /// required counter.
     pub fn delta_to(self, terminal: Self) -> Result<AttemptLimitEventDelta, AttemptCgroupError> {
-        if self.unit_name != terminal.unit_name
-            || self.unit_path != terminal.unit_path
-            || self.control_group != terminal.control_group
-            || self.device != terminal.device
-            || self.inode != terminal.inode
-        {
+        if self.identity != terminal.identity {
             return Err(AttemptCgroupError::LimitEventIdentityMismatch);
         }
         if self.observed_monotonic() > terminal.observed_monotonic() {
             return Err(AttemptCgroupError::LimitEventTimeReversed);
         }
-        let mut increases = [0; 6];
-        for counter in COUNTERS {
+        let mut increases = [0; COUNTER_SPECS.len()];
+        for spec in COUNTER_SPECS {
+            let counter = spec.counter;
             let index = counter.index();
             increases[index] = terminal.counters[index]
                 .checked_sub(self.counters[index])
@@ -224,7 +229,7 @@ impl AttemptLimitEventSnapshot {
 pub struct AttemptLimitEventDelta {
     baseline: AttemptLimitEventSnapshot,
     terminal: AttemptLimitEventSnapshot,
-    increases: [u64; 6],
+    increases: [u64; COUNTER_SPECS.len()],
 }
 
 impl AttemptLimitEventDelta {
@@ -267,11 +272,12 @@ impl BoundAttemptCgroup {
     ) -> Result<AttemptLimitEventSnapshot, AttemptCgroupError> {
         verify(self)?;
         let mut raw = std::array::from_fn(|_| Vec::new());
-        let mut counters = [0; 6];
-        for source in SOURCES {
+        let mut counters = [0; COUNTER_SPECS.len()];
+        for spec in SOURCE_SPECS {
+            let source = spec.source;
             let bytes = self.read_limit_event_source(source)?;
             let parsed = parse_flat_counters(&bytes, source)?;
-            for &counter in source.required_counters() {
+            for &counter in spec.required_counters {
                 let Some(&value) = parsed.get(counter.key()) else {
                     return Err(AttemptCgroupError::MalformedLimitEvents {
                         property: source.file_name(),
@@ -284,11 +290,7 @@ impl BoundAttemptCgroup {
         verify(self)?;
         let observed = clock_gettime(ClockId::Monotonic);
         Ok(AttemptLimitEventSnapshot {
-            unit_name: self.unit_name.clone(),
-            unit_path: self.unit_path.clone(),
-            control_group: self.control_group.clone(),
-            device: self.device,
-            inode: self.inode,
+            identity: self.identity(),
             raw,
             counters,
             monotonic_seconds: observed.tv_sec,
@@ -302,27 +304,12 @@ impl BoundAttemptCgroup {
 
     fn verify_limit_event_identity_with_metadata(
         &self,
-        mut read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
+        read_metadata: impl FnMut(&File) -> std::io::Result<Metadata>,
     ) -> Result<(), AttemptCgroupError> {
-        let retained = read_metadata(&self.directory).map_err(AttemptCgroupError::Metadata)?;
-        if retained.dev() != self.device || retained.ino() != self.inode {
-            return Err(AttemptCgroupError::PathReused);
+        match self.inspect_path_with_metadata(read_metadata)? {
+            BoundCgroupPath::Present => Ok(()),
+            BoundCgroupPath::Missing { .. } => Err(AttemptCgroupError::PathOpen(Errno::NOENT)),
         }
-        let relative = relative_cgroup_path(&self.control_group)?;
-        let current = openat2(
-            &self.root.0,
-            relative,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-            RESOLVE_CHILD,
-        )
-        .map(File::from)
-        .map_err(AttemptCgroupError::PathOpen)?;
-        let metadata = read_metadata(&current).map_err(AttemptCgroupError::Metadata)?;
-        if metadata.dev() != self.device || metadata.ino() != self.inode {
-            return Err(AttemptCgroupError::PathReused);
-        }
-        Ok(())
     }
 
     fn read_limit_event_source(
@@ -387,9 +374,19 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
-    use crate::CgroupRoot;
+    use zbus::zvariant::OwnedObjectPath;
+
+    use crate::{CgroupRoot, TransientServiceUnitName};
 
     use super::*;
+
+    fn sources() -> impl Iterator<Item = AttemptLimitEventSource> {
+        SOURCE_SPECS.into_iter().map(|spec| spec.source)
+    }
+
+    fn counters() -> impl Iterator<Item = AttemptLimitEventCounter> {
+        COUNTER_SPECS.into_iter().map(|spec| spec.counter)
+    }
 
     fn source_bytes(source: AttemptLimitEventSource) -> &'static [u8] {
         match source {
@@ -406,7 +403,7 @@ mod tests {
         let directory = root.join("system.slice/test.service");
         fs::create_dir_all(&directory)?;
         fs::write(directory.join("cgroup.events"), b"populated 1\n")?;
-        for source in SOURCES {
+        for source in sources() {
             fs::write(directory.join(source.file_name()), source_bytes(source))?;
         }
         let bound = BoundAttemptCgroup::open(
@@ -431,10 +428,10 @@ mod tests {
         assert_eq!(baseline.control_group(), "/system.slice/test.service");
         assert!(baseline.cgroup_identity().1 > 0);
         assert!(baseline.observed_monotonic().0 >= 0);
-        for source in SOURCES {
+        for source in sources() {
             assert_eq!(baseline.raw(source), source_bytes(source));
         }
-        for counter in COUNTERS {
+        for counter in counters() {
             assert_eq!(baseline.counter(counter), 5);
         }
 
@@ -488,7 +485,7 @@ mod tests {
         let (bound, directory) = fixture(temporary.path())?;
         let baseline = bound.capture_limit_events()?;
         let unchanged = baseline.clone().delta_to(baseline.clone())?;
-        for counter in COUNTERS {
+        for counter in counters() {
             assert_eq!(unchanged.increase(counter), 0);
         }
         fs::write(
@@ -528,7 +525,7 @@ mod tests {
             b"foo 18446744073709551616\n",
             b"foo 1\nfoo 2\n",
         ];
-        for source in SOURCES {
+        for source in sources() {
             let path = directory.join(source.file_name());
             for bytes in invalid {
                 fs::write(&path, bytes)?;
@@ -549,7 +546,7 @@ mod tests {
         let (bound, directory) = fixture(temporary.path())?;
         let outside = temporary.path().join("outside");
         fs::write(&outside, b"max 5\n")?;
-        for source in SOURCES {
+        for source in sources() {
             let path = directory.join(source.file_name());
             fs::remove_file(&path)?;
             assert!(matches!(
@@ -675,31 +672,32 @@ mod tests {
         let baseline = bound.capture_limit_events()?;
         let terminal = bound.capture_limit_events()?;
         let mut foreign = terminal.clone();
-        foreign.unit_name = TransientServiceUnitName::from_attempt_id([2; 16])?;
+        foreign.identity.unit_name = TransientServiceUnitName::from_attempt_id([2; 16])?;
         assert!(matches!(
             baseline.clone().delta_to(foreign),
             Err(AttemptCgroupError::LimitEventIdentityMismatch)
         ));
         let mut foreign = terminal.clone();
-        foreign.unit_path = OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/other")?;
+        foreign.identity.unit_path =
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/other")?;
         assert!(matches!(
             baseline.clone().delta_to(foreign),
             Err(AttemptCgroupError::LimitEventIdentityMismatch)
         ));
         let mut foreign = terminal.clone();
-        foreign.control_group = "/system.slice/other.service".to_owned();
+        foreign.identity.control_group = "/system.slice/other.service".to_owned();
         assert!(matches!(
             baseline.clone().delta_to(foreign),
             Err(AttemptCgroupError::LimitEventIdentityMismatch)
         ));
         let mut foreign = terminal.clone();
-        foreign.device = foreign.device.wrapping_add(1);
+        foreign.identity.device = foreign.identity.device.wrapping_add(1);
         assert!(matches!(
             baseline.clone().delta_to(foreign),
             Err(AttemptCgroupError::LimitEventIdentityMismatch)
         ));
         let mut foreign = terminal.clone();
-        foreign.inode = foreign.inode.wrapping_add(1);
+        foreign.identity.inode = foreign.identity.inode.wrapping_add(1);
         assert!(matches!(
             baseline.clone().delta_to(foreign),
             Err(AttemptCgroupError::LimitEventIdentityMismatch)
@@ -710,7 +708,7 @@ mod tests {
             baseline.clone().delta_to(reversed),
             Err(AttemptCgroupError::LimitEventTimeReversed)
         ));
-        for counter in COUNTERS {
+        for counter in counters() {
             let mut decreased = terminal.clone();
             decreased.counters[counter.index()] = 4;
             assert!(matches!(
