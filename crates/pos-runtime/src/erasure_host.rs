@@ -1834,15 +1834,8 @@ impl ErasureExecutionHostV1 {
         match publication {
             Ok((inventory, transition)) => {
                 let inventory = self.verify_published_inventory(inventory, limits)?;
-                let generation = inventory.generation();
-                let refreshed_request_count = inventory.request_count();
-                self.inventory = Some(Arc::new(inventory));
+                let generation = self.install_ready_inventory(inventory, maximum_requests);
                 self.recovery_limits = limits;
-                self.state = HostStateV1::Ready {
-                    generation,
-                    maximum_requests,
-                    request_count: refreshed_request_count,
-                };
                 Ok((transition.timeline, generation))
             }
             Err(publication_error) => match transition_failure {
@@ -1969,14 +1962,7 @@ impl ErasureExecutionHostV1 {
         };
         match publication {
             Ok((inventory, timeline)) => {
-                let generation = inventory.generation();
-                let request_count = inventory.request_count();
-                self.inventory = Some(Arc::new(inventory));
-                self.state = HostStateV1::Ready {
-                    generation,
-                    maximum_requests: input.maximum_requests,
-                    request_count,
-                };
+                let generation = self.install_ready_inventory(inventory, input.maximum_requests);
                 Ok((timeline, generation))
             }
             Err(error) => Err(self.handle_transition_failure(
@@ -2216,6 +2202,15 @@ impl ErasureExecutionHostV1 {
                 ));
             }
         };
+        let generation = self.install_ready_inventory(inventory, maximum_requests);
+        Ok((result, generation))
+    }
+
+    fn install_ready_inventory(
+        &mut self,
+        inventory: ErasureVerifiedInventoryV1,
+        maximum_requests: usize,
+    ) -> ErasureReferenceV1 {
         let generation = inventory.generation();
         let request_count = inventory.request_count();
         self.inventory = Some(Arc::new(inventory));
@@ -2224,7 +2219,7 @@ impl ErasureExecutionHostV1 {
             maximum_requests,
             request_count,
         };
-        Ok((result, generation))
+        generation
     }
 
     fn handle_transition_failure(
