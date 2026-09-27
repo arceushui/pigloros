@@ -14999,8 +14999,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sqlite_recovery_proof_checks_objects_states_all_indexes_and_subject() {
+    fn sqlite_recovery_proof_test_value() -> ciborium::value::Value {
         use ciborium::value::Value;
 
         let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
@@ -15056,7 +15055,7 @@ mod tests {
             digest(effect_subject),
             digest(reference(62)),
         ]);
-        let proof_value = Value::Array(vec![
+        Value::Array(vec![
             Value::Text(pos_core::ERASURE_FORK_RECOVERY_PROOF_TAG_V1.to_owned()),
             Value::Integer(1.into()),
             digest(reference(58)),
@@ -15065,13 +15064,23 @@ mod tests {
             digest(reference(60)),
             digest(reference(63)),
             Value::Array(vec![mutation]),
-        ]);
-        let mut proof_bytes = Vec::new();
-        ciborium::into_writer(&proof_value, &mut proof_bytes).test_ok();
-        let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes).test_ok();
-        let proof_mutation = proof.admissions().first().test_ok();
+        ])
+    }
 
-        let store = new_store();
+    fn seed_sqlite_recovery_proof_test_rows(store: &SqliteStore) {
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let extension = reference(50);
+        let request = reference(51);
+        let state_reference = reference(52);
+        let manifest = reference(53);
+        let effect_subject = reference(54);
+        let index_references = [reference(55), reference(56), reference(57)];
+        let effect = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: effect_subject,
+        };
+        let effect_bytes = effect.to_canonical_cbor().test_ok();
+        let object_bytes = b"extension";
+        let state_bytes = b"state";
         insert_sqlite_exact(&store.conn, extension, object_bytes).test_ok();
         store
             .conn
@@ -15113,6 +15122,25 @@ mod tests {
                 ],
             )
             .test_ok();
+    }
+
+    #[test]
+    fn sqlite_recovery_proof_checks_objects_states_all_indexes_and_subject() {
+        use ciborium::value::Value;
+
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let extension = reference(50);
+        let request = reference(51);
+        let state_reference = reference(52);
+        let manifest = reference(53);
+        let effect_subject = reference(54);
+        let proof_value = sqlite_recovery_proof_test_value();
+        let mut proof_bytes = Vec::new();
+        ciborium::into_writer(&proof_value, &mut proof_bytes).test_ok();
+        let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes).test_ok();
+        let proof_mutation = proof.admissions().first().test_ok();
+        let store = new_store();
+        seed_sqlite_recovery_proof_test_rows(&store);
 
         sqlite_recovery_proof_mutation_is_exact(&store.conn, proof_mutation).test_ok();
         sqlite_recovery_proof_indexes_are_exact(&store.conn, proof_mutation).test_ok();
@@ -15161,6 +15189,21 @@ mod tests {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
+        sqlite_recovery_proof_rejects_missing_extension_and_subject(&store, &proof_value, &proof);
+        sqlite_recovery_proof_rejects_corrupt_rows(&store, &proof);
+    }
+
+    fn sqlite_recovery_proof_rejects_missing_extension_and_subject(
+        store: &SqliteStore,
+        proof_value: &ciborium::value::Value,
+        proof: &ErasureForkRecoveryProofV1,
+    ) {
+        use ciborium::value::Value;
+
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let effect_subject = reference(54);
+        let manifest = reference(53);
+        let proof_mutation = proof.admissions().first().test_ok();
         let mut missing_extension = proof_value.clone();
         let Value::Array(fields) = &mut missing_extension else {
             std::panic::resume_unwind(Box::new("recovery proof root is not an array"));
@@ -15208,6 +15251,18 @@ mod tests {
                 ],
             )
             .test_ok();
+    }
+
+    fn sqlite_recovery_proof_rejects_corrupt_rows(
+        store: &SqliteStore,
+        proof: &ErasureForkRecoveryProofV1,
+    ) {
+        let reference = |value| ErasureReferenceV1::from_digest([value; 32]);
+        let extension = reference(50);
+        let request = reference(51);
+        let state_reference = reference(52);
+        let manifest = reference(53);
+        let proof_mutation = proof.admissions().first().test_ok();
 
         store
             .conn

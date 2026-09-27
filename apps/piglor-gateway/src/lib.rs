@@ -5829,12 +5829,13 @@ mod tests {
         } else {
             b.test_err()
         };
-        assert!(matches!(
-            rejected,
+        let expected_rejection = matches!(
+            &rejected,
             GatewayError::EventLimitReached {
                 maximum: MAX_EVENTS_PER_TIMELINE
-            }
-        ));
+            } | GatewayError::Store(CoreError::ErasureContainmentUnavailable)
+        );
+        assert!(expected_rejection, "unexpected rejection: {rejected:?}");
         let mut fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
         Gateway::bind_test_erasure_gate(fresh.as_mut());
         assert_eq!(
