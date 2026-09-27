@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(unix)]
 #[doc(hidden)]
 pub mod control_framing;
 
