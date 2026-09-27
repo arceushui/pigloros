@@ -8,7 +8,7 @@ use ed25519_dalek::VerifyingKey;
 use pos_core::{
     CanonicalBytes, CoreError, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
     ForkReproManifestV1, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1,
-    PublicKey, SignedForkReproManifestV1,
+    PublicKey, Signature, SignedForkReproManifestV1,
 };
 
 use crate::{
@@ -25,31 +25,6 @@ pub enum ForkAttributionSigningErrorV1 {
     /// The current key registry rejected the derived attribution identity.
     #[error(transparent)]
     Registry(#[from] KeyRegistryErrorV1),
-}
-
-/// Produce a mathematical `FSM1` signature through the current role registry.
-///
-/// This standalone operation is intentionally unsuitable for trusted Fork
-/// publication: its authorization ends when the callback returns. It exists
-/// for portable vectors and diagnostics only.
-///
-/// # Errors
-///
-/// Returns the closed registry error when the exact attribution identity is
-/// inactive, absent, destroyed, or does not match the supplied private key.
-pub fn sign_local_fork_manifest_signature_only<R: KeyRegistrySigningPortV1>(
-    registry: &mut R,
-    signing_key: &SigningKeyMaterial,
-    identity: KeyIdentityV1,
-    manifest: pos_core::ForkReproManifestV1,
-) -> Result<SignedForkReproManifestV1, KeyRegistryErrorV1> {
-    if identity.role != KeyRoleV1::SubjectAttributionSigning {
-        return Err(KeyRegistryErrorV1::SigningRoleRequired);
-    }
-    let payload = CanonicalBytes::from_vec(manifest.to_canonical_cbor());
-    let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
-    SignedForkReproManifestV1::new(identity, manifest, signature)
-        .map_err(|_| KeyRegistryErrorV1::SigningRoleRequired)
 }
 
 /// Sign an `FSM1` whose creator and duplicate `FRM1` coordinates match local `FAR1`.
@@ -110,15 +85,15 @@ pub fn sign_local_fork_manifest_for_identity_from_admission_signature_only<
     {
         return Err(ForkAttributionCodecErrorV1::FieldMismatch.into());
     }
-    manifest.validate_against_admission(admission)?;
-    let payload = CanonicalBytes::from_vec(manifest.to_canonical_cbor());
-    let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
-    Ok(SignedForkReproManifestV1::new_from_admission(
+    let unsigned = SignedForkReproManifestV1::new_from_admission(
         admission,
         identity.epoch,
         manifest,
-        signature,
-    )?)
+        Signature::from_bytes([0; 64]),
+    )?;
+    let payload = CanonicalBytes::from_vec(unsigned.manifest_bytes());
+    let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
+    Ok(unsigned.with_signature(signature))
 }
 
 /// Verify only the mathematical ADR-065 role signature in `FSM1`.
