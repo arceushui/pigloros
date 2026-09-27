@@ -138,8 +138,10 @@ pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
-    erasure_evidence_set_reference, inspect_artifact_registration_graph_v1,
-    selected_obligations_reference, ArtifactChildEdgeV1, ArtifactClaimInputV1, ArtifactDataClassV1,
+    erasure_evidence_set_reference, extract_adapter_admission_registration_v1,
+    extract_adapter_transcript_registration_v1, inspect_artifact_registration_graph_v1,
+    selected_obligations_reference, AdapterArtifactRegistrationErrorV1, ArtifactChildEdgeV1,
+    ArtifactClaimInputV1, ArtifactDataClassV1,
     ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1,
     ArtifactRedactionStateV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
     ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1,
