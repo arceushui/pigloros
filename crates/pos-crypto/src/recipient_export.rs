@@ -83,6 +83,9 @@ pub struct RecipientTimelineExportV1 {
 
 impl RecipientTimelineExportV1 {
     /// Decode an exact canonical TRX1 envelope without accessing private material.
+    ///
+    /// # Errors
+    /// Returns an encoding or bounds error for any invalid envelope.
     pub fn decode(encoded: &[u8]) -> Result<Self, RecipientExportErrorV1> {
         if encoded.len() > MAX_ENVELOPE_BYTES {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
@@ -187,6 +190,10 @@ impl RecipientTimelineExportV1 {
 ///
 /// `export_id` is host supplied so the host can create and reserve it inside
 /// its publication transaction. It must be fresh and nonzero.
+///
+/// # Errors
+/// Returns a structural, bounds, identity, or encryption error before
+/// constructing a partial envelope.
 pub fn encrypt_timeline_export_v1(
     export: &TimelineExport,
     recipient: RecipientKeyDescriptorV1,
@@ -251,6 +258,10 @@ pub fn encrypt_timeline_export_v1(
 }
 
 /// Authenticate and decode TRX1, returning only a structural candidate export.
+///
+/// # Errors
+/// Returns an encoding, identity, or authentication error without exposing
+/// plaintext when the envelope cannot be verified.
 pub fn decrypt_timeline_export_v1(
     encoded: &[u8],
     expected_export_id: [u8; 16],
@@ -449,8 +460,7 @@ fn validate_export(export: &TimelineExport) -> Result<(), RecipientExportErrorV1
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
     match (export.timeline.meta.fork_point, export.parent_fork_hash) {
-        (None, None) => {}
-        (Some((_, _)), Some(_)) => {}
+        (None, None) | (Some(_), Some(_)) => {}
         _ => return Err(RecipientExportErrorV1::SourceMismatch),
     }
     for (index, event) in export.events.iter().enumerate() {
@@ -541,7 +551,7 @@ fn encode_event(out: &mut Vec<u8>, event: &Event) {
     match event.signature {
         Some(signature) => byte_string(out, signature.as_bytes()),
         None => out.push(0xf6),
-    };
+    }
     match event.signature_identity {
         Some(identity) => {
             array(out, 3);
@@ -550,7 +560,7 @@ fn encode_event(out: &mut Vec<u8>, event: &Event) {
             unsigned_to(out, identity.epoch);
         }
         None => out.push(0xf6),
-    };
+    }
     byte_string(out, event.payload_hash.as_bytes());
 }
 fn decode_event(value: &Value) -> Result<Event, RecipientExportErrorV1> {
@@ -630,14 +640,14 @@ fn optional_signature(value: &Value) -> Result<Option<Signature>, RecipientExpor
         Ok(Some(Signature::from_bytes(bytes_of::<64>(value)?)))
     }
 }
-fn mode_code(mode: TimelineMode) -> u64 {
+const fn mode_code(mode: TimelineMode) -> u64 {
     match mode {
         TimelineMode::Historical => 0,
         TimelineMode::Live => 1,
         TimelineMode::Future => 2,
     }
 }
-fn decode_mode(value: u64) -> Result<TimelineMode, RecipientExportErrorV1> {
+const fn decode_mode(value: u64) -> Result<TimelineMode, RecipientExportErrorV1> {
     match value {
         0 => Ok(TimelineMode::Historical),
         1 => Ok(TimelineMode::Live),
@@ -771,17 +781,17 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
     let bytes = value.to_be_bytes();
     match value {
         0..=23 => out.push(tag | bytes[7]),
-        24..=0xff => out.extend_from_slice(&[tag | 24, bytes[7]]),
+        24..=0xff => out.extend_from_slice(&[tag | 0x18, bytes[7]]),
         0x100..=0xffff => {
-            out.push(tag | 25);
+            out.push(tag | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
         0x1_0000..=0xffff_ffff => {
-            out.push(tag | 26);
+            out.push(tag | 0x1a);
             out.extend_from_slice(&bytes[4..]);
         }
         _ => {
-            out.push(tag | 27);
+            out.push(tag | 0x1b);
             out.extend_from_slice(&bytes);
         }
     }
@@ -870,7 +880,7 @@ fn scan_cbor_item(
             }
             Ok(())
         }
-        7 if matches!(initial, 0xf4 | 0xf5 | 0xf6) => Ok(()),
+        7 if matches!(initial, 0xf4..=0xf6) => Ok(()),
         _ => Err(RecipientExportErrorV1::InvalidEncoding),
     }
 }
@@ -1010,10 +1020,10 @@ mod tests {
         let mut envelope = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
         assert_eq!(envelope.ciphertext_chunks.len(), 2);
         envelope.ciphertext_chunks.swap(0, 1);
-        assert_eq!(
+        assert!(matches!(
             decrypt_timeline_export_v1(&envelope.encode(), [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::AuthenticationFailed)
-        );
+        ));
         Ok(())
     }
 
@@ -1030,10 +1040,10 @@ mod tests {
             &mut rng,
         )?
         .encode();
-        assert_eq!(
+        assert!(matches!(
             decrypt_timeline_export_v1(&encoded, [4; 16], recipient, &private),
             Err(RecipientExportErrorV1::IdentityMismatch)
-        );
+        ));
         let mut noncanonical = Vec::with_capacity(encoded.len() + 1);
         noncanonical.extend_from_slice(&[0x98, 8]);
         noncanonical.extend_from_slice(&encoded[1..]);
