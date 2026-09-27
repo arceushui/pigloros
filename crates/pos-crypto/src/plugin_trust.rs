@@ -418,14 +418,11 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8], PluginTrustErrorV1> {
-        let end = self
-            .offset
-            .checked_add(count)
-            .ok_or(PluginTrustErrorV1::InvalidEncoding)?;
-        let bytes = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(PluginTrustErrorV1::InvalidEncoding)?;
+        if count > self.bytes.len() - self.offset {
+            return Err(PluginTrustErrorV1::InvalidEncoding);
+        }
+        let end = self.offset + count;
+        let bytes = &self.bytes[self.offset..end];
         self.offset = end;
         Ok(bytes)
     }
