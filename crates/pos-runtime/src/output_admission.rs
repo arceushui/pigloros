@@ -577,7 +577,7 @@ impl InstalledOutputPolicySourceV1 {
         .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
             kind: "configuration",
         })?;
-        let execution_profile_artifact = execution_profile_artifact_v1(profile_id)
+        let execution_profile_artifact = execution_profile_artifact_v1(profile_id, self)
             .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
         let implementation_artifact = self.implementation_artifact(plugin);
         let retention_policy_artifact =
@@ -1275,19 +1275,22 @@ pub(crate) fn draft_execution_profile_artifact_v1(
     }
 }
 
-fn execution_profile_artifact_v1(profile_id: &str) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
+fn execution_profile_artifact_v1(
+    profile_id: &str,
+    source: InstalledOutputPolicySourceV1,
+) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
     #[cfg(any(test, feature = "test-support"))]
-    {
-        // `test-support` deliberately permits unsigned draft artifacts for
-        // fixtures; deployable builds must not enable that feature.
-        draft_execution_profile_artifact_v1(profile_id)
+    if source == InstalledOutputPolicySourceV1::Generated {
+        return draft_execution_profile_artifact_v1(profile_id);
     }
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = source;
+    #[cfg(target_os = "linux")]
     {
         pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
             .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
     }
-    #[cfg(all(not(target_os = "linux"), not(any(test, feature = "test-support"))))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = profile_id;
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
@@ -1574,6 +1577,35 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "source-probe"
+        }
+    }
+
+    #[test]
+    fn draft_epf1_is_available_only_to_generated_fixture_source() {
+        let profile_id = "deterministic-local-v1";
+        let generated = execution_profile_artifact_v1(
+            profile_id,
+            InstalledOutputPolicySourceV1::Generated,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            generated,
+            pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+        );
+        for source in [
+            InstalledOutputPolicySourceV1::Gateway,
+            InstalledOutputPolicySourceV1::World,
+            InstalledOutputPolicySourceV1::RuleAgent,
+            InstalledOutputPolicySourceV1::Agent,
+            InstalledOutputPolicySourceV1::SyntheticObservation,
+            InstalledOutputPolicySourceV1::Society,
+            InstalledOutputPolicySourceV1::Experiment,
+        ] {
+            assert_eq!(
+                execution_profile_artifact_v1(profile_id, source),
+                Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+            );
         }
     }
 
