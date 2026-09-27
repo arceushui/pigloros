@@ -532,11 +532,11 @@ fn quarantine_unregistered_staged_material(
     owner: &RecipientKeyOwnerV1,
     inventory: &[StoredRecipientKeyInventoryV1],
 ) -> Result<(), CoreError> {
+    use std::os::unix::ffi::OsStrExt;
+
     let registered_names = inventory
         .iter()
-        .filter_map(|entry| {
-            Path::new(std::ffi::OsStr::from_encoded_bytes(&entry.private_path)).file_name()
-        })
+        .filter_map(|entry| Path::new(std::ffi::OsStr::from_bytes(&entry.private_path)).file_name())
         .map(std::ffi::OsStr::as_encoded_bytes)
         .map(<[u8]>::to_vec)
         .collect::<BTreeSet<_>>();
