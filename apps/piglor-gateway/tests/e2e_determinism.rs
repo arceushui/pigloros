@@ -415,6 +415,7 @@ struct MultiRateScenario {
     society_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
+    pinned_wall_time: WallTime,
     erasure_gate: Arc<dyn pos_core::ErasureGate>,
     fast_decisions: Arc<AtomicUsize>,
     slow_decisions: Arc<AtomicUsize>,
@@ -434,12 +435,43 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
-    let host = ErasureExecutionHostV1::open_verified_empty(
+    let society_entity = EntityId::new();
+    let fast_entity = EntityId::new();
+    let slow_entity = EntityId::new();
+    let pinned_wall_time = WallTime::from_micros(u64::try_from(i64::MAX).test_ok()?);
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Sqlite { path: path.clone() },
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
     let erasure_gate = host.containment_gate();
+    let timeline = {
+        let mut sender = host.command_sender().test_ok()?;
+        let timeline = sender.create_timeline("multi-rate-e2e").test_ok()?;
+        let first = draft_signal(
+            society_entity,
+            &SocietySignal {
+                dimension: SocietyDimension::Trust,
+                value: 0.75,
+                subject: None,
+                object: None,
+            },
+        );
+        let pending = draft_signal(
+            fast_entity,
+            &SocietySignal {
+                dimension: SocietyDimension::Trust,
+                value: 0.25,
+                subject: None,
+                object: None,
+            },
+        )
+        .with_wall_time(pinned_wall_time);
+        let seeded = sender.append(timeline.id(), &[first, pending]).test_ok()?;
+        assert_eq!(seeded.len(), 2);
+        assert_eq!(seeded[1].seq.as_u64(), 2);
+        timeline.id()
+    };
     let state = AppState {
         gateway: Gateway::new_with_erasure_host_and_authorization(
             host,
@@ -466,33 +498,6 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         server_shutdown: Some(server_shutdown),
         server: Some(server),
     };
-    let created = request_http(
-        address,
-        "POST",
-        "/v1/timelines",
-        Some(json!({"name": "multi-rate-e2e"})),
-    )
-    .await?;
-    assert_eq!(created.status, 201);
-    let timeline_text = created.body["id"].as_str().test_ok()?;
-    let timeline = TimelineId::from_ulid(ulid::Ulid::from_string(timeline_text).test_ok()?);
-    let society_entity = EntityId::new();
-    let fast_entity = EntityId::new();
-    let slow_entity = EntityId::new();
-    let signal = request_http(
-        address,
-        "POST",
-        &format!("/v1/timelines/{timeline}/signals"),
-        Some(json!({
-            "entity_id": society_entity.to_string(),
-            "dimension": "trust",
-            "value": 0.75,
-            "subject": null,
-            "object": null,
-        })),
-    )
-    .await?;
-    assert_eq!(signal.status, 201);
     Ok(MultiRateScenario {
         _database: database,
         path,
@@ -503,6 +508,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         society_entity,
         fast_entity,
         slow_entity,
+        pinned_wall_time,
         erasure_gate,
         fast_decisions: Arc::new(AtomicUsize::new(0)),
         slow_decisions: Arc::new(AtomicUsize::new(0)),
@@ -611,45 +617,13 @@ async fn run_tick_boundaries(
     mut session: pos_experiment::ExperimentSession,
 ) -> Result<(pos_experiment::ExperimentSession, WallTime), Box<dyn std::error::Error + Send + Sync>>
 {
-    let pinned_wall_time = WallTime::from_micros(u64::try_from(i64::MAX).test_ok()?);
-    let mut pending_store = open_store(StoreConfig::Sqlite {
-        path: scenario.path.clone(),
-    })
-    .test_ok()
-    .map_err(|error| std::io::Error::other(format!("open pending store: {error}")))?;
-    // This direct adapter is separate from the host-owned Gateway adapter, so
-    // it needs its own test-only binding rather than consuming the host gate's
-    // one-shot store binding.
-    pending_store
-        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-        .test_ok()
-        .map_err(|error| std::io::Error::other(format!("bind pending gate: {error}")))?;
-    let pending = pending_store
-        .append(
-            scenario.timeline,
-            &[draft_signal(
-                scenario.fast_entity,
-                &SocietySignal {
-                    dimension: SocietyDimension::Trust,
-                    value: 0.25,
-                    subject: None,
-                    object: None,
-                },
-            )
-            .with_wall_time(pinned_wall_time)],
-        )
-        .test_ok()
-        .map_err(|error| std::io::Error::other(format!("append pending signal: {error}")))?;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].seq.as_u64(), 2);
-    drop(pending_store);
     assert_eq!(
         session
             .step_cadenced(0)
             .test_ok()
             .map_err(|error| std::io::Error::other(format!("first tick: {error}")))?,
         TickOutcome::Advanced {
-            folded_events: 3,
+            folded_events: 2,
             emitted_events: 2,
         }
     );
@@ -712,7 +686,7 @@ async fn run_tick_boundaries(
             emitted_events: 2,
         }
     );
-    Ok((session, pinned_wall_time))
+    Ok((session, scenario.pinned_wall_time))
 }
 
 async fn poll_events(
