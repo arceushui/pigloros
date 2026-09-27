@@ -897,12 +897,15 @@ mod tests {
         }
         fixtures.sort_by(|left, right| left.0.cmp(&right.0));
         let layers = value["layers"].as_array_mut().ok_or("fixture layers")?;
-        for (digest, bytes) in fixtures {
-            layers.push(layer(
-                &format!("migration-fixture/{}", &digest[7..]),
-                "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
-                &bytes,
-            ));
+        for (index, (digest, bytes)) in fixtures.into_iter().enumerate() {
+            layers.insert(
+                index + 3,
+                layer(
+                    &format!("schema/{}", &digest[7..]),
+                    "application/vnd.pigloros.plugin.schema.v1+json",
+                    &bytes,
+                ),
+            );
             blobs.insert(digest, bytes);
         }
         assert_eq!(
