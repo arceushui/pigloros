@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +14,7 @@ use pos_plugin_release::{
 use sha2::{Digest as _, Sha256};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 struct PrivateRoot(PathBuf);
 
@@ -134,6 +135,59 @@ fn assert_one_quarantined(root: &PrivateRoot) -> Result<(), Box<dyn std::error::
     let mut entries = fs::read_dir(root.0.join("quarantine"))?;
     assert!(entries.next().is_some());
     assert!(entries.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn open_rejects_a_symlinked_root() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let link = root.0.join("root-link");
+    std::os::unix::fs::symlink(&root.0, &link)?;
+
+    assert!(matches!(
+        LocalOciPublisherV1::open(&link),
+        Err(LocalOciPublicationErrorV1::InvalidLayout)
+    ));
+    assert_eq!(fs::read_dir(&root.0)?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn open_rejects_an_unsupported_filesystem_before_initialization(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mount = std::path::Path::new("/dev/shm");
+    let Ok(mount) = File::open(mount) else {
+        return Ok(());
+    };
+    // `/dev/shm` is conventional, but runners may mount or restrict it differently.
+    let Ok(filesystem) = rustix::fs::fstatfs(&mount) else {
+        return Ok(());
+    };
+    if u64::try_from(filesystem.f_type).ok() != Some(TMPFS_MAGIC) {
+        return Ok(());
+    }
+    let root = std::path::Path::new("/dev/shm").join(format!(
+        "pigloros-oci-public-unsupported-{}-{}",
+        std::process::id(),
+        NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+    ));
+    if fs::create_dir(&root).is_err() {
+        return Ok(());
+    }
+    if fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).is_err() {
+        let _ = fs::remove_dir(&root);
+        return Ok(());
+    }
+
+    let opened = LocalOciPublisherV1::open(&root);
+    let entries = fs::read_dir(&root)?.count();
+    fs::remove_dir(&root)?;
+
+    assert!(matches!(
+        opened,
+        Err(LocalOciPublicationErrorV1::InvalidLayout)
+    ));
+    assert_eq!(entries, 0);
     Ok(())
 }
 

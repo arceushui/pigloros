@@ -4,7 +4,9 @@ use std::io::{Read as _, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
-use rustix::fs::{self, AtFlags, Dir, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags};
+use rustix::fs::{
+    self, AtFlags, Dir, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, CWD,
+};
 
 use crate::{
     verify_oci_closure_v1, BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1,
@@ -18,6 +20,10 @@ const LOCK_NAME: &str = ".publisher.lock";
 const INDEX_NAME: &str = "published.json";
 const RELEASES_NAME: &str = "releases";
 const QUARANTINE_NAME: &str = "quarantine";
+const EXT_SUPER_MAGIC: u64 = 0xef53;
+const XFS_SUPER_MAGIC: u64 = 0x5846_5342;
+const BTRFS_SUPER_MAGIC: u64 = 0x9123_683e;
+const F2FS_SUPER_MAGIC: u64 = 0xf2f5_2010;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,17 +242,10 @@ impl LocalOciPublisherV1 {
     /// directory owned by the effective UID. Every child is then opened below
     /// the retained root descriptor with no symlink or mount traversal.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, LocalOciPublicationErrorV1> {
-        let root_path = root.as_ref();
-        if std::fs::symlink_metadata(root_path)
-            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?
-            .file_type()
-            .is_symlink()
-        {
-            return Err(LocalOciPublicationErrorV1::InvalidLayout);
-        }
-        let root = File::open(root_path).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        let root = open_root(root.as_ref())?;
         let owner = rustix::process::geteuid().as_raw();
         validate_private_directory(&root, owner)?;
+        validate_local_filesystem(&root)?;
         #[cfg(test)]
         injected_fault(PublicationFaultPointV1::InitializeReleases)?;
         create_private_directory(&root, RELEASES_NAME, owner)?;
@@ -1235,6 +1234,30 @@ fn open_directory(root: &File, name: &str) -> Result<File, LocalOciPublicationEr
     .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
     validate_private_directory(&directory, rustix::process::geteuid().as_raw())?;
     Ok(directory)
+}
+
+fn open_root(root: &Path) -> Result<File, LocalOciPublicationErrorV1> {
+    fs::openat2(
+        CWD,
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map(File::from)
+    .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)
+}
+
+fn validate_local_filesystem(root: &File) -> Result<(), LocalOciPublicationErrorV1> {
+    let filesystem = fs::fstatfs(root).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+    if matches!(
+        u64::try_from(filesystem.f_type).ok(),
+        Some(EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | F2FS_SUPER_MAGIC)
+    ) {
+        Ok(())
+    } else {
+        Err(LocalOciPublicationErrorV1::InvalidLayout)
+    }
 }
 
 fn open_private_file(root: &File, name: &str) -> Result<File, LocalOciPublicationErrorV1> {
