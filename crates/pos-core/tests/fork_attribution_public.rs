@@ -75,6 +75,16 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() {
 #[test]
 fn local_far1_rejects_reserved_import_origin_and_noncanonical_bytes() {
     let admission = admission();
+    let mut binary_creator = admission.to_canonical_cbor();
+    let creator_at = binary_creator
+        .windows(b"creator-a".len())
+        .position(|bytes| bytes == b"creator-a")
+        .expect("encoded creator");
+    binary_creator[creator_at - 1] = 0x49;
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&binary_creator),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
     let mut imported = admission.to_canonical_cbor();
     let last = imported.len() - 1;
     imported[last] = 2;
