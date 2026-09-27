@@ -397,7 +397,7 @@ jobs:
         with:
           toolchain: 1.97.1
       - name: Exercise the unsupported owned-key signing boundary
-        run: cargo test -p piglor-ledger --all-features --locked -- --include-ignored
+        run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
 
   clippy:
     name: clippy
