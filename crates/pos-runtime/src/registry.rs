@@ -5487,8 +5487,11 @@ mod tests {
             },
         )
         .test_ok();
-        registry.plugins.get_mut(&plugin.id()).test_ok().manifest_slot =
-            Some("fixture".to_owned());
+        registry
+            .plugins
+            .get_mut(&plugin.id())
+            .test_ok()
+            .manifest_slot = Some("fixture".to_owned());
         registry.manifest_batch = Some(catalog.clone());
         (registry, plugin.id(), catalog)
     }
@@ -5496,7 +5499,9 @@ mod tests {
     #[test]
     fn manifest_validation_rejects_missing_key_and_unverified_entry() {
         let (mut registry, id, catalog) = manifest_validation_fixture();
-        registry.validate_complete_manifest_batch(&catalog).test_ok();
+        registry
+            .validate_complete_manifest_batch(&catalog)
+            .test_ok();
 
         let other_id = PluginId::new();
         let entry = registry.plugins.shift_remove(&id).test_ok();
@@ -5515,14 +5520,25 @@ mod tests {
         ));
         registry.plugins.get_mut(&id).test_ok().registration = saved_registration;
 
-        let saved_admission = registry.plugins.get_mut(&id).test_ok().output_admission.take();
+        let saved_admission = registry
+            .plugins
+            .get_mut(&id)
+            .test_ok()
+            .output_admission
+            .take();
         assert!(matches!(
             registry.validate_complete_manifest_batch(&catalog),
             Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
         ));
         registry.plugins.get_mut(&id).test_ok().output_admission = saved_admission;
 
-        let verified = registry.plugins.get_mut(&id).test_ok().output_admission.take().test_ok();
+        let verified = registry
+            .plugins
+            .get_mut(&id)
+            .test_ok()
+            .output_admission
+            .take()
+            .test_ok();
         let unverified = OutputAdmissionV1::try_new(
             id,
             &catalog.as_input().rows[0].plugin_version,
@@ -5536,17 +5552,24 @@ mod tests {
             Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
         ));
         registry.plugins.get_mut(&id).test_ok().output_admission = Some(verified);
-        registry.validate_complete_manifest_batch(&catalog).test_ok();
+        registry
+            .validate_complete_manifest_batch(&catalog)
+            .test_ok();
     }
 
     #[test]
     fn manifest_validation_rejects_unavailable_and_wrong_pin() {
         let (mut registry, id, catalog) = manifest_validation_fixture();
-        let valid = registry.plugins.get(&id).test_ok().registration.as_ref().test_ok().clone();
-        let disabled = PluginRegistrationV1::new(
-            valid.pin().clone(),
-            PluginAvailabilityV1::Disabled,
-        );
+        let valid = registry
+            .plugins
+            .get(&id)
+            .test_ok()
+            .registration
+            .as_ref()
+            .test_ok()
+            .clone();
+        let disabled =
+            PluginRegistrationV1::new(valid.pin().clone(), PluginAvailabilityV1::Disabled);
         registry.plugins.get_mut(&id).test_ok().registration = Some(disabled);
         assert!(matches!(
             registry.validate_complete_manifest_batch(&catalog),
@@ -5568,7 +5591,9 @@ mod tests {
             Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
         ));
         registry.plugins.get_mut(&id).test_ok().registration = Some(valid);
-        registry.validate_complete_manifest_batch(&catalog).test_ok();
+        registry
+            .validate_complete_manifest_batch(&catalog)
+            .test_ok();
     }
 
     fn plugin_with_caps(
