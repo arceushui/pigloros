@@ -6210,11 +6210,35 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
             )
             .optional()
             .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?
-            .map(|bytes| {
-                ForkAdmissionRecordV1::from_canonical_cbor(&bytes)
-                    .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)
-            })
+            .map(|bytes| ForkAdmissionRecordV1::from_canonical_cbor(&bytes).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority))
             .transpose()
+            .and_then(|admission| {
+                admission.map_or(Ok(None), |admission| {
+                    let child = self.get_timeline(child_id).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?
+                        .ok_or(ForkAdmissionErrorV1::CorruptAuthority)?;
+                    let input = admission.input();
+                    if input.child_timeline_id != child_id
+                        || child.meta.fork_point != Some((input.parent_timeline_id, Seq::from_u64(input.parent_logical_head)))
+                        || self.compute_chain_hash_at(input.parent_timeline_id, Seq::from_u64(input.parent_logical_head)).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)? != input.parent_chain_head_hash
+                    { return Err(ForkAdmissionErrorV1::CorruptAuthority); }
+                    let mut rows = self.conn.prepare("SELECT operation_id, principal_digest, owner_id, pob1_cbor FROM fork_principal_owner_bindings").map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
+                    let mut bindings = rows.query([]).map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
+                    let mut matches = 0_u8;
+                    while let Some(row) = bindings.next().map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)? {
+                        let operation: Vec<u8> = row.get(0).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+                        let principal: Vec<u8> = row.get(1).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+                        let owner: String = row.get(2).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+                        let bytes: Vec<u8> = row.get(3).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+                        let operation = Hash::from_bytes(operation.as_slice().try_into().map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?);
+                        let principal = Hash::from_bytes(principal.as_slice().try_into().map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?);
+                        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 { operation_id: operation, principal_digest: principal, owner: OwnerIdV1::new(owner).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?, origin: ForkAuthorityOriginV1::Local })?;
+                        if binding.to_canonical_cbor() != bytes { return Err(ForkAdmissionErrorV1::CorruptAuthority); }
+                        if binding.digest() == input.principal_owner_binding_digest && binding.input().owner == input.creator { matches = matches.saturating_add(1); }
+                    }
+                    if matches != 1 { return Err(ForkAdmissionErrorV1::CorruptAuthority); }
+                    Ok(Some(admission))
+                })
+            })
     }
 }
 
