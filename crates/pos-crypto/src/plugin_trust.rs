@@ -31,6 +31,9 @@ pub enum PluginTrustErrorV1 {
     /// A chain link or cumulative set is invalid.
     #[error("Plugin trust chain is discontinuous")]
     ChainDiscontinuity,
+    /// An authenticated complete-record digest does not match its required link.
+    #[error("Plugin trust record digest link differs")]
+    DigestMismatch,
     /// Terminal signed metadata is not valid at the supplied UTC second.
     #[error("terminal Plugin trust metadata is expired or not yet valid")]
     Expired,
@@ -236,6 +239,8 @@ pub struct VerifiedPluginTrustEvidenceV1 {
     grants: Vec<Grant>,
     revoked_keys: BTreeSet<PublisherKey>,
     revoked_artifacts: BTreeSet<[u8; 32]>,
+    terminal_revoked_key_count: usize,
+    terminal_revoked_artifact_count: usize,
 }
 
 impl VerifiedPluginTrustEvidenceV1 {
@@ -308,12 +313,16 @@ impl VerifiedPluginTrustEvidenceV1 {
     ///
     /// # Errors
     /// Returns a closed error when the projection is incomplete, its exact
-    /// publisher or Plugin ID is unauthorized, its interval is invalid at this
-    /// evidence's UTC second, or a key or digest is effectively revoked.
+    /// publisher or Plugin ID is unauthorized, the terminal revocation record
+    /// is capacity-bound, its interval is invalid at this evidence's UTC
+    /// second, or a key or digest is effectively revoked.
     pub fn authorize_release(
         &self,
         manifest: &ValidatedPluginManifestProjectionV1,
     ) -> Result<ResolvedPluginTrustAuthorizationV1, PluginTrustErrorV1> {
+        if self.terminal_revoked_key_count == 4096 || self.terminal_revoked_artifact_count == 4096 {
+            return Err(PluginTrustErrorV1::RevocationCapacityExhausted);
+        }
         validate_manifest_projection(manifest)?;
         if self.evaluation_utc_second < manifest.not_before
             || self.evaluation_utc_second >= manifest.expires
@@ -1000,12 +1009,14 @@ fn verify_root_history(
         publisher_publics.extend(root.publishers.iter().map(|key| key.public));
         let previous = index.checked_sub(1).map(|index| &roots[index]);
         if let Some(previous) = previous {
+            if root.previous != Some(previous.digest) {
+                return Err(PluginTrustErrorV1::DigestMismatch);
+            }
             if root.version
                 != previous
                     .version
                     .checked_add(1)
                     .ok_or(PluginTrustErrorV1::ChainDiscontinuity)?
-                || root.previous != Some(previous.digest)
             {
                 return Err(PluginTrustErrorV1::ChainDiscontinuity);
             }
@@ -1049,7 +1060,7 @@ fn verify_revocation_history(
         let root_index = roots
             .iter()
             .position(|root| root.digest == revocation.root_digest)
-            .ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
+            .ok_or(PluginTrustErrorV1::DigestMismatch)?;
         if root_index < previous_root_index {
             return Err(PluginTrustErrorV1::ChainDiscontinuity);
         }
@@ -1070,10 +1081,10 @@ fn verify_revocation_history(
         }
         if let Some(prior_index) = index.checked_sub(1) {
             let prior = &revocations[prior_index];
-            if revocation.previous != Some(prior.digest)
-                || revocation.epoch <= prior.epoch
-                || revocation.tick < prior.tick
-            {
+            if revocation.previous != Some(prior.digest) {
+                return Err(PluginTrustErrorV1::DigestMismatch);
+            }
+            if revocation.epoch <= prior.epoch || revocation.tick < prior.tick {
                 return Err(PluginTrustErrorV1::ChainDiscontinuity);
             }
             validate_cumulative_keys(&prior.keys, &revocation.keys, revocation.tick)?;
@@ -1082,11 +1093,12 @@ fn verify_revocation_history(
                 &revocation.artifacts,
                 revocation.tick,
             )?;
-        } else if revocation.previous.is_some()
-            || revocation
-                .keys
-                .iter()
-                .any(|entry| entry.tick != revocation.tick)
+        } else if revocation.previous.is_some() {
+            return Err(PluginTrustErrorV1::DigestMismatch);
+        } else if revocation
+            .keys
+            .iter()
+            .any(|entry| entry.tick != revocation.tick)
             || revocation
                 .artifacts
                 .iter()
@@ -1100,7 +1112,7 @@ fn verify_revocation_history(
         .ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
     let terminal_root = roots.last().ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
     if terminal.root_digest != terminal_root.digest {
-        return Err(PluginTrustErrorV1::ChainDiscontinuity);
+        return Err(PluginTrustErrorV1::DigestMismatch);
     }
     if evaluation_utc_second < terminal.not_before || evaluation_utc_second >= terminal.expires {
         return Err(PluginTrustErrorV1::Expired);
@@ -1164,6 +1176,8 @@ pub fn verify_plugin_trust_v1(
             .filter(|entry| entry.tick <= evaluation_tick)
             .map(|entry| entry.digest)
             .collect(),
+        terminal_revoked_key_count: terminal_revocation.keys.len(),
+        terminal_revoked_artifact_count: terminal_revocation.artifacts.len(),
     })
 }
 
@@ -1328,6 +1342,33 @@ mod tests {
             release_digest: [0x22; 32],
             descriptor_digests: vec![[0x33; 32]],
         })
+    }
+
+    fn capacity_evidence(
+        terminal_revoked_key_count: usize,
+        terminal_revoked_artifact_count: usize,
+    ) -> VerifiedPluginTrustEvidenceV1 {
+        VerifiedPluginTrustEvidenceV1 {
+            scope: "scope".to_owned(),
+            root_version: 1,
+            root_digest: [0; 32],
+            policy_epoch: 1,
+            revocation_digest: [1; 32],
+            evaluation_utc_second: 50,
+            evaluation_tick: 5,
+            root_validity: (0, 100),
+            revocation_validity: (0, 100),
+            root_keys: Vec::new(),
+            publishers: Vec::new(),
+            grants: Vec::new(),
+            // The terminal entries are future-effective, so the public
+            // effective sets must remain empty while their terminal counts
+            // still close release authorization at V1 capacity.
+            revoked_keys: BTreeSet::new(),
+            revoked_artifacts: BTreeSet::new(),
+            terminal_revoked_key_count,
+            terminal_revoked_artifact_count,
+        }
     }
 
     fn revoked_artifact(digest: [u8; 32], tick: u64) -> Value {
@@ -1595,6 +1636,109 @@ mod tests {
                 Err(PluginTrustErrorV1::ArtifactRevoked)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_revocation_capacity_closes_authorization_for_future_entries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for counts in [(4096, 0), (0, 4096)] {
+            let evidence = capacity_evidence(counts.0, counts.1);
+            assert_eq!(evidence.effective_key_revocations().count(), 0);
+            assert_eq!(evidence.effective_artifact_revocations().count(), 0);
+            assert_eq!(
+                evidence.authorize_release(&manifest_projection()?),
+                Err(PluginTrustErrorV1::RevocationCapacityExhausted)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verifier_keeps_terminal_artifact_capacity_when_entries_are_future_effective(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, _, root, _) = fixture()?;
+        let root_digest = *blake3::hash(&root).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
+        let artifacts = (0..4096_u32)
+            .map(|index| {
+                let mut digest = [0; 32];
+                digest[..4].copy_from_slice(&index.to_be_bytes());
+                revoked_artifact(digest, 10)
+            })
+            .collect();
+        let mut fields = revocation_fields(root_digest, 1, None, artifacts);
+        fields[8] = unsigned(10);
+        let revocation = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
+
+        let evidence = verify_plugin_trust_v1(&anchor, &[&root], &[&revocation], 50, 5)?;
+        assert_eq!(evidence.terminal_revoked_artifact_count, 4096);
+        assert_eq!(evidence.effective_artifact_revocations().count(), 0);
+        assert_eq!(
+            evidence.authorize_release(&manifest_projection()?),
+            Err(PluginTrustErrorV1::RevocationCapacityExhausted)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verifier_keeps_terminal_key_capacity_when_entries_are_future_effective(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let signer = SigningKey::from_bytes(&[7; 32]);
+        let mut roots = Vec::new();
+        let mut revoked_keys = Vec::new();
+        let mut previous = None;
+
+        // A PTR1 can name 256 publisher keys. Sixteen linked PTR1 records
+        // therefore make all 4096 distinct future-effective PRV1 entries
+        // known to the verifier without making any of them effective at Tick 5.
+        for root_index in 0_u16..16 {
+            let mut publishers = Vec::new();
+            for publisher_index in 0_u16..256 {
+                let mut seed = [0; 32];
+                seed[..2].copy_from_slice(&root_index.to_be_bytes());
+                seed[2..4].copy_from_slice(&publisher_index.to_be_bytes());
+                seed[31] = 1;
+                let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+                let owner = format!("owner-{root_index:02}-{publisher_index:03}");
+                publishers.push(Value::Array(vec![
+                    Value::Text(owner.clone()),
+                    unsigned(3),
+                    unsigned(1),
+                    bytes(public),
+                ]));
+                revoked_keys.push(Value::Array(vec![
+                    Value::Text(owner),
+                    unsigned(3),
+                    unsigned(1),
+                    bytes(public),
+                    unsigned(10),
+                    unsigned(1),
+                    Value::Null,
+                ]));
+            }
+            let mut fields = root_fields(&signer, [0; 32], u64::from(root_index) + 1, previous);
+            fields[9] = Value::Array(publishers);
+            fields[10] = Value::Array(Vec::new());
+            let root = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+            previous = Some(*blake3::hash(&root).as_bytes());
+            roots.push(root);
+        }
+        let terminal_root_digest = *blake3::hash(&roots[15]).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&roots[0]).as_bytes())?;
+        let mut fields = revocation_fields(terminal_root_digest, 1, None, Vec::new());
+        fields[8] = unsigned(10);
+        fields[9] = Value::Array(revoked_keys);
+        let revocation = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
+        let root_references = roots.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+        let evidence = verify_plugin_trust_v1(&anchor, &root_references, &[&revocation], 50, 5)?;
+        assert_eq!(evidence.terminal_revoked_key_count, 4096);
+        assert_eq!(evidence.effective_key_revocations().count(), 0);
+        assert_eq!(
+            evidence.authorize_release(&manifest_projection()?),
+            Err(PluginTrustErrorV1::RevocationCapacityExhausted)
+        );
         Ok(())
     }
 
@@ -2515,6 +2659,16 @@ mod tests {
             Err(PluginTrustErrorV1::ChainDiscontinuity)
         ));
 
+        let wrong_previous = signed_record(
+            root_fields(&signer, publisher, 2, Some([0; 32])),
+            ROOT_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root, &wrong_previous], &[&revocation], 50, 5),
+            Err(PluginTrustErrorV1::DigestMismatch)
+        ));
+
         let alias_public = signer.verifying_key().to_bytes();
         let alias_root = signed_record(
             root_fields(&signer, alias_public, 1, None),
@@ -2532,7 +2686,13 @@ mod tests {
         let bad_initial_previous = self::revocation(&signer, digest, 1, Some([0; 32]), Vec::new())?;
         assert!(matches!(
             verify_plugin_trust_v1(&anchor, &[&root], &[&bad_initial_previous], 50, 5),
-            Err(PluginTrustErrorV1::ChainDiscontinuity)
+            Err(PluginTrustErrorV1::DigestMismatch)
+        ));
+
+        let unknown_root = self::revocation(&signer, [0; 32], 1, None, Vec::new())?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&unknown_root], 50, 5),
+            Err(PluginTrustErrorV1::DigestMismatch)
         ));
 
         let repeated_epoch = self::revocation(
@@ -2551,7 +2711,7 @@ mod tests {
         let rotated = rotated_root(&new_signer, publisher, digest, &[&signer, &new_signer])?;
         assert!(matches!(
             verify_plugin_trust_v1(&anchor, &[&root, &rotated], &[&revocation], 50, 5),
-            Err(PluginTrustErrorV1::ChainDiscontinuity)
+            Err(PluginTrustErrorV1::DigestMismatch)
         ));
         Ok(())
     }
