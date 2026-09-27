@@ -240,12 +240,24 @@ struct ActiveGraph {
 }
 
 fn completed_graph(
+    targets: Vec<ErasureRequiredTargetV1>,
+    lineage_rule: Option<ErasureReferenceV1>,
+) -> Result<CompletedGraph, ErasureErrorV1> {
+    completed_graph_with_affected_timeline(targets, lineage_rule, None)
+}
+
+fn completed_graph_with_affected_timeline(
     mut targets: Vec<ErasureRequiredTargetV1>,
     lineage_rule: Option<ErasureReferenceV1>,
+    affected_timeline: Option<TimelineId>,
 ) -> Result<CompletedGraph, ErasureErrorV1> {
     targets.sort_unstable();
     let request = request()?;
     let port = port(targets.clone(), lineage_rule);
+    let port = match affected_timeline {
+        Some(timeline) => port.with_verified_topology(vec![(timeline, reference(7))], Vec::new()),
+        None => port,
+    };
     let adapter = port.clone();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     coordinator.submit(request.clone(), request.provenance())?;
@@ -1094,7 +1106,7 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
             ERASURE_SCOPE_COMMITMENT_TAG_V1,
             SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD,
             Value::Bytes(reference(250).digest().to_vec()),
-            ErasureErrorV1::ScopeInvalid,
+            ErasureErrorV1::ProvenanceMissing,
         ),
         (
             MANIFEST_FREEZE_PROVENANCE_FIELD,
@@ -1564,14 +1576,18 @@ fn fork_preparation_rejects_unbound_child_metadata() -> Result<(), ErasureErrorV
 #[test]
 fn coordinator_verifies_complete_nonempty_inventory() -> Result<(), ErasureErrorV1> {
     let lineage_rule = reference(170);
-    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let timeline = TimelineId::new();
+    let graph = completed_graph_with_affected_timeline(
+        vec![target(10)],
+        Some(lineage_rule),
+        Some(timeline),
+    )?;
     let request = graph.request.reference();
     let manifest = graph
         .adapter
         .current_manifest(request)
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .digest();
-    let timeline = TimelineId::new();
     let observation = ErasureInventoryObservationV1::new(
         vec![(request, manifest)],
         vec![timeline],
