@@ -500,6 +500,14 @@ fn read_root_keys(
     Ok(keys)
 }
 
+fn read_root_threshold(reader: &mut Reader<'_>) -> Result<usize, PluginTrustErrorV1> {
+    let threshold = reader.unsigned()?;
+    if !(1..=32).contains(&threshold) {
+        return Err(PluginTrustErrorV1::InvalidEncoding);
+    }
+    Ok(usize::from(threshold.to_le_bytes()[0]))
+}
+
 fn read_publishers(reader: &mut Reader<'_>) -> Result<Vec<PublisherKey>, PluginTrustErrorV1> {
     let publisher_count = reader.array(256)?;
     let mut publishers = Vec::with_capacity(publisher_count);
@@ -563,8 +571,7 @@ impl PluginTrustRootRecordV1 {
         }
         let (not_before, expires) = read_interval(&mut reader)?;
         let previous = reader.optional_bytes()?;
-        let threshold =
-            usize::try_from(reader.unsigned()?).map_err(|_| PluginTrustErrorV1::InvalidEncoding)?;
+        let threshold = read_root_threshold(&mut reader)?;
         let keys = read_root_keys(&mut reader, threshold)?;
         let publishers = read_publishers(&mut reader)?;
         let grants = read_grants(&mut reader, &publishers)?;
