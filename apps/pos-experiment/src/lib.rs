@@ -9243,7 +9243,7 @@ mod fault_injection_tests {
                 })),
             )
             .test_ok();
-        drop(pos_store::sqlite::SqliteStore::open(&path).test_ok());
+        drop(pos_store::sqlite::SqliteStore::open(path.to_str().test_ok()).test_ok());
         Connection::open(&path)
             .test_ok()
             .execute_batch(
@@ -9378,7 +9378,7 @@ mod fault_injection_tests {
                 })),
             )
             .test_ok();
-        drop(pos_store::sqlite::SqliteStore::open(&path).test_ok());
+        drop(pos_store::sqlite::SqliteStore::open(path.to_str().test_ok()).test_ok());
         Connection::open(&path)
             .test_ok()
             .execute_batch(
