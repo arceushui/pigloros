@@ -55,6 +55,7 @@ enum PublicationFaultPointV1 {
     QuarantineDirectorySync,
     QuarantineRootSync,
     RecoveryCleanupSync,
+    DirectoryRead,
     NthSync(usize),
 }
 
@@ -798,10 +799,14 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
 fn directory_entries(
     directory: &File,
 ) -> Result<impl Iterator<Item = String> + use<>, LocalOciPublicationErrorV1> {
-    let entries = Dir::read_from(directory)
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    let entries = faulted_io!(
+        fault_selected(PublicationFaultPointV1::DirectoryRead),
+        rustix::io::Errno::IO,
+        Dir::read_from(directory)
+    )
+    .map_err(|_| LocalOciPublicationErrorV1::Io)?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|_| LocalOciPublicationErrorV1::Io)?;
     let names = entries
         .into_iter()
         .map(|entry| {
@@ -1541,6 +1546,30 @@ mod tests {
             assert!(publisher.recover_all()?.committed.is_empty());
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn directory_read_faults_fail_closed_at_public_boundaries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root("directory-read")?;
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        let bundle = bundle()?;
+        let address = bundle.address().clone();
+        assert_eq!(
+            publisher.publish(&bundle)?,
+            PublishOutcomeV1::Published(address.clone())
+        );
+        PUBLICATION_FAULT.with(|fault| fault.set(Some(PublicationFaultPointV1::DirectoryRead)));
+        assert_eq!(publisher.recover_all(), Err(LocalOciPublicationErrorV1::Io));
+        assert_eq!(
+            publisher.read_verified(&address),
+            Err(ReleaseSourceErrorV1::Io)
+        );
+        PUBLICATION_FAULT.with(|fault| fault.set(None));
+        assert_eq!(publisher.read_verified(&address)?, bundle);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
