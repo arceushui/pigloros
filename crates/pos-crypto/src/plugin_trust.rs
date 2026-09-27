@@ -1047,35 +1047,44 @@ mod tests {
         version: u64,
         previous: Option<[u8; 32]>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let public = signer.verifying_key().to_bytes();
         signed_record(
-            vec![
-                Value::Text("PTR1".to_owned()),
-                unsigned(1),
-                Value::Text("scope".to_owned()),
-                unsigned(version),
-                signed(0),
-                signed(100),
-                previous.map_or(Value::Null, bytes),
-                unsigned(1),
-                Value::Array(vec![Value::Array(vec![
-                    bytes(root_key_id(public)),
-                    bytes(public),
-                ])]),
-                Value::Array(vec![Value::Array(vec![
-                    Value::Text("publisher".to_owned()),
-                    unsigned(3),
-                    unsigned(1),
-                    bytes(publisher),
-                ])]),
-                Value::Array(vec![Value::Array(vec![
-                    Value::Text("plugin-a".to_owned()),
-                    Value::Text("publisher".to_owned()),
-                ])]),
-            ],
+            root_fields(signer, publisher, version, previous),
             ROOT_SIGNATURE_DOMAIN,
             &[signer],
         )
+    }
+
+    fn root_fields(
+        signer: &SigningKey,
+        publisher: [u8; 32],
+        version: u64,
+        previous: Option<[u8; 32]>,
+    ) -> Vec<Value> {
+        let public = signer.verifying_key().to_bytes();
+        vec![
+            Value::Text("PTR1".to_owned()),
+            unsigned(1),
+            Value::Text("scope".to_owned()),
+            unsigned(version),
+            signed(0),
+            signed(100),
+            previous.map_or(Value::Null, bytes),
+            unsigned(1),
+            Value::Array(vec![Value::Array(vec![
+                bytes(root_key_id(public)),
+                bytes(public),
+            ])]),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("publisher".to_owned()),
+                unsigned(3),
+                unsigned(1),
+                bytes(publisher),
+            ])]),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("plugin-a".to_owned()),
+                Value::Text("publisher".to_owned()),
+            ])]),
+        ]
     }
 
     fn revocation(
@@ -1086,22 +1095,31 @@ mod tests {
         revoked_artifacts: Vec<Value>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         signed_record(
-            vec![
-                Value::Text("PRV1".to_owned()),
-                unsigned(1),
-                Value::Text("scope".to_owned()),
-                unsigned(epoch),
-                signed(0),
-                signed(100),
-                bytes(root_digest),
-                previous.map_or(Value::Null, bytes),
-                unsigned(5),
-                Value::Array(Vec::new()),
-                Value::Array(revoked_artifacts),
-            ],
+            revocation_fields(root_digest, epoch, previous, revoked_artifacts),
             REVOCATION_SIGNATURE_DOMAIN,
             &[signer],
         )
+    }
+
+    fn revocation_fields(
+        root_digest: [u8; 32],
+        epoch: u64,
+        previous: Option<[u8; 32]>,
+        revoked_artifacts: Vec<Value>,
+    ) -> Vec<Value> {
+        vec![
+            Value::Text("PRV1".to_owned()),
+            unsigned(1),
+            Value::Text("scope".to_owned()),
+            unsigned(epoch),
+            signed(0),
+            signed(100),
+            bytes(root_digest),
+            previous.map_or(Value::Null, bytes),
+            unsigned(5),
+            Value::Array(Vec::new()),
+            Value::Array(revoked_artifacts),
+        ]
     }
 
     fn fixture() -> Result<(SigningKey, [u8; 32], Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
@@ -1361,6 +1379,294 @@ mod tests {
         assert!(matches!(
             PluginTrustRootRecordV1::decode(&noncanonical),
             Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn signed_schema_and_type_vectors_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, _, root, revocation) = fixture()?;
+        let anchor = TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&root).as_bytes())?;
+        let mut roots = Vec::new();
+        for (index, value) in [
+            (0, Value::Text("PRV1".to_owned())),
+            (1, unsigned(2)),
+            (2, Value::Text("Scope".to_owned())),
+            (3, Value::Text("one".to_owned())),
+            (4, Value::Text("zero".to_owned())),
+            (6, unsigned(0)),
+            (7, Value::Text("one".to_owned())),
+            (8, bytes([0_u8; 32])),
+            (9, Value::Text("publishers".to_owned())),
+            (10, Value::Text("grants".to_owned())),
+        ] {
+            let mut fields = root_fields(
+                &signer,
+                SigningKey::from_bytes(&[8; 32]).verifying_key().to_bytes(),
+                1,
+                None,
+            );
+            fields[index] = value;
+            roots.push(signed_record(fields, ROOT_SIGNATURE_DOMAIN, &[&signer])?);
+        }
+        for malformed in roots {
+            assert!(matches!(
+                PluginTrustRootRecordV1::decode(&malformed),
+                Err(PluginTrustErrorV1::InvalidEncoding)
+            ));
+            assert!(verify_plugin_trust_v1(&anchor, &[&malformed], &[&revocation], 50, 5).is_err());
+        }
+
+        let root_digest = *blake3::hash(&root).as_bytes();
+        let mut revocations = Vec::new();
+        for (index, value) in [
+            (0, Value::Text("PTR1".to_owned())),
+            (1, unsigned(2)),
+            (2, Value::Text("Scope".to_owned())),
+            (3, unsigned(0)),
+            (4, Value::Text("zero".to_owned())),
+            (6, Value::Text("digest".to_owned())),
+            (7, unsigned(0)),
+            (8, Value::Text("tick".to_owned())),
+            (9, Value::Text("keys".to_owned())),
+            (10, Value::Text("artifacts".to_owned())),
+        ] {
+            let mut fields = revocation_fields(root_digest, 1, None, Vec::new());
+            fields[index] = value;
+            revocations.push(signed_record(
+                fields,
+                REVOCATION_SIGNATURE_DOMAIN,
+                &[&signer],
+            )?);
+        }
+        for malformed in revocations {
+            assert!(matches!(
+                PluginRevocationRecordV1::decode(&malformed),
+                Err(PluginTrustErrorV1::InvalidEncoding)
+            ));
+            assert!(verify_plugin_trust_v1(&anchor, &[&root], &[&malformed], 50, 5).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signed_order_identity_threshold_and_expiry_vectors_are_checked(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, root, _) = fixture()?;
+        let other = SigningKey::from_bytes(&[9; 32]);
+        let root_digest = *blake3::hash(&root).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
+
+        let invalid_public = (1_u8..=255)
+            .map(|byte| [byte; 32])
+            .find(|public| VerifyingKey::from_bytes(public).is_err())
+            .ok_or("expected an invalid Ed25519 public key")?;
+        let mut invalid_root_key = root_fields(&signer, publisher, 1, None);
+        invalid_root_key[8] = Value::Array(vec![Value::Array(vec![
+            bytes(root_key_id(invalid_public)),
+            bytes(invalid_public),
+        ])]);
+        let invalid_root_key = signed_record(invalid_root_key, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            PluginTrustRootRecordV1::decode(&invalid_root_key),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+
+        let mut mismatched_key_id = root_fields(&signer, publisher, 1, None);
+        mismatched_key_id[8] = Value::Array(vec![Value::Array(vec![
+            bytes([0; 32]),
+            bytes(signer.verifying_key().to_bytes()),
+        ])]);
+        let mismatched_key_id =
+            signed_record(mismatched_key_id, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            PluginTrustRootRecordV1::decode(&mismatched_key_id),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+
+        let mut duplicate_publisher = root_fields(&signer, publisher, 1, None);
+        duplicate_publisher[9] = Value::Array(vec![
+            Value::Array(vec![
+                Value::Text("publisher".to_owned()),
+                unsigned(3),
+                unsigned(1),
+                bytes(publisher),
+            ]),
+            Value::Array(vec![
+                Value::Text("publisher".to_owned()),
+                unsigned(3),
+                unsigned(1),
+                bytes(other.verifying_key().to_bytes()),
+            ]),
+        ]);
+        let duplicate_publisher =
+            signed_record(duplicate_publisher, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            PluginTrustRootRecordV1::decode(&duplicate_publisher),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+
+        let mut unordered_grants = root_fields(&signer, publisher, 1, None);
+        unordered_grants[10] = Value::Array(vec![
+            Value::Array(vec![
+                Value::Text("plugin-z".to_owned()),
+                Value::Text("publisher".to_owned()),
+            ]),
+            Value::Array(vec![
+                Value::Text("plugin-a".to_owned()),
+                Value::Text("publisher".to_owned()),
+            ]),
+        ]);
+        let unordered_grants = signed_record(unordered_grants, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            PluginTrustRootRecordV1::decode(&unordered_grants),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+
+        let mut ungranted_owner = root_fields(&signer, publisher, 1, None);
+        ungranted_owner[10] = Value::Array(vec![Value::Array(vec![
+            Value::Text("plugin-a".to_owned()),
+            Value::Text("different-owner".to_owned()),
+        ])]);
+        let ungranted_owner = signed_record(ungranted_owner, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            PluginTrustRootRecordV1::decode(&ungranted_owner),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+
+        let mut key_revocation_fields = revocation_fields(root_digest, 1, None, Vec::new());
+        key_revocation_fields[9] = Value::Array(vec![Value::Array(vec![
+            Value::Text("publisher".to_owned()),
+            unsigned(3),
+            unsigned(1),
+            bytes(publisher),
+            unsigned(5),
+            unsigned(1),
+            Value::Array(vec![
+                Value::Text("publisher".to_owned()),
+                unsigned(3),
+                unsigned(1),
+                bytes(publisher),
+            ]),
+        ])]);
+        let key_revocation = signed_record(
+            key_revocation_fields.clone(),
+            REVOCATION_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        let evidence = verify_plugin_trust_v1(&anchor, &[&root], &[&key_revocation], 50, 5)?;
+        assert_eq!(
+            evidence.effective_key_revocations().collect::<Vec<_>>(),
+            vec![(pos_core::OwnerIdV1::new("publisher")?, 1, publisher)]
+        );
+        key_revocation_fields[9] = Value::Array(vec![Value::Array(vec![
+            Value::Text("publisher".to_owned()),
+            unsigned(3),
+            unsigned(1),
+            bytes(other.verifying_key().to_bytes()),
+            unsigned(5),
+            unsigned(1),
+            Value::Null,
+        ])]);
+        let foreign_key_revocation = signed_record(
+            key_revocation_fields,
+            REVOCATION_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&foreign_key_revocation], 50, 5),
+            Err(PluginTrustErrorV1::ChainDiscontinuity)
+        ));
+
+        let mut threshold_root = root_fields(&signer, publisher, 1, None);
+        let signer_public = signer.verifying_key().to_bytes();
+        let other_public = other.verifying_key().to_bytes();
+        let mut keys = [
+            (root_key_id(signer_public), signer_public),
+            (root_key_id(other_public), other_public),
+        ];
+        keys.sort_by_key(|(id, _)| *id);
+        let mut reversed_root_keys = root_fields(&signer, publisher, 1, None);
+        reversed_root_keys[8] = Value::Array(
+            keys.iter()
+                .rev()
+                .map(|(id, public)| Value::Array(vec![bytes(*id), bytes(*public)]))
+                .collect(),
+        );
+        let reversed_root_keys =
+            signed_record(reversed_root_keys, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
+        assert!(matches!(
+            PluginTrustRootRecordV1::decode(&reversed_root_keys),
+            Err(PluginTrustErrorV1::InvalidEncoding)
+        ));
+        threshold_root[7] = unsigned(2);
+        threshold_root[8] = Value::Array(
+            keys.into_iter()
+                .map(|(id, public)| Value::Array(vec![bytes(id), bytes(public)]))
+                .collect(),
+        );
+        let threshold_root =
+            signed_record(threshold_root, ROOT_SIGNATURE_DOMAIN, &[&signer, &other])?;
+        let threshold_digest = *blake3::hash(&threshold_root).as_bytes();
+        let threshold_anchor = TrustedPluginRootAnchorV1::new("scope", threshold_digest)?;
+        let threshold_revocation = signed_record(
+            revocation_fields(threshold_digest, 1, None, Vec::new()),
+            REVOCATION_SIGNATURE_DOMAIN,
+            &[&signer, &other],
+        )?;
+        assert!(verify_plugin_trust_v1(
+            &threshold_anchor,
+            &[&threshold_root],
+            &[&threshold_revocation],
+            50,
+            5
+        )
+        .is_ok());
+        let under_threshold = signed_record(
+            root_fields(&signer, publisher, 1, None)
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| match index {
+                    7 => unsigned(2),
+                    8 => Value::Array(
+                        keys.iter()
+                            .map(|(id, public)| Value::Array(vec![bytes(*id), bytes(*public)]))
+                            .collect(),
+                    ),
+                    _ => value,
+                })
+                .collect(),
+            ROOT_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        let under_threshold_anchor =
+            TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&under_threshold).as_bytes())?;
+        assert!(matches!(
+            verify_plugin_trust_v1(
+                &under_threshold_anchor,
+                &[&under_threshold],
+                &[&threshold_revocation],
+                50,
+                5
+            ),
+            Err(PluginTrustErrorV1::ThresholdNotMet)
+        ));
+
+        let mut starting_revocation_fields = revocation_fields(root_digest, 1, None, Vec::new());
+        starting_revocation_fields[4] = signed(50);
+        let starts_at_fifty = signed_record(
+            starting_revocation_fields,
+            REVOCATION_SIGNATURE_DOMAIN,
+            &[&signer],
+        )?;
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&starts_at_fifty], 49, 5),
+            Err(PluginTrustErrorV1::Expired)
+        ));
+        assert!(verify_plugin_trust_v1(&anchor, &[&root], &[&starts_at_fifty], 50, 5).is_ok());
+        assert!(matches!(
+            verify_plugin_trust_v1(&anchor, &[&root], &[&starts_at_fifty], 100, 5),
+            Err(PluginTrustErrorV1::Expired)
         ));
         Ok(())
     }
