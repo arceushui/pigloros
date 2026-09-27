@@ -369,3 +369,24 @@ fn recipient_owner_public_contract_rejects_private_material_size_and_bytes(
     }
     Ok(())
 }
+
+#[test]
+fn recipient_owner_public_contract_rejects_directory_that_becomes_unsafe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, _) = enrolled_owner()?;
+    let directory = temporary.path().join("recipient-private");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_destruction_is_idempotent_after_receipt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_, mut store, owner, descriptor) = enrolled_owner()?;
+    let authorization = Hash::from_bytes([42; 32]);
+    store.destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)?;
+    store.destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    Ok(())
+}
