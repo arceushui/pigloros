@@ -8,7 +8,7 @@ use pos_crypto::{
         sign_local_fork_manifest_signature_only, verify_local_fork_manifest_signature_only,
     },
     key_roles::SigningKeyMaterial,
-    signing::{generate_keypair, public_key_from_verifying_key},
+    signing::{generate_keypair, public_key_from_verifying_key, verifying_key_from_public_key},
 };
 
 const fn hash(value: u8) -> Hash {
@@ -65,6 +65,11 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
         pos_core::PublicKey::from_bytes([0; 32])
     )
     .is_err());
+    let invalid_public_key = (0..=u8::MAX)
+        .map(|byte| pos_core::PublicKey::from_bytes([byte; 32]))
+        .find(|key| verifying_key_from_public_key(key).is_err())
+        .ok_or("no invalid compressed public key fixture")?;
+    assert!(verify_local_fork_manifest_signature_only(&signed, invalid_public_key).is_err());
     Ok(())
 }
 

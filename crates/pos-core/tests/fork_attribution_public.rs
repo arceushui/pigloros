@@ -63,6 +63,8 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() -> Result<(), Box<dyn st
         manifest,
         pos_core::Signature::from_bytes([9; 64]),
     )?;
+    assert_eq!(outer.manifest().to_canonical_cbor(), outer.manifest_bytes());
+    assert_ne!(outer.record_id(), Hash::zero());
     assert_eq!(
         SignedForkReproManifestV1::from_canonical_cbor(&outer.to_canonical_cbor()),
         Ok(outer)
@@ -452,5 +454,145 @@ fn public_attribution_decoders_reject_forbidden_cbor_shapes(
     let mut bad_signature = signed.to_canonical_cbor();
     bad_signature.pop();
     assert!(SignedForkReproManifestV1::from_canonical_cbor(&bad_signature).is_err());
+    Ok(())
+}
+
+#[test]
+fn manifest_decoder_rejects_count_coordinates_and_noncanonical_sequence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let canonical = manifest(&admission)?.to_canonical_cbor();
+    let sequences_at = canonical
+        .windows(3)
+        .position(|window| window == [0x82, 0x05, 0x07])
+        .ok_or("intervention sequence marker is absent")?;
+
+    let mut too_many = canonical.clone();
+    too_many.splice(sequences_at..sequences_at + 1, [0x19, 0x04, 0x01]);
+    assert_eq!(
+        ForkReproManifestV1::from_canonical_cbor(&too_many),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+
+    let mut bad_final_head = canonical.clone();
+    bad_final_head[sequences_at + 3] = 3;
+    assert_eq!(
+        ForkReproManifestV1::from_canonical_cbor(&bad_final_head),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+
+    let mut noncanonical = canonical.clone();
+    noncanonical.splice(sequences_at + 1..sequences_at + 2, [0x18, 0x05]);
+    assert_eq!(
+        ForkReproManifestV1::from_canonical_cbor(&noncanonical),
+        Err(ForkAttributionCodecErrorV1::NonCanonical)
+    );
+
+    let mut trailing = canonical;
+    trailing.push(0);
+    assert_eq!(
+        ForkReproManifestV1::from_canonical_cbor(&trailing),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn signed_manifest_decoder_rejects_identity_length_and_inner_mutations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let inner = manifest(&admission)?;
+    let signed = SignedForkReproManifestV1::new(
+        KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
+        inner,
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    let canonical = signed.to_canonical_cbor();
+    let owner_at = canonical
+        .windows(b"creator-a".len())
+        .position(|window| window == b"creator-a")
+        .ok_or("owner marker is absent")?;
+    let role_at = owner_at + b"creator-a".len();
+
+    let mut oversized_owner = canonical.clone();
+    oversized_owner.splice(owner_at - 1..owner_at, [0x79, 0x00, 0x81]);
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&oversized_owner),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut empty_owner = canonical.clone();
+    empty_owner[owner_at - 1] = 0x60;
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&empty_owner),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut unknown_role = canonical.clone();
+    unknown_role[role_at] = 0x17;
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&unknown_role),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let mut oversized_role = canonical.clone();
+    oversized_role.splice(role_at..role_at + 1, [0x19, 0x01, 0x00]);
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&oversized_role),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let mut zero_epoch = canonical.clone();
+    zero_epoch[role_at + 1] = 0;
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&zero_epoch),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut noncanonical_epoch = canonical.clone();
+    noncanonical_epoch.splice(role_at + 1..role_at + 2, [0x18, 0x01]);
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&noncanonical_epoch),
+        Err(ForkAttributionCodecErrorV1::NonCanonical)
+    );
+
+    let inner_bytes = signed.manifest_bytes();
+    let inner_at = canonical
+        .windows(inner_bytes.len())
+        .position(|window| window == inner_bytes)
+        .ok_or("inner manifest marker is absent")?;
+    assert_eq!(canonical[inner_at - 2], 0x58);
+    let mut oversized_inner = canonical.clone();
+    oversized_inner.splice(inner_at - 2..inner_at, [0x59, 0x40, 0x01]);
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&oversized_inner),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut invalid_inner = canonical.clone();
+    invalid_inner[inner_at] = 0xff;
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&invalid_inner),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let mut wrong_signature_length = canonical.clone();
+    let signature_length_at = wrong_signature_length.len() - 65;
+    wrong_signature_length[signature_length_at] = 63;
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&wrong_signature_length),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let mut trailing = canonical;
+    trailing.push(0);
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&trailing),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_decoder_rejects_zero_required_operation_hash() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut bytes = admission()?.to_canonical_cbor();
+    bytes[9..41].fill(0);
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&bytes),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
     Ok(())
 }
