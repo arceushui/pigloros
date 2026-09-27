@@ -1851,7 +1851,11 @@ mod tests {
         plugin_id: PluginId,
         workload_profile: WorkloadProfileV1,
     ) -> OutputPolicyClosureV1 {
-        let profile = execution_profile_artifact_v1("deterministic-local-v1").or_resume();
+        let profile = execution_profile_artifact_v1(
+            "deterministic-local-v1",
+            InstalledOutputPolicySourceV1::Generated,
+        )
+        .or_resume();
         let profile_hash = crate::reviewed_policy::execution_profile_artifact_hash_v1(&profile);
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
