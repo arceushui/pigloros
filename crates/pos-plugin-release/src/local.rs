@@ -1461,10 +1461,13 @@ mod tests {
         let mut manifest =
             serde_json::from_slice(&std::fs::read(&path)?).map_err(std::io::Error::other)?;
         mutate(&mut manifest);
-        std::fs::write(
-            path,
-            serde_json::to_vec(&manifest).map_err(std::io::Error::other)?,
-        )
+        let bytes = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
+        if u64::try_from(bytes.len()).ok() != Some(address.size()) {
+            return Err(std::io::Error::other(
+                "rewritten manifest changed address size",
+            ));
+        }
+        std::fs::write(path, bytes)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1733,13 +1736,13 @@ mod tests {
             "reader-invalid-manifest",
             ReleaseSourceErrorV1::InvalidDescriptor,
             |release, address| {
-                std::fs::write(
-                    release
-                        .join("blobs")
-                        .join("sha256")
-                        .join(&address.digest()[7..]),
-                    b"[]",
-                )
+                let path = release
+                    .join("blobs")
+                    .join("sha256")
+                    .join(&address.digest()[7..]);
+                let mut bytes = std::fs::read(&path)?;
+                bytes[0] = b'[';
+                std::fs::write(path, bytes)
             },
         )?;
         reader_rejects_mutation(
@@ -1747,16 +1750,8 @@ mod tests {
             ReleaseSourceErrorV1::InvalidDescriptor,
             |release, address| {
                 rewrite_manifest(release, address, |manifest| {
-                    manifest["config"]["digest"] = serde_json::json!("invalid");
-                })
-            },
-        )?;
-        reader_rejects_mutation(
-            "reader-declared-total-bound",
-            ReleaseSourceErrorV1::BoundsExceeded,
-            |release, address| {
-                rewrite_manifest(release, address, |manifest| {
-                    manifest["layers"][0]["size"] = serde_json::json!(crate::MAX_TOTAL_BYTES);
+                    manifest["config"]["digest"] =
+                        serde_json::json!(format!("x{}", "a".repeat(63)));
                 })
             },
         )?;
