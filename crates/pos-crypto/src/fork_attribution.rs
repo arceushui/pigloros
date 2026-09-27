@@ -114,7 +114,10 @@ pub fn sign_local_fork_manifest_for_identity_from_admission_signature_only<
     let payload = CanonicalBytes::from_vec(manifest.to_canonical_cbor());
     let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
     Ok(SignedForkReproManifestV1::new_from_admission(
-        admission, epoch, manifest, signature,
+        admission,
+        identity.epoch,
+        manifest,
+        signature,
     )?)
 }
 
