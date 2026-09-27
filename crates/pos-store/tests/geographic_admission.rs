@@ -513,18 +513,26 @@ fn sqlite_rechecks_a_revoked_fence_before_committing_geographic_admission() {
     ));
     assert!(revoked.load(Ordering::Relaxed));
 
-    assert!(store
-        .read(timeline.id(), pos_core::SeqRange::all())
-        .test_ok()
-        .is_empty());
-    assert_eq!(
-        store.get_timeline(timeline.id()).test_ok(),
-        Some(original_timeline)
-    );
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.get_timeline(timeline.id()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
     let mut reopened = SqliteStore::open(path).test_ok();
     reopened
         .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok();
+    assert!(reopened
+        .read(timeline.id(), pos_core::SeqRange::all())
+        .test_ok()
+        .is_empty());
+    assert_eq!(
+        reopened.get_timeline(timeline.id()).test_ok(),
+        Some(original_timeline)
+    );
     assert!(matches!(
         reopened.admit_geo_location(request(timeline.id(), entity, ([6; 32], [7; 32]))),
         Err(CoreError::GeographicAdmissionValidationFailed)
@@ -570,12 +578,24 @@ fn sqlite_rechecks_a_reconsented_fence_before_committing_geographic_admission() 
         Err(CoreError::GeographicAdmissionValidationFailed)
     ));
     assert!(replaced.load(Ordering::Relaxed));
-    assert!(store
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(matches!(
+        store.get_timeline(timeline.id()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    let mut reopened = SqliteStore::open(path).test_ok();
+    reopened
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+        .test_ok();
+    assert!(reopened
         .read(timeline.id(), pos_core::SeqRange::all())
         .test_ok()
         .is_empty());
     assert_eq!(
-        store.get_timeline(timeline.id()).test_ok(),
+        reopened.get_timeline(timeline.id()).test_ok(),
         Some(original_timeline)
     );
 }
@@ -687,10 +707,10 @@ fn sqlite_admission_rolls_back_every_artifact_when_link_write_fails() {
     assert!(store
         .admit_geo_location(request(timeline.id(), entity, ([4; 32], [5; 32])))
         .is_err());
-    assert!(store
-        .read(timeline.id(), pos_core::SeqRange::all())
-        .test_ok()
-        .is_empty());
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
 
     for table in [
         "events",
