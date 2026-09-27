@@ -463,9 +463,13 @@ fn manifest_decoder_rejects_count_coordinates_and_noncanonical_sequence(
     let admission = admission()?;
     let canonical = manifest(&admission)?.to_canonical_cbor();
     let sequences_at = canonical
-        .windows(3)
-        .position(|window| window == [0x82, 0x05, 0x07])
-        .ok_or("intervention sequence marker is absent")?;
+        .len()
+        .checked_sub(38)
+        .ok_or("manifest is shorter than its sequence suffix")?;
+    assert_eq!(
+        &canonical[sequences_at..sequences_at + 3],
+        &[0x82, 0x05, 0x07]
+    );
 
     let mut too_many = canonical.clone();
     too_many.splice(sequences_at..sequences_at + 1, [0x19, 0x04, 0x01]);
