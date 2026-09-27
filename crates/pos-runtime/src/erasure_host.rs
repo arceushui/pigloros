@@ -6198,6 +6198,13 @@ mod tests {
             4,
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.rollback_unaffected_topology_timeline(
+                &Timeline::new(TimelineMeta::root("already-present")),
+                false,
+            ),
+            Ok(())
+        );
         host.fail_inventory_publication = true;
         assert_eq!(
             host.command_sender()
@@ -6229,7 +6236,9 @@ mod tests {
                 None,
                 |_permit, _store| Ok(affected.clone()),
                 |_permit, _store, _candidate| {
-                    panic!("an affected candidate must never reach the store transition")
+                    std::panic::resume_unwind(Box::new(
+                        "an affected candidate must never reach the store transition",
+                    ))
                 },
             ),
             Err(ErasureHostErrorV1::Conflict)
@@ -6676,6 +6685,29 @@ mod tests {
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         assert!(!effect_ran);
+    }
+
+    #[test]
+    fn stale_command_fence_rejects_before_starting_an_effect() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut sender = host
+            .command_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        sender.generation = ErasureReferenceV1::from_digest([9; 32]);
+        let mut ran = false;
+        assert_eq!(
+            sender.with_protected_effect_fence(
+                TimelineId::new(),
+                ErasureProtectedOperationV1::Append,
+                &mut |_| ran = true,
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert!(!ran);
     }
 
     #[test]

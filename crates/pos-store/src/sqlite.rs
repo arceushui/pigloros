@@ -7591,6 +7591,25 @@ mod tests {
         store
             .conn
             .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(context.action, AuthAction::Transaction { .. }) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+
+        store
+            .conn
+            .authorizer(Some(|context: AuthContext<'_>| {
                 if matches!(
                     context.action,
                     AuthAction::Pragma { pragma_name, .. }
@@ -7637,6 +7656,10 @@ mod tests {
         store.conn.execute_batch("ROLLBACK").test_ok();
 
         store.erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::StaleGeneration)
+        );
         store.conn.authorizer(Some(deny_rollback)).test_ok();
         assert_eq!(
             store.begin_protected_effect_interval(),
@@ -7647,6 +7670,36 @@ mod tests {
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
             .test_ok();
         store.conn.execute_batch("ROLLBACK").test_ok();
+    }
+
+    #[test]
+    fn protected_store_fences_propagate_effect_and_gate_rejection() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("fence-rejection").test_ok();
+        assert!(matches!(
+            store.with_erasure_read_filter(
+                timeline.id(),
+                ErasureProtectedOperationV1::Read,
+                |_store| Err::<(), _>(CoreError::Storage("read failed".to_owned())),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+
+        let gate = Arc::clone(
+            store
+                .erasure_gate
+                .as_ref()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing test gate"))),
+        );
+        gate.freeze_timeline_for_test(timeline.id());
+        assert!(matches!(
+            store.with_erasure_fence(
+                timeline.id(),
+                ErasureProtectedOperationV1::Append,
+                |_store| Ok::<(), CoreError>(()),
+            ),
+            Err(CoreError::ErasureAccessFrozen)
+        ));
     }
 
     #[test]
@@ -7735,6 +7788,29 @@ mod tests {
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
             .test_ok();
 
+        store
+            .conn
+            .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Pragma { pragma_name, .. }
+                        if pragma_name.eq_ignore_ascii_case("data_version")
+                ) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(4),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+
         let version_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reads = Arc::clone(&version_reads);
         store
@@ -7764,13 +7840,15 @@ mod tests {
     }
 
     #[test]
-    fn event_row_decoder_rejects_a_non_integer_sequence() {
+    fn event_row_decoder_rejects_a_non_integer_schema_version() {
         let store = new_store();
         let decoded = store
             .conn
-            .query_row("SELECT 'not-an-integer'", [], |row| {
-                Ok(decode_event_row(row))
-            })
+            .query_row(
+                "SELECT 1, 'event', 'entity', 'type', X'00', 0, NULL, NULL, 'not-an-integer'",
+                [],
+                |row| Ok(decode_event_row(row)),
+            )
             .test_ok();
         assert!(matches!(decoded, Err(CoreError::Storage(_))));
     }
@@ -15738,6 +15816,32 @@ mod tests {
             empty.recover_fork_admission(operation, &inventory),
             Ok(None)
         );
+        empty
+            .conn
+            .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Rollback
+                    }
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert_eq!(
+            empty.recover_fork_admission(operation, &inventory),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        empty
+            .conn
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )
+            .test_ok();
+        empty.conn.execute_batch("ROLLBACK").test_ok();
 
         let mut orphaned = new_store();
         let snapshot = orphaned.complete_erasure_inventory_snapshot(4).test_ok();
