@@ -1,4 +1,4 @@
-**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 7
+**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 8
 
 Related: #400 · #201 · #292 · [[ADR-041_Scenario_Room_Configuration_and_Reproducible_Fork_Inputs]] · [[ADR-065_KeyRegistry_Authorized_Signing_After_Destruction]] · [[ADR-091_Subject_Key_Custody_and_Historical_Decryption]] · [[ADR-060_Subject_Erasure_and_Replay_Claim_Degradation]]
 
@@ -407,6 +407,25 @@ fourth authority row and a caller-supplied FPR1 is never trusted. Operation and
 record IDs are nonzero. The three rows are append-only: update and deletion are
 forbidden while the child Fork or any Replay evidence exists.
 
+FPO1 is a checked authorization projection, not an independent source of
+claims. Its fields have exactly these sources and equality requirements:
+
+| FPO1 field | Sole source | Required equality |
+|---|---|---|
+| 3–5: child, final head, chain hash | authoritative Fork state held at publication | FAR1 field 6 and FRM1 fields 3, 11, and 12 |
+| 6: admission digest | complete validated FAR1 canonical bytes | FRM1 field 4 and a fresh domain-separated FAR1 digest |
+| 7: creator | FAR1 field 4 | FSM1 field 2 and held identity owner |
+| 8–9: role and epoch | held registry identity | FSM1 fields 3–4; role is exactly `SubjectAttributionSigning` |
+| 10: private-material digest | held active key record | the caller-supplied fingerprint and, on trusted read, the live record fingerprint or matching tombstone `destroyed_material_digest` |
+| 11: public verification key | held active key record | the caller-supplied key and retained exact-identity key record |
+| 12: record ID | complete canonical FSM1 bytes in FPA1 | FPA1 field 2, FPB1 field 5, and recomputation from those bytes |
+
+No caller, callback, import envelope, or decoded FSM1 may select an FPO1 field.
+Local publication derives all fields from the sources above. Trusted read,
+committed recovery, and Replay enforce the same equalities before returning or
+accepting the artifact. A #202-authenticated import proves transport authority
+but does not waive any equality or cryptographic check.
+
 Before new authorization, `commit_authorized` performs the recovery lookup by
 operation ID described below. A complete exact match of the durable request
 tuple returns derived FPR1 without comparing the caller's current expected
@@ -445,18 +464,25 @@ serialization domain used by registration, rotation, and destruction, it:
    and `Some(public_verification_key)` must exactly equal the supplied values;
 3. only after every authorization check succeeds, constructs one
    `HeldRegistryAuthorizationV1` from that validated active record and immutable
-   in-memory snapshot; then loads and validates the immutable Fork admission,
-   exact final head and chain
-   hash, and complete intervention set;
-4. invokes exactly once a synchronous, non-escaping
+   in-memory snapshot; then loads and validates the immutable FAR1, exact final
+   head and chain hash, and complete intervention set, and requires the held
+   identity owner to equal FAR1 field 4;
+4. constructs FRM1 solely from those validated authorities, including FAR1's
+   freshly recomputed digest and the authoritative final chain hash, then
+   constructs FSM1 fields 2–5 solely from FAR1 creator, held role/epoch, and the
+   complete canonical FRM1 bytes;
+5. invokes exactly once a synchronous, non-escaping
    `FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<[u8; 64], SignError>`
    with the held authorization and complete canonical inner bytes;
-5. the callback signs ADR-065's exact preimage for the held identity and
-   returns only the signature;
-6. validates the outer bytes, computes `record_id`, constructs exact FPO1,
-   FPB1, and FPA1 bytes, validates every duplicate and unique-key relation, and
-   inserts all three rows; and
-7. atomically commits all three rows before constructing and returning exact
+6. the callback signs ADR-065's exact preimage for the held identity and
+   returns only the signature; the publisher constructs canonical FSM1 and
+   verifies that signature against the held public key, exact held
+   owner/role/epoch, and exact inner bytes before any insert;
+7. computes `record_id`; derives FPO1 fields 3–12 only from the authoritative
+   Fork/FAR1 values, held authorization, and completed FSM1/FPA1 bytes according
+   to the table above; constructs FPB1 and FPA1; revalidates every cross-record,
+   duplicate, and unique-key relation; and inserts all three rows; and
+8. atomically commits all three rows before constructing and returning exact
    `PublicationReceiptV1` (FPR1). The caller reads committed FSM1 bytes only
    through the publication read below.
 
@@ -474,16 +500,19 @@ then `SigningRoleRequired`; malformed/unavailable or unequal expected durable
 snapshot (`RegistryUnavailable` or `RegistryChanged`); `NotFound`; `Destroyed`;
 `DestructionPending`; `InactiveKey` for a missing or unequal active identity;
 then `SigningKeyMismatch` for either material-digest or public-key inequality.
-The publisher does not collapse these into `SigningFailed`. A callback error is
-`SigningFailed` only after active authorization succeeded.
+The publisher does not collapse these into `SigningFailed`. A callback error or
+a callback signature that fails verification is `SigningFailed` only after
+active authorization and provenance binding succeeded; neither case inserts.
 
 No signature or uncommitted bytes escape on callback, validation, insertion,
 or commit failure. Rollback leaves no FPO1, FPB1, or FPA1. Retry/recovery first
 looks up FPO1 by operation ID under a consistent snapshot. If absent, it also
 requires no FPB1/FPA1 references before a fresh attempt. If present, it joins
-the single FPB1 and FPA1, strictly decodes all three records, recomputes FPA1's
-record ID, and returns derived FPR1 only when the caller's operation ID,
-child/head, identity, material/public key, and every stored duplicate match.
+the single FPB1 and FPA1, strictly decodes all three records, loads the trusted
+FAR1 and retained exact-identity key record, enforces the complete FPO1 source
+table, verifies the stored FSM1 signature, recomputes FPA1's record ID, and
+returns derived FPR1 only when the caller's operation ID, child/head, identity,
+material/public key, and every stored duplicate match.
 The caller's expected registry snapshot is intentionally irrelevant after a
 matching publication has committed. Recovery never invokes the callback.
 Missing, partial, orphaned, duplicate, or unequal records are
@@ -521,8 +550,10 @@ The public boundary vectors are normative:
 | Stale/inactive | exact record exists but active index is absent or names another epoch | `InactiveKey`; 0 |
 | Material mismatch | active record private-material digest differs | `SigningKeyMismatch`; 0 |
 | Public-key mismatch | active record public verification key differs | `SigningKeyMismatch`; 0 |
+| Creator-identity mismatch | held identity owner differs from FAR1 creator | `PrincipalOwnerConflict`; 0 |
 | Post-authorization provenance conflict | authorization valid; admission/head/intervention recheck fails | matching provenance error; 0 |
 | Signer failure | authorization and provenance valid; callback fails | `SigningFailed`; 1, rollback |
+| Invalid callback signature | callback returns bytes that do not verify for exact held identity/key/preimage | `SigningFailed`; 1, rollback |
 | Destruction wins lock | pending/destruction state committed before publisher acquires the boundary | `DestructionPending` or `Destroyed`; 0 |
 | Publication wins lock | publisher acquires boundary first and commits | committed receipt; callback exactly once; later destruction retains verification key |
 | Exact committed retry | FPO1/FPB1/FPA1 graph and durable request tuple match; any expected registry snapshot | derive the same FPR1; callback 0 |
@@ -542,16 +573,25 @@ record ID after publication without altering the signed Fork head.
 the sole authorized-issuance read. It accepts only that lookup key, not bytes,
 record ID, operation ID, or receipt. Under one consistent read snapshot it
 loads the unique FPB1, follows its exact operation ID to FPO1 and record ID to
-FPA1, strictly decodes all three canonical records, requires every duplicated
-operation/record/Fork/head field to match, recomputes the record ID from FPA1's
-complete FSM1 bytes, and accepts only local authority origin or a #202-verified
-import origin. It then derives FPR1 and returns
+FPA1, strictly decodes all three canonical records plus embedded FSM1/FRM1,
+loads the unique trusted FAR1 and retained exact-identity registry record under
+that same snapshot, and enforces every equality in the FPO1 source table. In
+particular it recomputes the FAR1 digest and FSM1 record ID; requires FPO1
+creator/role/epoch to equal FSM1 and FAR1; requires FPO1 chain hash to equal
+FRM1 and authoritative Fork state; requires FPO1 public key to equal the
+retained key record; requires FPO1 material digest to equal the live record
+fingerprint or, after destruction, the matching tombstone
+`destroyed_material_digest`; and verifies the FSM1 signature under that exact
+public key and ADR-065 owner/role/epoch preimage. It accepts only local authority
+origin or a #202-verified import origin, and authenticated import remains
+subject to every preceding check. It then derives FPR1 and returns
 `CommittedForkManifestV1 { receipt, operation, binding, record_id,
 outer_bytes }`; `operation` and `binding` are the validated canonical FPO1 and
 FPB1 values and `outer_bytes` is exactly FPA1 field 4. Zero FPB1 rows is
 `PublicationMissing`; a missing join, extra row, invalid origin, noncanonical
-record, or unequal/recomputed field is `PublicationConflict`. No public
-constructor can manufacture this result.
+record, missing retained registry comparison source, invalid signature, or
+unequal/recomputed field is `PublicationConflict`. No public constructor can
+manufacture this result.
 
 Human-subject Replay first obtains the authoritative current final logical head
 for the requested child Fork, then calls `read_committed(child_id, head)`. The
@@ -567,10 +607,13 @@ claim is accepted, Replay:
 3. requires the parsed stored FSM1 to be FPA1's exact bytes and FRM1's
    final Fork ID/head to equal FPB1 fields 2/3, FPO1 fields 3/4, and FPR1
    fields 3/4; and
-4. only then resolves `ForkAdmissionRecordV1` and checks its digest, creator,
-   parent/cut/boundary/composition/policy, retained identity-bound public key,
-   ADR-065 role signature, authoritative parent/final chain hashes, and total
-   intervention vector.
+4. resolves FAR1 and the retained exact-identity key record, repeats every
+   FPO1 source-table equality including chain hash, FAR1 digest, creator,
+   role/epoch, material fingerprint, and public key, and verifies the stored
+   FSM1 signature returned by the publication callback over the exact FSM1
+   identity/preimage; and
+5. only then checks FAR1 parent/cut/boundary/composition/policy,
+   authoritative parent/final chain hashes, and the total intervention vector.
 
 The read and Replay verifier reject before execution on an absent, duplicate,
 untrusted, imported-without-#202-verification, orphaned, byte-mismatched,
@@ -578,9 +621,12 @@ record-ID-mismatched, receipt-mismatched, Fork/head-mismatched, malformed, or
 cryptographically/provenance-invalid sidecar. Structural artifact import and a
 caller-supplied publication receipt are never trusted. A future #202 import
 must authenticate and atomically install exact FPO1, FPB1, and FPA1 records
-together with the admission and intervention/origin authority under an
-identity-preserving envelope; FPR1 is then derived locally from those validated
-rows.
+together with the admission, intervention/origin authority, and exact retained
+key record plus any destruction tombstone needed to compare FPO1 fields 10–11,
+under an identity-preserving envelope. The imported registry evidence must pass
+the same `KeyRegistryStateV1` identity, public-key, material-retention, and
+tombstone invariants as local evidence; FPR1 is then derived locally from those
+validated rows.
 
 `verify_fork_manifest_signature_only(outer_bytes, public_key)` may be exposed
 for diagnostics and interoperability. It returns only a mathematical result
@@ -602,7 +648,10 @@ Replay boundary vectors are also normative:
 | Copied-key signature | mathematical signature valid but bytes/ID absent from committed binding | `PublicationMissing` or mismatch; Replay rejects |
 | Substituted bytes | binding exists but supplied/stored bytes or recomputed ID differ | publication mismatch; Replay rejects |
 | Wrong Fork/head | FSM1 inner fields differ from lookup key | publication mismatch; Replay rejects |
+| Substituted FPO1 provenance/key | any FPO1 chain hash, FAR1 digest, creator, role, epoch, material fingerprint, or public key differs from its trusted source | `PublicationConflict` before execution |
+| Valid FSM1, inconsistent FPO1 | FSM1 signature is valid but any FPO1 authorization/provenance field differs | `PublicationConflict` before execution |
 | Structural import | artifact/binding was imported without #202 verified authority envelope | untrusted publication; Replay rejects |
+| Authenticated inconsistent import | #202 envelope is valid but imported FPO1/FAR1/FSM1/key provenance fails any source-table equality | `PublicationConflict` before execution |
 
 For a human-subject Fork, a missing, malformed, untrusted, conflicting, or
 mismatched committed sidecar aborts Replay **before execution**. The ADR-041 Replay grant and
