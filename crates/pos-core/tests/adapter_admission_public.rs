@@ -182,6 +182,12 @@ fn invalid_identity_count_entry_and_order_reject() -> TestResult<()> {
         ..input()?
     })
     .is_ok());
+    Ok(())
+}
+
+#[test]
+fn invalid_adapter_profile_and_configuration_length_reject() -> TestResult<()> {
+    let good = entry(1, 1, Vec::new());
     for bad in [
         AdapterAdmissionEntryV1 {
             adapter_id: String::new(),
@@ -225,7 +231,7 @@ fn invalid_identity_count_entry_and_order_reject() -> TestResult<()> {
         },
         AdapterAdmissionEntryV1 {
             effect_mode: 2,
-            ..good.clone()
+            ..good
         },
     ] {
         assert_eq!(

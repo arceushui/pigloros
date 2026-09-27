@@ -299,7 +299,7 @@ fn aggregate_transcript_and_decoder_byte_limits_reject() -> TestResult<()> {
 }
 
 #[test]
-fn malformed_air1_and_mat1_reject_before_authority() -> TestResult<()> {
+fn malformed_air1_reject_before_authority() -> TestResult<()> {
     let air = invocation(0, b"a".to_vec())?.to_canonical_cbor();
     let mut wrong_air_shape = air.clone();
     wrong_air_shape[0] = 0x8a;
@@ -354,7 +354,11 @@ fn malformed_air1_and_mat1_reject_before_authority() -> TestResult<()> {
         AdapterInvocationV1::from_canonical_cbor(&overbound_length),
         Err(AdapterTranscriptErrorV1::FieldOutOfBounds)
     );
+    Ok(())
+}
 
+#[test]
+fn malformed_mat1_reject_before_authority() -> TestResult<()> {
     let good = vector()?;
     let mut cases = vec![
         (Vec::new(), AdapterTranscriptErrorV1::InvalidEncoding),
