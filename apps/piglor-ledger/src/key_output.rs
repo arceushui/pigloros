@@ -284,7 +284,9 @@ pub(crate) fn bind_owned_secret_key(
     _identity: pos_core::KeyIdentityV1,
     _material_digest: pos_core::Hash,
 ) -> Result<(), pos_core::CoreError> {
-    Ok(())
+    Err(pos_core::CoreError::Storage(
+        "owned signing-key file binding requires Unix".to_owned(),
+    ))
 }
 
 /// Delete the application-owned signing-key file after registry authorization

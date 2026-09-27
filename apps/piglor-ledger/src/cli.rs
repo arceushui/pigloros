@@ -177,7 +177,20 @@ fn bad_source(error: impl std::fmt::Display) -> CliError {
     CliError::BadSource(error.to_string())
 }
 
+#[cfg(not(unix))]
+fn require_supported_store_key_owner() -> Result<(), CliError> {
+    Err(bad_source(
+        "store: owner-managed signing-key files require Unix",
+    ))
+}
+
+#[cfg(unix)]
+fn require_supported_store_key_owner() -> Result<(), CliError> {
+    Ok(())
+}
+
 fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStore>, CliError> {
+    require_supported_store_key_owner()?;
     let key_path = key.ok_or_else(|| bad_source("store: source requires --key <path>"))?;
     let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
         crate::HostedLedgerStore::open(StoreConfig::Sqlite {
@@ -1812,6 +1825,30 @@ mod tests {
         let db = tmp.path().join("l.db");
         assert!(open_store(&Source::Store(db), None).is_err());
 
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn open_store_store_requires_a_supported_key_owner() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("l.db");
+        let key = tmp.path().join("secret.key");
+        for supplied_key in [None, Some(key.as_path())] {
+            let error = open_store(&Source::Store(db.clone()), supplied_key).test_err()?;
+            assert!(error.to_string().contains("require Unix"), "{error}");
+            assert!(!db.exists());
+        }
+        let identity =
+            KeyIdentityV1::from_parts(ledger_owner_id(), KeyRoleV1::TimelineIntegritySigning, 1);
+        let error = crate::key_output::bind_owned_secret_key(
+            &db,
+            &key,
+            identity,
+            Hash::from_bytes([0; 32]),
+        )
+        .test_err()?;
+        assert!(error.to_string().contains("require Unix"), "{error}");
         Ok(())
     }
 
