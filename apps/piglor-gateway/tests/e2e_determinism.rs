@@ -837,12 +837,13 @@ fn assert_event_order(
     Ok(())
 }
 
+type LiveProjectionState = (&'static str, EntityId, pos_core::State);
+
 fn assert_projection_state(
     scenario: &MultiRateScenario,
     session: &pos_experiment::ExperimentSession,
     authority: &ConsentAuthority,
-) -> Result<Vec<(&'static str, EntityId, pos_core::State)>, Box<dyn std::error::Error + Send + Sync>>
-{
+) -> Result<Vec<LiveProjectionState>, Box<dyn std::error::Error + Send + Sync>> {
     let read_state = |reducer: &str, subject: EntityId| {
         let token = authority.record_grant_on_timeline(
             scenario.timeline,
@@ -905,7 +906,7 @@ fn assert_projection_state(
 
 fn assert_replay(
     scenario: &MultiRateScenario,
-    live_states: &[(&str, EntityId, pos_core::State)],
+    live_states: &[LiveProjectionState],
     pinned_wall_time: WallTime,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let first_store = open_store(StoreConfig::Sqlite {
