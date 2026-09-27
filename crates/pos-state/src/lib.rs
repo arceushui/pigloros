@@ -448,13 +448,15 @@ impl ProjectionRegistry {
         entity: &EntityId,
     ) -> Result<Option<State>, AuthorityErrorV1> {
         self.with_erasure_fence(timeline, |registry| {
-            Ok(registry
-                .slots
-                .iter()
-                .find(|(n, _)| n == name)
+            let mut matches = registry.slots.iter().filter(|(n, _)| n == name);
+            Ok(matches
+                .next()
+                .filter(|_| matches.next().is_none())
                 .and_then(|(_, slot)| slot.registry.get(entity))
                 .cloned())
         })
+    }
+
     /// Return state from one installed Plugin's reducer slot.
     #[must_use]
     pub fn state_for_plugin(&self, plugin_id: PluginId, entity: &EntityId) -> Option<&State> {
@@ -507,6 +509,20 @@ impl ProjectionRegistry {
         })
     }
 
+    fn unique_observation_slot_for_plugin(
+        &self,
+        name: &str,
+        plugin_id: PluginId,
+    ) -> Option<&Slot> {
+        let mut matches = self.slots.iter().filter(|(registered, slot)| {
+            registered == name && slot.plugin_id.is_none_or(|id| id == plugin_id)
+        });
+        matches
+            .next()
+            .filter(|_| matches.next().is_none())
+            .map(|(_, slot)| slot)
+    }
+
     fn materialize_authorized_projection(
         &self,
         request: &AuthorizationRequestV1,
@@ -530,16 +546,9 @@ impl ProjectionRegistry {
         else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
-        let mut matches = self.slots.iter().filter(|(name, slot)| {
-            name == &context.reducer && slot.plugin_id.is_none_or(|id| id == plugin_id)
-        });
-        let slot = matches
-            .next()
-            .map(|(_, slot)| slot)
-            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
-        if matches.next().is_some() {
+        let Some(slot) = self.unique_observation_slot_for_plugin(&context.reducer, plugin_id) else {
             return Err(AuthorityErrorV1::SourceUnavailable);
-        }
+        };
         let Some(policy) = slot.observation_policy.as_ref() else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };

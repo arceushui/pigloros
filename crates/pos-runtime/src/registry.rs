@@ -4668,6 +4668,42 @@ mod tests {
     }
 
     #[test]
+    fn invalid_installed_reducer_name_rejects_before_any_registry_change() {
+        let plugin = plugin_with_caps("", &["invalid-name.output"], false, true);
+        let pin = crate::composition::PluginPinV1::try_new(
+            crate::composition::DomainImplementationKindV1::Plugin,
+            crate::composition::PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["invalid-name-role".to_owned()],
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        let schemas_before = registry.schemas.len();
+        let context = registry.registration_context(&plugin).test_ok();
+        assert!(matches!(
+            registry.register_with_approver_slice(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                None,
+                None,
+                &[],
+                context,
+                RegistrationOptions {
+                    registration: Some(PluginRegistrationV1::new(
+                        pin,
+                        PluginAvailabilityV1::Available,
+                    )),
+                    output_admission: None,
+                },
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert_eq!(registry.len(), 0);
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert!(registry.projections.reducer_names().is_empty());
+    }
+
+    #[test]
     fn duplicate_projection_slot_rejects_before_schema_mutation() {
         let mut registry = gated_registry();
         let id = PluginId::new();
