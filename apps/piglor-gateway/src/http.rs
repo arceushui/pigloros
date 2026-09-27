@@ -223,27 +223,24 @@ async fn list_events_response(
     raw_query: Option<&str>,
     headers: &HeaderMap,
 ) -> Result<serde_json::Value, GatewayError> {
-    let mut q = match parse_events_query(raw_query) {
-        Ok(query) => query,
-        Err(error) => return Err(error),
-    };
-    let expected_generation = if let Some(cursor) = q.cursor.as_deref() {
+    let (query, expected_generation) = parse_event_page_request(raw_query, timeline_id)?;
+    let page = read_events_page(gateway, timeline_id, &query, headers, expected_generation).await?;
+    bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES, timeline_id)
+}
+
+fn parse_event_page_request(
+    raw_query: Option<&str>,
+    timeline_id: &str,
+) -> Result<(EventsQuery, Option<ErasureReferenceV1>), GatewayError> {
+    let mut query = parse_events_query(raw_query)?;
+    let expected_generation = if let Some(cursor) = query.cursor.as_deref() {
         let (from_seq, generation) = parse_event_cursor(cursor, timeline_id)?;
-        q.from_seq = from_seq;
+        query.from_seq = from_seq;
         Some(generation)
     } else {
         None
     };
-    let page = match read_events_page(gateway, timeline_id, &q, headers, expected_generation).await
-    {
-        Ok(page) => page,
-        Err(error) => return Err(error),
-    };
-    let response = match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES, timeline_id) {
-        Ok(response) => response,
-        Err(error) => return Err(error),
-    };
-    Ok(response)
+    Ok((query, expected_generation))
 }
 
 async fn read_events_page(
@@ -306,6 +303,16 @@ fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayErr
     let Some(raw_query) = raw_query.filter(|query| !query.is_empty()) else {
         return Ok(EventsQuery::default());
     };
+    let query = parse_events_query_fields(raw_query)?;
+    if query.limit == 0 || query.limit > MAX_EVENTS_PER_POLL {
+        return Err(GatewayError::InvalidPageLimit {
+            maximum: MAX_EVENTS_PER_POLL,
+        });
+    }
+    Ok(query)
+}
+
+fn parse_events_query_fields(raw_query: &str) -> Result<EventsQuery, GatewayError> {
     let mut query = EventsQuery::default();
     let mut saw_from_seq = false;
     let mut saw_limit = false;
@@ -333,11 +340,6 @@ fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayErr
             }
             _ => return Err(GatewayError::InvalidEventsQuery(field.to_owned())),
         }
-    }
-    if query.limit == 0 || query.limit > MAX_EVENTS_PER_POLL {
-        return Err(GatewayError::InvalidPageLimit {
-            maximum: MAX_EVENTS_PER_POLL,
-        });
     }
     if saw_from_seq && saw_cursor {
         return Err(GatewayError::InvalidEventsQuery("cursor".to_owned()));

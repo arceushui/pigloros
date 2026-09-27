@@ -384,12 +384,6 @@ enum Command {
         timeline: TimelineId,
         range: SeqRange,
         bounds: EventReadBounds,
-        reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
-    },
-    ReadPage {
-        timeline: TimelineId,
-        range: SeqRange,
-        bounds: EventReadBounds,
         expected_generation: Option<ErasureReferenceV1>,
         reply: oneshot::Sender<Result<ProtectedReadPage, StoreExecutorError>>,
     },
@@ -471,7 +465,6 @@ impl Command {
         match self {
             Self::RootCount { .. }
             | Self::Read { .. }
-            | Self::ReadPage { .. }
             | Self::ProtectedLogicalHead { .. }
             | Self::ErasureStatus { .. } => true,
             #[cfg(test)]
@@ -1499,12 +1492,9 @@ impl StoreExecutor {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, StoreExecutorError> {
-        submit!(self, |reply| Command::Read {
-            timeline,
-            range,
-            bounds,
-            reply,
-        })
+        self.read_page(timeline, range, bounds, None)
+            .await
+            .map(|page| page.events)
     }
     pub(crate) async fn read_page(
         &self,
@@ -1513,7 +1503,7 @@ impl StoreExecutor {
         bounds: EventReadBounds,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<ProtectedReadPage, StoreExecutorError> {
-        submit!(self, |reply| Command::ReadPage {
+        submit!(self, |reply| Command::Read {
             timeline,
             range,
             bounds,
@@ -1997,9 +1987,6 @@ fn expire_command_impl(command: Command) {
         Command::Read { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::ReadPage { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
         #[cfg(test)]
         Command::ReadOne { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
@@ -2171,12 +2158,6 @@ fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandE
             timeline,
             range,
             bounds,
-            reply,
-        } => execute_read_command(state, timeline, range, bounds, reply),
-        Command::ReadPage {
-            timeline,
-            range,
-            bounds,
             expected_generation,
             reply,
         } => execute_read_page_command(state, timeline, range, bounds, expected_generation, reply),
@@ -2324,25 +2305,6 @@ fn execute_create_command(
     );
 }
 
-fn execute_read_command(
-    state: &mut ExecutorState,
-    timeline: TimelineId,
-    range: SeqRange,
-    bounds: EventReadBounds,
-    reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
-) {
-    send_store_result(
-        reply,
-        state.store.execute(
-            |host| {
-                host.read_sender()
-                    .and_then(|mut sender| sender.read_bounded(timeline, range, bounds))
-            },
-            |store| store.read_bounded(timeline, range, bounds),
-        ),
-    );
-}
-
 #[inline(never)]
 fn execute_read_page_command(
     state: &mut ExecutorState,
@@ -2460,7 +2422,7 @@ mod read_page_coverage_tests {
     #[test]
     fn expired_read_page_reports_deadline() {
         let (reply, result) = oneshot::channel();
-        expire_command(Command::ReadPage {
+        expire_command(Command::Read {
             timeline: TimelineId::new(),
             range: page_range(),
             bounds: page_bounds(),
@@ -3994,6 +3956,7 @@ mod tests {
                 timeline: TimelineId::new(),
                 range: SeqRange::all(),
                 bounds: EventReadBounds::new(1, 1, 1, 1),
+                expected_generation: None,
                 reply,
             },
             receiver,
