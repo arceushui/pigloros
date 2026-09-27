@@ -49,7 +49,7 @@ fn node(
     })
 }
 
-fn edge(child: &ArtifactRegistrationGraphNodeV1, required: bool) -> ArtifactChildEdgeV1 {
+const fn edge(child: &ArtifactRegistrationGraphNodeV1, required: bool) -> ArtifactChildEdgeV1 {
     ArtifactChildEdgeV1 {
         artifact_class: child.artifact_class,
         artifact_digest: child.artifact_digest,
@@ -126,7 +126,7 @@ fn root_and_catalog_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         Vec::new(),
     )?;
     assert_eq!(
-        inspect_artifact_registration_graph_v1(Hash::zero(), &[required.clone()]),
+        inspect_artifact_registration_graph_v1(Hash::zero(), std::slice::from_ref(&required)),
         Err(ArtifactRegistrationGraphErrorV1::InvalidRoot)
     );
     let optional = node(
@@ -201,7 +201,7 @@ fn edges_reject_missing_wrong_and_aliased_children() -> Result<(), Box<dyn std::
         Vec::new(),
     )?;
     assert_eq!(
-        inspect_artifact_registration_graph_v1(root.address, &[root.clone()]),
+        inspect_artifact_registration_graph_v1(root.address, std::slice::from_ref(&root)),
         Err(ArtifactRegistrationGraphErrorV1::MissingChild)
     );
     let mut wrong_class = child.clone();
@@ -420,7 +420,7 @@ fn distinct_key_budget_is_enforced_across_shared_graph() -> Result<(), Box<dyn s
     assert_eq!(
         inspect_artifact_registration_graph_v1(
             within_budget.address,
-            &[within_budget.clone(), leaves[0].clone(), leaves[1].clone()]
+            &[within_budget, leaves[0].clone(), leaves[1].clone()]
         )?
         .keys,
         MAX_ARTIFACT_GRAPH_KEYS_V1
