@@ -185,6 +185,37 @@ mod hosted_cli_store_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sqlite_replay_read_stays_inside_the_host_fence() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join("cli-replay.db");
+        let mut store = HostedCliStore::open(StoreConfig::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+        })?;
+        let timeline = store.create_timeline("cli-replay")?;
+        let mut host = store.host.lock().map_err(|_| "CLI host lock is poisoned")?;
+        let mut sender = host.read_sender()?;
+        let mut read_result = None;
+        let result = sender.with_protected_effect_fence(
+            timeline.id(),
+            pos_core::ErasureProtectedOperationV1::Read,
+            &mut |sender| {
+                read_result = Some(sender.read_bounded(
+                    timeline.id(),
+                    SeqRange::all(),
+                    pos_core::store::EventReadBounds::new(8, 32, 4, 4),
+                ));
+            },
+        );
+        assert!(result.is_ok(), "CLI read fence failed: {result:?}");
+        assert!(
+            matches!(read_result, Some(Ok(_))),
+            "nested CLI read failed: {read_result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delegates_the_cli_store_surface() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = HostedCliStore::open(StoreConfig::Memory)?;
         assert!(store
