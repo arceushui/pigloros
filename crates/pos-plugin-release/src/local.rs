@@ -20,7 +20,7 @@ const RELEASES_NAME: &str = "releases";
 const QUARANTINE_NAME: &str = "quarantine";
 
 /// Closed failures for the Linux-local OCI publisher.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LocalOciPublicationErrorV1 {
     #[error("release address is invalid")]
     InvalidAddress,
@@ -104,6 +104,9 @@ impl LocalOciPublisherV1 {
     }
 
     /// Publish one already-verified OCI closure under the exclusive store lock.
+    ///
+    /// # Errors
+    /// Returns a closed publication error if lock, layout, or durability checks fail.
     pub fn publish(
         &self,
         bundle: &VerifiedReleaseBundleV1,
@@ -119,6 +122,9 @@ impl LocalOciPublisherV1 {
     }
 
     /// Scan bounded private recovery state under the exclusive writer lock.
+    ///
+    /// # Errors
+    /// Returns a closed recovery error if private state is invalid or incomplete.
     pub fn recover_all(&self) -> Result<RecoveryReportV1, LocalOciPublicationErrorV1> {
         self.verify_root()?;
         let lock = open_private_file(&self.root, LOCK_NAME)?;
@@ -136,50 +142,8 @@ impl LocalOciPublisherV1 {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
         let releases = open_directory(&self.root, RELEASES_NAME)?;
-        let staging = directory_entries(&releases)?
-            .filter(|name| name.starts_with('.'))
-            .collect::<Vec<_>>();
-        if staging.len() > 1 {
-            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
-        }
-        let mut removed_staging = 0;
-        if let Some(name) = staging.first() {
-            let dir = open_directory(&releases, name)?;
-            let owner = read_limited(open_private_file(&dir, "OWNER")?, 128)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            if !owner.starts_with(b"pigloros-local-oci-staging-v1\n") {
-                self.quarantine_entry(&releases, name, "staging")?;
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
-            fs::unlinkat(&releases, name, AtFlags::REMOVEDIR)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            fs::fsync(&releases).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-            removed_staging = 1;
-        }
-        let next = directory_entries(&self.root)?
-            .filter(|name| name.starts_with(".published.") && name.ends_with(".next"))
-            .collect::<Vec<_>>();
-        if next.len() > 1 {
-            return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-        }
-        let mut removed_next_index = false;
-        if let Some(name) = next.first() {
-            let file = open_private_file(&self.root, name)?;
-            let metadata = file
-                .metadata()
-                .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-            if !metadata.is_file()
-                || metadata.uid() != self.owner
-                || metadata.mode() & 0o7777 != 0o600
-            {
-                self.quarantine_entry(&self.root, name, "next-index")?;
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
-            fs::unlinkat(&self.root, name, AtFlags::empty())
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-            removed_next_index = true;
-        }
+        let removed_staging = self.recover_staging(&releases)?;
+        let removed_next_index = self.recover_next_index()?;
         let finals = directory_entries(&releases)?
             .filter(|name| !name.starts_with('.'))
             .collect::<Vec<_>>();
@@ -238,6 +202,61 @@ impl LocalOciPublisherV1 {
             removed_staging,
             removed_next_index,
         })
+    }
+
+    fn recover_staging(&self, releases: &File) -> Result<usize, LocalOciPublicationErrorV1> {
+        let staging = directory_entries(releases)?
+            .filter(|name| name.starts_with('.'))
+            .collect::<Vec<_>>();
+        if staging.len() > 1 {
+            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
+        }
+        if let Some(name) = staging.first() {
+            let dir = open_directory(releases, name)?;
+            let owner = read_limited(open_private_file(&dir, "OWNER")?, 128)
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            if !owner.starts_with(b"pigloros-local-oci-staging-v1\n") {
+                self.quarantine_entry(releases, name, "staging")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
+            fs::unlinkat(releases, name, AtFlags::REMOVEDIR)
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            fs::fsync(releases).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn recover_next_index(&self) -> Result<bool, LocalOciPublicationErrorV1> {
+        let next = directory_entries(&self.root)?
+            .filter(|name| {
+                name.starts_with(".published.")
+                    && Path::new(name).extension().is_some_and(|ext| ext == "next")
+            })
+            .collect::<Vec<_>>();
+        if next.len() > 1 {
+            return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+        }
+        if let Some(name) = next.first() {
+            let file = open_private_file(&self.root, name)?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+            if !metadata.is_file()
+                || metadata.uid() != self.owner
+                || metadata.mode() & 0o7777 != 0o600
+            {
+                self.quarantine_entry(&self.root, name, "next-index")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
+            fs::unlinkat(&self.root, name, AtFlags::empty())
+                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn publish_locked(
@@ -313,7 +332,7 @@ impl LocalOciPublisherV1 {
         }
         let destination = format!(
             "{kind}.{}",
-            &name.as_bytes().iter().fold(0_u64, |hash, byte| hash
+            name.as_bytes().iter().fold(0_u64, |hash, byte| hash
                 .wrapping_mul(131)
                 .wrapping_add(u64::from(*byte)))
         );
@@ -366,7 +385,7 @@ impl LocalOciPublisherV1 {
 
 fn directory_entries(
     directory: &File,
-) -> Result<impl Iterator<Item = String>, LocalOciPublicationErrorV1> {
+) -> Result<impl Iterator<Item = String> + use<>, LocalOciPublicationErrorV1> {
     let entries = Dir::read_from(directory)
         .map_err(|_| LocalOciPublicationErrorV1::Io)?
         .collect::<Result<Vec<_>, _>>()

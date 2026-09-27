@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 
 use sha2::{Digest as _, Sha256};
 
@@ -31,7 +30,10 @@ impl BundleAddressV1 {
     /// Returns `InvalidAddress` when the descriptor is not the exact V1
     /// manifest address grammar.
     pub fn new(digest: String, size: u64) -> Result<Self, ReleaseSourceErrorV1> {
-        if !valid_sha256_digest(&digest) || size == 0 || size as usize > MAX_MANIFEST_BYTES {
+        if !valid_sha256_digest(&digest)
+            || size == 0
+            || usize::try_from(size).map_or(true, |size| size > MAX_MANIFEST_BYTES)
+        {
             return Err(ReleaseSourceErrorV1::InvalidAddress);
         }
         Ok(Self { digest, size })
@@ -124,7 +126,7 @@ pub struct VerifiedReleaseBundleV1 {
 impl VerifiedReleaseBundleV1 {
     /// Return the immutable transport address.
     #[must_use]
-    pub fn address(&self) -> &BundleAddressV1 {
+    pub const fn address(&self) -> &BundleAddressV1 {
         &self.address
     }
 
@@ -201,7 +203,7 @@ pub enum ReleaseSourceErrorV1 {
 pub fn verify_oci_closure_v1(
     address: BundleAddressV1,
     manifest: Vec<u8>,
-    supplied_blobs: BTreeMap<String, Vec<u8>>,
+    mut supplied_blobs: BTreeMap<String, Vec<u8>>,
 ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
     if manifest.len() > MAX_MANIFEST_BYTES {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
@@ -263,8 +265,7 @@ pub fn verify_oci_closure_v1(
     let mut blobs = Vec::with_capacity(expected.len());
     for (digest, size) in expected {
         let bytes = supplied_blobs
-            .get(&digest)
-            .cloned()
+            .remove(&digest)
             .ok_or(ReleaseSourceErrorV1::NotFound)?;
         if bytes.len() > MAX_BLOB_BYTES {
             return Err(ReleaseSourceErrorV1::BoundsExceeded);
@@ -322,7 +323,10 @@ fn parse_layers(
             .get("size")
             .and_then(serde_json::Value::as_u64)
             .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
-        if size == 0 || size as usize > MAX_BLOB_BYTES || !valid_sha256_digest(digest) {
+        if size == 0
+            || usize::try_from(size).map_or(true, |size| size > MAX_BLOB_BYTES)
+            || !valid_sha256_digest(digest)
+        {
             return Err(ReleaseSourceErrorV1::InvalidDescriptor);
         }
         if !seen_digests.insert(digest.to_owned()) {
@@ -451,7 +455,7 @@ fn verify_descriptor_bytes(
     Ok(())
 }
 
-pub(crate) fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
+pub(super) fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
     if bytes.is_empty() || bytes.len() > MAX_MANIFEST_BYTES || has_duplicate_object_keys(bytes) {
         return Err(ReleaseSourceErrorV1::InvalidDescriptor);
     }
@@ -485,9 +489,11 @@ fn valid_sha256_digest(value: &str) -> bool {
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::from("sha256:");
     for byte in Sha256::digest(bytes) {
-        let _ = write!(output, "{byte:02x}");
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     output
 }
@@ -651,7 +657,9 @@ mod tests {
         })
     }
 
-    fn closure() -> (BundleAddressV1, Vec<u8>, BTreeMap<String, Vec<u8>>) {
+    type ClosureFixture = (BundleAddressV1, Vec<u8>, BTreeMap<String, Vec<u8>>);
+
+    fn closure() -> Result<ClosureFixture, Box<dyn std::error::Error>> {
         let pmf1 = b"pmf1".to_vec();
         let component = b"component".to_vec();
         let wit = b"wit".to_vec();
@@ -685,8 +693,8 @@ mod tests {
             "layers": layers,
             "mediaType": MANIFEST_MEDIA_TYPE,
             "schemaVersion": 2,
-        })).unwrap();
-        let address = BundleAddressV1::new(digest(&manifest), manifest.len() as u64).unwrap();
+        }))?;
+        let address = BundleAddressV1::new(digest(&manifest), manifest.len() as u64)?;
         let mut blobs = BTreeMap::new();
         for bytes in [
             EMPTY_CONFIG_BYTES.to_vec(),
@@ -699,27 +707,29 @@ mod tests {
         ] {
             blobs.insert(digest(&bytes), bytes);
         }
-        (address, manifest, blobs)
+        Ok((address, manifest, blobs))
     }
 
     #[test]
-    fn verifies_complete_public_oci_closure() {
-        let (address, manifest, blobs) = closure();
-        let verified = verify_oci_closure_v1(address.clone(), manifest, blobs).unwrap();
+    fn verifies_complete_public_oci_closure() -> Result<(), Box<dyn std::error::Error>> {
+        let (address, manifest, blobs) = closure()?;
+        let verified = verify_oci_closure_v1(address.clone(), manifest, blobs)?;
         assert_eq!(verified.address(), &address);
         assert_eq!(verified.members().len(), 6);
         assert_eq!(verified.blobs().len(), 7);
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_closure_blob() {
-        let (address, manifest, mut blobs) = closure();
-        let removed = blobs.keys().next().cloned().unwrap();
+    fn rejects_missing_closure_blob() -> Result<(), Box<dyn std::error::Error>> {
+        let (address, manifest, mut blobs) = closure()?;
+        let removed = blobs.keys().next().cloned().ok_or("no fixture blob")?;
         blobs.remove(&removed);
         assert_eq!(
             verify_oci_closure_v1(address, manifest, blobs),
             Err(ReleaseSourceErrorV1::BoundsExceeded)
         );
+        Ok(())
     }
 
     #[test]
