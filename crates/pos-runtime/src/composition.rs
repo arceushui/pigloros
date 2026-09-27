@@ -18,7 +18,9 @@ pub enum ManifestRegistrationErrorV1 {
     PluginMismatch,
     #[error("manifest registration slot is missing, duplicated or mismatched")]
     SlotMismatch,
-    #[error("manifest registration requires an available installed pin and retained output closure")]
+    #[error(
+        "manifest registration requires an available installed pin and retained output closure"
+    )]
     UnverifiedRegistration,
     #[error("manifest registration batch is incomplete or changed")]
     IncompleteBatch,

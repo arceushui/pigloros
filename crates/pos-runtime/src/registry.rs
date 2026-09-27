@@ -1249,7 +1249,8 @@ impl PluginRegistry {
         admission: Option<&OutputAdmissionV1>,
         stable_slot: Option<&str>,
     ) -> Result<(), ManifestRegistrationErrorV1> {
-        let registration = registration.ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+        let registration =
+            registration.ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
         let admission = admission.ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
         let Some(closure) = admission.closure() else {
             return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);

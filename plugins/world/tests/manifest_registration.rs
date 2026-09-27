@@ -5,8 +5,8 @@ use std::error::Error;
 use pos_core::{
     event::Kind,
     manifest_owner_link::{
-        ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
-        ManifestAdmissionCatalogV1, ManifestOwnerLinkErrorV1,
+        ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+        ManifestOwnerLinkErrorV1,
     },
     Hash, Plugin,
 };
@@ -114,7 +114,8 @@ fn same_name_plugin_ids_need_both_preassigned_slots() -> Result<(), Box<dyn Erro
 
     let mut next = batch.as_input().clone();
     next.configuration_generation = 2;
-    let renewed = registry.revalidate_manifest_registration(ManifestAdmissionCatalogV1::new(next)?)?;
+    let renewed =
+        registry.revalidate_manifest_registration(ManifestAdmissionCatalogV1::new(next)?)?;
     assert!(registry.is_admitted_composition_current(&renewed));
     assert_eq!(renewed.catalog().as_input().configuration_generation, 2);
     Ok(())
@@ -125,10 +126,13 @@ fn malformed_or_changed_batches_fail_without_partial_admission() -> Result<(), B
     let first = fixture("alpha", b"first")?;
     let second = fixture("beta", b"second")?;
     let rows = vec![first.row.clone(), second.row.clone()];
-    let duplicate_slot = vec![first.row.clone(), ManifestAdmissionCatalogRowV1 {
-        stable_slot: "alpha".to_owned(),
-        ..second.row.clone()
-    }];
+    let duplicate_slot = vec![
+        first.row.clone(),
+        ManifestAdmissionCatalogRowV1 {
+            stable_slot: "alpha".to_owned(),
+            ..second.row.clone()
+        },
+    ];
     assert!(matches!(
         ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
             owner_id: [0x41; 32],
