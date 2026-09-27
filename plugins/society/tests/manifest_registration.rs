@@ -3,41 +3,36 @@
 use std::error::Error;
 
 use pos_core::{
-    event::Kind,
+    ids::TimelineId,
     manifest_owner_link::{
         ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
         ManifestOwnerLinkErrorV1,
     },
     Hash, Plugin,
 };
-use pos_plugin_world::{WorldDriver, WorldPlugin, WorldReducer, EVENT_TYPE_ACTION_V1};
+use pos_plugin_society::{SocietyPlugin, SocietyReducer};
 use pos_runtime::{
-    installed_plugin_role_v1, DomainImplementationKindV1, HostWorldProfileV1,
-    InstalledOutputPolicySourceV1, ManifestRegistrationErrorV1, OutputPolicyBindingV1,
-    PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
-    RuntimeError,
+    installed_plugin_role_v1, DomainImplementationKindV1, Driver, InstalledOutputPolicySourceV1,
+    ManifestRegistrationErrorV1, ObservationView, OutputPolicyBindingV1, PluginAvailabilityV1,
+    PluginCompositionErrorV1, PluginIsolationV1, PluginPinFieldV1, PluginPinV1,
+    PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput,
 };
 
 struct InstalledFixture {
-    plugin: WorldPlugin,
+    plugin: SocietyPlugin,
     binding: OutputPolicyBindingV1,
     registration: PluginRegistrationV1,
     row: ManifestAdmissionCatalogRowV1,
 }
 
 fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn Error>> {
-    let plugin = WorldPlugin::new();
+    let plugin = SocietyPlugin::new();
     let binding = OutputPolicyBindingV1::from_installed_source(
         &plugin,
-        InstalledOutputPolicySourceV1::World,
+        InstalledOutputPolicySourceV1::Society,
         configuration,
         "deterministic-local-v1",
-    )?
-    .with_installed_driver(WorldDriver::new_live(
-        Vec::new(),
-        HostWorldProfileV1::standard(),
-    )?)?
-    .with_installed_plugin_action_approver(&plugin, [Kind::new(EVENT_TYPE_ACTION_V1)])?;
+    )?;
     let pin = PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,
@@ -63,13 +58,14 @@ fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn
     })
 }
 
-fn catalog(rows: Vec<ManifestAdmissionCatalogRowV1>) -> ManifestAdmissionCatalogV1 {
+fn catalog(
+    rows: Vec<ManifestAdmissionCatalogRowV1>,
+) -> Result<ManifestAdmissionCatalogV1, ManifestOwnerLinkErrorV1> {
     ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
         owner_id: [0x41; 32],
         configuration_generation: 1,
         rows,
     })
-    .expect("valid catalog fixture")
 }
 
 fn register(registry: &mut PluginRegistry, fixture: InstalledFixture) -> Result<(), RuntimeError> {
@@ -83,9 +79,25 @@ fn register(registry: &mut PluginRegistry, fixture: InstalledFixture) -> Result<
         &plugin,
         binding,
         registration,
-        Some(Box::new(WorldReducer)),
+        Some(Box::new(SocietyReducer)),
         &row.stable_slot,
     )
+}
+
+struct MutationProbe;
+
+impl Driver for MutationProbe {
+    fn step(
+        &mut self,
+        _timeline: TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::empty())
+    }
+
+    fn name(&self) -> &'static str {
+        "manifest-mutation-probe"
+    }
 }
 
 #[test]
@@ -95,7 +107,7 @@ fn same_name_plugin_ids_need_both_preassigned_slots() -> Result<(), Box<dyn Erro
     assert_eq!(first.plugin.name(), second.plugin.name());
     assert_ne!(first.plugin.id(), second.plugin.id());
     assert_ne!(first.row.eop1_native_digest, second.row.eop1_native_digest);
-    let batch = catalog(vec![first.row.clone(), second.row.clone()]);
+    let batch = catalog(vec![first.row.clone(), second.row.clone()])?;
     let mut registry = PluginRegistry::new();
     registry.prepare_manifest_registration(batch.clone())?;
     register(&mut registry, first)?;
@@ -149,7 +161,7 @@ fn malformed_or_changed_batches_fail_without_partial_admission() -> Result<(), B
     ));
 
     let mut registry = PluginRegistry::new();
-    registry.prepare_manifest_registration(catalog(rows.clone()))?;
+    registry.prepare_manifest_registration(catalog(rows)?)?;
     register(&mut registry, first)?;
     assert!(matches!(
         registry.admit_complete_manifest_registration(),
@@ -192,7 +204,7 @@ fn absent_batch_and_wrong_policy_reject_before_mutation() -> Result<(), Box<dyn 
     let bad = fixture("alpha", b"actual")?;
     let mut wrong_row = bad.row.clone();
     wrong_row.eop1_native_digest = Hash::from_bytes([0x72; 32]);
-    registry.prepare_manifest_registration(catalog(vec![wrong_row]))?;
+    registry.prepare_manifest_registration(catalog(vec![wrong_row])?)?;
     assert!(matches!(
         register(&mut registry, bad),
         Err(RuntimeError::ManifestRegistration(
@@ -200,6 +212,57 @@ fn absent_batch_and_wrong_policy_reject_before_mutation() -> Result<(), Box<dyn 
         ))
     ));
     assert!(registry.is_empty());
+    Ok(())
+}
+
+#[test]
+fn wrong_pin_and_unavailable_plugin_reject_before_mutation() -> Result<(), Box<dyn Error>> {
+    for unavailable in [false, true] {
+        let actual = fixture("alpha", b"pinned")?;
+        let registration = if unavailable {
+            PluginRegistrationV1::new(
+                actual.registration.pin().clone(),
+                PluginAvailabilityV1::Disabled,
+            )
+        } else {
+            PluginRegistrationV1::new(
+                PluginPinV1::try_new(
+                    DomainImplementationKindV1::Plugin,
+                    PluginIsolationV1::OperatorTrustedNative,
+                    Hash::from_bytes([0x74; 32]),
+                    vec![installed_plugin_role_v1(&actual.plugin)],
+                )?,
+                PluginAvailabilityV1::Available,
+            )
+        };
+        let mut registry = PluginRegistry::new();
+        registry.prepare_manifest_registration(catalog(vec![actual.row.clone()])?)?;
+        let result = registry.register_installed_output_in_manifest_slot(
+            &actual.plugin,
+            actual.binding,
+            registration,
+            Some(Box::new(SocietyReducer)),
+            "alpha",
+        );
+        assert!(matches!(
+            (unavailable, result),
+            (
+                true,
+                Err(RuntimeError::Composition(
+                    PluginCompositionErrorV1::ImplementationUnavailable { .. }
+                ))
+            ) | (
+                false,
+                Err(RuntimeError::Composition(
+                    PluginCompositionErrorV1::IncompatibleImplementation {
+                        field: PluginPinFieldV1::ConfigurationDigest,
+                        ..
+                    }
+                ))
+            )
+        ));
+        assert!(registry.is_empty());
+    }
     Ok(())
 }
 
@@ -218,7 +281,7 @@ fn every_static_catalog_field_is_checked_before_registration() -> Result<(), Box
             _ => wrong.closure_hash = Hash::from_bytes([0x73; 32]),
         }
         let mut registry = PluginRegistry::new();
-        registry.prepare_manifest_registration(catalog(vec![wrong]))?;
+        registry.prepare_manifest_registration(catalog(vec![wrong])?)?;
         let result = register(&mut registry, actual);
         assert!(matches!(
             result,
@@ -240,11 +303,11 @@ fn preparation_and_capability_invalidation_are_fail_closed() -> Result<(), Box<d
         Err(ManifestRegistrationErrorV1::BatchState)
     ));
     assert!(matches!(
-        registry.prepare_manifest_registration(catalog(Vec::new())),
+        registry.prepare_manifest_registration(catalog(Vec::new())?),
         Err(ManifestRegistrationErrorV1::EmptyBatch)
     ));
     let fixture = fixture("alpha", b"current")?;
-    let batch = catalog(vec![fixture.row.clone()]);
+    let batch = catalog(vec![fixture.row.clone()])?;
     registry.prepare_manifest_registration(batch.clone())?;
     assert!(matches!(
         registry.prepare_manifest_registration(batch.clone()),
@@ -261,10 +324,7 @@ fn preparation_and_capability_invalidation_are_fail_closed() -> Result<(), Box<d
         Err(ManifestRegistrationErrorV1::IncompleteBatch)
     ));
     assert!(!PluginRegistry::new().is_admitted_composition_current(&admitted));
-    registry.register_driver(Box::new(WorldDriver::new_live(
-        Vec::new(),
-        HostWorldProfileV1::standard(),
-    )?));
+    registry.register_driver(Box::new(MutationProbe));
     assert!(!registry.is_admitted_composition_current(&admitted));
     assert!(matches!(
         registry.admit_complete_manifest_registration(),
