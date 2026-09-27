@@ -130,9 +130,15 @@ impl RecipientKeyOwnerV1 {
 impl SqliteStore {
     /// Stage and durably enroll a fresh role-4 recipient key.
     ///
-    /// The private file and RKP1 descriptor are synced before the SQLite
+    /// The private file and RKP1 descriptor are synced before the `SQLite`
     /// registry/inventory transaction makes the identity active. A failed
     /// transaction cannot activate the staged material.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the custody directory is unsafe, entropy or
+    /// key derivation fails, material cannot be durably written, or the
+    /// registry/inventory transaction cannot commit.
     pub fn enroll_recipient_key(
         &mut self,
         owner: &RecipientKeyOwnerV1,
@@ -186,6 +192,11 @@ impl SqliteStore {
     ///
     /// Missing, corrupt, or descriptor-mismatched material fails closed; this
     /// method never derives a replacement from public RKP1 data.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the custody directory, registry, inventory,
+    /// or private material is absent, unsafe, corrupt, or inconsistent.
     pub fn recover_recipient_keys(
         &self,
         owner: &RecipientKeyOwnerV1,
@@ -279,6 +290,12 @@ impl SqliteStore {
 
     /// Mark one recipient epoch pending, durably remove its owned key file,
     /// then commit the irreversible registry tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the requested identity is unavailable, its
+    /// material cannot be safely removed, or a durable custody transition
+    /// cannot commit.
     pub fn destroy_recipient_key(
         &mut self,
         owner: &RecipientKeyOwnerV1,
@@ -322,14 +339,14 @@ impl SqliteStore {
         self.finish_recipient_key_destruction(owner, request)
     }
 
-    /// Resume the exact pending request under the SQLite writer reservation.
+    /// Resume the exact pending request under the `SQLite` writer reservation.
     ///
     /// The receipt row and registry tombstone commit together only after the
     /// directory-relative unlink and directory sync. If a process stops after
     /// unlinking but before that commit, the request remains pending and this
     /// method refuses to manufacture a receipt from the missing pathname.
     fn finish_recipient_key_destruction(
-        &mut self,
+        &self,
         owner: &RecipientKeyOwnerV1,
         request: KeyDestructionRequestV1,
     ) -> Result<(), CoreError> {
