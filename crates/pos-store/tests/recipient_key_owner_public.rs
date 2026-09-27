@@ -108,10 +108,7 @@ fn recipient_owner_public_contract_recovers_and_destroys_the_bound_file(
             &descriptor.identity().owner_id,
             KeyRoleV1::ExportRecipientEncryption
         )
-        .is_some());
-    assert!(registry
-        .pending_destruction_requests()
-        .any(|request| request.identity == descriptor.identity()));
+        .is_none());
     assert!(registry.tombstone(descriptor.identity()).is_some());
     let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
         .query_row(
@@ -164,7 +161,10 @@ fn recipient_owner_public_contract_rejects_replaced_file_and_keeps_pending(
             &descriptor.identity().owner_id,
             KeyRoleV1::ExportRecipientEncryption
         )
-        .is_none());
+        .is_some());
+    assert!(registry
+        .pending_destruction_requests()
+        .any(|request| request.identity == descriptor.identity()));
     assert!(registry.tombstone(descriptor.identity()).is_none());
     let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
         .query_row(
