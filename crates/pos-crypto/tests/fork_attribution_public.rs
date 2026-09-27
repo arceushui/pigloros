@@ -5,6 +5,7 @@ use pos_core::{
 };
 use pos_crypto::{
     fork_attribution::{
+        sign_local_fork_manifest_for_identity_from_admission_signature_only,
         sign_local_fork_manifest_from_admission_signature_only,
         sign_local_fork_manifest_signature_only, verify_local_fork_manifest_signature_only,
         ForkAttributionSigningErrorV1,
@@ -87,6 +88,30 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
     };
     assert_eq!(
         mismatch,
+        pos_core::ForkAttributionCodecErrorV1::FieldMismatch
+    );
+
+    let (private_b, public_b) = generate_keypair();
+    let private_b = SigningKeyMaterial::new(private_b);
+    let identity_b = KeyIdentityV1::new("creator-b", KeyRoleV1::SubjectAttributionSigning, 1);
+    registry.register_key(KeyRegistrationV1::new(
+        identity_b,
+        private_b.material_digest(),
+        Some(public_key_from_verifying_key(&public_b)),
+    ))?;
+    let creator_b = sign_local_fork_manifest_for_identity_from_admission_signature_only(
+        &mut registry,
+        &private_b,
+        identity_b,
+        &admission,
+        ForkReproManifestV1::from_admission(&admission, vec![], 0, hash(6))?,
+    )
+    .unwrap_err();
+    let ForkAttributionSigningErrorV1::Codec(creator_b) = creator_b else {
+        return Err("creator-b FAR1 mismatch unexpectedly reached the registry".into());
+    };
+    assert_eq!(
+        creator_b,
         pos_core::ForkAttributionCodecErrorV1::FieldMismatch
     );
     verify_local_fork_manifest_signature_only(&signed, public_key_from_verifying_key(&public))?;

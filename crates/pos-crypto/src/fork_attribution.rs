@@ -69,15 +69,48 @@ pub fn sign_local_fork_manifest_from_admission_signature_only<R: KeyRegistrySign
     epoch: u64,
     manifest: ForkReproManifestV1,
 ) -> Result<SignedForkReproManifestV1, ForkAttributionSigningErrorV1> {
-    if epoch == 0 {
-        return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds.into());
-    }
-    manifest.validate_against_admission(admission)?;
     let identity = KeyIdentityV1::from_parts(
         admission.input().creator,
         KeyRoleV1::SubjectAttributionSigning,
         epoch,
     );
+    sign_local_fork_manifest_for_identity_from_admission_signature_only(
+        registry,
+        signing_key,
+        identity,
+        admission,
+        manifest,
+    )
+}
+
+/// Sign an admission-bound `FSM1` after validating an existing registry identity.
+///
+/// This supports callers that already hold a registry identity while rejecting
+/// a creator, role, or epoch that disagrees with supplied local `FAR1` before
+/// the registry can sign. It does not grant admission or publication authority.
+///
+/// # Errors
+///
+/// Returns a precise codec error for an identity or record mismatch, or the
+/// closed registry error from the signing operation.
+pub fn sign_local_fork_manifest_for_identity_from_admission_signature_only<
+    R: KeyRegistrySigningPortV1,
+>(
+    registry: &mut R,
+    signing_key: &SigningKeyMaterial,
+    identity: KeyIdentityV1,
+    admission: &ForkAdmissionRecordV1,
+    manifest: ForkReproManifestV1,
+) -> Result<SignedForkReproManifestV1, ForkAttributionSigningErrorV1> {
+    if identity.epoch == 0 {
+        return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds.into());
+    }
+    if identity.owner_id != admission.input().creator
+        || identity.role != KeyRoleV1::SubjectAttributionSigning
+    {
+        return Err(ForkAttributionCodecErrorV1::FieldMismatch.into());
+    }
+    manifest.validate_against_admission(admission)?;
     let payload = CanonicalBytes::from_vec(manifest.to_canonical_cbor());
     let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
     Ok(SignedForkReproManifestV1::new_from_admission(
