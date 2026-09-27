@@ -300,34 +300,38 @@ fn verify_snapshot_event_sets(
     let full_state = registry
         .state_snapshot(snap.timeline)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-    if snap
-        .registry
-        .keys()
-        .any(|name| !full_state.contains_key(name))
-    {
-        return Err(SnapshotError::ArtifactUnavailable);
-    }
-    verify_snapshot_entities(&all_entities, &incremental_state, &full_state)?;
-    if incremental_state != full_state {
-        return Err(SnapshotError::InconsistentState);
-    }
-    Ok(())
+    verify_snapshot_reducer_coverage(snap, &full_state)
+        .and_then(|()| verify_snapshot_entity_states(all_entities, &incremental_state, &full_state))
 }
 
-fn verify_snapshot_entities(
-    entities: &[EntityId],
+fn verify_snapshot_reducer_coverage(
+    snap: &Snapshot,
+    full_state: &HashMap<String, StateRegistry>,
+) -> Result<(), SnapshotError> {
+    snap.registry
+        .keys()
+        .all(|name| full_state.contains_key(name))
+        .then_some(())
+        .ok_or(SnapshotError::ArtifactUnavailable)
+}
+
+fn verify_snapshot_entity_states(
+    all_entities: Vec<EntityId>,
     incremental_state: &HashMap<String, StateRegistry>,
     full_state: &HashMap<String, StateRegistry>,
 ) -> Result<(), SnapshotError> {
-    for entity in entities {
+    for entity in all_entities {
         for name in full_state.keys() {
             let incremental_registry = incremental_state.get(name).cloned().unwrap_or_default();
             let full_registry = full_state.get(name).cloned().unwrap_or_default();
             if incremental_registry.get_or_default(&entity) != full_registry.get_or_default(&entity)
             {
-                return Err(SnapshotError::Inconsistent { entity: *entity });
+                return Err(SnapshotError::Inconsistent { entity });
             }
         }
+    }
+    if incremental_state != full_state {
+        return Err(SnapshotError::InconsistentState);
     }
     Ok(())
 }
