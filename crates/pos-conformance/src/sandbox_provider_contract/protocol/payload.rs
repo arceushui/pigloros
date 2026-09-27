@@ -109,8 +109,10 @@ impl SandboxPayloadChunkV1 {
     /// Returns a closed error when an unsigned field is invalid.
     pub fn seal(mut self) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
-        self.chunk_digest = digest(SBC1, &self.unsigned_value())?;
-        Ok(self)
+        digest(SBC1, &self.unsigned_value()).map(|digest| {
+            self.chunk_digest = digest;
+            self
+        })
     }
 
     /// Validate the chunk shape and self-digest.
@@ -119,9 +121,11 @@ impl SandboxPayloadChunkV1 {
     /// Returns a closed error for malformed chunk metadata or bytes.
     pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
         self.validate_unsigned()?;
-        (self.chunk_digest == digest(SBC1, &self.unsigned_value())?)
-            .then_some(())
-            .ok_or(SandboxContractErrorV1::DigestMismatch)
+        digest(SBC1, &self.unsigned_value()).and_then(|digest| {
+            (self.chunk_digest == digest)
+                .then_some(())
+                .ok_or(SandboxContractErrorV1::DigestMismatch)
+        })
     }
 
     /// Encode exact deterministic-CBOR SBC1 bytes.

@@ -529,10 +529,7 @@ impl SandboxProviderErrorV1 {
             return Err(SandboxContractErrorV1::InconsistentFields);
         }
         if self.code.requires_authenticated_request() {
-            let Some(operation) = self.operation else {
-                return Err(SandboxContractErrorV1::InconsistentFields);
-            };
-            let attempt_identity_matches_operation = if operation == 0 {
+            let attempt_identity_matches_operation = if self.operation == Some(0) {
                 self.attempt_id.is_none()
             } else {
                 self.attempt_id.is_some()

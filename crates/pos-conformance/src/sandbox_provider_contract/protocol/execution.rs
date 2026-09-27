@@ -53,15 +53,19 @@ impl NetworkExchangePlanV1 {
     /// Returns a closed error when a plan field is invalid.
     pub fn seal(mut self) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
-        self.plan_digest = digest_with_domain(NXP1_DIGEST_DOMAIN, &self.unsigned_value())?;
-        Ok(self)
+        digest_with_domain(NXP1_DIGEST_DOMAIN, &self.unsigned_value()).map(|digest| {
+            self.plan_digest = digest;
+            self
+        })
     }
 
     fn validate(&self) -> Result<(), SandboxContractErrorV1> {
         self.validate_unsigned()?;
-        (self.plan_digest == digest_with_domain(NXP1_DIGEST_DOMAIN, &self.unsigned_value())?)
-            .then_some(())
-            .ok_or(SandboxContractErrorV1::DigestMismatch)
+        digest_with_domain(NXP1_DIGEST_DOMAIN, &self.unsigned_value()).and_then(|digest| {
+            (self.plan_digest == digest)
+                .then_some(())
+                .ok_or(SandboxContractErrorV1::DigestMismatch)
+        })
     }
 
     fn validate_unsigned(&self) -> Result<(), SandboxContractErrorV1> {
@@ -414,9 +418,11 @@ impl AdmissionGrantV1 {
     /// Returns a closed contract error when an unsigned field is invalid.
     pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
-        self.grant_digest = digest(AGR1, &self.unsigned_value())?;
-        self.signature = sign(AGR1, &self.grant_digest, key);
-        Ok(self)
+        digest(AGR1, &self.unsigned_value()).map(|digest| {
+            self.grant_digest = digest;
+            self.signature = sign(AGR1, &self.grant_digest, key);
+            self
+        })
     }
 
     /// Validate shape, ordering, and self-digest.

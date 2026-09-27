@@ -79,9 +79,11 @@ impl SandboxProviderReceiptV1 {
     /// Returns a closed contract error when an unsigned field is invalid.
     pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, SandboxContractErrorV1> {
         self.validate_unsigned()?;
-        self.receipt_digest = digest(SPR1, &self.unsigned_value())?;
-        self.signature = sign(SPR1, &self.receipt_digest, key);
-        Ok(self)
+        digest(SPR1, &self.unsigned_value()).map(|digest| {
+            self.receipt_digest = digest;
+            self.signature = sign(SPR1, &self.receipt_digest, key);
+            self
+        })
     }
 
     /// Validate evidence bindings, bounds, and self-digest.
@@ -91,9 +93,11 @@ impl SandboxProviderReceiptV1 {
     pub fn validate(&self) -> Result<(), SandboxContractErrorV1> {
         self.validate_unsigned()?;
         validate_signed_bytes(&self.signature)?;
-        (self.receipt_digest == digest(SPR1, &self.unsigned_value())?)
-            .then_some(())
-            .ok_or(SandboxContractErrorV1::DigestMismatch)
+        digest(SPR1, &self.unsigned_value()).and_then(|digest| {
+            (self.receipt_digest == digest)
+                .then_some(())
+                .ok_or(SandboxContractErrorV1::DigestMismatch)
+        })
     }
 
     /// Verify this receipt with an authorized runtime-attestation key.
