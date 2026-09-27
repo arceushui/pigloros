@@ -6089,7 +6089,7 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                 ulid::Ulid::from_string(&child_id)
                     .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?,
             );
-            return if stored_digest.as_slice() == request_digest.as_bytes()
+            if !(stored_digest.as_slice() == request_digest.as_bytes()
                 && admission.input().child_timeline_id == child
                 && admission.input().operation_id == request.operation_id
                 && admission.input().parent_timeline_id == request.parent_timeline_id
@@ -6098,14 +6098,21 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                 && admission.input().room_revision_descriptor_hash
                     == request.room_revision_descriptor_hash
                 && admission.input().plugin_composition_hash == request.plugin_composition_hash
-                && admission.input().attribution_required == request.attribution_required
+                && admission.input().attribution_required == request.attribution_required)
             {
+                return Err(ForkAdmissionErrorV1::Conflict);
+            }
+            drop(tx);
+            let trusted = self
+                .read_fork_admission(child)?
+                .ok_or(ForkAdmissionErrorV1::CorruptAuthority)?;
+            return if trusted == admission {
                 Ok(ForkAdmissionReceiptV1 {
                     child_id: child,
-                    admission_digest: admission.digest(),
+                    admission_digest: trusted.digest(),
                 })
             } else {
-                Err(ForkAdmissionErrorV1::Conflict)
+                Err(ForkAdmissionErrorV1::CorruptAuthority)
             };
         }
         let principal_digest = pos_core::principal_digest_v1(request.authenticated.principal())?;
