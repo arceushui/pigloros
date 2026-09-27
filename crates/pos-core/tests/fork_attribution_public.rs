@@ -4,11 +4,11 @@ use pos_core::{
     KeyRoleV1, SignedForkReproManifestV1, TimelineId,
 };
 
-fn hash(value: u8) -> Hash {
+const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
-fn admission() -> ForkAdmissionRecordV1 {
+fn admission() -> Result<ForkAdmissionRecordV1, ForkAttributionCodecErrorV1> {
     ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
         operation_id: hash(1),
         principal_owner_binding_digest: hash(2),
@@ -24,10 +24,11 @@ fn admission() -> ForkAdmissionRecordV1 {
         attribution_required: true,
         origin: ForkAttributionOriginV1::Local,
     })
-    .expect("valid admission")
 }
 
-fn manifest(admission: &ForkAdmissionRecordV1) -> ForkReproManifestV1 {
+fn manifest(
+    admission: &ForkAdmissionRecordV1,
+) -> Result<ForkReproManifestV1, ForkAttributionCodecErrorV1> {
     let input = admission.input();
     ForkReproManifestV1::new(ForkReproManifestInputV1 {
         parent_timeline_id: input.parent_timeline_id,
@@ -42,19 +43,16 @@ fn manifest(admission: &ForkAdmissionRecordV1) -> ForkReproManifestV1 {
         final_fork_logical_head: 7,
         final_fork_chain_head_hash: hash(6),
     })
-    .expect("valid manifest")
 }
 
 #[test]
-fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() {
-    let admission = admission();
-    let manifest = manifest(&admission);
-    manifest
-        .validate_against_admission(&admission)
-        .expect("matching admission");
+fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let manifest = manifest(&admission)?;
+    manifest.validate_against_admission(&admission)?;
     assert_eq!(
         ForkAdmissionRecordV1::from_canonical_cbor(&admission.to_canonical_cbor()),
-        Ok(admission.clone())
+        Ok(admission)
     );
     assert_eq!(
         ForkReproManifestV1::from_canonical_cbor(&manifest.to_canonical_cbor()),
@@ -64,22 +62,23 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() {
         KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
         manifest,
         pos_core::Signature::from_bytes([9; 64]),
-    )
-    .expect("attribution identity");
+    )?;
     assert_eq!(
         SignedForkReproManifestV1::from_canonical_cbor(&outer.to_canonical_cbor()),
         Ok(outer)
     );
+    Ok(())
 }
 
 #[test]
-fn local_far1_rejects_reserved_import_origin_and_noncanonical_bytes() {
-    let admission = admission();
+fn local_far1_rejects_reserved_import_origin_and_noncanonical_bytes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
     let mut binary_creator = admission.to_canonical_cbor();
     let creator_at = binary_creator
         .windows(b"creator-a".len())
         .position(|bytes| bytes == b"creator-a")
-        .expect("encoded creator");
+        .ok_or("encoded creator is absent")?;
     binary_creator[creator_at - 1] = 0x49;
     assert_eq!(
         ForkAdmissionRecordV1::from_canonical_cbor(&binary_creator),
@@ -99,11 +98,13 @@ fn local_far1_rejects_reserved_import_origin_and_noncanonical_bytes() {
         ForkAdmissionRecordV1::from_canonical_cbor(&noncanonical),
         Err(ForkAttributionCodecErrorV1::NonCanonical)
     );
+    Ok(())
 }
 
 #[test]
-fn manifest_rejects_unordered_out_of_range_and_mismatched_provenance() {
-    let admission = admission();
+fn manifest_rejects_unordered_out_of_range_and_mismatched_provenance(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
     let input = admission.input();
     assert_eq!(
         ForkReproManifestV1::new(ForkReproManifestInputV1 {
@@ -121,7 +122,7 @@ fn manifest_rejects_unordered_out_of_range_and_mismatched_provenance() {
         }),
         Err(ForkAttributionCodecErrorV1::InterventionOrder)
     );
-    let matching = manifest(&admission);
+    let matching = manifest(&admission)?;
     let incorrect = ForkReproManifestV1::new(ForkReproManifestInputV1 {
         parent_timeline_id: input.parent_timeline_id,
         fork_timeline_id: input.child_timeline_id,
@@ -134,18 +135,19 @@ fn manifest_rejects_unordered_out_of_range_and_mismatched_provenance() {
         intervention_sequences: vec![],
         final_fork_logical_head: input.parent_logical_head,
         final_fork_chain_head_hash: hash(7),
-    })
-    .expect("structural manifest");
+    })?;
     assert_eq!(
         incorrect.validate_against_admission(&admission),
         Err(ForkAttributionCodecErrorV1::FieldMismatch)
     );
     assert_eq!(matching.validate_against_admission(&admission), Ok(()));
+    Ok(())
 }
 
 #[test]
-fn admission_constructor_rejects_each_required_cut_invariant() {
-    let valid = admission().input().clone();
+fn admission_constructor_rejects_each_required_cut_invariant(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let valid = admission()?.input().clone();
     let mut operation = valid.clone();
     operation.operation_id = Hash::zero();
     assert_eq!(
@@ -188,11 +190,12 @@ fn admission_constructor_rejects_each_required_cut_invariant() {
         ForkAdmissionRecordV1::new(tick),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
 }
 
 #[test]
-fn far1_decoder_rejects_malformed_fields_and_limits() {
-    let admission = admission();
+fn far1_decoder_rejects_malformed_fields_and_limits() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
     let canonical = admission.to_canonical_cbor();
     let cases = [
         (0, 0x8e, ForkAttributionCodecErrorV1::InvalidEncoding),
@@ -235,12 +238,13 @@ fn far1_decoder_rejects_malformed_fields_and_limits() {
         ]),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
 }
 
 #[test]
-fn manifest_constructor_and_decoder_enforce_bounds() {
-    let admission = admission();
-    let valid = manifest(&admission).input().clone();
+fn manifest_constructor_and_decoder_enforce_bounds() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let valid = manifest(&admission)?.input().clone();
     let mut timelines = valid.clone();
     timelines.fork_timeline_id = timelines.parent_timeline_id;
     assert_eq!(
@@ -300,10 +304,11 @@ fn manifest_constructor_and_decoder_enforce_bounds() {
         ]),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
 }
 
 #[test]
-fn wide_cbor_coordinates_round_trip_at_the_public_seam() {
+fn wide_cbor_coordinates_round_trip_at_the_public_seam() -> Result<(), Box<dyn std::error::Error>> {
     let parent = TimelineId::new();
     let child = TimelineId::new();
     let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
@@ -320,8 +325,7 @@ fn wide_cbor_coordinates_round_trip_at_the_public_seam() {
         plugin_composition_hash: hash(5),
         attribution_required: false,
         origin: ForkAttributionOriginV1::Local,
-    })
-    .expect("valid admission");
+    })?;
     let manifest = ForkReproManifestV1::new(ForkReproManifestInputV1 {
         parent_timeline_id: parent,
         fork_timeline_id: child,
@@ -334,11 +338,10 @@ fn wide_cbor_coordinates_round_trip_at_the_public_seam() {
         intervention_sequences: vec![25, 256, 65_536],
         final_fork_logical_head: 4_294_967_296,
         final_fork_chain_head_hash: hash(6),
-    })
-    .expect("valid manifest");
+    })?;
     assert_eq!(
         ForkAdmissionRecordV1::from_canonical_cbor(&admission.to_canonical_cbor()),
-        Ok(admission.clone())
+        Ok(admission)
     );
     assert_eq!(
         ForkReproManifestV1::from_canonical_cbor(&manifest.to_canonical_cbor()),
@@ -352,18 +355,19 @@ fn wide_cbor_coordinates_round_trip_at_the_public_seam() {
         ),
         manifest,
         pos_core::Signature::from_bytes([9; 64]),
-    )
-    .expect("valid signature wrapper");
+    )?;
     assert_eq!(
         SignedForkReproManifestV1::from_canonical_cbor(&signed.to_canonical_cbor()),
         Ok(signed)
     );
+    Ok(())
 }
 
 #[test]
-fn fsm1_rejects_non_attribution_identities_and_outer_limits() {
-    let admission = admission();
-    let manifest = manifest(&admission);
+fn fsm1_rejects_non_attribution_identities_and_outer_limits(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let manifest = manifest(&admission)?;
     assert_eq!(
         SignedForkReproManifestV1::new(
             KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1),
@@ -388,4 +392,5 @@ fn fsm1_rejects_non_attribution_identities_and_outer_limits() {
         ]),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
 }
