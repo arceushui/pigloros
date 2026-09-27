@@ -5,7 +5,10 @@
 
 use std::{error::Error, fs::File, io::Write, os::fd::OwnedFd, time::Duration};
 
-use rustix::fs::{fcntl_getfd, fcntl_setfd, fstat, FdFlags};
+use rustix::{
+    fs::fstat,
+    io::{fcntl_getfd, fcntl_setfd, FdFlags},
+};
 use serde_json::{json, Value};
 use tokio::net::UnixStream;
 use zlink::{tokio::unix::Stream, Connection, Reply};
