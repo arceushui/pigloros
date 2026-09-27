@@ -6014,14 +6014,17 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
             .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
         let existing = tx
             .query_row(
-                "SELECT pob1_cbor FROM fork_principal_owner_bindings WHERE operation_id = ?1",
+                "SELECT principal_digest, owner_id, pob1_cbor FROM fork_principal_owner_bindings WHERE operation_id = ?1",
                 params![operation_id.as_bytes().as_slice()],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)),
             )
             .optional()
             .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
-        let result = if let Some(existing) = existing {
-            if existing == canonical {
+        let result = if let Some((stored_principal, stored_owner, existing)) = existing {
+            if stored_principal.as_slice() == principal_digest.as_bytes()
+                && stored_owner == binding.input().owner.as_str()
+                && existing == canonical
+            {
                 Ok(binding.clone())
             } else {
                 Err(ForkAdmissionErrorV1::Conflict)
@@ -6088,6 +6091,14 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
             );
             return if stored_digest.as_slice() == request_digest.as_bytes()
                 && admission.input().child_timeline_id == child
+                && admission.input().operation_id == request.operation_id
+                && admission.input().parent_timeline_id == request.parent_timeline_id
+                && admission.input().completed_fold_cursor == request.completed_fold_cursor
+                && admission.input().post_fold_tick_boundary == request.post_fold_tick_boundary
+                && admission.input().room_revision_descriptor_hash
+                    == request.room_revision_descriptor_hash
+                && admission.input().plugin_composition_hash == request.plugin_composition_hash
+                && admission.input().attribution_required == request.attribution_required
             {
                 Ok(ForkAdmissionReceiptV1 {
                     child_id: child,
