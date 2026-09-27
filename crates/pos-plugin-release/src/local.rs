@@ -59,6 +59,7 @@ thread_local! {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn injected_fault(point: PublicationFaultPointV1) -> Result<(), LocalOciPublicationErrorV1> {
     PUBLICATION_FAULT.with(|fault| {
         if fault.get() == Some(point) {
@@ -70,12 +71,13 @@ fn injected_fault(point: PublicationFaultPointV1) -> Result<(), LocalOciPublicat
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn fault_selected(point: PublicationFaultPointV1) -> bool {
     PUBLICATION_FAULT.with(|fault| fault.get() == Some(point))
 }
 
 macro_rules! faulted_io {
-    ($selected:expr, $error:expr, $operation:expr) => {{
+    ($selected:expr_2021, $error:expr_2021, $operation:expr_2021) => {{
         #[cfg(test)]
         {
             if $selected {
@@ -927,7 +929,7 @@ impl LocalOciPublisherV1 {
                     .and_then(|size| total.checked_add(size))
                     .ok_or(ReleaseSourceErrorV1::BoundsExceeded)
             })?;
-        if declared_total > crate::oci::MAX_TOTAL_BYTES {
+        if declared_total > crate::MAX_TOTAL_BYTES {
             return Err(ReleaseSourceErrorV1::BoundsExceeded);
         }
         let mut bytes = BTreeMap::new();
@@ -1230,6 +1232,7 @@ mod tests {
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn digest(bytes: &[u8]) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut result = String::from("sha256:");
@@ -1240,6 +1243,7 @@ mod tests {
         result
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn layer(member: &str, media_type: &str, bytes: &[u8]) -> serde_json::Value {
         serde_json::json!({
             "annotations": {"org.pigloros.plugin.member": member},
@@ -1249,6 +1253,7 @@ mod tests {
         })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bundle() -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
         let pmf1 = b"pmf1".to_vec();
         let component = b"component".to_vec();
@@ -1303,6 +1308,7 @@ mod tests {
         Ok(verify_oci_closure_v1(address, manifest, blobs)?)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn private_root(label: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!(
             "pigloros-oci-{label}-{}-{}",
@@ -1314,6 +1320,7 @@ mod tests {
         Ok(root)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn publish_with_fault(
         publisher: &LocalOciPublisherV1,
         bundle: &VerifiedReleaseBundleV1,
@@ -1326,6 +1333,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn initialization_faults_retry_from_private_root_without_partial_index(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for point in [
@@ -1351,6 +1359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn quarantine_move_and_sync_faults_keep_unsafe_stage_closed(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for point in [
@@ -1381,6 +1390,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn recovery_cleanup_sync_fault_requires_retry_before_publication(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let root = private_root("cleanup-sync")?;
@@ -1410,6 +1420,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn pre_final_publication_faults_leave_only_owned_recoverable_staging(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for point in [
@@ -1460,6 +1471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn owner_write_fault_quarantines_unowned_stage_before_retry(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let root = private_root("owner-fault")?;
@@ -1492,6 +1504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn post_final_faults_recover_the_one_unindexed_ready_release(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for point in [
@@ -1536,6 +1549,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn root_sync_fault_requires_address_scoped_recovery() -> Result<(), Box<dyn std::error::Error>>
     {
         let root = private_root("root-sync")?;
@@ -1556,6 +1570,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ready_write_fault_leaves_no_discoverable_release_and_retry_recovers(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!(
@@ -1588,6 +1603,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn recovery_fault_before_next_index_removal_fails_closed(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!(

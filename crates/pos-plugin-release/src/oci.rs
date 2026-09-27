@@ -10,7 +10,6 @@ const EMPTY_CONFIG_DIGEST: &str =
 const EMPTY_CONFIG_BYTES: &[u8] = b"{}";
 const MAX_MANIFEST_BYTES: usize = crate::MAX_JCS_BYTES;
 const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
-pub(super) const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STORED_BLOBS: usize = 359;
 const MAX_SCHEMAS: usize = 256;
 const MAX_LICENCES: usize = 32;
@@ -276,7 +275,9 @@ pub fn verify_oci_closure_v1(
         }
         blobs.push(BlobV1 { digest, bytes });
     }
-    if blobs.iter().map(|blob| blob.bytes.len()).sum::<usize>() + manifest.len() > MAX_TOTAL_BYTES {
+    if blobs.iter().map(|blob| blob.bytes.len()).sum::<usize>() + manifest.len()
+        > crate::MAX_TOTAL_BYTES
+    {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
     }
     Ok(VerifiedReleaseBundleV1 {
@@ -488,10 +489,12 @@ fn sha256_digest(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn digest(bytes: &[u8]) -> String {
         sha256_digest(bytes)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn layer(member: &str, media_type: &str, bytes: &[u8]) -> serde_json::Value {
         let digest = digest(bytes);
         serde_json::json!({
@@ -504,6 +507,7 @@ mod tests {
 
     type ClosureFixture = (BundleAddressV1, Vec<u8>, BTreeMap<String, Vec<u8>>);
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn closure() -> Result<ClosureFixture, Box<dyn std::error::Error>> {
         let pmf1 = b"pmf1".to_vec();
         let component = b"component".to_vec();
@@ -556,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verifies_complete_public_oci_closure() -> Result<(), Box<dyn std::error::Error>> {
         let (address, manifest, blobs) = closure()?;
         let verified = verify_oci_closure_v1(address.clone(), manifest, blobs)?;
@@ -575,6 +580,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_value(
         value: &serde_json::Value,
         blobs: BTreeMap<String, Vec<u8>>,
@@ -586,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_malformed_public_manifest_json() -> Result<(), Box<dyn std::error::Error>> {
         for manifest in [
             b"0".as_slice(),
@@ -629,6 +636,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_wrong_top_level_and_config_descriptors() -> Result<(), Box<dyn std::error::Error>> {
         let (_, manifest, blobs) = closure()?;
         let valid: serde_json::Value = serde_json::from_slice(&manifest)?;
@@ -676,6 +684,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_invalid_layer_shapes_and_order() -> Result<(), Box<dyn std::error::Error>> {
         let (_, manifest, blobs) = closure()?;
         let valid: serde_json::Value = serde_json::from_slice(&manifest)?;
@@ -784,6 +793,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_mismatched_public_descriptor_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let (address, manifest, blobs) = closure()?;
         let shorter = BundleAddressV1::new(address.digest().to_owned(), address.size() - 1)?;
@@ -825,6 +835,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn accepts_ordered_schema_and_migration_members() -> Result<(), Box<dyn std::error::Error>> {
         let (_, manifest, mut blobs) = closure()?;
         let mut value: serde_json::Value = serde_json::from_slice(&manifest)?;
@@ -859,6 +870,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_missing_closure_blob() -> Result<(), Box<dyn std::error::Error>> {
         let (address, manifest, mut blobs) = closure()?;
         let removed = blobs.keys().next().cloned().ok_or("no fixture blob")?;
@@ -871,6 +883,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_noncanonical_address() {
         assert_eq!(
             BundleAddressV1::new("sha256:ABC".to_owned(), 1),

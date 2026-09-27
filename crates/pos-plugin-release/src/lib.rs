@@ -16,6 +16,7 @@ mod oci;
 use std::collections::BTreeSet;
 
 const MAX_JCS_BYTES: usize = 64 * 1024;
+const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parse bounded canonical JSON shared by private transport adapters.
 fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
