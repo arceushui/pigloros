@@ -1879,7 +1879,6 @@ impl ErasureScopeCommitmentV1 {
     /// Returns a closed scope error for an empty, duplicate, or oversized scope.
     pub fn new(input: ErasureScopeCommitmentInputV1) -> Result<Self, ErasureErrorV1> {
         if input.scope_members.is_empty()
-            || input.scope_members.len() > ERASURE_MAX_SCOPE_EXTENSIONS
             || !strictly_increasing(&input.scope_members)
             || input.scope_timeline_ids.len() > ERASURE_MAX_INVENTORY_TIMELINES
             || input

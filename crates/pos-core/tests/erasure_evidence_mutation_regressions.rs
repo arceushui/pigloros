@@ -141,6 +141,33 @@ evidence_roundtrip!(scope_commitment_roundtrips, ErasureScopeCommitmentV1, {
     })
 });
 
+#[test]
+fn scope_commitment_accepts_more_than_the_extension_limit_of_scope_references(
+) -> Result<(), ErasureErrorV1> {
+    let extension_limit = u64::try_from(pos_core::ERASURE_MAX_SCOPE_EXTENSIONS)
+        .map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+    let members = (0..=extension_limit)
+        .map(|index| {
+            let mut digest = [0_u8; 32];
+            digest[24..].copy_from_slice(&index.to_be_bytes());
+            pos_core::ErasureReferenceV1::from_digest(digest)
+        })
+        .collect::<Vec<_>>();
+    let commitment = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: reference(1),
+        scope_members: members.clone(),
+        scope_timeline_ids: Vec::new(),
+        target_closure: reference(2),
+        lineage_rule: None,
+    })?;
+    assert_eq!(commitment.scope_members(), members.as_slice());
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&commitment.to_canonical_cbor()?)?,
+        commitment
+    );
+    Ok(())
+}
+
 evidence_roundtrip!(freeze_provenance_roundtrips, ErasureFreezeProvenanceV1, {
     ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request: reference(1),
