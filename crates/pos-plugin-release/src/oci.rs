@@ -7,6 +7,7 @@ const ARTIFACT_TYPE: &str = "application/vnd.pigloros.plugin.release.v1";
 const EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
 const EMPTY_CONFIG_DIGEST: &str =
     "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+#[cfg(test)]
 const EMPTY_CONFIG_BYTES: &[u8] = b"{}";
 const MAX_MANIFEST_BYTES: usize = crate::MAX_JCS_BYTES;
 const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
