@@ -16,6 +16,21 @@ use std::path::Path;
 
 use crate::CliError;
 
+#[cfg(all(test, unix))]
+macro_rules! fault {
+    ($path:expr_2021, $stage:expr_2021) => {
+        injected_fault_result($path, $stage)
+    };
+}
+
+#[cfg(all(not(test), unix))]
+macro_rules! fault {
+    ($path:expr_2021, $stage:expr_2021) => {{
+        let _ = $path;
+        Ok::<(), std::io::Error>(())
+    }};
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BoundFileIdentity {
@@ -243,21 +258,6 @@ pub(crate) fn bind_owned_secret_key(
     _material_digest: pos_core::Hash,
 ) -> Result<(), pos_core::CoreError> {
     Ok(())
-}
-
-#[cfg(all(test, unix))]
-macro_rules! fault {
-    ($path:expr_2021, $stage:expr_2021) => {
-        injected_fault_result($path, $stage)
-    };
-}
-
-#[cfg(all(not(test), unix))]
-macro_rules! fault {
-    ($path:expr_2021, $stage:expr_2021) => {{
-        let _ = $path;
-        Ok::<(), std::io::Error>(())
-    }};
 }
 
 /// Delete the application-owned signing-key file after registry authorization
