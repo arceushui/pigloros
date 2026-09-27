@@ -44,18 +44,18 @@ use pos_core::{
     timeline::{Timeline, TimelineMeta},
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CreateForkAdmittedRequestV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CreateForkAdmittedRequestV1,
+    ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
+    ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
+    ErasurePersistedStateV1, ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1,
+    ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, ErasureStateResolverV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
     ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
-    ForkAuthorityOriginV1, OwnerIdV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PrincipalOwnerTrustV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryV1,
-    ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
-    ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
-    ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ForkAuthorityOriginV1, KeyRegistryStateV1, OwnerIdV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PrincipalOwnerTrustV1,
+    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -175,8 +175,14 @@ pub struct MemoryStore {
     principal_owner_trust: Option<PrincipalOwnerTrustV1>,
     principal_owner_bindings: HashMap<Hash, PrincipalOwnerBindingV1>,
     principal_owner_operations: HashMap<Hash, PrincipalOwnerBindingV1>,
-    fork_admission_operations:
-        HashMap<Hash, (CreateForkAdmittedRequestV1, ForkAdmissionReceiptV1, ForkAdmissionRecordV1)>,
+    fork_admission_operations: HashMap<
+        Hash,
+        (
+            CreateForkAdmittedRequestV1,
+            ForkAdmissionReceiptV1,
+            ForkAdmissionRecordV1,
+        ),
+    >,
     fork_admissions: HashMap<TimelineId, ForkAdmissionRecordV1>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
@@ -1415,7 +1421,11 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
             origin: ForkAuthorityOriginV1::Local,
         })?;
         if let Some(existing) = self.principal_owner_operations.get(&operation_id) {
-            return if existing == &binding { Ok(existing.clone()) } else { Err(ForkAdmissionErrorV1::Conflict) };
+            return if existing == &binding {
+                Ok(existing.clone())
+            } else {
+                Err(ForkAdmissionErrorV1::Conflict)
+            };
         }
         if let Some(existing) = self.principal_owner_bindings.get(&principal_digest) {
             return if existing.input().owner == binding.input().owner {
@@ -1424,8 +1434,10 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
                 Err(ForkAdmissionErrorV1::PrincipalOwnerConflict)
             };
         }
-        self.principal_owner_operations.insert(operation_id, binding.clone());
-        self.principal_owner_bindings.insert(principal_digest, binding.clone());
+        self.principal_owner_operations
+            .insert(operation_id, binding.clone());
+        self.principal_owner_bindings
+            .insert(principal_digest, binding.clone());
         Ok(binding)
     }
 
@@ -1434,8 +1446,22 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
         request: &CreateForkAdmittedRequestV1,
         now: WallTime,
     ) -> Result<ForkAdmissionReceiptV1, ForkAdmissionErrorV1> {
-        if let Some((stored_request, receipt, _)) = self.fork_admission_operations.get(&request.operation_id) {
-            return if stored_request == request { Ok(*receipt) } else { Err(ForkAdmissionErrorV1::Conflict) };
+        if let Some((stored_request, receipt, _)) =
+            self.fork_admission_operations.get(&request.operation_id)
+        {
+            if stored_request != request {
+                return Err(ForkAdmissionErrorV1::Conflict);
+            }
+            return self.read_fork_admission(receipt.child_id)?.map_or(
+                Err(ForkAdmissionErrorV1::CorruptAuthority),
+                |admission| {
+                    if admission.digest() == receipt.admission_digest {
+                        Ok(*receipt)
+                    } else {
+                        Err(ForkAdmissionErrorV1::CorruptAuthority)
+                    }
+                },
+            );
         }
         if request.operation_id == Hash::zero()
             || request.room_revision_descriptor_hash == Hash::zero()
@@ -1465,9 +1491,11 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
         let parent_hash = self
             .compute_chain_hash_at(request.parent_timeline_id, parent_head)
             .map_err(|_| ForkAdmissionErrorV1::ParentChanged)?;
-        let child = self
-            .fork_visible_timeline(request.parent_timeline_id, parent_head, &request.child_name)
-            .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
+        let child = Timeline::new(TimelineMeta::forked_from(
+            request.parent_timeline_id,
+            parent_head,
+            &request.child_name,
+        ));
         let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
             operation_id: request.operation_id,
             principal_owner_binding_digest: binding.digest(),
@@ -1484,9 +1512,15 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
             origin: pos_core::ForkAttributionOriginV1::Local,
         })
         .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
-        let receipt = ForkAdmissionReceiptV1 { child_id: child.id(), admission_digest: admission.digest() };
+        self.create_timeline_with_meta(child.meta.clone())
+            .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
+        let receipt = ForkAdmissionReceiptV1 {
+            child_id: child.id(),
+            admission_digest: admission.digest(),
+        };
         self.fork_admissions.insert(child.id(), admission.clone());
-        self.fork_admission_operations.insert(request.operation_id, (request.clone(), receipt, admission));
+        self.fork_admission_operations
+            .insert(request.operation_id, (request.clone(), receipt, admission));
         Ok(receipt)
     }
 
@@ -1494,7 +1528,37 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
         &self,
         child_id: TimelineId,
     ) -> Result<Option<ForkAdmissionRecordV1>, ForkAdmissionErrorV1> {
-        Ok(self.fork_admissions.get(&child_id).cloned())
+        let Some(admission) = self.fork_admissions.get(&child_id).cloned() else {
+            return Ok(None);
+        };
+        let Some(child) = self.timelines.get(&child_id) else {
+            return Err(ForkAdmissionErrorV1::CorruptAuthority);
+        };
+        if child.timeline.meta.fork_point
+            != Some((
+                admission.input().parent_timeline_id,
+                pos_core::Seq::from_u64(admission.input().parent_logical_head),
+            ))
+            || !child.events.is_empty()
+            || child.chain_head != admission.input().parent_chain_head_hash
+            || child.timeline.meta.name.as_deref()
+                != self
+                    .fork_admission_operations
+                    .get(&admission.input().operation_id)
+                    .map(|(request, _, _)| request.child_name.as_str())
+            || self
+                .principal_owner_bindings
+                .values()
+                .filter(|binding| {
+                    binding.digest() == admission.input().principal_owner_binding_digest
+                        && binding.input().owner == admission.input().creator
+                })
+                .count()
+                != 1
+        {
+            return Err(ForkAdmissionErrorV1::CorruptAuthority);
+        }
+        Ok(Some(admission))
     }
 }
 

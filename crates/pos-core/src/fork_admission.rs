@@ -193,6 +193,10 @@ pub fn fork_admission_request_digest_v1(
 }
 
 /// Host-resolved, caller-limited Fork admission request.
+///
+/// The trusted host derives the room revision, Plugin composition, and
+/// attribution policy from its admitted Room state at the completed Tick
+/// Boundary. A network client must never construct this value directly.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateForkAdmittedRequestV1 {
     pub operation_id: Hash,
