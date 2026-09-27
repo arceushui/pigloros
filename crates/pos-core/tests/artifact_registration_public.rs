@@ -24,11 +24,7 @@ fn sample_fields() -> Result<ArtifactRegistrationFieldsV1, Box<dyn std::error::E
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
@@ -116,7 +112,7 @@ fn decoder_rejects_noncanonical_and_wrong_shape() -> Result<(), Box<dyn std::err
     for prefix in 0..canonical.len() {
         assert!(ArtifactRegistrationV1::from_canonical_cbor(&canonical[..prefix]).is_err());
     }
-    let mut trailing = canonical.clone();
+    let mut trailing = canonical;
     trailing.push(0);
     assert!(ArtifactRegistrationV1::from_canonical_cbor(&trailing).is_err());
     let oversized = vec![0; MAX_ARTIFACT_REGISTRATION_BYTES_V1 + 1];
@@ -239,7 +235,7 @@ fn parser_rejects_invalid_direct_field_and_array_heads() -> Result<(), Box<dyn s
         ArtifactRegistrationV1::from_canonical_cbor(&wrong_blob_length),
         Err(ArtifactRegistrationErrorV1::InvalidEncoding)
     );
-    let mut nonpreferred = canonical.clone();
+    let mut nonpreferred = canonical;
     nonpreferred[7] = 0x18;
     nonpreferred.insert(8, 0);
     assert_eq!(
@@ -302,7 +298,7 @@ fn parser_rejects_invalid_nested_owner_role_and_boolean() -> Result<(), Box<dyn 
         ArtifactRegistrationV1::from_canonical_cbor(&oversized_role_code),
         Err(ArtifactRegistrationErrorV1::UnsupportedValue)
     );
-    let mut invalid_boolean = canonical.clone();
+    let mut invalid_boolean = canonical;
     let last_dependency_field = invalid_boolean.len() - 2;
     invalid_boolean[last_dependency_field] = 0xf6;
     assert_eq!(
