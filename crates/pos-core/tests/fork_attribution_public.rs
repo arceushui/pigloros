@@ -404,17 +404,17 @@ fn every_truncated_attribution_record_fails_closed() -> Result<(), Box<dyn std::
         manifest.clone(),
         pos_core::Signature::from_bytes([9; 64]),
     )?;
-    let far1 = admission.to_canonical_cbor();
-    let frm1 = manifest.to_canonical_cbor();
-    let fsm1 = signed.to_canonical_cbor();
-    for length in 0..far1.len() {
-        assert!(ForkAdmissionRecordV1::from_canonical_cbor(&far1[..length]).is_err());
+    let admission_bytes = admission.to_canonical_cbor();
+    let manifest_bytes = manifest.to_canonical_cbor();
+    let signed_bytes = signed.to_canonical_cbor();
+    for length in 0..admission_bytes.len() {
+        assert!(ForkAdmissionRecordV1::from_canonical_cbor(&admission_bytes[..length]).is_err());
     }
-    for length in 0..frm1.len() {
-        assert!(ForkReproManifestV1::from_canonical_cbor(&frm1[..length]).is_err());
+    for length in 0..manifest_bytes.len() {
+        assert!(ForkReproManifestV1::from_canonical_cbor(&manifest_bytes[..length]).is_err());
     }
-    for length in 0..fsm1.len() {
-        assert!(SignedForkReproManifestV1::from_canonical_cbor(&fsm1[..length]).is_err());
+    for length in 0..signed_bytes.len() {
+        assert!(SignedForkReproManifestV1::from_canonical_cbor(&signed_bytes[..length]).is_err());
     }
     Ok(())
 }
