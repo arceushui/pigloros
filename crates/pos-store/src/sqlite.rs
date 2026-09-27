@@ -7860,11 +7860,14 @@ mod tests {
                     TimelineMeta::root("uncertain-commit"),
                 )
                 .test_err();
-            assert!(matches!(
-                error,
-                CoreError::StorageOutcomeUnknown(message)
-                    if message.contains("transaction commit outcome uncertain")
-            ));
+            assert!(
+                matches!(
+                    &error,
+                    CoreError::StorageOutcomeUnknown(message)
+                        if message.contains("transaction commit failed")
+                ),
+                "unexpected commit error: {error:?}"
+            );
             Ok::<_, ErasureErrorV1>((inventory.clone(), ()))
         };
         gate.install_from_verified_inventory_transition(&mut transition)
@@ -8447,10 +8450,15 @@ mod tests {
                 .admit_geo_location(geographic_request(timeline.id(), entity))
                 .map(|_| ()),
         );
-        assert!(store
-            .read(timeline.id(), SeqRange::all())
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::ErasureContainmentUnavailable)
+        ));
+        let event_count: i64 = Connection::open(&path)
             .test_ok()
-            .is_empty());
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .test_ok();
+        assert_eq!(event_count, 0);
     }
 
     #[test]
@@ -8972,7 +8980,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_or_duplicate_and_cleanup_surface_transaction_and_query_failures() {
+    fn append_or_duplicate_uses_savepoint_and_cleanup_surfaces_query_failures() {
         let entity = EntityId::new();
 
         let mut transaction = new_store();
@@ -8985,8 +8993,13 @@ mod tests {
                 WallTime::from_micros(1),
                 make_draft(entity, b"x")
             )
-            .is_err());
+            .test_ok()
+            .is_some());
         transaction.conn.execute_batch("ROLLBACK").test_ok();
+        assert!(transaction
+            .read_own(timeline.id(), SeqRange::all())
+            .test_ok()
+            .is_empty());
 
         let mut timeline_query = new_store();
         timeline_query
@@ -9464,18 +9477,18 @@ mod tests {
     }
 
     #[test]
-    fn bounded_read_propagates_snapshot_and_metadata_query_errors() {
+    fn bounded_read_reuses_snapshot_and_propagates_metadata_query_errors() {
         let mut store = new_store();
         let timeline = store.create_timeline("snapshot").test_ok();
         store
             .append(timeline.id(), &[make_draft(EntityId::new(), b"x")])
             .test_ok();
         store.conn.execute_batch("BEGIN").test_ok();
-        let error = store
+        let events = store
             .read_bounded(timeline.id(), SeqRange::all(), read_bounds(1))
-            .test_err();
+            .test_ok();
         store.conn.execute_batch("ROLLBACK").test_ok();
-        let _: CoreError = error;
+        assert_eq!(events.len(), 1);
 
         let mut query_store = new_store();
         let query_timeline = query_store.create_timeline("query").test_ok();
@@ -12192,20 +12205,22 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_fails_when_connection_already_in_txn() {
+    fn append_uses_savepoint_when_connection_already_in_txn() {
         let mut store = new_store();
         let tl = store.create_timeline("main").test_ok();
         let entity = EntityId::new();
         store.conn.execute_batch("BEGIN IMMEDIATE").test_ok();
-        let err = store
-            .append(tl.id(), &[make_draft(entity, b"x")])
-            .test_err();
-        let bounded_err = store
+        let event = store.append(tl.id(), &[make_draft(entity, b"x")]).test_ok();
+        let bounded = store
             .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
-            .test_err();
-        drop(store.conn.execute_batch("ROLLBACK"));
-        assert!(matches!(err, CoreError::Storage(_)));
-        assert!(matches!(bounded_err, CoreError::Storage(_)));
+            .test_ok();
+        assert_eq!(event.len(), 1);
+        assert!(bounded.is_none());
+        store.conn.execute_batch("ROLLBACK").test_ok();
+        assert!(store
+            .read_own(tl.id(), SeqRange::all())
+            .test_ok()
+            .is_empty());
     }
 
     #[test]
@@ -12219,11 +12234,17 @@ mod tests {
         let err = store
             .append(tl.id(), &[make_draft(entity, b"x")])
             .test_err();
-        assert!(matches!(err, CoreError::Storage(_)));
+        assert!(
+            matches!(&err, CoreError::StorageOutcomeUnknown(_)),
+            "{err:?}"
+        );
         let bounded_err = store
             .append_bounded(tl.id(), &[make_draft(entity, b"bounded")], 1)
             .test_err();
-        assert!(matches!(bounded_err, CoreError::Storage(_)));
+        assert!(
+            matches!(&bounded_err, CoreError::StorageOutcomeUnknown(_)),
+            "{bounded_err:?}"
+        );
         store.conn.commit_hook::<fn() -> bool>(None).test_ok();
         assert!(store
             .read_own(tl.id(), SeqRange::all())
@@ -14510,10 +14531,11 @@ mod tests {
         let mut begin_store = new_store();
         let begin_parent = begin_store.create_timeline("begin-error").test_ok();
         begin_store.conn.execute_batch("BEGIN IMMEDIATE").test_ok();
-        assert!(begin_store
+        let child = begin_store
             .fork(begin_parent.id(), Seq::ZERO, "child")
-            .is_err());
+            .test_ok();
         begin_store.conn.execute_batch("ROLLBACK").test_ok();
+        assert!(begin_store.get_timeline(child.id()).test_ok().is_none());
 
         let mut commit_store = new_store();
         let commit_parent = commit_store.create_timeline("commit-error").test_ok();
