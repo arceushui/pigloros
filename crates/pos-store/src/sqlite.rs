@@ -2202,9 +2202,14 @@ fn timeline_fields_to_timeline(
 }
 
 impl SqliteStore {
+    #[cfg(not(test))]
+    fn check_key_destruction_inventory_version(&self) -> Result<(), CoreError> {
+        self.validate_erasure_inventory_data_version()
+    }
+
+    #[cfg(test)]
     fn check_key_destruction_inventory_version(&mut self) -> Result<(), CoreError> {
         let version_check = self.validate_erasure_inventory_data_version();
-        #[cfg(test)]
         if version_check.is_ok() {
             if let Some((started, release)) = self.destruction_transaction_hook.take() {
                 assert!(started.send(()).is_ok());
