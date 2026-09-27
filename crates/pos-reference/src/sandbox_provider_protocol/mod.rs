@@ -8,6 +8,7 @@ mod audit;
 mod authority;
 mod codec;
 mod execution;
+mod network;
 mod operations;
 mod policy;
 mod revocation;
@@ -34,6 +35,7 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
     "uts-namespace",
 ];
 
+pub use network::{NetworkExchangeTranscript, NetworkRetentionPolicy};
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
