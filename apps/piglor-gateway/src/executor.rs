@@ -20,9 +20,9 @@ use pos_core::{
     },
     timeline::Timeline,
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
-    CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, OwnTracksIngressInputV1,
-    OwnTracksIngressRateKeyV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
+    OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, PreparedOwnTracksIngressV1, ProposedAction,
+    Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, OwnTracksIngressStore};
@@ -384,7 +384,8 @@ enum Command {
         timeline: TimelineId,
         range: SeqRange,
         bounds: EventReadBounds,
-        reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
+        expected_generation: Option<ErasureReferenceV1>,
+        reply: oneshot::Sender<Result<ProtectedReadPage, StoreExecutorError>>,
     },
     #[cfg(test)]
     ReadOne {
@@ -798,7 +799,14 @@ pub(crate) enum StoreExecutorError {
     Closed,
     DeadlineExceeded,
     Unhealthy,
+    StaleGeneration,
     Store(CoreError),
+}
+
+#[derive(Debug)]
+pub(crate) struct ProtectedReadPage {
+    pub(crate) events: Vec<Event>,
+    pub(crate) generation: Option<ErasureReferenceV1>,
 }
 
 #[derive(Debug)]
@@ -1484,10 +1492,22 @@ impl StoreExecutor {
         range: SeqRange,
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, StoreExecutorError> {
+        self.read_page(timeline, range, bounds, None)
+            .await
+            .map(|page| page.events)
+    }
+    pub(crate) async fn read_page(
+        &self,
+        timeline: TimelineId,
+        range: SeqRange,
+        bounds: EventReadBounds,
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<ProtectedReadPage, StoreExecutorError> {
         submit!(self, |reply| Command::Read {
             timeline,
             range,
             bounds,
+            expected_generation,
             reply,
         })
     }
@@ -2138,8 +2158,9 @@ fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandE
             timeline,
             range,
             bounds,
+            expected_generation,
             reply,
-        } => execute_read_command(state, timeline, range, bounds, reply),
+        } => execute_read_page_command(state, timeline, range, bounds, expected_generation, reply),
         #[cfg(test)]
         Command::ReadOne {
             timeline,
@@ -2284,23 +2305,123 @@ fn execute_create_command(
     );
 }
 
-fn execute_read_command(
+#[inline(never)]
+fn execute_read_page_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
     range: SeqRange,
     bounds: EventReadBounds,
-    reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
+    expected_generation: Option<ErasureReferenceV1>,
+    reply: oneshot::Sender<Result<ProtectedReadPage, StoreExecutorError>>,
 ) {
-    send_store_result(
-        reply,
-        state.store.execute(
-            |host| {
-                host.read_sender()
-                    .and_then(|mut sender| sender.read_bounded(timeline, range, bounds))
-            },
-            |store| store.read_bounded(timeline, range, bounds),
-        ),
-    );
+    let result = match &mut state.store {
+        ExecutorStore::Host(host) => host
+            .read_sender()
+            .and_then(|mut sender| {
+                sender.read_bounded_at_generation(timeline, range, bounds, expected_generation)
+            })
+            .map(|(events, generation)| ProtectedReadPage {
+                events,
+                generation: Some(generation),
+            })
+            .map_err(|error| match error {
+                ErasureHostErrorV1::StaleGeneration => StoreExecutorError::StaleGeneration,
+                error => StoreExecutorError::Store(host_error_to_core(error)),
+            }),
+        #[cfg(test)]
+        ExecutorStore::Generic(store) => store
+            .read_bounded(timeline, range, bounds)
+            .map(|events| ProtectedReadPage {
+                events,
+                generation: None,
+            })
+            .map_err(StoreExecutorError::Store),
+        #[cfg(test)]
+        ExecutorStore::Gateway(store) => store
+            .event_store()
+            .read_bounded(timeline, range, bounds)
+            .map(|events| ProtectedReadPage {
+                events,
+                generation: None,
+            })
+            .map_err(StoreExecutorError::Store),
+    };
+    drop(reply.send(result));
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod read_page_coverage_tests {
+    use super::*;
+    use pos_core::{ConsentAuthority, ErasureContainmentGateV1};
+    use pos_store::memory::MemoryStore;
+
+    fn page_range() -> SeqRange {
+        SeqRange {
+            from: Seq::from_u64(1),
+            to: None,
+        }
+    }
+
+    fn page_bounds() -> EventReadBounds {
+        EventReadBounds::new(1024, 128, 64, 2)
+    }
+
+    #[tokio::test]
+    async fn test_store_variants_return_pages_and_propagate_read_errors(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for gateway_store in [false, true] {
+            let mut store = MemoryStore::new();
+            let executor = if gateway_store {
+                assert!(store
+                    .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+                    .is_ok());
+                StoreExecutor::new_with_geo_location_admission(
+                    store,
+                    ConsentAuthority::new().append_permit(),
+                )
+            } else {
+                StoreExecutor::new(Box::new(store))
+            };
+            let Ok(timeline) = executor.create("read-page-coverage".to_owned()).await else {
+                return Err("expected test Timeline creation".into());
+            };
+            let Ok(page) = executor
+                .read_page(timeline.id(), page_range(), page_bounds(), None)
+                .await
+            else {
+                return Err("expected an empty test-store page".into());
+            };
+            assert!(page.events.is_empty());
+            assert_eq!(page.generation, None);
+
+            assert!(matches!(
+                executor
+                    .read_page(TimelineId::new(), page_range(), page_bounds(), None)
+                    .await,
+                Err(StoreExecutorError::Store(_))
+            ));
+            drop(executor);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn expired_read_page_reports_deadline() {
+        // An expired queued command is a scheduler fault state, so inject it here.
+        let (reply, result) = oneshot::channel();
+        expire_command(Command::Read {
+            timeline: TimelineId::new(),
+            range: page_range(),
+            bounds: page_bounds(),
+            expected_generation: None,
+            reply,
+        });
+        assert!(matches!(
+            result.blocking_recv(),
+            Ok(Err(StoreExecutorError::DeadlineExceeded))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -3812,17 +3933,6 @@ mod tests {
         assert_expired(
             Command::Create {
                 name: "expired".to_owned(),
-                reply,
-            },
-            receiver,
-        );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::Read {
-                timeline: TimelineId::new(),
-                range: SeqRange::all(),
-                bounds: EventReadBounds::new(1, 1, 1, 1),
                 reply,
             },
             receiver,

@@ -2,9 +2,9 @@
 //! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
-    ActionRequest, CreateTimelineRequest, EventPage, EventView, EventsQuery, Gateway, GatewayError,
-    LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL, MAX_EVENTS_RESPONSE_BYTES,
-    MAX_HTTP_BODY_BYTES,
+    ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayError,
+    GenerationBoundEventPage, LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL,
+    MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, RawQuery, State},
@@ -19,7 +19,7 @@ use axum::{
 use piglor_ledger::{render_html, LedgerView};
 use pos_core::{
     clock::{Seq, WallTime},
-    ActionRejected, CoreError,
+    ActionRejected, CoreError, ErasureReferenceV1,
 };
 use pos_plugin_ledger::NewPrediction;
 use pos_runtime::ErasureHostStatusV1;
@@ -77,11 +77,15 @@ mod coverage_tests {
             .test_ok();
         event.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
         assert!(bounded_events_response(
-            EventPage {
-                events: vec![event],
-                next_from_seq: None,
+            GenerationBoundEventPage {
+                page: crate::EventPage {
+                    events: vec![event],
+                    next_from_seq: None,
+                },
+                inventory_generation: None,
             },
             MAX_EVENTS_RESPONSE_BYTES,
+            &timeline.id().to_string(),
         )
         .is_err());
         drop(gateway);
@@ -221,32 +225,50 @@ async fn list_events_response(
     raw_query: Option<&str>,
     headers: &HeaderMap,
 ) -> Result<serde_json::Value, GatewayError> {
-    let q = match parse_events_query(raw_query) {
-        Ok(query) => query,
-        Err(error) => return Err(error),
+    let request = parse_event_page_request(raw_query, timeline_id)?;
+    let page = read_events_page(gateway, timeline_id, &request, headers).await?;
+    bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES, timeline_id)
+}
+
+struct EventPageRequest {
+    query: EventsQuery,
+    expected_generation: Option<ErasureReferenceV1>,
+}
+
+fn parse_event_page_request(
+    raw_query: Option<&str>,
+    timeline_id: &str,
+) -> Result<EventPageRequest, GatewayError> {
+    let mut query = parse_events_query(raw_query)?;
+    let expected_generation = if let Some(cursor) = query.cursor.as_deref() {
+        let (from_seq, generation) = parse_event_cursor(cursor, timeline_id)?;
+        query.from_seq = from_seq;
+        Some(generation)
+    } else {
+        None
     };
-    let page = match read_events_page(gateway, timeline_id, &q, headers).await {
-        Ok(page) => page,
-        Err(error) => return Err(error),
-    };
-    let response = match bounded_events_response(page, MAX_EVENTS_RESPONSE_BYTES) {
-        Ok(response) => response,
-        Err(error) => return Err(error),
-    };
-    Ok(response)
+    Ok(EventPageRequest {
+        query,
+        expected_generation,
+    })
 }
 
 async fn read_events_page(
     gateway: &Gateway,
     timeline_id: &str,
-    query: &EventsQuery,
+    request: &EventPageRequest,
     headers: &HeaderMap,
-) -> Result<EventPage, GatewayError> {
+) -> Result<GenerationBoundEventPage, GatewayError> {
     if gateway.has_authorization() {
-        read_authorized_events(gateway, timeline_id, query, headers).await
+        read_authorized_events(gateway, timeline_id, request, headers).await
     } else {
         gateway
-            .read_events_page(timeline_id, query.from_seq, query.limit)
+            .read_events_page_at_generation(
+                timeline_id,
+                request.query.from_seq,
+                request.query.limit,
+                request.expected_generation,
+            )
             .await
     }
 }
@@ -254,9 +276,9 @@ async fn read_events_page(
 async fn read_authorized_events(
     gateway: &Gateway,
     timeline_id: &str,
-    query: &EventsQuery,
+    request: &EventPageRequest,
     headers: &HeaderMap,
-) -> Result<EventPage, GatewayError> {
+) -> Result<GenerationBoundEventPage, GatewayError> {
     let Some(actor) = headers
         .get("x-piglor-actor-entity")
         .and_then(|value| value.to_str().ok())
@@ -269,17 +291,18 @@ async fn read_authorized_events(
         Err(error) => return Err(error),
     };
     gateway
-        .read_events_page_authorized(
+        .read_events_page_authorized_at_generation(
             timeline_id,
-            query.from_seq,
-            query.limit,
+            request.query.from_seq,
+            request.query.limit,
             crate::GatewayAuthorizationRequest::read(
                 actor,
                 target_timeline,
-                query.from_seq,
-                query.limit,
+                request.query.from_seq,
+                request.query.limit,
                 WallTime::now(),
             ),
+            request.expected_generation,
         )
         .await
 }
@@ -288,9 +311,20 @@ fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayErr
     let Some(raw_query) = raw_query.filter(|query| !query.is_empty()) else {
         return Ok(EventsQuery::default());
     };
+    let query = parse_events_query_fields(raw_query)?;
+    if query.limit == 0 || query.limit > MAX_EVENTS_PER_POLL {
+        return Err(GatewayError::InvalidPageLimit {
+            maximum: MAX_EVENTS_PER_POLL,
+        });
+    }
+    Ok(query)
+}
+
+fn parse_events_query_fields(raw_query: &str) -> Result<EventsQuery, GatewayError> {
     let mut query = EventsQuery::default();
     let mut saw_from_seq = false;
     let mut saw_limit = false;
+    let mut saw_cursor = false;
     for field in raw_query.split('&') {
         let Some((name, value)) = field.split_once('=') else {
             return Err(GatewayError::InvalidEventsQuery(field.to_owned()));
@@ -308,21 +342,79 @@ fn parse_events_query(raw_query: Option<&str>) -> Result<EventsQuery, GatewayErr
                     .map_err(|_| GatewayError::InvalidEventsQuery(field.to_owned()))?;
                 saw_limit = true;
             }
+            "cursor" if !saw_cursor => {
+                query.cursor = Some(value.to_owned());
+                saw_cursor = true;
+            }
             _ => return Err(GatewayError::InvalidEventsQuery(field.to_owned())),
         }
     }
-    if query.limit == 0 || query.limit > MAX_EVENTS_PER_POLL {
-        return Err(GatewayError::InvalidPageLimit {
-            maximum: MAX_EVENTS_PER_POLL,
-        });
+    if saw_from_seq && saw_cursor {
+        return Err(GatewayError::InvalidEventsQuery("cursor".to_owned()));
     }
     Ok(query)
 }
 
+fn parse_event_cursor(
+    cursor: &str,
+    timeline_id: &str,
+) -> Result<(u64, ErasureReferenceV1), GatewayError> {
+    let invalid = || GatewayError::InvalidEventsQuery("cursor".to_owned());
+    let mut parts = cursor.split('.');
+    let (Some("v1"), Some(hex), Some(bound_timeline), Some(position), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return Err(invalid());
+    };
+    if hex.len() != 64 || bound_timeline != timeline_id {
+        return Err(invalid());
+    }
+    let mut digest = [0; 32];
+    for (slot, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        let high = hex_nibble(pair[0]).ok_or_else(invalid)?;
+        let low = hex_nibble(pair[1]).ok_or_else(invalid)?;
+        *slot = high * 16 + low;
+    }
+    let from_seq = position
+        .parse::<u64>()
+        .ok()
+        .filter(|position| *position > 0)
+        .ok_or_else(invalid)?;
+    Ok((from_seq, ErasureReferenceV1::from_digest(digest)))
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn next_event_cursor(
+    generation: Option<ErasureReferenceV1>,
+    timeline_id: &str,
+    next_from_seq: Option<Seq>,
+) -> Option<String> {
+    generation
+        .zip(next_from_seq)
+        .map(|(generation, seq)| crate::event_cursor(generation, timeline_id, seq.as_u64()))
+}
+
 fn bounded_events_response(
-    page: EventPage,
+    bounded: GenerationBoundEventPage,
     maximum_bytes: usize,
+    timeline_id: &str,
 ) -> Result<serde_json::Value, GatewayError> {
+    let GenerationBoundEventPage {
+        page,
+        inventory_generation,
+    } = bounded;
     let mut events = Vec::with_capacity(page.events.len());
     let mut source = page.events.into_iter().peekable();
     loop {
@@ -340,6 +432,7 @@ fn bounded_events_response(
         let candidate = json!({
             "events": events,
             "next_from_seq": next_from_seq,
+            "next_cursor": next_event_cursor(inventory_generation, timeline_id, next_from_seq),
         });
         if serialized_len(&candidate) > maximum_bytes {
             events.pop();
@@ -351,12 +444,22 @@ fn bounded_events_response(
             return Ok(json!({
                 "events": events,
                 "next_from_seq": Seq::from_u64(event_seq),
+                "next_cursor": next_event_cursor(
+                    inventory_generation,
+                    timeline_id,
+                    Some(Seq::from_u64(event_seq)),
+                ),
             }));
         }
     }
     Ok(json!({
         "events": events,
         "next_from_seq": page.next_from_seq,
+        "next_cursor": next_event_cursor(
+            inventory_generation,
+            timeline_id,
+            page.next_from_seq,
+        ),
     }))
 }
 
@@ -468,7 +571,9 @@ impl IntoResponse for GatewayError {
             | Self::ForkDepthTooLarge { .. }
             | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
-            Self::CompatibilityReadTruncated { .. } | Self::IngressConflict => StatusCode::CONFLICT,
+            Self::CompatibilityReadTruncated { .. }
+            | Self::IngressConflict
+            | Self::StaleEventCursor => StatusCode::CONFLICT,
             Self::ResourceUnavailable => StatusCode::NOT_FOUND,
             Self::Store(error) => {
                 gateway_store_status(error).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -556,6 +661,27 @@ mod tests {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         })
+    }
+
+    async fn host_cursor_fixture(name: &str) -> (Gateway, Router, String, String) {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let timeline = gateway.create_timeline(name).await.test_ok();
+        let app = router(AppState {
+            gateway: gateway.clone(),
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        });
+        (
+            gateway,
+            app,
+            timeline.id().to_string(),
+            EntityId::new().to_string(),
+        )
     }
 
     fn test_app_with_body_limit(max_body_bytes: usize) -> Router {
@@ -1248,6 +1374,178 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn host_event_cursor_rejects_stale_generation_and_wrong_timeline() {
+        let (gateway, app, id, actor) = host_cursor_fixture("cursor-owner").await;
+        for marker in 1..=2 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor,
+                    crate::EVENT_TYPE_ACTION,
+                    &json!({"marker": marker}),
+                )
+                .await
+                .test_ok();
+        }
+        let (status, first) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let cursor = first["next_cursor"].as_str().test_ok();
+        let (status, second) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}&limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["events"][0]["seq"], 2);
+
+        let other = gateway.create_timeline("cursor-other").await.test_ok();
+        assert!(gateway
+            .read_events_page(&TimelineId::new().to_string(), 0, 1)
+            .await
+            .is_err());
+        drop(gateway);
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/v1/timelines/{}/events?cursor={cursor}", other.id()),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        for invalid in [
+            "bad".to_owned(),
+            format!("v1.{}.{id}.2", "z".repeat(64)),
+            format!("v1.{}z.{id}.2", "a".repeat(63)),
+            format!("v1.{}.{id}.2", "a".repeat(63)),
+            format!("v1.{}.{id}.0", "a".repeat(64)),
+            format!("v2.{}.{id}.2", "a".repeat(64)),
+        ] {
+            let (status, _) = json_request(
+                app.clone(),
+                "GET",
+                &format!("/v1/timelines/{id}/events?cursor={invalid}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/v1/timelines/{id}/events?cursor=v1.{}.{id}.2",
+                "A".repeat(64)
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = json_request(
+            app,
+            "GET",
+            &format!("/v1/timelines/{id}/events?cursor={cursor}&from_seq=2"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn host_cursor_tracks_the_response_byte_limit() {
+        let (gateway, app, id, actor) = host_cursor_fixture("cursor-byte-limit").await;
+        let payload = "x".repeat(240 * 1024);
+        for _ in 0..5 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor,
+                    crate::EVENT_TYPE_ACTION,
+                    &json!({"data": &payload}),
+                )
+                .await
+                .test_ok();
+        }
+        drop(gateway);
+        let (status, first) =
+            json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["events"].as_array().test_ok().len(), 1);
+        assert!(first["next_cursor"].is_string());
+        assert_eq!(first["next_from_seq"], 2);
+    }
+
+    #[tokio::test]
+    async fn admitted_boundary_event_remains_pollable_with_host_cursor() {
+        let (gateway, app, id, actor) = host_cursor_fixture("cursor-admission-boundary").await;
+        let mut boundary = None;
+        for length in (MAX_EVENTS_RESPONSE_BYTES / 8 - 128)..=(MAX_EVENTS_RESPONSE_BYTES / 8) {
+            let payload = json!({"data": "\0".repeat(length)});
+            let bytes = crate::json_to_cbor(&payload);
+            let view = EventView {
+                id: "0".repeat(26),
+                entity: actor.clone(),
+                event_type: crate::EVENT_TYPE_ACTION.to_owned(),
+                seq: u64::MAX,
+                payload: Some(payload.clone()),
+                payload_hex: crate::hex_encode(bytes.as_slice()),
+            };
+            // Keep the wire-size oracle independent of the cursor formatter.
+            let worst_page = json!({
+                "events": [view],
+                "next_from_seq": u64::MAX,
+                "next_cursor": format!("v1.{}.{}.{}", "f".repeat(64), "0".repeat(26), u64::MAX),
+            });
+            if serde_json::to_vec(&worst_page).test_ok().len() <= MAX_EVENTS_RESPONSE_BYTES {
+                boundary = Some(payload);
+            } else {
+                break;
+            }
+        }
+        let payload = boundary.test_ok();
+        gateway
+            .append_action(&id, &actor, crate::EVENT_TYPE_ACTION, &payload)
+            .await
+            .test_ok();
+        gateway
+            .append_action(
+                &id,
+                &actor,
+                crate::EVENT_TYPE_ACTION,
+                &json!({"marker": "next"}),
+            )
+            .await
+            .test_ok();
+        drop(gateway);
+        let (status, first) = json_request(
+            app,
+            "GET",
+            &format!("/v1/timelines/{id}/events?limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["events"].as_array().test_ok().len(), 1);
+        assert_eq!(first["next_from_seq"], 2);
+        assert!(first["next_cursor"].is_string());
     }
 
     #[tokio::test]
