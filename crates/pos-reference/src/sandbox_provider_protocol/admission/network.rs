@@ -83,6 +83,7 @@ impl LocalNetworkAdmission {
     }
 
     /// Plans and their unique exact endpoints, in the authenticated caller order.
+    #[must_use]
     pub fn exchanges(
         &self,
     ) -> impl ExactSizeIterator<Item = (&NetworkExchangePlan, &NetworkCapability)> {
@@ -169,9 +170,9 @@ fn bind_exchange(
             .get(plan.capability_id.as_str())
             .ok_or(SandboxProviderProtocolError::InconsistentFields)
             .and_then(|endpoint| {
-                if plan.request_length > endpoint.request_maximum
-                    || plan.response_maximum > endpoint.response_maximum
-                {
+                let request_exceeds_bound = plan.request_length > endpoint.request_maximum;
+                let response_exceeds_bound = plan.response_maximum > endpoint.response_maximum;
+                if request_exceeds_bound || response_exceeds_bound {
                     Err(SandboxProviderProtocolError::FieldOutOfBounds)
                 } else {
                     Ok((plan.clone(), (*endpoint).clone()))
