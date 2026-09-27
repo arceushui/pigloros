@@ -7841,6 +7841,34 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn backtest_store_seams_reject_missing_and_foreign_gates() {
+        let config = || BacktestConfig {
+            experiment_name: "backtest-gate-boundary".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        };
+        let mut raw_store = pos_store::memory::MemoryStore::new();
+        assert!(matches!(
+            BacktestRunner::new(config(), PluginRegistry::new).run_on_store(&mut raw_store),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        let hosted_store = ok(HostedExperimentStore::open(StoreConfig::Memory));
+        let foreign_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        assert!(matches!(
+            BacktestRunner::new(config(), PluginRegistry::new)
+                .with_erasure_gate(foreign_gate)
+                .run_with_hosted_store(hosted_store),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+    }
+
+    #[test]
     fn host_gate_binding_and_startup_errors_are_closed() {
         let unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
         assert!(matches!(

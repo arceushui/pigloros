@@ -3179,6 +3179,67 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn poisoned_host_rejects_both_action_command_shapes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let timeline = host
+            .command_sender()?
+            .create_timeline("poisoned-action-host")?
+            .id();
+        let panic_result = {
+            let mut sender = host.command_sender()?;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = sender.with_protected_effect_fence(
+                    timeline,
+                    super::ErasureProtectedOperationV1::ProposedAction,
+                    &mut |_sender| panic!("poison this test host"),
+                );
+            }))
+        };
+        assert!(panic_result.is_err());
+
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = PluginRegistry::new();
+        let bus = broadcast::channel(1).0;
+        let context = ActionCommandContext {
+            timeline,
+            registry: &registry,
+            proposal: &proposal,
+            authorization: &authorization,
+            decision: &decision,
+            bus: &bus,
+            maximum: 1,
+        };
+        let mut state = ExecutorState {
+            store: ExecutorStore::Host(Box::new(host)),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        execute_submit_action_command(&mut state, &context, reply);
+        assert!(receiver.blocking_recv().test_ok()?.is_err());
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        execute_submit_identified_action_command(
+            &mut state,
+            &context,
+            AppendIdentity::new(
+                AppendDedupKey::from_keyed_hash([13; 32]),
+                AppendDedupScope::from_keyed_hash([14; 32]),
+            ),
+            reply,
+        );
+        assert!(receiver.blocking_recv().test_ok()?.is_err());
+        Ok(())
+    }
+
     impl EventStore for RecordingBoundedStore {
         fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
             Err(CoreError::Storage(

@@ -7657,6 +7657,21 @@ mod tests {
         let deny = |_context: AuthContext<'_>| Authorization::Deny;
         store.conn.authorizer(Some(deny)).test_ok();
         assert!(begin_immediate_scope(&store.conn).is_err());
+        assert!(store
+            .append_or_duplicate_with_limit_visible(
+                TimelineId::new(),
+                append_identity(1, 1),
+                WallTime::from_micros(1),
+                &make_draft(EntityId::new(), b"denied"),
+                None,
+            )
+            .is_err());
+        assert!(store
+            .append_bounded_visible(TimelineId::new(), &[], 0, false, None, None)
+            .is_err());
+        assert!(store
+            .fork_unchecked(TimelineId::new(), Seq::ZERO, "denied-fork")
+            .is_err());
         store
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
@@ -7690,6 +7705,58 @@ mod tests {
             ),
             Err(CoreError::Storage(_))
         ));
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+    }
+
+    #[test]
+    fn inventory_snapshot_rejects_denied_transaction_and_final_version_read() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let mut store = new_store();
+        store
+            .conn
+            .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(context.action, AuthAction::Transaction { .. }) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(4),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+
+        let version_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads = Arc::clone(&version_reads);
+        store
+            .conn
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Pragma { pragma_name, .. }
+                        if pragma_name.eq_ignore_ascii_case("data_version")
+                ) && reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+                {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert_eq!(
+            store.complete_erasure_inventory_snapshot(4),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        assert_eq!(version_reads.load(std::sync::atomic::Ordering::SeqCst), 2);
         store
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
