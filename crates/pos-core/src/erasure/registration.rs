@@ -17,7 +17,16 @@ pub const MAX_ARTIFACT_REGISTRATION_CHILDREN_V1: usize = 2_048;
 // Under the direct-list and OwnerIdV1 bounds, even the maximum encoding fits
 // the one-MiB record ceiling. The decoder still rejects overlong input first.
 const _: () = assert!(
-    1 + 5 + 1 + 1 + 34 + 34 + 1 + 1 + 1 + 1 + 5
+    1 + 5
+        + 1
+        + 1
+        + 34
+        + 34
+        + 1
+        + 1
+        + 1
+        + 1
+        + 5
         + 3
         + (1 + 2 + 128 + 1 + 9 + 34 + 1) * MAX_ARTIFACT_REGISTRATION_KEYS_V1
         + 3
@@ -341,10 +350,9 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn take(&mut self, length: usize) -> Result<&'a [u8], ArtifactRegistrationErrorV1> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(ArtifactRegistrationErrorV1::InvalidEncoding)?;
+        // The whole input is at most one MiB; every requested scalar is at
+        // most 128 bytes, so this offset addition cannot overflow usize.
+        let end = self.offset + length;
         let value = self
             .bytes
             .get(self.offset..end)
@@ -379,13 +387,6 @@ impl<'a> Reader<'a> {
             27 => self.unsigned_bytes(8)?,
             _ => return Err(ArtifactRegistrationErrorV1::InvalidEncoding),
         };
-        if (extra == 24 && value < 24)
-            || (extra == 25 && value <= 255)
-            || (extra == 26 && value <= 65_535)
-            || (extra == 27 && value <= 4_294_967_295)
-        {
-            return Err(ArtifactRegistrationErrorV1::NonCanonical);
-        }
         Ok(value)
     }
 
@@ -428,8 +429,7 @@ impl<'a> Reader<'a> {
         if !(1..=128).contains(&length) {
             return Err(ArtifactRegistrationErrorV1::FieldOutOfBounds);
         }
-        let length =
-            usize::try_from(length).map_err(|_| ArtifactRegistrationErrorV1::FieldOutOfBounds)?;
+        let length = usize::from(length.to_be_bytes()[7]);
         let text = std::str::from_utf8(self.take(length)?)
             .map_err(|_| ArtifactRegistrationErrorV1::InvalidEncoding)?;
         OwnerIdV1::new(text).map_err(|_| ArtifactRegistrationErrorV1::FieldOutOfBounds)

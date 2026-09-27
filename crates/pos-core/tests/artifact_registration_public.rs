@@ -81,6 +81,12 @@ fn decoder_rejects_noncanonical_and_wrong_shape() -> Result<(), Box<dyn std::err
         ArtifactRegistrationV1::from_canonical_cbor(&wrong_class),
         Err(ArtifactRegistrationErrorV1::UnsupportedValue)
     );
+    let mut wrong_version = canonical.clone();
+    wrong_version[6] = 2;
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&wrong_version),
+        Err(ArtifactRegistrationErrorV1::UnsupportedValue)
+    );
     for (index, invalid_code) in [(76, 5), (77, 2), (78, 4)] {
         let mut unknown = canonical.clone();
         unknown[index] = invalid_code;
@@ -150,7 +156,15 @@ fn every_closed_field_code_and_unsigned_width_round_trips() -> Result<(), Box<dy
         ArtifactTransitionRuleV1::RetainStructure,
         ArtifactTransitionRuleV1::Remove,
     ];
+    let class_count = classes.len();
+    let mut class_digests = std::collections::BTreeSet::new();
     for artifact_class in classes {
+        assert!(
+            class_digests.insert(ArtifactRegistrationV1::artifact_digest(
+                artifact_class,
+                b"abc"
+            )?)
+        );
         for data_class in data_classes {
             for optionality in optionalities {
                 for transition_rule in transitions {
@@ -168,6 +182,7 @@ fn every_closed_field_code_and_unsigned_width_round_trips() -> Result<(), Box<dy
             }
         }
     }
+    assert_eq!(class_digests.len(), class_count);
     let owner = OwnerIdV1::new("a".repeat(128))?;
     for epoch in [
         23,
@@ -218,6 +233,12 @@ fn parser_rejects_invalid_direct_field_and_array_heads() -> Result<(), Box<dyn s
         ArtifactRegistrationV1::from_canonical_cbor(&wrong_blob),
         Err(ArtifactRegistrationErrorV1::InvalidEncoding)
     );
+    let mut wrong_blob_length = canonical.clone();
+    wrong_blob_length[9] = 31;
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&wrong_blob_length),
+        Err(ArtifactRegistrationErrorV1::InvalidEncoding)
+    );
     let mut nonpreferred = canonical.clone();
     nonpreferred[7] = 0x18;
     nonpreferred.insert(8, 0);
@@ -225,6 +246,99 @@ fn parser_rejects_invalid_direct_field_and_array_heads() -> Result<(), Box<dyn s
         ArtifactRegistrationV1::from_canonical_cbor(&nonpreferred),
         Err(ArtifactRegistrationErrorV1::NonCanonical)
     );
+    Ok(())
+}
+
+#[test]
+fn parser_rejects_invalid_nested_owner_role_and_boolean() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut fields = sample_fields()?;
+    fields.required_key_roles = vec![KeyRoleV1::TimelineIntegritySigning];
+    fields.key_dependencies.push(ArtifactKeyDependencyV1 {
+        identity: KeyIdentityV1::from_parts(
+            OwnerIdV1::new("alice")?,
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ),
+        material_digest: Hash::from_bytes([3; 32]),
+        private_material_required: false,
+    });
+    let canonical = ArtifactRegistrationV1::new(fields)?
+        .canonical_cbor()
+        .to_vec();
+    let owner_at = canonical
+        .windows(5)
+        .position(|window| window == b"alice")
+        .ok_or_else(|| std::io::Error::other("missing test owner"))?;
+    let mut invalid_utf8 = canonical.clone();
+    invalid_utf8[owner_at] = 0xff;
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&invalid_utf8),
+        Err(ArtifactRegistrationErrorV1::InvalidEncoding)
+    );
+    let mut empty_owner = canonical.clone();
+    empty_owner[owner_at - 1] = 0x60;
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&empty_owner),
+        Err(ArtifactRegistrationErrorV1::FieldOutOfBounds)
+    );
+    let mut unknown_role = canonical.clone();
+    unknown_role[80] = 7;
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&unknown_role),
+        Err(ArtifactRegistrationErrorV1::UnsupportedValue)
+    );
+    let mut mismatched_role = canonical.clone();
+    mismatched_role[80] = 1;
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&mismatched_role),
+        Err(ArtifactRegistrationErrorV1::InvalidOrder)
+    );
+    let mut oversized_role_code = canonical.clone();
+    oversized_role_code[80] = 0x19;
+    oversized_role_code.insert(81, 1);
+    oversized_role_code.insert(82, 0);
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&oversized_role_code),
+        Err(ArtifactRegistrationErrorV1::UnsupportedValue)
+    );
+    let mut invalid_boolean = canonical.clone();
+    let last_dependency_field = invalid_boolean.len() - 2;
+    invalid_boolean[last_dependency_field] = 0xf6;
+    assert_eq!(
+        ArtifactRegistrationV1::from_canonical_cbor(&invalid_boolean),
+        Err(ArtifactRegistrationErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn every_prefix_of_nested_widths_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    for epoch in [1, 256, 65_536, 4_294_967_296] {
+        let mut fields = sample_fields()?;
+        fields.required_key_roles = vec![KeyRoleV1::TimelineIntegritySigning];
+        fields.key_dependencies.push(ArtifactKeyDependencyV1 {
+            identity: KeyIdentityV1::from_parts(
+                OwnerIdV1::new("alice")?,
+                KeyRoleV1::TimelineIntegritySigning,
+                epoch,
+            ),
+            material_digest: Hash::from_bytes([4; 32]),
+            private_material_required: false,
+        });
+        fields.child_artifacts.push(ArtifactChildEdgeV1 {
+            artifact_class: ErasureArtifactClassV1::Export,
+            artifact_digest: Hash::from_bytes([5; 32]),
+            registration_address: Hash::from_bytes([6; 32]),
+            required: true,
+        });
+        let canonical = ArtifactRegistrationV1::new(fields)?
+            .canonical_cbor()
+            .to_vec();
+        for prefix in 0..canonical.len() {
+            assert!(ArtifactRegistrationV1::from_canonical_cbor(&canonical[..prefix]).is_err());
+        }
+    }
     Ok(())
 }
 
@@ -350,6 +464,26 @@ fn maximal_direct_lists_fit_the_enclosing_one_mib_record() -> Result<(), Box<dyn
     fields.key_dependencies.push(fields.key_dependencies[0]);
     assert_eq!(
         ArtifactRegistrationV1::new(fields),
+        Err(ArtifactRegistrationErrorV1::FieldOutOfBounds)
+    );
+    let mut excess_roles = sample_fields()?;
+    excess_roles.required_key_roles = vec![KeyRoleV1::SubjectDataEncryption; 6];
+    assert_eq!(
+        ArtifactRegistrationV1::new(excess_roles),
+        Err(ArtifactRegistrationErrorV1::FieldOutOfBounds)
+    );
+    let mut excess_children = sample_fields()?;
+    excess_children.child_artifacts = vec![
+        ArtifactChildEdgeV1 {
+            artifact_class: ErasureArtifactClassV1::Export,
+            artifact_digest: Hash::from_bytes([5; 32]),
+            registration_address: Hash::from_bytes([6; 32]),
+            required: true,
+        };
+        MAX_ARTIFACT_REGISTRATION_CHILDREN_V1 + 1
+    ];
+    assert_eq!(
+        ArtifactRegistrationV1::new(excess_children),
         Err(ArtifactRegistrationErrorV1::FieldOutOfBounds)
     );
     Ok(())
