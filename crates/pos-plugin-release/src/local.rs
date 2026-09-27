@@ -219,8 +219,7 @@ impl LocalOciPublisherV1 {
                 self.quarantine_entry(releases, name, "staging")?;
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             }
-            fs::unlinkat(releases, name, AtFlags::REMOVEDIR)
-                .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            remove_owned_staging(releases, name)?;
             fs::fsync(releases).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
             Ok(1)
         } else {
@@ -381,6 +380,40 @@ impl LocalOciPublisherV1 {
         .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::Sync)
     }
+}
+
+fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPublicationErrorV1> {
+    let staging = open_directory(releases, name)?;
+    let mut entries = directory_entries(&staging)?.collect::<Vec<_>>();
+    entries.sort();
+    for required in ["OWNER", "oci-layout", "index.json", "blobs"] {
+        if !entries.iter().any(|entry| entry == required) {
+            return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+        }
+    }
+    if entries.len() != 4 {
+        return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+    }
+    for file in ["OWNER", "oci-layout", "index.json"] {
+        fs::unlinkat(&staging, file, AtFlags::empty())
+            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    }
+    let blobs = open_directory(&staging, "blobs")?;
+    let sha256 = open_directory(&blobs, "sha256")?;
+    let members = directory_entries(&sha256)?.collect::<Vec<_>>();
+    if members.len() > 359 {
+        return Err(LocalOciPublicationErrorV1::BoundsExceeded);
+    }
+    for member in members {
+        fs::unlinkat(&sha256, member, AtFlags::empty())
+            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    }
+    fs::unlinkat(&blobs, "sha256", AtFlags::REMOVEDIR)
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    fs::unlinkat(&staging, "blobs", AtFlags::REMOVEDIR)
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    fs::unlinkat(releases, name, AtFlags::REMOVEDIR)
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
 }
 
 fn directory_entries(
