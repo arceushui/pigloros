@@ -19296,6 +19296,7 @@ mod tests {
             let (entered_tx, entered_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
             let (mutation_tx, mutation_rx) = std::sync::mpsc::channel();
+            let rotated_for_mutation = &rotated;
             let (decryption_result, mutation_result) = std::thread::scope(|scope| {
                 let decryption = scope.spawn(move || {
                     decrypting_store.with_decryption_authorization(
@@ -19319,7 +19320,7 @@ mod tests {
 
                 let mutation = scope.spawn(move || {
                     let result = if rotate {
-                        mutating_store.save_key_registry(&rotated)
+                        mutating_store.save_key_registry(rotated_for_mutation)
                     } else {
                         mutating_store
                             .begin_key_registry_destruction(request)
