@@ -1751,7 +1751,7 @@ mod tests {
             |release, address| {
                 rewrite_manifest(release, address, |manifest| {
                     manifest["config"]["digest"] =
-                        serde_json::json!(format!("x{}", "a".repeat(63)));
+                        serde_json::json!(format!("x{}", "a".repeat(70)));
                 })
             },
         )?;
