@@ -423,6 +423,8 @@ fn failed_tombstone_commit_keeps_pending_until_absent_file_is_recovered(
          WHEN NEW.state_cbor <> OLD.state_cbor
          BEGIN SELECT RAISE(ABORT, 'final destruction commit denied'); END",
     )?;
+    drop(store);
+    let mut store = authorized_store(&database)?;
     assert!(piglor_ledger::key_output::destroy_owned_secret_key(
         &mut store, &database, &key, request
     )
@@ -439,6 +441,8 @@ fn failed_tombstone_commit_keeps_pending_until_absent_file_is_recovered(
 
     connection.execute_batch("DROP TRIGGER reject_final_destruction")?;
     drop(connection);
+    drop(store);
+    let mut store = authorized_store(&database)?;
     piglor_ledger::key_output::destroy_owned_secret_key(&mut store, &database, &key, request)?;
     drop(store);
     let state = registry(&database)?;
