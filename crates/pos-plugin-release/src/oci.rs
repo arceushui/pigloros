@@ -562,6 +562,285 @@ mod tests {
         assert_eq!(verified.address(), &address);
         assert_eq!(verified.members().len(), 6);
         assert_eq!(verified.blobs().len(), 7);
+        assert_eq!(verified.manifest().len() as u64, address.size());
+        for blob in verified.blobs() {
+            assert_eq!(sha256_digest(blob.bytes()), blob.digest());
+        }
+        for member in verified.members() {
+            assert!(!member.member().is_empty());
+            assert!(!member.media_type().is_empty());
+            assert!(member.digest().starts_with("sha256:"));
+            assert!(member.size() > 0);
+        }
+        Ok(())
+    }
+
+    fn verify_value(
+        value: &serde_json::Value,
+        blobs: BTreeMap<String, Vec<u8>>,
+    ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
+        let manifest = serde_json::to_vec(value).expect("fixture JSON");
+        let address = BundleAddressV1::new(digest(&manifest), manifest.len() as u64)
+            .expect("fixture address");
+        verify_oci_closure_v1(address, manifest, blobs)
+    }
+
+    #[test]
+    fn rejects_malformed_public_manifest_json() {
+        for manifest in [
+            b"0".as_slice(),
+            b"true",
+            b"false",
+            b"null",
+            b"[]",
+            b"{}",
+            b"{\"x\":1,\"x\":2}",
+            b"{\"x\":}",
+            b"{\"x\":1,}",
+            b"{\"x\" 1}",
+            b"{\"x\":\"\\q\"}",
+            b"{\"x\":\"bad\n\"}",
+            b"{\"x\":\"unfinished",
+            b"{\"x\":tru}",
+            b"{\"x\":flse}",
+            b"{\"x\":nul}",
+            b"{\"x\":01}",
+            b"{\"x\":+1}",
+            b"{\"x\":[1,2]}",
+            b"{\"x\":[]}",
+            b"{\"x\":{}}",
+            b"{}x",
+            b" { } ",
+        ] {
+            let address = BundleAddressV1::new(digest(manifest), manifest.len() as u64)
+                .expect("fixture address");
+            assert_eq!(
+                verify_oci_closure_v1(address, manifest.to_vec(), BTreeMap::new()),
+                Err(ReleaseSourceErrorV1::InvalidDescriptor),
+                "{manifest:?}"
+            );
+        }
+        let invalid_utf8 = b"{\"x\":\"\xff\"}";
+        let address = BundleAddressV1::new(digest(invalid_utf8), invalid_utf8.len() as u64)
+            .expect("fixture address");
+        assert_eq!(
+            verify_oci_closure_v1(address, invalid_utf8.to_vec(), BTreeMap::new()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_top_level_and_config_descriptors() -> Result<(), Box<dyn std::error::Error>> {
+        let (_, manifest, blobs) = closure()?;
+        let valid: serde_json::Value = serde_json::from_slice(&manifest)?;
+        for (field, bad) in [
+            ("artifactType", serde_json::json!("other")),
+            ("mediaType", serde_json::json!("other")),
+            ("schemaVersion", serde_json::json!(3)),
+            ("config", serde_json::json!([])),
+            ("layers", serde_json::json!({})),
+        ] {
+            let mut changed = valid.clone();
+            changed[field] = bad;
+            assert_eq!(
+                verify_value(&changed, blobs.clone()),
+                Err(ReleaseSourceErrorV1::InvalidDescriptor),
+                "{field}"
+            );
+        }
+        let mut changed = valid.clone();
+        changed["extra"] = serde_json::json!(true);
+        assert_eq!(
+            verify_value(&changed, blobs.clone()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+        for (field, bad) in [
+            ("digest", serde_json::json!("sha256:bad")),
+            ("mediaType", serde_json::json!("wrong")),
+            ("size", serde_json::json!(3)),
+        ] {
+            let mut changed = valid.clone();
+            changed["config"][field] = bad;
+            assert_eq!(
+                verify_value(&changed, blobs.clone()),
+                Err(ReleaseSourceErrorV1::InvalidDescriptor),
+                "{field}"
+            );
+        }
+        let mut changed = valid;
+        changed["config"]["extra"] = serde_json::json!(true);
+        assert_eq!(
+            verify_value(&changed, blobs),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_layer_shapes_and_order() -> Result<(), Box<dyn std::error::Error>> {
+        let (_, manifest, blobs) = closure()?;
+        let valid: serde_json::Value = serde_json::from_slice(&manifest)?;
+        let bad_first_layers = [
+            serde_json::json!(null),
+            serde_json::json!({"digest": digest(b"pmf1")}),
+            serde_json::json!({"annotations": [], "digest": digest(b"pmf1"), "mediaType": "x", "size": 4}),
+            serde_json::json!({"annotations": {}, "digest": digest(b"pmf1"), "mediaType": "x", "size": 4}),
+        ];
+        for bad in bad_first_layers {
+            let mut changed = valid.clone();
+            changed["layers"][0] = bad;
+            assert_eq!(
+                verify_value(&changed, blobs.clone()),
+                Err(ReleaseSourceErrorV1::InvalidDescriptor)
+            );
+        }
+        for (field, bad) in [
+            ("digest", serde_json::json!(42)),
+            ("digest", serde_json::json!("sha256:bad")),
+            ("mediaType", serde_json::json!(42)),
+            ("size", serde_json::json!(-1)),
+            ("size", serde_json::json!(0)),
+            ("size", serde_json::json!(MAX_BLOB_BYTES + 1)),
+        ] {
+            let mut changed = valid.clone();
+            changed["layers"][0][field] = bad;
+            assert_eq!(
+                verify_value(&changed, blobs.clone()),
+                Err(ReleaseSourceErrorV1::InvalidDescriptor),
+                "{field}"
+            );
+        }
+        for (member, media_type) in [
+            (
+                "unknown",
+                "application/vnd.pigloros.plugin.manifest.v1+cbor",
+            ),
+            ("pmf1", "wrong"),
+            ("licence/wrong", "text/plain; charset=utf-8"),
+        ] {
+            let mut changed = valid.clone();
+            changed["layers"][0]["annotations"]["org.pigloros.plugin.member"] =
+                serde_json::json!(member);
+            changed["layers"][0]["mediaType"] = serde_json::json!(media_type);
+            let expected = if member == "pmf1" {
+                ReleaseSourceErrorV1::UnsupportedMediaType
+            } else {
+                ReleaseSourceErrorV1::InvalidDescriptor
+            };
+            assert_eq!(verify_value(&changed, blobs.clone()), Err(expected));
+        }
+        let mut changed = valid.clone();
+        changed["layers"][0]["annotations"]["org.pigloros.plugin.member"] = serde_json::json!(5);
+        assert_eq!(
+            verify_value(&changed, blobs.clone()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+        let mut changed = valid.clone();
+        changed["layers"][0]["annotations"]["extra"] = serde_json::json!(true);
+        assert_eq!(
+            verify_value(&changed, blobs.clone()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+        let mut changed = valid.clone();
+        changed["layers"][0]["extra"] = serde_json::json!(true);
+        assert_eq!(
+            verify_value(&changed, blobs.clone()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+        let mut changed = valid.clone();
+        let duplicate_digest = changed["layers"][0]["digest"].clone();
+        changed["layers"][1]["digest"] = duplicate_digest;
+        assert_eq!(
+            verify_value(&changed, blobs.clone()),
+            Err(ReleaseSourceErrorV1::DuplicateMember)
+        );
+        let mut changed = valid.clone();
+        changed["layers"].as_array_mut().expect("layers").swap(0, 1);
+        assert_eq!(
+            verify_value(&changed, blobs.clone()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+        let mut changed = valid.clone();
+        changed["layers"].as_array_mut().expect("layers").remove(0);
+        assert_eq!(
+            verify_value(&changed, blobs.clone()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+        let mut changed = valid;
+        changed["layers"].as_array_mut().expect("layers").pop();
+        assert_eq!(
+            verify_value(&changed, blobs),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_mismatched_public_descriptor_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let (address, manifest, blobs) = closure()?;
+        let shorter = BundleAddressV1::new(address.digest().to_owned(), address.size() - 1)?;
+        assert_eq!(
+            verify_oci_closure_v1(shorter, manifest.clone(), blobs.clone()),
+            Err(ReleaseSourceErrorV1::SizeMismatch)
+        );
+        let wrong_digest =
+            BundleAddressV1::new(format!("sha256:{}", "0".repeat(64)), address.size())?;
+        assert_eq!(
+            verify_oci_closure_v1(wrong_digest, manifest.clone(), blobs.clone()),
+            Err(ReleaseSourceErrorV1::DigestMismatch)
+        );
+        let oversized = vec![b'0'; MAX_MANIFEST_BYTES + 1];
+        assert_eq!(
+            verify_oci_closure_v1(address.clone(), oversized, blobs.clone()),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        let mut extra = blobs.clone();
+        extra.insert(digest(b"extra"), b"extra".to_vec());
+        assert_eq!(
+            verify_oci_closure_v1(address.clone(), manifest.clone(), extra),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        let mut wrong_size = blobs.clone();
+        let member = digest(b"component");
+        wrong_size.insert(member.clone(), b"short".to_vec());
+        assert_eq!(
+            verify_oci_closure_v1(address.clone(), manifest.clone(), wrong_size),
+            Err(ReleaseSourceErrorV1::SizeMismatch)
+        );
+        let mut wrong_digest = blobs;
+        wrong_digest.insert(member, b"xxxxxxxxx".to_vec());
+        assert_eq!(
+            verify_oci_closure_v1(address, manifest, wrong_digest),
+            Err(ReleaseSourceErrorV1::DigestMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_ordered_schema_and_migration_members() -> Result<(), Box<dyn std::error::Error>> {
+        let (_, manifest, mut blobs) = closure()?;
+        let mut value: serde_json::Value = serde_json::from_slice(&manifest)?;
+        let schema = b"schema".to_vec();
+        let migration = b"migration".to_vec();
+        let schema_digest = digest(&schema);
+        let migration_digest = digest(&migration);
+        value["layers"].as_array_mut().expect("layers").insert(
+            3,
+            layer(
+                &format!("schema/{}", &schema_digest[7..]),
+                "application/vnd.pigloros.plugin.schema.v1+json",
+                &schema,
+            ),
+        );
+        value["layers"].as_array_mut().expect("layers").push(layer(
+            &format!("migration-fixture/{}", &migration_digest[7..]),
+            "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
+            &migration,
+        ));
+        blobs.insert(schema_digest, schema);
+        blobs.insert(migration_digest, migration);
+        let verified = verify_value(&value, blobs)?;
+        assert_eq!(verified.members().len(), 8);
         Ok(())
     }
 
