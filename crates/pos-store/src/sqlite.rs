@@ -7543,6 +7543,33 @@ mod tests {
             .test_ok();
     }
 
+    #[test]
+    fn protected_savepoint_reports_uncertain_cleanup_after_external_release() {
+        let connection = Connection::open_in_memory().test_ok();
+        connection.execute_batch("BEGIN").test_ok();
+        let scope = begin_immediate_scope(&connection).test_ok();
+        connection
+            .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+            .test_ok();
+        assert!(matches!(
+            finish_immediate_scope(&connection, scope, Ok(())),
+            Err(CoreError::StorageOutcomeUnknown(_))
+        ));
+
+        let scope = begin_immediate_scope(&connection).test_ok();
+        connection
+            .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+            .test_ok();
+        let rejected: Result<(), CoreError> = Err(CoreError::Storage(
+            "injected protected effect failure".to_owned(),
+        ));
+        assert!(matches!(
+            finish_immediate_scope(&connection, scope, rejected),
+            Err(CoreError::StorageOutcomeUnknown(_))
+        ));
+        connection.execute_batch("ROLLBACK").test_ok();
+    }
+
     fn cover_sqlite_host_transition_success(
         store: &mut SqliteStore,
         gate: &ErasureContainmentGateV1,

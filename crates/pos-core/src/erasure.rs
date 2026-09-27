@@ -6099,6 +6099,36 @@ mod coverage_paths {
         Ok(())
     }
 
+    #[test]
+    fn committed_scope_bindings_require_exact_timeline_and_scope() -> Result<(), ErasureErrorV1> {
+        let timeline = TimelineId::new();
+        let other = TimelineId::new();
+        let state = inventory_state_with_timelines(
+            reference(204),
+            reference(205),
+            reference(206),
+            ErasureLifecycleV1::AccessFrozen,
+            vec![timeline],
+        )?;
+        assert_eq!(
+            validate_committed_scope_timeline_bindings(&state, &[(timeline, reference(206))]),
+            Ok(())
+        );
+        for bindings in [
+            Vec::new(),
+            vec![(timeline, reference(207))],
+            vec![(other, reference(206))],
+            vec![(timeline, reference(206)), (other, reference(206))],
+            vec![(timeline, reference(206)), (timeline, reference(206))],
+        ] {
+            assert_eq!(
+                validate_committed_scope_timeline_bindings(&state, &bindings),
+                Err(ErasureErrorV1::ProvenanceMissing)
+            );
+        }
+        Ok(())
+    }
+
     struct InventoryQuery(Option<ErasureVerifiedInventoryV1>);
 
     impl ErasureVerifiedInventoryQueryV1 for InventoryQuery {

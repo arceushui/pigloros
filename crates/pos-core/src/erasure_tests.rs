@@ -462,7 +462,7 @@ fn scope_codec_rejects_malformed_affected_scope_entry_types() -> Result<(), Eras
             Value::Array(vec![Value::Integer(1_u64.into()), Value::Bytes(vec![1])]),
         ],
         vec![
-            member.clone(),
+            member,
             Value::Array(vec![
                 Value::Integer(1_u64.into()),
                 Value::Text("invalid".to_owned()),

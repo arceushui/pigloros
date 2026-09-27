@@ -3639,6 +3639,8 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FaultModeV1 {
+        BeginProtectedEffect,
+        FinishProtectedEffect,
         BindGate,
         InventorySnapshot,
         NonemptyRequestInventory,
@@ -4022,6 +4024,28 @@ mod tests {
     }
 
     impl pos_core::ErasureInventoryPersistencePortV1 for FaultStoreV1 {
+        fn begin_protected_effect_interval(
+            &self,
+        ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
+            if self.fault == FaultModeV1::BeginProtectedEffect {
+                Err(ErasureErrorV1::ReceiptCommitFailed)
+            } else {
+                Ok(ErasureProtectedEffectIntervalV1::Unowned)
+            }
+        }
+
+        fn finish_protected_effect_interval(
+            &self,
+            _interval: ErasureProtectedEffectIntervalV1,
+            _disposition: ErasureProtectedEffectDispositionV1,
+        ) -> Result<(), ErasureErrorV1> {
+            if self.fault == FaultModeV1::FinishProtectedEffect {
+                Err(ErasureErrorV1::ReceiptCommitFailed)
+            } else {
+                Ok(())
+            }
+        }
+
         fn complete_erasure_inventory_snapshot(
             &mut self,
             maximum_requests: usize,
@@ -8082,6 +8106,49 @@ mod tests {
         };
         assert!(panic_result.is_err());
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
+    fn protected_effect_interval_failures_poison_command_and_read_hosts() {
+        for fault in [
+            FaultModeV1::BeginProtectedEffect,
+            FaultModeV1::FinishProtectedEffect,
+        ] {
+            let mut command_host =
+                ErasureExecutionHostV1::recover_verified_empty(Box::new(fault_store(fault)), 4)
+                    .unwrap_or_else(|error| {
+                        std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                    });
+            let timeline = TimelineId::new();
+            assert_eq!(
+                command_host.command_sender().and_then(|mut sender| {
+                    sender.with_protected_effect_fence(
+                        timeline,
+                        ErasureProtectedOperationV1::ProposedAction,
+                        &mut |_| {},
+                    )
+                }),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(command_host.status(), ErasureHostStatusV1::Poisoned);
+
+            let mut read_host =
+                ErasureExecutionHostV1::recover_verified_empty(Box::new(fault_store(fault)), 4)
+                    .unwrap_or_else(|error| {
+                        std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                    });
+            assert_eq!(
+                read_host.read_sender().and_then(|mut sender| {
+                    sender.with_protected_effect_fence(
+                        timeline,
+                        ErasureProtectedOperationV1::Read,
+                        &mut |_| {},
+                    )
+                }),
+                Err(ErasureHostErrorV1::AdapterFailure)
+            );
+            assert_eq!(read_host.status(), ErasureHostStatusV1::Poisoned);
+        }
     }
 
     #[test]
