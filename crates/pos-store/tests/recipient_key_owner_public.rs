@@ -414,6 +414,58 @@ fn recipient_owner_public_contract_rejects_unsafe_owner_directories(
 }
 
 #[test]
+fn recipient_owner_public_contract_rejects_unknown_destruction_epoch(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    assert!(store
+        .destroy_recipient_key(
+            &owner,
+            descriptor
+                .identity()
+                .epoch
+                .checked_add(1)
+                .ok_or("epoch overflow")?,
+            Hash::from_bytes([46; 32]),
+        )
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_a_descriptor_with_changed_public_key(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, descriptor) = enrolled_owner()?;
+    let mut changed = descriptor.encode();
+    *changed.last_mut().ok_or("recipient descriptor is empty")? ^= 1;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "UPDATE recipient_key_inventory_v1 SET descriptor = ?1",
+        [changed],
+    )?;
+
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_duplicate_inventory_identity(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, _) = enrolled_owner()?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TABLE recipient_key_inventory_duplicate AS
+             SELECT * FROM recipient_key_inventory_v1;
+         DROP TABLE recipient_key_inventory_v1;
+         ALTER TABLE recipient_key_inventory_duplicate RENAME TO recipient_key_inventory_v1;
+         INSERT INTO recipient_key_inventory_v1
+             SELECT * FROM recipient_key_inventory_v1;",
+    )?;
+
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_rejects_a_missing_live_inventory_identity(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (temporary, store, owner, descriptor) = enrolled_owner()?;
