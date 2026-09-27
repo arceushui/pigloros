@@ -3458,7 +3458,7 @@ impl EventStore for MemoryStore {
         let result = self
             .ensure_generic_timeline_visibility(parent)
             .and_then(|()| self.create_timeline_with_meta_unchecked(&meta));
-        if result.is_ok() || matches!(&result, Err(CoreError::StorageOutcomeUnknown(_))) {
+        if crate::inventory_generation_may_have_changed(&result) {
             self.erasure_inventory_generation = None;
         }
         result

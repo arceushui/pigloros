@@ -556,6 +556,22 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     })
 }
 
+fn human_action_payload(
+    scenario: &MultiRateScenario,
+) -> Result<CanonicalBytes, Box<dyn std::error::Error + Send + Sync>> {
+    WorldActionV1 {
+        actor_entity_id: scenario.human_entity,
+        body_entity_id: scenario.human_body,
+        action_kind: ActionKindV1::Impulse,
+        params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok()?,
+        action_scope: 0,
+        catalogue_version: 1,
+        tick: 1,
+    }
+    .encode()
+    .test_ok()
+}
+
 fn register_experiment(
     scenario: &mut MultiRateScenario,
 ) -> Result<
@@ -570,17 +586,7 @@ fn register_experiment(
     let society = SocietyPlugin::new();
     let human = FixturePlugin::new("human-action", true, false)
         .with_owned_event_type(Kind::new("world.action.v1"));
-    let human_action = WorldActionV1 {
-        actor_entity_id: scenario.human_entity,
-        body_entity_id: scenario.human_body,
-        action_kind: ActionKindV1::Impulse,
-        params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok()?,
-        action_scope: 0,
-        catalogue_version: 1,
-        tick: 1,
-    }
-    .encode()
-    .test_ok()?;
+    let human_action = human_action_payload(scenario)?;
     let fast = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
     let slow = AgentPlugin::new();
@@ -835,7 +841,8 @@ fn assert_projection_state(
     scenario: &MultiRateScenario,
     session: &pos_experiment::ExperimentSession,
     authority: &ConsentAuthority,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<(&'static str, EntityId, pos_core::State)>, Box<dyn std::error::Error + Send + Sync>>
+{
     let read_state = |reducer: &str, subject: EntityId| {
         let token = authority.record_grant_on_timeline(
             scenario.timeline,
@@ -885,15 +892,20 @@ fn assert_projection_state(
             .and_then(Value::as_str),
         Some(EVENT_TYPE_ACTION)
     );
-    let events = session.source_events().test_ok()?;
-    let mut replayed = replay_registry();
-    replayed.fold_events(&events);
-    snapshot_json(&replayed, scenario.timeline)
+    Ok(vec![
+        ("observation", scenario.human_entity, observation_human),
+        ("observation", scenario.fast_entity, observation_fast),
+        ("observation", scenario.slow_entity, observation_slow),
+        ("society", scenario.society_entity, society),
+        ("society", scenario.fast_entity, society_fast),
+        ("agent", scenario.fast_entity, agent_fast),
+        ("agent", scenario.slow_entity, agent_slow),
+    ])
 }
 
 fn assert_replay(
     scenario: &MultiRateScenario,
-    live_snapshot: &Value,
+    live_states: &[(&str, EntityId, pos_core::State)],
     pinned_wall_time: WallTime,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let first_store = open_store(StoreConfig::Sqlite {
@@ -917,6 +929,14 @@ fn assert_replay(
     );
     let mut first_replay = replay_registry();
     first_replay.fold_events(&stored);
+    let replayed_states = first_replay.state_snapshot(scenario.timeline).test_ok()?;
+    for (reducer, entity, live_state) in live_states {
+        let replayed_state = replayed_states
+            .get(*reducer)
+            .and_then(|states| states.get(entity))
+            .test_ok()?;
+        assert_eq!(replayed_state, live_state, "{reducer} live/replay mismatch");
+    }
     let second_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
     })
@@ -931,12 +951,8 @@ fn assert_replay(
         .test_ok()?;
     second_replay.fold_events(&second_events);
     assert_eq!(
-        snapshot_json(&first_replay, scenario.timeline)?,
-        *live_snapshot
-    );
-    assert_eq!(
         snapshot_json(&second_replay, scenario.timeline)?,
-        *live_snapshot
+        snapshot_json(&first_replay, scenario.timeline)?
     );
     Ok(())
 }
@@ -1033,7 +1049,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         &events,
     )?;
 
-    let live_snapshot = assert_projection_state(&scenario, &session, &authority).map_err(
+    let live_states = assert_projection_state(&scenario, &session, &authority).map_err(
         |error| -> Box<dyn std::error::Error + Send + Sync> {
             format!("assert_projection_state: {error}").into()
         },
@@ -1041,7 +1057,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
     assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
-    assert_replay(&scenario, &live_snapshot, pinned_wall_time).map_err(
+    assert_replay(&scenario, &live_states, pinned_wall_time).map_err(
         |error| -> Box<dyn std::error::Error + Send + Sync> {
             format!("assert_replay: {error}").into()
         },
@@ -1076,6 +1092,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         )
         .await
         .test_ok()?;
+    drop(recovered_gateway);
     assert_eq!(page.events.len(), events.len());
     assert_eq!(page.next_from_seq, None);
     for (actual, expected) in page.events.iter().zip(&events) {

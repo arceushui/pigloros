@@ -165,13 +165,6 @@ fn map_action_submission_error(error: pos_runtime::ActionSubmissionError) -> Exp
     }
 }
 
-fn bind_registry_to_host_gate(
-    registry: &mut PluginRegistry,
-    gate: Arc<dyn ErasureGate>,
-) -> Result<(), ExperimentError> {
-    ensure_registry_erasure_gate(registry, gate).map_err(ExperimentError::Store)
-}
-
 fn ensure_registry_erasure_gate(
     registry: &mut PluginRegistry,
     gate: Arc<dyn ErasureGate>,
@@ -1244,7 +1237,7 @@ impl Experiment {
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let gate = store.containment_gate();
-        bind_registry_to_host_gate(&mut self.registry, gate.clone())?;
+        ensure_registry_erasure_gate(&mut self.registry, gate)?;
         self.finish_start_with_bound_store(Box::new(store), recovery_store_config)
     }
 
@@ -1278,7 +1271,7 @@ impl Experiment {
         store_config: StoreConfig,
     ) -> Result<ExperimentSession, ExperimentError> {
         let gate = store.containment_gate();
-        bind_registry_to_host_gate(&mut self.registry, gate.clone())?;
+        ensure_registry_erasure_gate(&mut self.registry, gate)?;
         self.resume_bound_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
     }
 
@@ -7893,9 +7886,9 @@ mod coverage_entrypoints {
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut registry = PluginRegistry::new();
-        ok(bind_registry_to_host_gate(&mut registry, gate.clone()));
-        ok(bind_registry_to_host_gate(&mut registry, gate));
-        assert!(bind_registry_to_host_gate(
+        ok(ensure_registry_erasure_gate(&mut registry, gate.clone()));
+        ok(ensure_registry_erasure_gate(&mut registry, gate));
+        assert!(ensure_registry_erasure_gate(
             &mut registry,
             Arc::new(ErasureContainmentGateV1::new_test_open())
         )
@@ -7910,7 +7903,7 @@ mod coverage_entrypoints {
             bind_registry_erasure_gate(&mut store, &missing_bound_gate, gate.clone()),
             Err(pos_core::CoreError::ErasureContainmentUnavailable)
         ));
-        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, gate).is_err());
+        assert!(ensure_registry_erasure_gate(&mut missing_bound_gate, gate).is_err());
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let registry = PluginRegistry::new().with_erasure_gate(gate);

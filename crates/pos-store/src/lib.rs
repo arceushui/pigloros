@@ -66,6 +66,13 @@ pub use pos_core::{
     WallTime,
 };
 
+/// A committed or indeterminate topology write invalidates a cached inventory.
+pub(crate) const fn inventory_generation_may_have_changed<T>(
+    result: &Result<T, CoreError>,
+) -> bool {
+    matches!(result, Ok(_) | Err(CoreError::StorageOutcomeUnknown(_)))
+}
+
 /// Finalize first-commit context for a local committed batch. A supplied
 /// origin must agree with the owning segment and inherited Fork prefix.
 fn finalize_committed_origins(

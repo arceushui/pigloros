@@ -4081,7 +4081,7 @@ impl EventStore for SqliteStore {
     ) -> Result<Timeline, CoreError> {
         self.ensure_host_transition_permit(permit)?;
         let result = self.create_timeline_with_meta_for_host_transition_unchecked(&meta);
-        if result.is_ok() || matches!(&result, Err(CoreError::StorageOutcomeUnknown(_))) {
+        if crate::inventory_generation_may_have_changed(&result) {
             self.erasure_inventory_generation = None;
         }
         result
@@ -4712,7 +4712,7 @@ impl EventStore for SqliteStore {
         let result = self
             .ensure_generic_timeline_visibility(parent)
             .and_then(|()| self.create_timeline_with_meta_for_host_transition_unchecked(&meta));
-        if result.is_ok() || matches!(&result, Err(CoreError::StorageOutcomeUnknown(_))) {
+        if crate::inventory_generation_may_have_changed(&result) {
             self.erasure_inventory_generation = None;
         }
         result
