@@ -13,6 +13,11 @@
 mod local;
 mod oci;
 
+/// Parse bounded canonical JSON shared by private transport adapters.
+fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErrorV1> {
+    oci::parse_jcs_object(bytes)
+}
+
 #[cfg(target_os = "linux")]
 pub use local::PublishOutcomeV1;
 #[cfg(target_os = "linux")]

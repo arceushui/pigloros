@@ -767,7 +767,7 @@ impl LocalOciPublisherV1 {
                 .map_err(|error| map_publication_to_source(&error))?,
             64 * 1024,
         )?;
-        let manifest_value = crate::oci::parse_jcs_object(&manifest)?;
+        let manifest_value = crate::parse_jcs_object(&manifest)?;
         let mut descriptors = BTreeMap::new();
         if let Some(config) = manifest_value.get("config") {
             collect_descriptor(config, &mut descriptors)?;
@@ -830,8 +830,7 @@ fn collect_descriptor(
 }
 
 fn parse_root_index(bytes: &[u8]) -> Result<Vec<BundleAddressV1>, ReleaseSourceErrorV1> {
-    let index =
-        crate::oci::parse_jcs_object(bytes).map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
+    let index = crate::parse_jcs_object(bytes).map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
     let root = index
         .as_object()
         .ok_or(ReleaseSourceErrorV1::InvalidLayout)?;
