@@ -869,6 +869,17 @@ impl LocalOciPublisherV1 {
                 collect_descriptor(layer, &mut descriptors)?;
             }
         }
+        let declared_total = descriptors
+            .values()
+            .try_fold(manifest.len(), |total, size| {
+                usize::try_from(*size)
+                    .ok()
+                    .and_then(|size| total.checked_add(size))
+                    .ok_or(ReleaseSourceErrorV1::BoundsExceeded)
+            })?;
+        if declared_total > crate::oci::MAX_TOTAL_BYTES {
+            return Err(ReleaseSourceErrorV1::BoundsExceeded);
+        }
         let mut bytes = BTreeMap::new();
         for (digest, _) in descriptors {
             let hex = digest
@@ -965,16 +976,19 @@ fn parse_root_index(bytes: &[u8]) -> Result<Vec<BundleAddressV1>, ReleaseSourceE
     Ok(addresses)
 }
 
-fn read_limited(mut file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
+fn read_limited(file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
     let length = usize::try_from(file.metadata().map_err(|_| ReleaseSourceErrorV1::Io)?.len())
         .map_err(|_| ReleaseSourceErrorV1::BoundsExceeded)?;
     if length > limit {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
     }
     let mut bytes = Vec::with_capacity(length);
-    file.read_to_end(&mut bytes)
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| ReleaseSourceErrorV1::Io)?;
-    if bytes.len() == length {
+    if bytes.len() > limit {
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    } else if bytes.len() == length {
         Ok(bytes)
     } else {
         Err(ReleaseSourceErrorV1::Io)

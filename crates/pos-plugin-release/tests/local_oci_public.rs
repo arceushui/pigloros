@@ -507,11 +507,11 @@ fn root_discovery_index_rejects_noncanonical_and_malformed_entries(
             ReleaseSourceErrorV1::InvalidLayout,
         ),
         (
-            serde_json::json!({"addresses": [entry.clone(), entry.clone()], "version": 1}),
+            serde_json::json!({"addresses": [&entry, &entry], "version": 1}),
             ReleaseSourceErrorV1::InvalidLayout,
         ),
         (
-            serde_json::json!({"addresses": vec![entry.clone(); 257], "version": 1}),
+            serde_json::json!({"addresses": vec![&entry; 257], "version": 1}),
             ReleaseSourceErrorV1::BoundsExceeded,
         ),
     ];
@@ -617,5 +617,36 @@ fn owned_staging_with_unrecognized_members_is_quarantined() -> Result<(), Box<dy
         );
         assert_one_quarantined(&root)?;
     }
+    Ok(())
+}
+
+#[test]
+fn indexed_release_rejects_excess_declared_closure_before_blob_reads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let bundle = bundle()?;
+    let address = bundle.address().clone();
+    publisher.publish(&bundle)?;
+    let manifest_path = root
+        .0
+        .join("releases")
+        .join(&address.digest()[7..])
+        .join("blobs")
+        .join("sha256")
+        .join(&address.digest()[7..]);
+    let mut malformed: serde_json::Value = serde_json::from_slice(bundle.manifest())?;
+    malformed["layers"][0]["size"] = serde_json::json!(32 * 1024 * 1024);
+    malformed["layers"][1]["size"] = serde_json::json!(32 * 1024 * 1024);
+    fs::write(manifest_path, serde_json::to_vec(&malformed)?)?;
+    assert_eq!(
+        publisher.read_verified(&address),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    );
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_one_quarantined(&root)?;
     Ok(())
 }
