@@ -1556,7 +1556,6 @@ impl OutputAdmissionV1 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use pos_conformance::BundleContractErrorV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         output_policy::{
@@ -1594,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn draft_epf1_requires_generated_source() -> Result<(), BundleContractErrorV1> {
+    fn draft_epf1_requires_generated_source() -> Result<(), Box<dyn std::error::Error>> {
         let profile_id = "deterministic-local-v1";
         let generated =
             execution_profile_artifact_v1(profile_id, InstalledOutputPolicySourceV1::Generated)?;
@@ -1613,7 +1612,7 @@ mod tests {
         ] {
             assert_eq!(
                 execution_profile_artifact_v1(profile_id, source),
-                Err(BundleContractErrorV1::ProfileInvalid)
+                Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
             );
         }
         Ok(())
