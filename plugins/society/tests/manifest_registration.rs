@@ -308,7 +308,15 @@ fn preparation_and_capability_invalidation_are_fail_closed() -> Result<(), Box<d
     ));
     let fixture = fixture("alpha", b"current")?;
     let batch = catalog(vec![fixture.row.clone()])?;
+    assert!(matches!(
+        registry.revalidate_manifest_registration(batch.clone()),
+        Err(ManifestRegistrationErrorV1::BatchState)
+    ));
     registry.prepare_manifest_registration(batch.clone())?;
+    assert!(matches!(
+        registry.revalidate_manifest_registration(batch.clone()),
+        Err(ManifestRegistrationErrorV1::IncompleteBatch)
+    ));
     assert!(matches!(
         registry.prepare_manifest_registration(batch.clone()),
         Err(ManifestRegistrationErrorV1::BatchState)

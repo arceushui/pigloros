@@ -1260,8 +1260,8 @@ impl PluginRegistry {
         let Some(closure) = admission.closure() else {
             return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
         };
-        if admission.owner_token().is_none()
-            || registration.availability() != PluginAvailabilityV1::Available
+        // A retained closure is only constructed together with its owner token.
+        if registration.availability() != PluginAvailabilityV1::Available
             || registration.pin().implementation_kind() != DomainImplementationKindV1::Plugin
             || registration.pin().isolation() != PluginIsolationV1::OperatorTrustedNative
             || registration.pin().configuration_digest() != admission.policy_digest()
@@ -3321,15 +3321,16 @@ impl PluginRegistry {
         approver_event_types: impl IntoIterator<Item = Kind>,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
-        match (
+        let manifest_candidate = match (
             self.manifest_batch.as_ref(),
             options.manifest_slot.as_deref(),
         ) {
+            (Some(batch), Some(slot)) => Some((batch, slot)),
+            (None, None) => None,
             (Some(_), None) | (None, Some(_)) => {
                 return Err(ManifestRegistrationErrorV1::BatchState.into());
             }
-            _ => {}
-        }
+        };
         let context = self.registration_context(plugin)?;
         if !binding.verifies_erased_owner_instance(plugin) {
             return Err(RuntimeError::OutputAdmission(
@@ -3397,7 +3398,12 @@ impl PluginRegistry {
             closure,
             owner_token,
         )?;
-        self.validate_manifest_candidate(plugin, &admission, &options)?;
+        Self::validate_manifest_candidate(
+            plugin,
+            &admission,
+            options.registration.as_ref(),
+            manifest_candidate,
+        )?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
         let RegistrationCallbacks { driver, approver } = callbacks;
@@ -3414,18 +3420,14 @@ impl PluginRegistry {
     }
 
     fn validate_manifest_candidate(
-        &self,
         plugin: &dyn Plugin,
         admission: &OutputAdmissionV1,
-        options: &RegistrationOptions,
+        registration: Option<&PluginRegistrationV1>,
+        manifest_candidate: Option<(&ManifestAdmissionCatalogV1, &str)>,
     ) -> Result<(), RuntimeError> {
-        let Some(slot) = options.manifest_slot.as_deref() else {
+        let Some((batch, slot)) = manifest_candidate else {
             return Ok(());
         };
-        let batch = self
-            .manifest_batch
-            .as_ref()
-            .ok_or(ManifestRegistrationErrorV1::BatchState)?;
         let row = batch
             .as_input()
             .rows
@@ -3436,7 +3438,7 @@ impl PluginRegistry {
             row,
             plugin.name(),
             plugin.version(),
-            options.registration.as_ref(),
+            registration,
             Some(admission),
             Some(slot),
         )
@@ -5445,6 +5447,128 @@ mod tests {
             ))
         ));
         assert!(registry.is_empty());
+    }
+
+    fn manifest_validation_fixture() -> (PluginRegistry, PluginId, ManifestAdmissionCatalogV1) {
+        let plugin = simple_plugin("fixture", &[]);
+        let binding = PluginRegistry::generated_output_binding(&plugin).test_ok();
+        let pin = crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![crate::installed_plugin_role_v1(&plugin)],
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        registry
+            .register_pinned_generated(
+                &plugin,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                None,
+                None,
+            )
+            .test_ok();
+        let entry = registry.plugins.get(&plugin.id()).test_ok();
+        let admission = entry.output_admission.as_ref().test_ok();
+        let row = ManifestAdmissionCatalogRowV1 {
+            stable_slot: "fixture".to_owned(),
+            plugin_id: plugin.id(),
+            plugin_name: plugin.name().to_owned(),
+            plugin_version: plugin.version().to_owned(),
+            implementation_hash: admission.policy().fields().implementation_hash,
+            eop1_native_digest: admission.policy_digest(),
+            closure_hash: admission.closure().test_ok().manifest_closure_hash(),
+        };
+        let catalog = ManifestAdmissionCatalogV1::new(
+            pos_core::manifest_owner_link::ManifestAdmissionCatalogInputV1 {
+                owner_id: [0x41; 32],
+                configuration_generation: 1,
+                rows: vec![row],
+            },
+        )
+        .test_ok();
+        registry.plugins.get_mut(&plugin.id()).test_ok().manifest_slot =
+            Some("fixture".to_owned());
+        registry.manifest_batch = Some(catalog.clone());
+        (registry, plugin.id(), catalog)
+    }
+
+    #[test]
+    fn manifest_validation_rejects_missing_key_and_unverified_entry() {
+        let (mut registry, id, catalog) = manifest_validation_fixture();
+        registry.validate_complete_manifest_batch(&catalog).test_ok();
+
+        let other_id = PluginId::new();
+        let entry = registry.plugins.shift_remove(&id).test_ok();
+        registry.plugins.insert(other_id, entry);
+        assert!(matches!(
+            registry.validate_complete_manifest_batch(&catalog),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+        let entry = registry.plugins.shift_remove(&other_id).test_ok();
+        registry.plugins.insert(id, entry);
+
+        let saved_registration = registry.plugins.get_mut(&id).test_ok().registration.take();
+        assert!(matches!(
+            registry.validate_complete_manifest_batch(&catalog),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        registry.plugins.get_mut(&id).test_ok().registration = saved_registration;
+
+        let saved_admission = registry.plugins.get_mut(&id).test_ok().output_admission.take();
+        assert!(matches!(
+            registry.validate_complete_manifest_batch(&catalog),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        registry.plugins.get_mut(&id).test_ok().output_admission = saved_admission;
+
+        let verified = registry.plugins.get_mut(&id).test_ok().output_admission.take().test_ok();
+        let unverified = OutputAdmissionV1::try_new(
+            id,
+            &catalog.as_input().rows[0].plugin_version,
+            verified.policy().clone(),
+            verified.budget().clone(),
+        )
+        .test_ok();
+        registry.plugins.get_mut(&id).test_ok().output_admission = Some(unverified);
+        assert!(matches!(
+            registry.validate_complete_manifest_batch(&catalog),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        registry.plugins.get_mut(&id).test_ok().output_admission = Some(verified);
+        registry.validate_complete_manifest_batch(&catalog).test_ok();
+    }
+
+    #[test]
+    fn manifest_validation_rejects_unavailable_and_wrong_pin() {
+        let (mut registry, id, catalog) = manifest_validation_fixture();
+        let valid = registry.plugins.get(&id).test_ok().registration.as_ref().test_ok().clone();
+        let disabled = PluginRegistrationV1::new(
+            valid.pin().clone(),
+            PluginAvailabilityV1::Disabled,
+        );
+        registry.plugins.get_mut(&id).test_ok().registration = Some(disabled);
+        assert!(matches!(
+            registry.validate_complete_manifest_batch(&catalog),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        let wrong_pin = crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([0x74; 32]),
+            valid.pin().roles().to_vec(),
+        )
+        .test_ok();
+        registry.plugins.get_mut(&id).test_ok().registration = Some(PluginRegistrationV1::new(
+            wrong_pin,
+            PluginAvailabilityV1::Available,
+        ));
+        assert!(matches!(
+            registry.validate_complete_manifest_batch(&catalog),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        registry.plugins.get_mut(&id).test_ok().registration = Some(valid);
+        registry.validate_complete_manifest_batch(&catalog).test_ok();
     }
 
     fn plugin_with_caps(
