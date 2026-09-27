@@ -63,7 +63,7 @@ pub const SCOPE_NODE_EXTENSION_FIELD: usize = 4;
 pub const OBLIGATION_SET_REFERENCES_FIELD: usize = 3;
 
 /// Field positions in the immutable object arrays used by recovery fixtures.
-pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 5;
+pub const SCOPE_COMMITMENT_TARGET_CLOSURE_FIELD: usize = 4;
 pub const FREEZE_PROVENANCE_SCOPE_COMMITMENT_FIELD: usize = 3;
 pub const OBLIGATION_SET_POLICY_FIELD: usize = 4;
 pub const OBLIGATION_SET_TRUST_FIELD: usize = 5;

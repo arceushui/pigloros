@@ -7137,6 +7137,18 @@ mod coverage_paths {
         Ok(())
     }
 
+    fn poison_authority(gate: &Arc<ErasureContainmentGateV1>) {
+        let poisoned = Arc::clone(gate);
+        let result = std::thread::spawn(move || {
+            let _guard = poisoned.authority.write().unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
+            });
+            std::panic::resume_unwind(Box::new("poison erasure authority"));
+        })
+        .join();
+        assert!(result.is_err());
+    }
+
     #[test]
     fn gate_mutations_fail_closed_after_lock_poisoning() {
         fn poison_fence(gate: &Arc<ErasureContainmentGateV1>) {
@@ -7146,18 +7158,6 @@ mod coverage_paths {
                     std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
                 });
                 std::panic::resume_unwind(Box::new("poison erasure fence"));
-            })
-            .join();
-            assert!(result.is_err());
-        }
-
-        fn poison_authority(gate: &Arc<ErasureContainmentGateV1>) {
-            let poisoned = Arc::clone(gate);
-            let result = std::thread::spawn(move || {
-                let _guard = poisoned.authority.write().unwrap_or_else(|error| {
-                    std::panic::resume_unwind(Box::new(format!("unexpected poison: {error}")))
-                });
-                std::panic::resume_unwind(Box::new("poison erasure authority"));
             })
             .join();
             assert!(result.is_err());

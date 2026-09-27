@@ -194,9 +194,8 @@ pub(crate) fn validate_bound_erasure_inventory_generation(
     }
     match gate.inventory_generation() {
         Ok(generation) if Some(generation) == inventory_generation => Ok(()),
-        Ok(_) => Err(CoreError::ErasureContainmentUnavailable),
         Err(_) if gate.permits_unverified_test_fixture() => Ok(()),
-        Err(_) => Err(CoreError::ErasureContainmentUnavailable),
+        Ok(_) | Err(_) => Err(CoreError::ErasureContainmentUnavailable),
     }
 }
 
