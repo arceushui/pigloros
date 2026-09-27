@@ -101,7 +101,8 @@ The source validates this closure mechanically. #401's PMF1 codec must contain a
   .publisher.lock                # root-owned advisory lock file
   .published.<32-hex>.next       # owned private next-index file
   quarantine/                    # at most one retained unsafe entry
-    <kind>.<32-hex>/              # never traversed by ReleaseSourceV1
+    staging.<32-hex>/ | final.<32-hex>/ | next-index.<32-hex>
+                                  # never traversed by ReleaseSourceV1
   releases/<sha256-hex>/
     READY                         # recovery evidence, never a discovery entry
     oci-layout
