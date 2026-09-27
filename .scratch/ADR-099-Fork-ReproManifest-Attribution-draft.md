@@ -1,4 +1,4 @@
-**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 4
+**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 5
 
 Related: #400 · #201 · #292 · [[ADR-041_Scenario_Room_Configuration_and_Reproducible_Fork_Inputs]] · [[ADR-065_KeyRegistry_Authorized_Signing_After_Destruction]] · [[ADR-091_Subject_Key_Custody_and_Historical_Decryption]] · [[ADR-060_Subject_Erasure_and_Replay_Claim_Degradation]]
 
@@ -431,20 +431,67 @@ The durable publisher must bind a single Fork/head to the exact record ID and
 reject conflicting replacement. A separate audit Timeline may reference the
 record ID after publication without altering the signed Fork head.
 
-Verification first strictly parses and re-encodes both arrays to the exact
-input bytes, then resolves the exact `ForkAdmissionRecordV1` from the trusted
-authority port and checks its digest, creator, child, parent, cut, boundary,
-composition, and attribution policy. It then checks role and epoch, retained
-public key, and ADR-065 role signature. It validates the parent and final chain
-hashes against the authoritative stored Timelines and recomputes the complete
-intervention vector as specified above. A bare mathematically
-valid signature does not establish consent, pre-destruction authorized
-issuance, or the truth of unverified provenance fields. Human-subject status
-comes from trusted subject/consent state, never from an unsigned or
-self-declared flag. [S1, S6, S7]
+`ForkManifestPublicationPortV1::read_committed(child_id, final_logical_head)` is
+the sole authorized-issuance read. It returns
+`CommittedForkManifestV1 { receipt, child_id, final_logical_head, record_id,
+outer_bytes }` only from the same immutable local publication tables written by
+`commit_authorized`. Under one consistent read snapshot it requires exactly one
+binding for the key, exactly one artifact for its record ID, equality of the
+binding and artifact operation IDs, and the receipt's exact operation ID,
+record ID, child ID, and final head. Zero rows is `PublicationMissing`; more
+than one, an orphan, or any unequal field is `PublicationConflict`. No API can
+manufacture this committed result from caller bytes or a bare record ID.
 
-For a human-subject Fork, a missing, malformed, untrusted, or mismatched signed
-manifest aborts Replay **before execution**. The ADR-041 Replay grant and
+Human-subject Replay first obtains the authoritative current final logical head
+for the requested child Fork, then calls `read_committed(child_id, head)`. The
+returned sidecar is the only FSM1 candidate. Before any signature or provenance
+claim is accepted, Replay:
+
+1. recomputes
+   `BLAKE3(ASCII("pigloros/fork-signed-manifest/v1") || outer_bytes)` and
+   requires exact equality with both the stored artifact ID and receipt ID;
+2. strictly parses and re-encodes FSM1 to the exact stored `outer_bytes`, then
+   strictly parses/re-encodes its embedded FRM1 bytes;
+3. requires FSM1's exact stored bytes, FRM1 final Fork ID, and FRM1 final head
+   to equal the committed binding's bytes, child ID, and head; and
+4. only then resolves `ForkAdmissionRecordV1` and checks its digest, creator,
+   parent/cut/boundary/composition/policy, retained identity-bound public key,
+   ADR-065 role signature, authoritative parent/final chain hashes, and total
+   intervention vector.
+
+The read and Replay verifier reject before execution on an absent, duplicate,
+untrusted, imported-without-#202-verification, orphaned, byte-mismatched,
+record-ID-mismatched, receipt-mismatched, Fork/head-mismatched, malformed, or
+cryptographically/provenance-invalid sidecar. Structural artifact import and a
+caller-supplied publication receipt are never trusted. A future #202 import
+must authenticate and atomically install the publication binding, exact
+artifact bytes, record ID, receipt, admission, and intervention/origin authority
+under an identity-preserving envelope before this read can return them.
+
+`verify_fork_manifest_signature_only(outer_bytes, public_key)` may be exposed
+for diagnostics and interoperability. It returns only a mathematical result
+and MUST NOT produce `CommittedForkManifestV1`, satisfy human-subject Replay,
+or claim authorized pre-destruction issuance. Thus bytes signed later with a
+copied private key fail Replay because no trusted singleton publication binding
+exists, even if their Ed25519 signature is valid. Human-subject status comes
+from trusted subject/consent state, never from an unsigned or self-declared
+flag. [S1, S6, S7]
+
+Replay boundary vectors are also normative:
+
+| Vector | Publication lookup / presented input | Replay result |
+|---|---|---|
+| Trusted singleton | one local binding and artifact; receipt, recomputed ID, exact bytes, Fork/head, provenance, and signature all match | accepted subject to separate consent/access checks |
+| No binding | no row for `(child, final head)` | `PublicationMissing` before execution |
+| Duplicate/conflict | multiple bindings/artifacts, orphan row, or unequal operation/receipt fields | `PublicationConflict` before execution |
+| Caller bytes only | valid FSM1 supplied without trusted lookup | cryptographic-only result at most; Replay rejects |
+| Copied-key signature | mathematical signature valid but bytes/ID absent from committed binding | `PublicationMissing` or mismatch; Replay rejects |
+| Substituted bytes | binding exists but supplied/stored bytes or recomputed ID differ | publication mismatch; Replay rejects |
+| Wrong Fork/head | FSM1 inner fields differ from lookup key | publication mismatch; Replay rejects |
+| Structural import | artifact/binding was imported without #202 verified authority envelope | untrusted publication; Replay rejects |
+
+For a human-subject Fork, a missing, malformed, untrusted, conflicting, or
+mismatched committed sidecar aborts Replay **before execution**. The ADR-041 Replay grant and
 consent token are checked separately; erasure can still weaken ReplayClaim
 without invalidating the historical mathematics of a retained signature.
 Non-human-subject Forks may omit the signature as ADR-041 already permits, but
