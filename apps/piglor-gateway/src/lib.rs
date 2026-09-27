@@ -9,6 +9,7 @@
 
 pub mod authorization;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod e2e_determinism;
 pub mod executor;
 mod http;
