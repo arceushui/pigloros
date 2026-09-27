@@ -614,6 +614,44 @@ fn recipient_owner_public_contract_rejects_a_missing_live_inventory_identity(
 }
 
 #[test]
+fn recipient_owner_public_contract_keeps_missing_and_pending_material_unavailable(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
+    std::fs::remove_file(&path)?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+
+    let replacement = store.enroll_recipient_key(&owner)?;
+    begin_pending_destruction(&mut store, replacement, Hash::from_bytes([96; 32]))?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(
+        recipient_private_path(&temporary.path().join("recipient-private"), replacement).exists()
+    );
+    assert_ne!(descriptor, replacement);
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_foreign_inventory_bound_in_claimed_directory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, descriptor) = enrolled_owner()?;
+    let foreign_descriptor = pos_core::RecipientKeyDescriptorV1::for_grantee(
+        EntityId::new(),
+        descriptor.identity().epoch,
+        descriptor.public_key(),
+    )?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "UPDATE recipient_key_inventory_v1 SET descriptor = ?1",
+        [foreign_descriptor.encode()],
+    )?;
+
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(only_private_file(&temporary.path().join("recipient-private"))?.exists());
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_fails_closed_for_corrupt_durable_inventory(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (column, value) in [
