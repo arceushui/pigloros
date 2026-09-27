@@ -4,6 +4,7 @@ use std::{
     collections::BTreeSet,
     fs::File,
     io::{Read, Write},
+    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
 };
 
@@ -312,8 +313,6 @@ impl SqliteStore {
         &self,
         owner: &RecipientKeyOwnerV1,
     ) -> Result<Vec<RecipientKeyDescriptorV1>, CoreError> {
-        use std::os::unix::ffi::OsStringExt;
-
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
@@ -343,78 +342,8 @@ impl SqliteStore {
             let inventories = rows
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
-            let expected_identities = registry
-                .key_records()
-                .filter(|record| {
-                    record.identity.owner_id == owner_id
-                        && record.identity.role == KeyRoleV1::ExportRecipientEncryption
-                        && record.private_material_digest.is_some()
-                })
-                .map(|record| record.identity)
-                .collect::<BTreeSet<_>>();
-            let mut inventory_identities = BTreeSet::new();
-            let mut descriptors = Vec::new();
-            for inventory in &inventories {
-                let descriptor = RecipientKeyDescriptorV1::decode(&inventory.descriptor)
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
-                if !descriptor.is_for_grantee(owner.grantee_id)
-                    || inventory.material_digest.len() != 32
-                {
-                    return Err(CoreError::Storage(
-                        "recipient key inventory is invalid".to_owned(),
-                    ));
-                }
-                let mut inventory_digest = [0_u8; 32];
-                inventory_digest.copy_from_slice(&inventory.material_digest);
-                let inventory_digest = pos_core::Hash::from_bytes(inventory_digest);
-                let identity = descriptor.identity();
-                if !inventory_identities.insert(identity) {
-                    return Err(CoreError::Storage(
-                        "recipient key inventory repeats an identity".to_owned(),
-                    ));
-                }
-                if registry.key_record(identity).is_none_or(|record| {
-                    record.private_material_digest != Some(inventory_digest)
-                        || registry.tombstone(identity).is_some()
-                        || registry
-                            .pending_destruction_requests()
-                            .any(|pending| pending.identity == identity)
-                }) {
-                    return Err(CoreError::Storage(
-                        "recipient key inventory is not an exact live registry identity".to_owned(),
-                    ));
-                }
-                let path =
-                    PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
-                if !is_expected_recipient_private_path(&path, descriptor)? {
-                    return Err(CoreError::Storage(
-                        "recipient key inventory path does not match descriptor".to_owned(),
-                    ));
-                }
-                let file_identity = RecipientPrivateFileIdentityV1::from_inventory(inventory)?;
-                let material = read_bound_private_key(owner, &path, file_identity)?;
-                if pos_crypto::key_roles::key_material_digest(&material).as_bytes()
-                    != inventory.material_digest.as_slice()
-                {
-                    return Err(CoreError::Storage(
-                        "recipient private key digest differs from inventory".to_owned(),
-                    ));
-                }
-                if pos_crypto::recipient_key::recipient_public_key_from_private_v1(&material)
-                    .map_err(|error| CoreError::Storage(error.to_string()))?
-                    != descriptor.public_key()
-                {
-                    return Err(CoreError::Storage(
-                        "recipient private key does not match descriptor public key".to_owned(),
-                    ));
-                }
-                descriptors.push(descriptor);
-            }
-            if inventory_identities != expected_identities {
-                return Err(CoreError::Storage(
-                    "recipient key inventory does not cover live registry identities".to_owned(),
-                ));
-            }
+            let descriptors =
+                validate_recipient_key_inventory(owner, &owner_id, &registry, &inventories)?;
             quarantine_unregistered_staged_material(owner, &inventories)?;
             Ok(descriptors)
         })();
@@ -586,6 +515,84 @@ impl SqliteStore {
             pos_core::Hash::from_bytes(material_digest),
         ))
     }
+}
+
+fn validate_recipient_key_inventory(
+    owner: &RecipientKeyOwnerV1,
+    owner_id: &EntityId,
+    registry: &KeyRegistryStateV1,
+    inventories: &[StoredRecipientKeyInventoryV1],
+) -> Result<Vec<RecipientKeyDescriptorV1>, CoreError> {
+    let expected_identities = registry
+        .key_records()
+        .filter(|record| {
+            record.identity.owner_id == *owner_id
+                && record.identity.role == KeyRoleV1::ExportRecipientEncryption
+                && record.private_material_digest.is_some()
+        })
+        .map(|record| record.identity)
+        .collect::<BTreeSet<_>>();
+    let mut inventory_identities = BTreeSet::new();
+    let mut descriptors = Vec::new();
+    for inventory in inventories {
+        let descriptor = RecipientKeyDescriptorV1::decode(&inventory.descriptor)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        if !descriptor.is_for_grantee(owner.grantee_id) || inventory.material_digest.len() != 32 {
+            return Err(CoreError::Storage(
+                "recipient key inventory is invalid".to_owned(),
+            ));
+        }
+        let mut inventory_digest = [0_u8; 32];
+        inventory_digest.copy_from_slice(&inventory.material_digest);
+        let inventory_digest = pos_core::Hash::from_bytes(inventory_digest);
+        let identity = descriptor.identity();
+        if !inventory_identities.insert(identity) {
+            return Err(CoreError::Storage(
+                "recipient key inventory repeats an identity".to_owned(),
+            ));
+        }
+        if registry.key_record(identity).is_none_or(|record| {
+            record.private_material_digest != Some(inventory_digest)
+                || registry.tombstone(identity).is_some()
+                || registry
+                    .pending_destruction_requests()
+                    .any(|pending| pending.identity == identity)
+        }) {
+            return Err(CoreError::Storage(
+                "recipient key inventory is not an exact live registry identity".to_owned(),
+            ));
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
+        if !is_expected_recipient_private_path(&path, descriptor)? {
+            return Err(CoreError::Storage(
+                "recipient key inventory path does not match descriptor".to_owned(),
+            ));
+        }
+        let file_identity = RecipientPrivateFileIdentityV1::from_inventory(inventory)?;
+        let material = read_bound_private_key(owner, &path, file_identity)?;
+        if pos_crypto::key_roles::key_material_digest(&material).as_bytes()
+            != inventory.material_digest.as_slice()
+        {
+            return Err(CoreError::Storage(
+                "recipient private key digest differs from inventory".to_owned(),
+            ));
+        }
+        if pos_crypto::recipient_key::recipient_public_key_from_private_v1(&material)
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            != descriptor.public_key()
+        {
+            return Err(CoreError::Storage(
+                "recipient private key does not match descriptor public key".to_owned(),
+            ));
+        }
+        descriptors.push(descriptor);
+    }
+    if inventory_identities != expected_identities {
+        return Err(CoreError::Storage(
+            "recipient key inventory does not cover live registry identities".to_owned(),
+        ));
+    }
+    Ok(descriptors)
 }
 
 fn recipient_private_path(directory: &Path, descriptor: RecipientKeyDescriptorV1) -> PathBuf {
