@@ -472,7 +472,7 @@ fn manifest_decoder_rejects_count_coordinates_and_noncanonical_sequence(
     );
 
     let mut too_many = canonical.clone();
-    too_many.splice(sequences_at..sequences_at + 1, [0x19, 0x04, 0x01]);
+    too_many.splice(sequences_at..=sequences_at, [0x19, 0x04, 0x01]);
     assert_eq!(
         ForkReproManifestV1::from_canonical_cbor(&too_many),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
@@ -537,7 +537,7 @@ fn signed_manifest_decoder_rejects_identity_length_and_inner_mutations(
         Err(ForkAttributionCodecErrorV1::InvalidEncoding)
     );
     let mut oversized_role = canonical.clone();
-    oversized_role.splice(role_at..role_at + 1, [0x19, 0x01, 0x00]);
+    oversized_role.splice(role_at..=role_at, [0x19, 0x01, 0x00]);
     assert_eq!(
         SignedForkReproManifestV1::from_canonical_cbor(&oversized_role),
         Err(ForkAttributionCodecErrorV1::InvalidEncoding)
