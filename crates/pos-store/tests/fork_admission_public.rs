@@ -82,6 +82,16 @@ fn assert_contract(store: &mut dyn ForkAdmissionAuthorityPortV1, parent: Timelin
         store.create_fork_admitted(&conflict, WallTime::from_micros(20)),
         Err(ForkAdmissionErrorV1::Conflict)
     );
+    conflict.child_name.clear();
+    assert_eq!(
+        store.create_fork_admitted(&conflict, WallTime::from_micros(20)),
+        Err(ForkAdmissionErrorV1::Conflict)
+    );
+    conflict.operation_id = Hash::from_bytes([9; 32]);
+    assert_eq!(
+        store.create_fork_admitted(&conflict, WallTime::from_micros(20)),
+        Err(ForkAdmissionErrorV1::InvalidRequest)
+    );
     assert_eq!(
         store.commit_local_binding(
             Hash::from_bytes([2; 32]),

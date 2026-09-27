@@ -6145,15 +6145,6 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
         request: &CreateForkAdmittedRequestV1,
         now: WallTime,
     ) -> Result<ForkAdmissionReceiptV1, ForkAdmissionErrorV1> {
-        if request.operation_id == Hash::zero()
-            || request.room_revision_descriptor_hash == Hash::zero()
-            || request.plugin_composition_hash == Hash::zero()
-            || request.child_name.is_empty()
-            || request.child_name.len() > 128
-            || request.completed_fold_cursor != request.post_fold_tick_boundary
-        {
-            return Err(ForkAdmissionErrorV1::InvalidRequest);
-        }
         let request_digest = pos_core::fork_admission_request_digest_v1(request)?;
         let tx = self
             .conn
@@ -6196,6 +6187,15 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
             } else {
                 Err(ForkAdmissionErrorV1::CorruptAuthority)
             };
+        }
+        if request.operation_id == Hash::zero()
+            || request.room_revision_descriptor_hash == Hash::zero()
+            || request.plugin_composition_hash == Hash::zero()
+            || request.child_name.is_empty()
+            || request.child_name.len() > 128
+            || request.completed_fold_cursor != request.post_fold_tick_boundary
+        {
+            return Err(ForkAdmissionErrorV1::InvalidRequest);
         }
         self.principal_owner_trust
             .as_ref()
