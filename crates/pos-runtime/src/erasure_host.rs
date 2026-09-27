@@ -5942,6 +5942,39 @@ mod tests {
     }
 
     #[test]
+    fn verified_candidate_adapter_unavailability_poisons_the_host() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.apply_unaffected_topology_change(
+                None,
+                |_permit, _store| Ok(Timeline::new(TimelineMeta::root("unavailable"))),
+                |_permit, _store, _candidate| Err(CoreError::ErasureContainmentUnavailable),
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+
+        let mut ordinary = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            ordinary.apply_unaffected_topology_change(
+                None,
+                |_permit, _store| Ok(Timeline::new(TimelineMeta::root("ordinary-failure"))),
+                |_permit, _store, _candidate| Err(CoreError::Storage("write denied".to_owned())),
+            ),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(ordinary.status(), ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
     fn mismatched_persisted_topology_metadata_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(fault_store(FaultModeV1::MismatchedTopologyMetadata)),
