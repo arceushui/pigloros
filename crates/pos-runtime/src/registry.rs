@@ -3024,7 +3024,6 @@ impl PluginRegistry {
                 crate::OutputAdmissionErrorV1::PluginMismatch,
             ));
         }
-        #[cfg(debug_assertions)]
         if let Some(registration) = registration.as_ref() {
             self.validate_registration_roles(registration)?;
         }
@@ -3056,6 +3055,21 @@ impl PluginRegistry {
                 reason: format!(
                     "output policy declares event type '{}' outside the Plugin capability",
                     declaration.event_type()
+                ),
+            });
+        }
+        if let Some(kind) = owned_event_types.iter().find(|kind| {
+            !output_policy
+                .fields()
+                .output_declarations
+                .iter()
+                .any(|declaration| declaration.event_type() == kind.as_str())
+        }) {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: format!(
+                    "Plugin capability owns event type '{}' without an output-policy declaration",
+                    kind.as_str()
                 ),
             });
         }
@@ -3095,7 +3109,6 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
-    #[cfg(debug_assertions)]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
@@ -4366,6 +4379,72 @@ mod tests {
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn missing_owned_policy_declaration_is_rejected_before_registration() {
+        let plugin = simple_plugin("missing-policy", &["first.output", "second.output"]);
+        let valid_binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let (valid_policy, budget, _, _, _) = valid_binding.into_parts();
+        let fields = valid_policy.fields();
+        let incomplete_policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id: fields.plugin_id,
+            plugin_version: fields.plugin_version.clone(),
+            implementation_hash: fields.implementation_hash,
+            base_configuration_digest: fields.base_configuration_digest,
+            executable_profile_hash: fields.executable_profile_hash,
+            retention_policy_hash: fields.retention_policy_hash,
+            policy_revision: fields.policy_revision,
+            output_declarations: vec![fields.output_declarations[0].clone()],
+        })
+        .test_ok();
+        let incomplete_binding = OutputPolicyBindingV1::from_installed_source_with_policy(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            incomplete_policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_with_verified_output_policy(&plugin, incomplete_binding, None, None),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(!registry.contains(&plugin.id()));
+    }
+
+    #[test]
+    fn duplicate_pinned_role_is_rejected_before_registration() {
+        let first = simple_plugin("first-role", &["first.output"]);
+        let second = simple_plugin("second-role", &["second.output"]);
+        let pin = crate::composition::PluginPinV1::try_new(
+            crate::composition::DomainImplementationKindV1::Plugin,
+            crate::composition::PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["shared-role".to_owned()],
+        )
+        .test_ok();
+        let registration = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
+        let mut registry = gated_registry();
+        registry
+            .register_pinned_generated(&first, registration.clone(), None, None)
+            .test_ok();
+        assert!(matches!(
+            registry.register_pinned_generated(&second, registration, None, None),
+            Err(RuntimeError::Composition(
+                PluginCompositionErrorV1::DuplicateRole { .. }
+            ))
+        ));
+        assert!(registry.contains(&first.id()));
+        assert!(!registry.contains(&second.id()));
     }
 
     #[test]
