@@ -1,7 +1,7 @@
 use pos_core::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1,
     ForkReproManifestInputV1, ForkReproManifestV1, Hash, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, TimelineId,
+    KeyRegistryStateV1, KeyRoleV1, PublicKey, SignedForkReproManifestV1, TimelineId,
 };
 use pos_crypto::{
     fork_attribution::{
@@ -16,6 +16,22 @@ use pos_crypto::{
 
 const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
+}
+
+fn check_signature(
+    signed: &SignedForkReproManifestV1,
+    public: PublicKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    verify_local_fork_manifest_signature_only(signed, public)?;
+    assert!(
+        verify_local_fork_manifest_signature_only(signed, PublicKey::from_bytes([0; 32])).is_err()
+    );
+    let invalid_public_key = (0..=u8::MAX)
+        .map(|byte| PublicKey::from_bytes([byte; 32]))
+        .find(|key| verifying_key_from_public_key(key).is_err())
+        .ok_or("no invalid compressed public key fixture")?;
+    assert!(verify_local_fork_manifest_signature_only(signed, invalid_public_key).is_err());
+    Ok(())
 }
 
 #[test]
@@ -56,14 +72,15 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
         manifest,
     )?;
     assert_eq!(signed.identity(), identity);
-    let zero_epoch = sign_local_fork_manifest_from_admission_signature_only(
+    let Err(zero_epoch) = sign_local_fork_manifest_from_admission_signature_only(
         &mut registry,
         &private,
         &admission,
         0,
         ForkReproManifestV1::from_admission(&admission, vec![], 0, hash(6))?,
-    )
-    .unwrap_err();
+    ) else {
+        return Err("zero epoch unexpectedly signed".into());
+    };
     let ForkAttributionSigningErrorV1::Codec(zero_epoch) = zero_epoch else {
         return Err("zero epoch unexpectedly reached the registry".into());
     };
@@ -75,14 +92,15 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
     let mut admission_b_input = admission.input().clone();
     admission_b_input.child_timeline_id = TimelineId::new();
     let admission_b = ForkAdmissionRecordV1::new(admission_b_input)?;
-    let mismatch = sign_local_fork_manifest_from_admission_signature_only(
+    let Err(mismatch) = sign_local_fork_manifest_from_admission_signature_only(
         &mut registry,
         &private,
         &admission_b,
         identity.epoch,
         ForkReproManifestV1::from_admission(&admission, vec![], 0, hash(6))?,
-    )
-    .unwrap_err();
+    ) else {
+        return Err("mismatched FAR1 unexpectedly signed".into());
+    };
     let ForkAttributionSigningErrorV1::Codec(mismatch) = mismatch else {
         return Err("FAR1 mismatch unexpectedly reached the registry".into());
     };
@@ -99,14 +117,15 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
         private_b.material_digest(),
         Some(public_key_from_verifying_key(&public_b)),
     ))?;
-    let creator_b = sign_local_fork_manifest_for_identity_from_admission_signature_only(
+    let Err(creator_b) = sign_local_fork_manifest_for_identity_from_admission_signature_only(
         &mut registry,
         &private_b,
         identity_b,
         &admission,
         ForkReproManifestV1::from_admission(&admission, vec![], 0, hash(6))?,
-    )
-    .unwrap_err();
+    ) else {
+        return Err("creator-b FAR1 unexpectedly signed".into());
+    };
     let ForkAttributionSigningErrorV1::Codec(creator_b) = creator_b else {
         return Err("creator-b FAR1 mismatch unexpectedly reached the registry".into());
     };
@@ -114,17 +133,7 @@ fn local_signature_only_binds_exact_attribution_identity_and_inner_bytes(
         creator_b,
         pos_core::ForkAttributionCodecErrorV1::FieldMismatch
     );
-    verify_local_fork_manifest_signature_only(&signed, public_key_from_verifying_key(&public))?;
-    assert!(verify_local_fork_manifest_signature_only(
-        &signed,
-        pos_core::PublicKey::from_bytes([0; 32])
-    )
-    .is_err());
-    let invalid_public_key = (0..=u8::MAX)
-        .map(|byte| pos_core::PublicKey::from_bytes([byte; 32]))
-        .find(|key| verifying_key_from_public_key(key).is_err())
-        .ok_or("no invalid compressed public key fixture")?;
-    assert!(verify_local_fork_manifest_signature_only(&signed, invalid_public_key).is_err());
+    check_signature(&signed, public_key_from_verifying_key(&public))?;
     Ok(())
 }
 
