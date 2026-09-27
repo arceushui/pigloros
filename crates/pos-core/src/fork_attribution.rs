@@ -439,7 +439,7 @@ impl SignedForkReproManifestV1 {
     /// Replace the mathematical signature after the admission-bound fields
     /// have been validated. This does not grant publication authority.
     #[must_use]
-    pub fn with_signature(mut self, signature: Signature) -> Self {
+    pub const fn with_signature(mut self, signature: Signature) -> Self {
         self.signature = signature;
         self
     }
