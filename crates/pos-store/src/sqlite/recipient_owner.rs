@@ -246,15 +246,15 @@ impl SqliteStore {
                     })?,
             );
             let identity = descriptor.identity();
-            if registry
-                .active_key(&identity.owner_id, identity.role)
-                .is_none_or(|active| {
-                    active.identity != identity
-                        || active.private_material_digest != Some(inventory_digest)
-                })
-            {
+            if registry.key_record(identity).is_none_or(|record| {
+                record.private_material_digest != Some(inventory_digest)
+                    || registry.tombstone(identity).is_some()
+                    || registry
+                        .pending_destruction_requests()
+                        .any(|pending| pending.identity == identity)
+            }) {
                 return Err(CoreError::Storage(
-                    "recipient key inventory is not an exact active registry identity".to_owned(),
+                    "recipient key inventory is not an exact live registry identity".to_owned(),
                 ));
             }
             let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
