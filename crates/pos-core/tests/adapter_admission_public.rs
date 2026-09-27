@@ -331,6 +331,13 @@ fn malformed_adapter_entries_fail_at_the_public_decoder() -> TestResult<()> {
         AdapterAdmissionV1::from_canonical_cbor(&long_name),
         Err(AdapterAdmissionErrorV1::FieldOutOfBounds)
     );
+    let mut enormous_name = good.clone();
+    enormous_name[name - 1] = 0x7a;
+    enormous_name.splice(name..name, 65_536_u32.to_be_bytes());
+    assert_eq!(
+        AdapterAdmissionV1::from_canonical_cbor(&enormous_name),
+        Err(AdapterAdmissionErrorV1::FieldOutOfBounds)
+    );
     let config_header = good
         .windows(3)
         .position(|window| window == [0x59, 0x10, 0x00])

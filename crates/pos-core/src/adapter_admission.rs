@@ -1,6 +1,6 @@
 //! ADR-101 MAA1 adapter admission bytes.
 //!
-//! These structural bytes do not prove owner admission, PublicRecord
+//! These structural bytes do not prove owner admission, `PublicRecord`
 //! provenance, a complete Plugin roster, or authority to invoke an adapter.
 
 use crate::{Hash, PluginId};
@@ -80,7 +80,7 @@ pub struct AdapterAdmissionInputV1 {
 pub struct AdapterAdmissionV1(AdapterAdmissionInputV1);
 
 impl AdapterAdmissionV1 {
-    /// Validate the fixed PublicRecord profile and exact entry order.
+    /// Validate the fixed `PublicRecord` profile and exact entry order.
     ///
     /// # Errors
     /// Rejects invalid identities, entries, counts, order, or record length.
@@ -361,11 +361,12 @@ impl Reader<'_> {
         major: u8,
         maximum: usize,
     ) -> Result<&[u8], AdapterAdmissionErrorV1> {
-        let length = self.head(major)?;
-        if length > maximum as u64 {
+        let length = u16::try_from(self.head(major)?)
+            .map_err(|_| AdapterAdmissionErrorV1::FieldOutOfBounds)?;
+        if usize::from(length) > maximum {
             return Err(AdapterAdmissionErrorV1::FieldOutOfBounds);
         }
-        self.take(length as usize)
+        self.take(usize::from(length))
     }
 
     fn byte(&mut self) -> Result<u8, AdapterAdmissionErrorV1> {
