@@ -55,6 +55,7 @@ pub use pos_core::store::{
     AppendIntent, AppendOrDuplicateOutcome, EventStore, PurgeOutcome, SeqRange, TimelineExport,
     APPEND_IDENTITY_RETENTION_MICROS,
 };
+use pos_core::ErasureGate;
 pub use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
