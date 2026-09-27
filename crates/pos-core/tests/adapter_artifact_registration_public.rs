@@ -43,7 +43,10 @@ fn admission_extractor_derives_the_complete_public_root_fields() -> TestResult<(
         fields.artifact_digest,
         ArtifactRegistrationV1::artifact_digest(ErasureArtifactClassV1::ReproManifest, &bytes)?
     );
-    assert_eq!(fields.owner_reference, Hash::from_bytes([0x36; 32]));
+    assert_eq!(
+        fields.owner_reference,
+        Hash::from_bytes(<[u8; 32]>::try_from(&bytes[9..41])?)
+    );
     assert_eq!(fields.data_class, ArtifactDataClassV1::PublicRecord);
     assert_eq!(fields.optionality, ArtifactOptionalityV1::Required);
     assert_eq!(
@@ -76,9 +79,18 @@ fn transcript_extractor_binds_its_exact_required_admission_child() -> TestResult
         )?
     );
     assert_eq!(fields.child_artifacts.len(), 1);
-    assert_eq!(fields.child_artifacts[0].artifact_class, ErasureArtifactClassV1::ReproManifest);
-    assert_eq!(fields.child_artifacts[0].artifact_digest, admission.fields().artifact_digest);
-    assert_eq!(fields.child_artifacts[0].registration_address, admission.address());
+    assert_eq!(
+        fields.child_artifacts[0].artifact_class,
+        ErasureArtifactClassV1::ReproManifest
+    );
+    assert_eq!(
+        fields.child_artifacts[0].artifact_digest,
+        admission.fields().artifact_digest
+    );
+    assert_eq!(
+        fields.child_artifacts[0].registration_address,
+        admission.address()
+    );
     assert!(fields.child_artifacts[0].required);
     Ok(())
 }
@@ -89,7 +101,7 @@ fn extractor_rejects_foreign_or_unmatched_admission_material() -> TestResult<()>
     let foreign_registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
         artifact_class: ErasureArtifactClassV1::ReproManifest,
         artifact_digest: Hash::from_bytes([9; 32]),
-        owner_reference: Hash::from_bytes([0x36; 32]),
+        owner_reference: Hash::from_bytes(<[u8; 32]>::try_from(&admission_bytes[9..41])?),
         data_class: ArtifactDataClassV1::PublicRecord,
         optionality: ArtifactOptionalityV1::Required,
         transition_rule: ArtifactTransitionRuleV1::PreserveExact,
