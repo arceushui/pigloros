@@ -23,6 +23,7 @@ const QUARANTINE_NAME: &str = "quarantine";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationFaultPointV1 {
     RecoveryRootSyncBeforeNextIndexRemoval,
+    ReadyWrite,
 }
 
 #[cfg(test)]
@@ -458,6 +459,8 @@ impl LocalOciPublisherV1 {
             address.digest(),
             address.size()
         );
+        #[cfg(test)]
+        injected_fault(PublicationFaultPointV1::ReadyWrite)?;
         write_private_file(&staging, "READY", ready.as_bytes())?;
         fs::fsync(&staging).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
         fs::renameat_with(
@@ -1072,9 +1075,116 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use sha2::{Digest as _, Sha256};
+
     use super::*;
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    fn digest(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut result = String::from("sha256:");
+        for byte in Sha256::digest(bytes) {
+            result.push(char::from(HEX[usize::from(byte >> 4)]));
+            result.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        result
+    }
+
+    fn layer(member: &str, media_type: &str, bytes: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "annotations": {"org.pigloros.plugin.member": member},
+            "digest": digest(bytes),
+            "mediaType": media_type,
+            "size": bytes.len(),
+        })
+    }
+
+    fn bundle() -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
+        let pmf1 = b"pmf1".to_vec();
+        let component = b"component".to_vec();
+        let wit = b"wit".to_vec();
+        let provenance = b"provenance".to_vec();
+        let sbom = b"sbom".to_vec();
+        let licence = b"licence".to_vec();
+        let layers = vec![
+            layer(
+                "pmf1",
+                "application/vnd.pigloros.plugin.manifest.v1+cbor",
+                &pmf1,
+            ),
+            layer(
+                "component",
+                "application/vnd.pigloros.plugin.component.v1+wasm",
+                &component,
+            ),
+            layer("wit", "application/vnd.pigloros.plugin.wit.v1+tar", &wit),
+            layer("provenance", "application/vnd.in-toto+json", &provenance),
+            layer("sbom", "application/spdx+json", &sbom),
+            layer(
+                &format!("licence/{}", &digest(&licence)[7..]),
+                "text/plain; charset=utf-8",
+                &licence,
+            ),
+        ];
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "artifactType": "application/vnd.pigloros.plugin.release.v1",
+            "config": {
+                "digest": digest(b"{}"),
+                "mediaType": "application/vnd.oci.empty.v1+json",
+                "size": 2,
+            },
+            "layers": layers,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "schemaVersion": 2,
+        }))?;
+        let address = BundleAddressV1::new(digest(&manifest), u64::try_from(manifest.len())?)?;
+        let mut blobs = BTreeMap::new();
+        for bytes in [
+            b"{}".to_vec(),
+            pmf1,
+            component,
+            wit,
+            provenance,
+            sbom,
+            licence,
+        ] {
+            blobs.insert(digest(&bytes), bytes);
+        }
+        Ok(verify_oci_closure_v1(address, manifest, blobs)?)
+    }
+
+    #[test]
+    fn ready_write_fault_leaves_no_discoverable_release_and_retry_recovers(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "pigloros-oci-ready-fault-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root)?;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        let bundle = bundle()?;
+        let address = bundle.address().clone();
+        PUBLICATION_FAULT.with(|fault| fault.set(Some(PublicationFaultPointV1::ReadyWrite)));
+        let failed = publisher.publish(&bundle);
+        PUBLICATION_FAULT.with(|fault| fault.set(None));
+        assert_eq!(failed, Err(LocalOciPublicationErrorV1::RecoveryRequired));
+        assert_eq!(
+            publisher.read_verified(&address),
+            Err(ReleaseSourceErrorV1::NotFound)
+        );
+        let report = publisher.recover_all()?;
+        assert_eq!(report.removed_staging, 1);
+        assert!(report.committed.is_empty());
+        assert_eq!(
+            publisher.publish(&bundle)?,
+            PublishOutcomeV1::Published(address)
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn recovery_fault_before_next_index_removal_fails_closed(
