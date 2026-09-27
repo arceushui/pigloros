@@ -1,4 +1,4 @@
-**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 3
+**Status:** Proposed | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-28 | **Revision:** 4
 
 Related: #400 · #201 · #292 · [[ADR-041_Scenario_Room_Configuration_and_Reproducible_Fork_Inputs]] · [[ADR-065_KeyRegistry_Authorized_Signing_After_Destruction]] · [[ADR-091_Subject_Key_Custody_and_Historical_Decryption]] · [[ADR-060_Subject_Erasure_and_Replay_Claim_Degradation]]
 
@@ -337,18 +337,30 @@ provenance fields or signed bytes.
 `commit_authorized` owns the transaction and callback. Under the same
 serialization domain used by registration, rotation, and destruction, it:
 
-1. begins a write transaction and verifies the expected registry snapshot;
-2. loads and validates the immutable Fork admission, exact final head and chain
+1. rejects zero epoch and any role other than exactly
+   `SubjectAttributionSigning`, then begins a write transaction and acquires
+   the registry/rotation/destruction serialization lock;
+2. loads the durable `KeyRegistryStateV1`, requires it to equal the expected
+   snapshot, validates the complete registry state, and performs ADR-065's
+   full active signing authorization against the supplied exact
+   `KeyIdentityV1`, private-material digest, and public key: the identity record
+   must exist; no tombstone may exist; no pending-destruction entry may exist;
+   the active index for `(owner_id, SubjectAttributionSigning)` must equal that
+   exact identity and epoch; and the record's `Some(private_material_digest)`
+   and `Some(public_verification_key)` must exactly equal the supplied values;
+3. only after every authorization check succeeds, constructs one
+   `HeldRegistryAuthorizationV1` from that validated active record and immutable
+   in-memory snapshot; then loads and validates the immutable Fork admission,
+   exact final head and chain
    hash, and complete intervention set;
-3. invokes exactly once a synchronous, non-escaping
+4. invokes exactly once a synchronous, non-escaping
    `FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<[u8; 64], SignError>`
-   with an immutable in-memory clone of the already validated registry
-   snapshot and the complete canonical inner bytes;
-4. the callback signs ADR-065's exact preimage for the held identity and
+   with the held authorization and complete canonical inner bytes;
+5. the callback signs ADR-065's exact preimage for the held identity and
    returns only the signature;
-5. validates the outer bytes and inserts the immutable artifact, its record ID,
+6. validates the outer bytes and inserts the immutable artifact, its record ID,
    and a unique `(Fork TimelineId, final logical_head)` binding; and
-6. commits before returning only a publication receipt containing the record
+7. commits before returning only a publication receipt containing the record
    ID. The caller reads committed bytes through a separate receipt-bound read.
 
 `HeldRegistryAuthorizationV1` exposes only identity, public key,
@@ -358,6 +370,16 @@ ADR-065 preimage in memory. It MUST NOT call `sign_for_registered_role`,
 `with_signing_authorization`, `load_key_registry`, or any SQLite/store method
 while the publisher lock/transaction is held.
 
+Any failure in steps 1 or 2 returns before inner-byte construction and MUST
+NOT construct the held authorization or invoke the callback. The exact closed
+registry precedence is ADR-065/current `KeyRegistryStateV1`: `InvalidEpoch`,
+then `SigningRoleRequired`; malformed/unavailable or unequal expected durable
+snapshot (`RegistryUnavailable` or `RegistryChanged`); `NotFound`; `Destroyed`;
+`DestructionPending`; `InactiveKey` for a missing or unequal active identity;
+then `SigningKeyMismatch` for either material-digest or public-key inequality.
+The publisher does not collapse these into `SigningFailed`. A callback error is
+`SigningFailed` only after active authorization succeeded.
+
 No signature or uncommitted bytes escape on callback, validation, insertion,
 or commit failure. Rollback leaves no artifact or binding. The operation ID is
 idempotent only when creator identity, admission digest, final Fork head/hash,
@@ -366,9 +388,9 @@ missing, or conflicting state fails closed. Recovery looks up that stable
 operation ID and returns the existing receipt only after revalidating every
 binding. It never signs again to repair an ambiguous result.
 
-Authorization/registry errors precede head/provenance errors; those precede
-signing; signing precedes outer validation/insertion; commit/rollback errors
-are last and never become success. Recovery states are exactly `Absent`,
+The exact registry errors above precede head/provenance errors; those precede
+callback `SigningFailed`; signing precedes outer validation/insertion;
+commit/rollback errors are last and never become success. Recovery states are exactly `Absent`,
 `Committed(receipt)`, or `CorruptOrConflicting`; there is no durable `Pending`
 because operation, binding, and artifact share one transaction. An
 indeterminate commit is recovered by operation-ID lookup and full validation.
@@ -381,6 +403,25 @@ before commit. If destruction wins the shared
 serialization boundary first, publication never invokes the callback; if the
 publication transaction commits first, later destruction retains its public
 verification material. [S7]
+
+The public boundary vectors are normative:
+
+| Vector | Durable registry state / request | Result and callback count |
+|---|---|---|
+| Authorized | exact active creator + role 1 + positive epoch + matching material digest/public key; no tombstone or pending destruction | committed receipt; callback exactly once |
+| Zero epoch | otherwise valid, epoch 0 | `InvalidEpoch`; 0 |
+| Wrong role | positive epoch, any role other than `SubjectAttributionSigning` | `SigningRoleRequired`; 0 |
+| Snapshot changed/malformed | durable snapshot unequal to expected, unavailable, or invalid | `RegistryChanged` or `RegistryUnavailable`; 0 |
+| Missing identity | valid snapshot with no exact identity record | `NotFound`; 0 |
+| Tombstoned | exact record and tombstone present | `Destroyed`; 0 |
+| Destruction pending | exact record and pending-destruction entry present | `DestructionPending`; 0 |
+| Stale/inactive | exact record exists but active index is absent or names another epoch | `InactiveKey`; 0 |
+| Material mismatch | active record private-material digest differs | `SigningKeyMismatch`; 0 |
+| Public-key mismatch | active record public verification key differs | `SigningKeyMismatch`; 0 |
+| Post-authorization provenance conflict | authorization valid; admission/head/intervention recheck fails | matching provenance error; 0 |
+| Signer failure | authorization and provenance valid; callback fails | `SigningFailed`; 1, rollback |
+| Destruction wins lock | pending/destruction state committed before publisher acquires the boundary | `DestructionPending` or `Destroyed`; 0 |
+| Publication wins lock | publisher acquires boundary first and commits | committed receipt; callback exactly once; later destruction retains verification key |
 
 The signed manifest is a sidecar artifact, **outside the Fork Timeline whose
 head hash it records**. Appending it to that Fork would make the signed head
