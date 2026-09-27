@@ -41,6 +41,7 @@ pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
+pub mod recipient_key;
 pub mod plugin;
 pub mod retention;
 pub mod state;
@@ -264,6 +265,9 @@ pub use owntracks_enrollment::{
 pub use owntracks_ingress::{
     OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
     PreparedOwnTracksIngressV1,
+};
+pub use recipient_key::{
+    recipient_owner_id_from_grantee, RecipientKeyDescriptorErrorV1, RecipientKeyDescriptorV1,
 };
 pub use pipeline::{
     CommittedPipelineEventV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
