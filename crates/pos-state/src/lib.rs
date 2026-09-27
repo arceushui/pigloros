@@ -147,13 +147,6 @@ impl AuthorizationCacheV1 {
             .fold(first_grant.valid_until_position(), |shortest, grant| {
                 shortest.min(grant.valid_until_position())
             });
-        let chain_bindings_result = grants
-            .iter()
-            .map(pos_core::CapabilityGrantV1::binding_digest)
-            .collect::<Result<Vec<_>, _>>();
-        let Ok(chain_bindings) = chain_bindings_result else {
-            return None;
-        };
         let authentication_expiry = request.authenticated().expires_at();
         let expires_at = match request.consent() {
             ConsentEvidenceV1::Resolved { grants } => {
@@ -165,17 +158,9 @@ impl AuthorizationCacheV1 {
         };
         let current_decision =
             AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
-        let digest_matches = decision.request_digest() == request.binding_digest();
-        let request_matches = digest_matches
-            && decision.grant_chain_bindings() == chain_bindings.as_slice()
-            && decision.authority_timeline() == request.authority_timeline()
-            && decision.at_position() == request.at_position()
-            && decision.capability_policy_revision() == request.capability_policy_revision()
-            && decision.consent_policy_revision() == request.consent_policy_revision()
-            && authority.revocation_epoch() == request.revocation_epoch();
         if !decision.is_allowed()
             || decision != current_decision
-            || !request_matches
+            || authority.revocation_epoch() != request.revocation_epoch()
             || request.at_time() >= expires_at
             || valid_until_position <= decision.at_position()
             || grant_ids.is_empty()
