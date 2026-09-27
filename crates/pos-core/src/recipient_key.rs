@@ -410,3 +410,60 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn rkp1_public_api_covers_all_canonical_epoch_widths_and_rejection_classes() {
+        let grantee = EntityId::from_ulid(ulid::Ulid::from(1));
+        for epoch in [1, 24, 0x100, 0x1_0000, 0x1_0000_0000] {
+            let descriptor = RecipientKeyDescriptorV1::for_grantee(grantee, epoch, [9; 32])
+                .expect("nonzero epoch is valid");
+            assert_eq!(
+                RecipientKeyDescriptorV1::decode(&descriptor.encode()),
+                Ok(descriptor)
+            );
+        }
+        assert_eq!(
+            RecipientKeyDescriptorV1::for_grantee(grantee, 0, [0; 32]),
+            Err(RecipientKeyDescriptorErrorV1::InvalidEpoch)
+        );
+
+        let valid = RecipientKeyDescriptorV1::for_grantee(grantee, 1, [9; 32])
+            .expect("descriptor is valid")
+            .encode();
+        for (offset, value, expected) in [
+            (0, 0, RecipientKeyDescriptorErrorV1::InvalidEncoding),
+            (6, 2, RecipientKeyDescriptorErrorV1::UnsupportedVersion),
+            (51, 3, RecipientKeyDescriptorErrorV1::InvalidRole),
+            (54, 0, RecipientKeyDescriptorErrorV1::InvalidKem),
+        ] {
+            let mut malformed = valid.clone();
+            malformed[offset] = value;
+            assert_eq!(RecipientKeyDescriptorV1::decode(&malformed), Err(expected));
+        }
+        let mut zero_epoch = valid.clone();
+        zero_epoch[52] = 0;
+        assert_eq!(
+            RecipientKeyDescriptorV1::decode(&zero_epoch),
+            Err(RecipientKeyDescriptorErrorV1::InvalidEpoch)
+        );
+        let mut invalid_owner = valid.clone();
+        invalid_owner[10] = b'G';
+        assert_eq!(
+            RecipientKeyDescriptorV1::decode(&invalid_owner),
+            Err(RecipientKeyDescriptorErrorV1::InvalidOwner)
+        );
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        assert_eq!(
+            RecipientKeyDescriptorV1::decode(&trailing),
+            Err(RecipientKeyDescriptorErrorV1::InvalidEncoding)
+        );
+        for length in 0..valid.len() {
+            assert!(RecipientKeyDescriptorV1::decode(&valid[..length]).is_err());
+        }
+    }
+}
