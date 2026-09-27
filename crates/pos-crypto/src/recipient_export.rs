@@ -34,6 +34,9 @@ const MAX_EVENT_PAYLOAD_BYTES: usize = 16 << 20;
 const MAX_EVENT_TYPE_BYTES: usize = 256;
 const MAX_NAME_BYTES: usize = 4096;
 const MAX_CHUNKS: usize = 16_384;
+const MAX_CHUNKS_U32: u32 = 16_384;
+const MAX_PAYLOAD_BYTES_U64: u64 = 1 << 30;
+const CHUNK_BYTES_U64: u64 = 65_536;
 const MAX_NESTING: usize = 16;
 const MAX_ENVELOPE_BYTES: usize = MAX_PAYLOAD_BYTES + MAX_CHUNKS * TAG_BYTES + 1024 * 1024;
 const HEADER_DOMAIN: &[u8] = b"pigloros/timeline-recipient-export-header/v1\0";
@@ -152,14 +155,14 @@ impl RecipientTimelineExportV1 {
             || self.header.recipient.identity().role != KeyRoleV1::ExportRecipientEncryption
             || self.header.recipient.identity().epoch == 0
             || !(1..=MAX_CHUNKS).contains(&self.ciphertext_chunks.len())
-            || self.header.chunk_count as usize != self.ciphertext_chunks.len()
+            || usize::try_from(self.header.chunk_count).ok() != Some(self.ciphertext_chunks.len())
             || self.header.payload_length == 0
-            || self.header.payload_length > MAX_PAYLOAD_BYTES as u64
+            || self.header.payload_length > MAX_PAYLOAD_BYTES_U64
         {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
         let expected_count =
-            usize::try_from((self.header.payload_length - 1) / CHUNK_BYTES as u64 + 1)
+            usize::try_from((self.header.payload_length - 1) / CHUNK_BYTES_U64 + 1)
                 .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
         if expected_count != self.ciphertext_chunks.len() {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
@@ -233,7 +236,9 @@ pub fn encrypt_timeline_export_v1(
         let aad = chunk_aad(
             header_digest,
             u32::try_from(index).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
-            index + 1 == chunk_count as usize,
+            index + 1
+                == usize::try_from(chunk_count)
+                    .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
         );
         envelope.ciphertext_chunks.push(
             context
@@ -314,9 +319,9 @@ fn validate_header(header: &RecipientExportHeaderV1) -> Result<(), RecipientExpo
         || header.recipient.identity().role != KeyRoleV1::ExportRecipientEncryption
         || header.recipient.identity().epoch == 0
         || header.payload_length == 0
-        || header.payload_length > MAX_PAYLOAD_BYTES as u64
-        || !(1..=MAX_CHUNKS as u32).contains(&header.chunk_count)
-        || u64::from(header.chunk_count) != (header.payload_length - 1) / CHUNK_BYTES as u64 + 1
+        || header.payload_length > MAX_PAYLOAD_BYTES_U64
+        || !(1..=MAX_CHUNKS_U32).contains(&header.chunk_count)
+        || u64::from(header.chunk_count) != (header.payload_length - 1) / CHUNK_BYTES_U64 + 1
     {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
@@ -763,20 +768,21 @@ fn unsigned_to(out: &mut Vec<u8>, value: u64) {
 }
 fn head(out: &mut Vec<u8>, major: u8, value: u64) {
     let tag = major << 5;
+    let bytes = value.to_be_bytes();
     match value {
-        0..=23 => out.push(tag | value as u8),
-        24..=0xff => out.extend_from_slice(&[tag | 24, value as u8]),
+        0..=23 => out.push(tag | bytes[7]),
+        24..=0xff => out.extend_from_slice(&[tag | 24, bytes[7]]),
         0x100..=0xffff => {
             out.push(tag | 25);
-            out.extend_from_slice(&(value as u16).to_be_bytes());
+            out.extend_from_slice(&bytes[6..]);
         }
         0x1_0000..=0xffff_ffff => {
             out.push(tag | 26);
-            out.extend_from_slice(&(value as u32).to_be_bytes());
+            out.extend_from_slice(&bytes[4..]);
         }
         _ => {
             out.push(tag | 27);
-            out.extend_from_slice(&value.to_be_bytes());
+            out.extend_from_slice(&bytes);
         }
     }
 }
