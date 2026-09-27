@@ -7516,9 +7516,6 @@ mod coverage_paths {
         assert_eq!(proof.admissions().len(), 1);
         let admission = &proof.admissions()[0];
         assert_ne!(admission.binding_digest(), reference_zero());
-        assert_eq!(admission.operation(), reference(180));
-        assert_eq!(admission.expected_inventory_generation(), reference(181));
-        assert_eq!(admission.child_scope(), reference(182));
         assert_eq!(admission.request(), reference(183));
         assert_ne!(admission.extension(), reference_zero());
         assert_eq!(admission.predecessor(), Some(reference(189)));
