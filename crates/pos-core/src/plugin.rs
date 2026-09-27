@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::any::type_name;
 
 use crate::event::{CanonicalBytes, EventDraft, Kind};
 use crate::ids::{EntityId, PluginId};
@@ -28,6 +29,44 @@ pub trait Plugin: Send + Sync {
     /// Crate version string (e.g. "0.1.0"). Defaults to "0.1.0".
     fn version(&self) -> &'static str {
         "0.1.0"
+    }
+
+    /// Return the opaque host-issued owner token for this concrete instance.
+    ///
+    /// The default implementation is deliberately defined in the kernel: a
+    /// caller cannot construct or rewrite the token fields. The runtime
+    /// verifies both the concrete type and the instance address before it
+    /// accepts an installed output-policy source.
+    fn installed_owner_token(&self) -> PluginOwnerTokenV1 {
+        PluginOwnerTokenV1::for_instance(self)
+    }
+}
+
+/// Opaque identity issued by the kernel for one concrete Plugin instance.
+///
+/// Consumers can only ask the token to verify its instance; there is no public
+/// constructor or field accessor that permits a caller to mint an owner claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PluginOwnerTokenV1 {
+    type_name: &'static str,
+    instance_address: usize,
+}
+
+impl PluginOwnerTokenV1 {
+    fn for_instance<P: ?Sized>(plugin: &P) -> Self {
+        Self {
+            type_name: type_name::<P>(),
+            instance_address: std::ptr::from_ref(plugin).cast::<()>() as usize,
+        }
+    }
+
+    /// Verify that this opaque token belongs to the supplied concrete instance
+    /// and the expected installed source type.
+    #[must_use]
+    pub fn verifies_instance<P: ?Sized>(&self, plugin: &P, expected_type_name: &str) -> bool {
+        self.type_name == expected_type_name
+            && self.type_name == type_name::<P>()
+            && self.instance_address == std::ptr::from_ref(plugin).cast::<()>() as usize
     }
 }
 

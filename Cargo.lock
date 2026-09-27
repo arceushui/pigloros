@@ -4689,6 +4689,7 @@ dependencies = [
  "blake3",
  "ciborium",
  "indexmap",
+ "pos-conformance",
  "pos-core",
  "pos-crypto",
  "pos-state",

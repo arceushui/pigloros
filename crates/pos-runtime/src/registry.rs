@@ -12,12 +12,15 @@ use pos_core::{
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
     ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
-    ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, KnowledgeSnapshotV1, PersistedAuthorityV1, Plugin, ProposedAction,
-    Reducer, Timeline, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentErrorV1,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, KnowledgeSnapshotV1,
+    PersistedAuthorityV1, Plugin, ProposedAction, Reducer, Timeline,
+    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::output_admission::InstalledOutputPolicySourceV1;
 use crate::{
     composition::{
         PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
@@ -30,6 +33,7 @@ use crate::{
         SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
+    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -37,6 +41,90 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
+
+fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn replay_policy_identity_digest(
+    entry: &PluginEntry,
+    admission: &OutputAdmissionV1,
+) -> pos_core::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/replay-policy-identity/v1");
+    hash_framed(&mut hasher, entry.name.as_bytes());
+    hash_framed(&mut hasher, entry.version.as_bytes());
+    let mut owned_event_types: Vec<&str> =
+        entry.owned_event_types.iter().map(Kind::as_str).collect();
+    owned_event_types.sort_unstable();
+    for event_type in owned_event_types {
+        hash_framed(&mut hasher, event_type.as_bytes());
+    }
+    let policy = admission.policy().fields();
+    for hash in [
+        policy.implementation_hash,
+        policy.base_configuration_digest,
+        policy.retention_policy_hash,
+    ] {
+        hasher.update(hash.as_bytes());
+    }
+    hasher.update(&policy.policy_revision.to_le_bytes());
+    let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
+    declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
+    for declaration in declarations {
+        hash_framed(&mut hasher, declaration.event_type().as_bytes());
+        hasher.update(&[match declaration.authority() {
+            pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
+            pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
+            pos_core::output_policy::OutputAuthorityV1::Ephemeral => 2,
+        }]);
+        hasher.update(&[match declaration.fidelity() {
+            pos_core::output_policy::OutputFidelityV1::L0 => 0,
+            pos_core::output_policy::OutputFidelityV1::L1 => 1,
+            pos_core::output_policy::OutputFidelityV1::L2 => 2,
+        }]);
+        hasher.update(&declaration.max_bytes().to_le_bytes());
+        hasher.update(&declaration.stride_ticks().unwrap_or_default().to_le_bytes());
+        hasher.update(
+            &declaration
+                .aggregate_min_group()
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+    }
+    let budget = admission.budget().fields();
+    hasher.update(&budget.revision.to_le_bytes());
+    hasher.update(&[match budget.workload_profile {
+        pos_core::WorkloadProfileV1::Interactive => 0,
+        pos_core::WorkloadProfileV1::Fork => 1,
+        pos_core::WorkloadProfileV1::Research => 2,
+    }]);
+    hasher.update(&[budget.cut_budget_family]);
+    hasher.update(&budget.max_event_bytes.to_le_bytes());
+    for fidelity in budget.fidelity_budgets {
+        hasher.update(&[fidelity.level]);
+        hasher.update(&fidelity.max_events.to_le_bytes());
+        hasher.update(&fidelity.max_bytes.to_le_bytes());
+        hasher.update(&fidelity.max_cpu_us.to_le_bytes());
+        hasher.update(&fidelity.shared_host_cpu_reservation_us.to_le_bytes());
+    }
+    let mut reservations = budget
+        .plugin_cpu_reservations
+        .iter()
+        .map(|reservation| reservation.cpu_reservations_us)
+        .collect::<Vec<_>>();
+    reservations.sort_unstable();
+    for reservation in reservations {
+        hasher.update(&reservation[0].to_le_bytes());
+        hasher.update(&reservation[1].to_le_bytes());
+        hasher.update(&reservation[2].to_le_bytes());
+    }
+    hasher.update(&[budget.accounting_semantics]);
+    hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
+    hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
+    pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
+}
 
 fn extend_unique_subscriptions(
     subscriptions: &mut Vec<ProjectionKey>,
@@ -56,6 +144,11 @@ fn driver_visible_event(event: &Event) -> bool {
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
 }
 
+fn validate_driver_output(entry: &PluginEntry, output: &StepOutput) -> Result<(), RuntimeError> {
+    reject_host_owned_drafts(output)?;
+    validate_plugin_output(entry, &output.drafts)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_paths {
@@ -66,12 +159,29 @@ mod coverage_paths {
         crypto::Hash,
         event::{CanonicalBytes, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
-        Event,
+        ConsentGrantedV1, Event,
     };
+    use pos_store::{open_store, StoreConfig};
     use std::sync::{Arc, Mutex};
 
     fn gated_registry() -> PluginRegistry {
         PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn gated_store() -> Box<dyn pos_core::store::EventStore> {
+        let mut store = open_store(StoreConfig::Memory).unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "opening the in-memory store failed: {error:?}"
+            )))
+        });
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "binding the in-memory erasure gate failed: {error:?}"
+                )))
+            });
+        store
     }
 
     struct RestoreDriver {
@@ -142,11 +252,97 @@ mod coverage_paths {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_rejects_a_forged_protected_draft_after_fences() {
+        struct EmptyDriver;
+        impl Driver for EmptyDriver {
+            fn name(&self) -> &'static str {
+                "empty"
+            }
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "append-boundary".to_owned(),
+            modalities: 0,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let forged = vec![EventDraft::new(
+            subject,
+            Kind::new("world.test"),
+            CanonicalBytes::from_static(b"forged"),
+        )];
+        let mut registry = gated_registry().with_consent_authority(authority);
+        registry.register_test_driver(Box::new(EmptyDriver));
+        assert!(registry
+            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .is_ok());
+        let mut store = gated_store();
+        assert!(matches!(
+            registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
+            Err(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            ))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_rejects_a_forged_public_draft_after_fences() {
+        struct EmptyDriver;
+        impl Driver for EmptyDriver {
+            fn name(&self) -> &'static str {
+                "empty"
+            }
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
+        let forged = vec![EventDraft::new(
+            subject,
+            Kind::new("world.test"),
+            CanonicalBytes::from_static(b"forged"),
+        )];
+        let mut registry = gated_registry();
+        registry.register_test_driver(Box::new(EmptyDriver));
+        assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_ok());
+        let mut store = gated_store();
+        assert!(matches!(
+            registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
+            Err(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            ))
+        ));
+    }
+
+    #[test]
     fn recovery_filters_geographic_events_before_driver_evidence() {
         let timeline = TimelineId::new();
         let observed = Arc::new(Mutex::new(Vec::new()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RecoveryVisibilityDriver {
+        registry.register_test_driver(Box::new(RecoveryVisibilityDriver {
             observed: Arc::clone(&observed),
         }));
         let event = Event {
@@ -225,7 +421,7 @@ mod coverage_paths {
         let timeline = TimelineId::new();
         let committed = Arc::new(Mutex::new(false));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RestoreDriver {
+        registry.register_test_driver(Box::new(RestoreDriver {
             committed: Arc::clone(&committed),
         }));
         assert!(registry.step_all(timeline).is_ok());
@@ -267,6 +463,7 @@ mod coverage_paths {
             cadence_updates: Vec::new(),
             event_cursors: Vec::new(),
             operation: OperationContext::Public,
+            staged_drafts: Vec::new(),
             authorized: None,
         });
         registry.abort_step();
@@ -277,6 +474,7 @@ mod coverage_paths {
             cadence_updates: vec![(id, 1)],
             event_cursors: vec![(id, Seq::ZERO)],
             operation: OperationContext::Public,
+            staged_drafts: Vec::new(),
             authorized: None,
         });
         assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
@@ -287,10 +485,10 @@ mod coverage_paths {
         let timeline = TimelineId::new();
         let aborts = Arc::new(Mutex::new(0));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RestoreDriver {
+        registry.register_test_driver(Box::new(RestoreDriver {
             committed: Arc::new(Mutex::new(false)),
         }));
-        registry.register_driver(Box::new(RestoreFailureDriver {
+        registry.register_test_driver(Box::new(RestoreFailureDriver {
             aborts: Arc::clone(&aborts),
         }));
 
@@ -318,12 +516,95 @@ mod coverage_entrypoints {
         crypto::Hash,
         event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
-        ConsentAuthority, ConsentGrantedV1,
+        output_policy::{
+            OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+            OutputPolicyV1,
+        },
+        ConsentAuthority, ConsentGrantedV1, ExecutableBudgetPolicyInputV1,
+        ExecutableBudgetPolicyV1, FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     };
     use std::sync::Arc;
 
     fn gated_registry() -> PluginRegistry {
         PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn register_output_driver(
+        registry: &mut PluginRegistry,
+        event_type: &str,
+        driver: Box<dyn Driver>,
+    ) {
+        let plugin_id = pos_core::PluginId::new();
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid output budget: {error:?}")))
+        });
+        let declaration = OutputDeclarationV1::new(
+            event_type.to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            4_096,
+            None,
+            None,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid output declaration: {error:?}")))
+        });
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "test".to_owned(),
+            implementation_hash: Hash::from_bytes([0x42; 32]),
+            base_configuration_digest: Hash::from_bytes([0x43; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([0x44; 32]),
+            policy_revision: 1,
+            output_declarations: vec![declaration],
+        })
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid output policy: {error:?}")))
+        });
+        registry
+            .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "failed to register output driver: {error:?}"
+                )))
+            });
     }
 
     struct NoopDriver;
@@ -376,7 +657,7 @@ mod coverage_entrypoints {
     #[test]
     fn restore_and_cadence_entrypoints_update_driver_state() {
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(NoopDriver));
+        register_output_driver(&mut registry, "coverage.public.tick", Box::new(NoopDriver));
         let timeline = TimelineId::new();
         let restore_event = event("coverage.restore", 1);
         assert!(registry
@@ -394,7 +675,7 @@ mod coverage_entrypoints {
     fn restore_commit_and_cursor_paths_are_exercised_at_a_public_seam() {
         let committed = std::sync::Arc::new(std::sync::Mutex::new(false));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(CommitTrackingDriver {
+        registry.register_test_driver(Box::new(CommitTrackingDriver {
             committed: std::sync::Arc::clone(&committed),
         }));
         let timeline = TimelineId::new();
@@ -550,7 +831,7 @@ mod coverage_entrypoints {
         let timeline = TimelineId::new();
         let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(marker_driver::DriverImpl {
+        registry.register_test_driver(Box::new(marker_driver::DriverImpl {
             observed: std::sync::Arc::clone(&observed),
         }));
         let events = vec![
@@ -665,6 +946,34 @@ fn reject_unowned_plugin_drafts(
     }
 }
 
+fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<(), RuntimeError> {
+    if drafts.is_empty() {
+        return Ok(());
+    }
+    let Some(admission) = entry.output_admission.as_ref() else {
+        return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
+            event_type: drafts[0].event_type.as_str().to_owned(),
+        }
+        .into());
+    };
+    admission.validate_batch(drafts).map_err(Into::into)
+}
+
+fn reset_admission_usage(entry: &PluginEntry) {
+    if let Some(admission) = entry.output_admission.as_ref() {
+        admission.reset_usage();
+    }
+}
+
+fn commit_driver_entry(entry: &mut PluginEntry) -> Option<String> {
+    reset_admission_usage(entry);
+    let driver = entry.driver.as_mut()?;
+    let name = driver.name().to_owned();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.commit_step()))
+        .is_err()
+        .then_some(name)
+}
+
 fn invoke_driver(
     driver: &mut dyn Driver,
     timeline: pos_core::ids::TimelineId,
@@ -687,6 +996,33 @@ struct PluginEntry {
     last_tick: Option<u128>,
     event_cursor: Seq,
     registration: Option<PluginRegistrationV1>,
+    output_admission: Option<OutputAdmissionV1>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct GeneratedDriverPlugin {
+    id: PluginId,
+    name: &'static str,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Plugin for GeneratedDriverPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn capability(&self) -> Capability {
+        Capability::default()
+    }
+}
+
+struct RegistrationOptions {
+    registration: Option<PluginRegistrationV1>,
+    output_admission: Option<OutputAdmissionV1>,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -703,6 +1039,7 @@ struct PendingStep {
     cadence_updates: Vec<(PluginId, u128)>,
     event_cursors: Vec<(PluginId, Seq)>,
     operation: OperationContext,
+    staged_drafts: Vec<EventDraft>,
     authorized: Option<AuthorizedPendingStep>,
 }
 
@@ -974,12 +1311,27 @@ impl PluginRegistry {
             .clone()
             .ok_or(RuntimeError::ErasureOperationUnavailable)?;
         let mut result = Err(RuntimeError::ErasureOperationUnavailable);
-        let mut run = || {
-            result = effect(self);
+        let fence_result = {
+            let mut run = || {
+                result = effect(self);
+            };
+            gate.with_fence(timeline, operation, &mut run)
         };
-        gate.with_fence(timeline, operation, &mut run)
-            .map_err(RuntimeError::ErasureContainment)?;
-        result
+        self.finish_mut_fence(fence_result, result)
+    }
+
+    fn finish_mut_fence<T>(
+        &mut self,
+        fence_result: Result<(), ErasureContainmentErrorV1>,
+        result: Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        match fence_result {
+            Ok(()) => result,
+            Err(error) => {
+                self.abort_step();
+                Err(RuntimeError::ErasureContainment(error))
+            }
+        }
     }
 
     fn snapshot_for_tick(
@@ -1407,6 +1759,7 @@ impl PluginRegistry {
 
     fn abort_drivers(&mut self, driver_ids: &[PluginId]) -> Option<RuntimeError> {
         let mut first_error = None;
+        self.plugins.values().for_each(reset_admission_usage);
         for id in driver_ids {
             if let Some(driver) = self
                 .plugins
@@ -1489,8 +1842,24 @@ impl PluginRegistry {
         } else {
             observations
         };
-        invoke_driver(driver.as_mut(), timeline, observations)
-            .and_then(|output| reject_host_owned_drafts(&output).map(|()| output))
+        invoke_driver(driver.as_mut(), timeline, observations).and_then(|output| {
+            reject_host_owned_drafts(&output)?;
+            validate_plugin_output(entry, &output.drafts)?;
+            Ok(output)
+        })
+    }
+
+    fn validate_registered_output(
+        &self,
+        plugin_id: PluginId,
+        drafts: &[EventDraft],
+    ) -> Result<(), RuntimeError> {
+        let Some(entry) = self.plugins.get(&plugin_id) else {
+            return Err(RuntimeError::NoDriver {
+                name: plugin_id.to_string(),
+            });
+        };
+        validate_plugin_output(entry, drafts)
     }
 
     fn collect_anchored_selection(
@@ -1656,6 +2025,7 @@ impl PluginRegistry {
             cadence_updates,
             event_cursors,
             operation,
+            staged_drafts: all_drafts.clone(),
             authorized: None,
         });
         Ok(all_drafts)
@@ -1779,6 +2149,7 @@ impl PluginRegistry {
         };
         if let Err(error) = reject_host_owned_drafts(&output)
             .and_then(|()| reject_unowned_plugin_drafts(&output, &owned_event_types))
+            .and_then(|()| self.validate_registered_output(plugin_id, &output.drafts))
             .and_then(|()| self.schemas.validate_batch(&output.drafts))
         {
             let _ = self.abort_drivers(&[plugin_id]);
@@ -1802,6 +2173,7 @@ impl PluginRegistry {
             cadence_updates: Vec::new(),
             event_cursors: vec![(plugin_id, snapshot.observed_through())],
             operation: OperationContext::Public,
+            staged_drafts: drafts.clone(),
             authorized: Some(AuthorizedPendingStep {
                 observation: observation.clone(),
                 drafts: drafts.clone(),
@@ -1812,17 +2184,8 @@ impl PluginRegistry {
 
     fn commit_pending_step(&mut self, pending: PendingStep) {
         for id in &pending.driver_ids {
-            if let Some(driver) = self
-                .plugins
-                .get_mut(id)
-                .and_then(|entry| entry.driver.as_mut())
-            {
-                let name = driver.name().to_owned();
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.commit_step()))
-                    .is_err()
-                {
-                    self.poisoned_driver = Some(name);
-                }
+            if let Some(name) = self.plugins.get_mut(id).and_then(commit_driver_entry) {
+                self.poisoned_driver = Some(name);
             }
         }
         for (id, now_ns) in pending.cadence_updates {
@@ -1833,6 +2196,30 @@ impl PluginRegistry {
         for (id, cursor) in pending.event_cursors {
             if let Some(entry) = self.plugins.get_mut(&id) {
                 entry.event_cursor = cursor;
+            }
+        }
+    }
+
+    fn finish_pending_append(
+        &mut self,
+        pending: PendingStep,
+        result: Result<Vec<Event>, RuntimeError>,
+    ) -> Result<Vec<Event>, RuntimeError> {
+        match result {
+            Ok(events) => {
+                self.commit_pending_step(pending);
+                Ok(events)
+            }
+            Err(error @ RuntimeError::ErasureContainmentAfterCommit { .. }) => {
+                // The Event append is durable. Rolling the Driver back would
+                // split the runtime state from the Event history; preserve the
+                // committed state and let the host quarantine this boundary.
+                self.commit_pending_step(pending);
+                Err(error)
+            }
+            Err(error) => {
+                let _ = self.abort_drivers(&pending.driver_ids);
+                Err(error)
             }
         }
     }
@@ -1851,10 +2238,10 @@ impl PluginRegistry {
     /// Commit a staged step after revalidating it at the supplied fresh time.
     ///
     /// # Errors
-    /// Returns the consent-fence error and aborts every staged Driver when the
-    /// operation is no longer authorized. Callers must not append drafts until
-    /// this fence succeeds; [`Self::append_and_commit_step_at`] combines the
-    /// fence and host append in one host-owned boundary.
+    /// Returns an authorization error or [`RuntimeError::UnappendedDriverOutput`]
+    /// and aborts every staged Driver on failure. This compatibility seam
+    /// commits only empty-output steps; nonempty output must use
+    /// [`Self::append_and_commit_step_at`] so append precedes Driver commit.
     pub fn commit_step_at(
         &mut self,
         timeline_head: Seq,
@@ -1871,6 +2258,19 @@ impl PluginRegistry {
         let Some(pending) = self.take_legacy_pending_step()? else {
             return Ok(());
         };
+        self.commit_checked_legacy_step(pending, timeline_head, commit_now_secs)
+    }
+
+    fn commit_checked_legacy_step(
+        &mut self,
+        pending: PendingStep,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+    ) -> Result<(), RuntimeError> {
+        if !pending.staged_drafts.is_empty() {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(RuntimeError::UnappendedDriverOutput);
+        }
         if let Err(error) = self.validate_operation(
             pending.timeline,
             &pending.operation,
@@ -1892,7 +2292,9 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns the consent, erasure-containment, or store error and aborts the
-    /// staged step when the fence or append fails.
+    /// staged step when the fence rejects before append or append fails. If
+    /// append succeeds but the post-effect fence fails, the committed Driver
+    /// state is preserved and the returned error requires host quarantine.
     fn append_with_erasure_fence(
         &self,
         store: &mut dyn pos_core::store::EventStore,
@@ -1903,18 +2305,38 @@ impl PluginRegistry {
             .erasure_gate
             .as_ref()
             .ok_or(RuntimeError::ErasureOperationUnavailable)?;
-        let mut append_result = Ok(Vec::new());
+        let mut append_result = Err(RuntimeError::ErasureOperationUnavailable);
         let mut append = || {
-            append_result = store.append(timeline, drafts);
+            append_result = store.append(timeline, drafts).map_err(RuntimeError::from);
         };
-        gate.with_fence(timeline, ErasureProtectedOperationV1::Append, &mut append)
-            .map_err(RuntimeError::ErasureContainment)?;
-        append_result.map_err(RuntimeError::from)
+        let fence_result =
+            gate.with_fence(timeline, ErasureProtectedOperationV1::Append, &mut append);
+        Self::finish_append_fence(fence_result, append_result)
+    }
+
+    fn finish_append_fence(
+        fence_result: Result<(), ErasureContainmentErrorV1>,
+        append_result: Result<Vec<Event>, RuntimeError>,
+    ) -> Result<Vec<Event>, RuntimeError> {
+        match fence_result {
+            Ok(()) => append_result,
+            Err(error) => append_result.map_or_else(
+                |_| Err(RuntimeError::ErasureContainment(error)),
+                |events| {
+                    Err(RuntimeError::ErasureContainmentAfterCommit {
+                        event_count: events.len(),
+                        source: error,
+                    })
+                },
+            ),
+        }
     }
 
     /// # Errors
     /// Returns a consent, erasure-containment, pending-step, or store error
-    /// when the Tick Boundary cannot be committed.
+    /// when the Tick Boundary cannot be committed. A post-append containment
+    /// error means Events and Driver state were committed and the host must
+    /// quarantine the boundary.
     pub fn append_and_commit_step_at(
         &mut self,
         store: &mut dyn pos_core::store::EventStore,
@@ -1923,6 +2345,76 @@ impl PluginRegistry {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, RuntimeError> {
         self.append_and_commit_legacy_step_at(store, timeline_head, commit_now_secs, drafts)
+    }
+
+    fn append_and_commit_protected_legacy_step(
+        &self,
+        store: &mut dyn pos_core::store::EventStore,
+        pending: &PendingStep,
+        token: &ConsentCapabilityToken,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let Some(gate) = self.consent_gate.clone() else {
+            return Err(RuntimeError::ConsentOperationUnavailable);
+        };
+        reject_host_owned_draft_slice(drafts).and_then(|()| {
+            self.validate_protected_drafts(
+                pending.timeline,
+                &OperationContext::Protected {
+                    token: token.clone(),
+                    now_secs: commit_now_secs,
+                },
+                timeline_head,
+                drafts,
+            )
+        })?;
+        if drafts != pending.staged_drafts.as_slice() {
+            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
+        }
+        let mut append_result = Ok(Vec::new());
+        let mut append = || {
+            append_result = self.append_with_erasure_fence(store, pending.timeline, drafts);
+        };
+        if let Err(error) = gate.with_token_fence(
+            pending.timeline,
+            token,
+            timeline_head.as_u64(),
+            commit_now_secs,
+            &mut append,
+        ) {
+            return Err(RuntimeError::Consent(error));
+        }
+        append_result
+    }
+
+    fn append_and_commit_public_legacy_step(
+        &self,
+        store: &mut dyn pos_core::store::EventStore,
+        pending: &PendingStep,
+        timeline_head: Seq,
+        commit_now_secs: u64,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, RuntimeError> {
+        self.validate_operation(
+            pending.timeline,
+            &OperationContext::Public,
+            timeline_head,
+            Some(commit_now_secs),
+        )?;
+        reject_host_owned_draft_slice(drafts).and_then(|()| {
+            self.validate_protected_drafts(
+                pending.timeline,
+                &OperationContext::Public,
+                timeline_head,
+                drafts,
+            )
+        })?;
+        if drafts != pending.staged_drafts.as_slice() {
+            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
+        }
+        self.append_with_erasure_fence(store, pending.timeline, drafts)
     }
 
     fn append_and_commit_legacy_step_at(
@@ -1935,82 +2427,26 @@ impl PluginRegistry {
         let Some(pending) = self.take_legacy_pending_step()? else {
             return Err(RuntimeError::PendingDriverStep);
         };
-        let pending_timeline = pending.timeline;
         let operation = pending.operation.clone();
         let events = match operation {
-            OperationContext::Protected { token, now_secs: _ } => {
-                let Some(gate) = self.consent_gate.clone() else {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(RuntimeError::ConsentOperationUnavailable);
-                };
-                if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
-                    self.validate_protected_drafts(
-                        pending_timeline,
-                        &OperationContext::Protected {
-                            token: token.clone(),
-                            now_secs: commit_now_secs,
-                        },
-                        timeline_head,
-                        drafts,
-                    )
-                }) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(error);
-                }
-                let mut append_result = Ok(Vec::new());
-                let mut append = || {
-                    append_result = self.append_with_erasure_fence(store, pending_timeline, drafts);
-                };
-                if let Err(error) = gate.with_token_fence(
-                    pending_timeline,
+            OperationContext::Protected { token, .. } => self
+                .append_and_commit_protected_legacy_step(
+                    store,
+                    &pending,
                     &token,
-                    timeline_head.as_u64(),
-                    commit_now_secs,
-                    &mut append,
-                ) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(RuntimeError::Consent(error));
-                }
-                match append_result {
-                    Ok(events) => events,
-                    Err(error) => {
-                        let _ = self.abort_drivers(&pending.driver_ids);
-                        return Err(error);
-                    }
-                }
-            }
-            OperationContext::Public => {
-                if let Err(error) = self.validate_operation(
-                    pending_timeline,
-                    &OperationContext::Public,
                     timeline_head,
-                    Some(commit_now_secs),
-                ) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(error);
-                }
-                if let Err(error) = reject_host_owned_draft_slice(drafts).and_then(|()| {
-                    self.validate_protected_drafts(
-                        pending_timeline,
-                        &OperationContext::Public,
-                        timeline_head,
-                        drafts,
-                    )
-                }) {
-                    let _ = self.abort_drivers(&pending.driver_ids);
-                    return Err(error);
-                }
-                match self.append_with_erasure_fence(store, pending_timeline, drafts) {
-                    Ok(events) => events,
-                    Err(error) => {
-                        let _ = self.abort_drivers(&pending.driver_ids);
-                        return Err(error);
-                    }
-                }
-            }
+                    commit_now_secs,
+                    drafts,
+                ),
+            OperationContext::Public => self.append_and_commit_public_legacy_step(
+                store,
+                &pending,
+                timeline_head,
+                commit_now_secs,
+                drafts,
+            ),
         };
-        self.commit_pending_step(pending);
-        Ok(events)
+        self.finish_pending_append(pending, events)
     }
 
     /// Revalidate, append, and commit one participant-authorized Driver step.
@@ -2020,7 +2456,9 @@ impl PluginRegistry {
     /// Any mismatch aborts the Driver while leaving the store untouched.
     ///
     /// # Errors
-    /// Returns a closed authority, draft, or store error and aborts staged work.
+    /// Returns a closed authority, draft, or store error and aborts staged work
+    /// unless a durable append has already completed. A post-append containment
+    /// error preserves committed Driver state and requires host quarantine.
     pub fn append_and_commit_authorized_step_at(
         &mut self,
         store: &mut dyn pos_core::store::EventStore,
@@ -2062,15 +2500,8 @@ impl PluginRegistry {
             let _ = self.abort_drivers(&pending.driver_ids);
             return Err(error);
         }
-        let events = match self.append_with_erasure_fence(store, pending.timeline, drafts) {
-            Ok(events) => events,
-            Err(error) => {
-                let _ = self.abort_drivers(&pending.driver_ids);
-                return Err(error);
-            }
-        };
-        self.commit_pending_step(pending);
-        Ok(events)
+        let result = self.append_with_erasure_fence(store, pending.timeline, drafts);
+        self.finish_pending_append(pending, result)
     }
 
     /// Abort the Driver and cadence state staged by an anchored step.
@@ -2230,34 +2661,240 @@ impl PluginRegistry {
         Ok(())
     }
 
-    /// Register a plugin.
-    ///
-    /// Wires event-type schemas and (optionally) a reducer and driver.
+    /// Register a plugin with a deterministic policy derived from its declared
+    /// event namespace and the bounded Interactive executable profile.
     ///
     /// # Errors
-    /// Returns [`RuntimeError::DuplicatePlugin`] if a plugin with the same `PluginId`
-    /// is already registered.
-    pub fn register(
+    /// Returns policy-construction or registration errors.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn register_generated(
         &mut self,
         plugin: &dyn Plugin,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        self.register_with_approver(plugin, reducer, driver, None, std::iter::empty())
+        let binding = Self::generated_output_binding(plugin)?;
+        self.register_with_verified_output_policy(plugin, binding, reducer, driver)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn generated_output_binding(
+        plugin: &dyn Plugin,
+    ) -> Result<OutputPolicyBindingV1, RuntimeError> {
+        let plugin_version = plugin.version().to_owned();
+        let (policy, budget) = Self::generated_output_binding_with_budget_input(
+            plugin,
+            &plugin_version,
+            Self::generated_budget_input(plugin),
+        )?;
+        Ok(OutputPolicyBindingV1::from_installed_source_with_policy(
+            plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn generated_output_binding_with_configuration_details(
+        plugin: &dyn Plugin,
+        configuration_details: &[u8],
+    ) -> Result<OutputPolicyBindingV1, RuntimeError> {
+        let plugin_version = plugin.version().to_owned();
+        let (policy, budget) =
+            Self::generated_output_binding_with_budget_input_for_profile_with_details(
+                plugin,
+                &plugin_version,
+                Self::generated_budget_input(plugin),
+                "deterministic-local-v1",
+                configuration_details,
+            )?;
+        Ok(OutputPolicyBindingV1::from_installed_source_with_policy(
+            plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            policy,
+            budget,
+            configuration_details,
+            "deterministic-local-v1",
+        )?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
+        pos_core::ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: pos_core::WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                pos_core::FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                pos_core::FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                pos_core::FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![pos_core::PluginCpuReservationV1 {
+                plugin_id: plugin.id(),
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: pos_core::Hash::zero(),
+            max_pass_wall_duration_us: 1_000,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn generated_output_binding_with_budget_input(
+        plugin: &dyn Plugin,
+        plugin_version: &str,
+        budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+    ) -> Result<
+        (
+            pos_core::output_policy::OutputPolicyV1,
+            pos_core::ExecutableBudgetPolicyV1,
+        ),
+        RuntimeError,
+    > {
+        Self::generated_output_binding_with_budget_input_for_profile(
+            plugin,
+            plugin_version,
+            budget_input,
+            "deterministic-local-v1",
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn generated_output_binding_with_budget_input_for_profile(
+        plugin: &dyn Plugin,
+        plugin_version: &str,
+        budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+        profile_id: &str,
+    ) -> Result<
+        (
+            pos_core::output_policy::OutputPolicyV1,
+            pos_core::ExecutableBudgetPolicyV1,
+        ),
+        RuntimeError,
+    > {
+        Self::generated_output_binding_with_budget_input_for_profile_with_details(
+            plugin,
+            plugin_version,
+            budget_input,
+            profile_id,
+            &[],
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn generated_output_binding_with_budget_input_for_profile_with_details(
+        plugin: &dyn Plugin,
+        plugin_version: &str,
+        mut budget_input: pos_core::ExecutableBudgetPolicyInputV1,
+        profile_id: &str,
+        configuration_details: &[u8],
+    ) -> Result<
+        (
+            pos_core::output_policy::OutputPolicyV1,
+            pos_core::ExecutableBudgetPolicyV1,
+        ),
+        RuntimeError,
+    > {
+        let profile_artifact = pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+        budget_input.execution_profile_hash =
+            crate::execution_profile_artifact_hash_v1(&profile_artifact);
+        let budget = pos_core::ExecutableBudgetPolicyV1::new(budget_input).map_err(|error| {
+            RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        let configuration_artifact =
+            crate::canonical_plugin_configuration_v1(plugin, configuration_details).map_err(
+                |error| RuntimeError::CapabilityMismatch {
+                    name: plugin.name().to_owned(),
+                    reason: error.to_string(),
+                },
+            )?;
+        let source = InstalledOutputPolicySourceV1::Generated;
+        let mut declarations = plugin
+            .capability()
+            .owned_event_types
+            .into_iter()
+            .map(|event_type| {
+                pos_core::output_policy::OutputDeclarationV1::new(
+                    event_type.as_str().to_owned(),
+                    pos_core::output_policy::OutputAuthorityV1::Authoritative,
+                    pos_core::output_policy::OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+        declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
+        let policy = pos_core::output_policy::OutputPolicyV1::new(
+            pos_core::output_policy::OutputPolicyInputV1 {
+                plugin_id: plugin.id(),
+                plugin_version: plugin_version.to_owned(),
+                implementation_hash: source.implementation_artifact_hash(plugin),
+                base_configuration_digest: crate::host_artifact_hash_v1(
+                    b"pigloros.base-configuration.v1",
+                    &configuration_artifact,
+                ),
+                executable_profile_hash: budget.digest(),
+                retention_policy_hash: crate::reviewed_retention_policy_hash_v1(),
+                policy_revision: 1,
+                output_declarations: declarations,
+            },
+        )
+        .map_err(|error| RuntimeError::CapabilityMismatch {
+            name: plugin.name().to_owned(),
+            reason: error.to_string(),
+        })?;
+        Ok((policy, budget))
     }
 
     /// Register an implementation through the explicit V1 composition seam.
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
-    pub fn register_pinned(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn register_pinned_generated(
         &mut self,
         plugin: &dyn Plugin,
         registration: PluginRegistrationV1,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        self.register_pinned_with_approver(
+        self.register_pinned_generated_with_approver(
             plugin,
             registration,
             reducer,
@@ -2267,40 +2904,13 @@ impl PluginRegistry {
         )
     }
 
-    /// Register a plugin with an optional [`ActionApprover`] (ADR-057).
-    ///
-    /// Wires event-type schemas, (optionally) a reducer and driver, and (optionally)
-    /// an action approver indexed by the explicitly supplied event types.
-    ///
-    /// # Errors
-    /// Returns [`RuntimeError::DuplicatePlugin`] if a plugin with the same `PluginId`
-    /// is already registered.
-    pub fn register_with_approver(
-        &mut self,
-        plugin: &dyn Plugin,
-        reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-        approver: Option<Box<dyn ActionApprover>>,
-        approver_event_types: impl IntoIterator<Item = Kind>,
-    ) -> Result<(), RuntimeError> {
-        let context = self.registration_context(plugin)?;
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        self.register_with_approver_slice(
-            plugin,
-            reducer,
-            driver,
-            approver,
-            &approver_event_types,
-            context,
-            None,
-        )
-    }
-
-    /// Register a pinned implementation with an optional ADR-057 approver.
+    /// Register a pinned implementation with an optional action approver.
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
-    pub fn register_pinned_with_approver(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn register_pinned_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
         registration: PluginRegistrationV1,
@@ -2309,8 +2919,153 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
+        let binding = Self::generated_output_binding(plugin)?;
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            Some(registration),
+        )
+    }
+
+    /// Register a plugin with a generated policy and action approver.
+    ///
+    /// # Errors
+    /// Returns policy-construction, capability, or registration errors.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn register_generated_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        let binding = Self::generated_output_binding(plugin)?;
+        self.register_with_verified_output_policy_and_approver(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+        )
+    }
+
+    /// Register a Plugin with a complete host-authorized output binding.
+    ///
+    /// Release registration has no policy-only or generated fallback.  The
+    /// installed authority resolves the exact implementation, configuration,
+    /// execution-profile, and retention artifacts; the runtime validates and
+    /// mints the retained closure before mutating the registry.
+    ///
+    /// # Errors
+    /// Returns a registration, identity, artifact, or capability error before
+    /// mutating the registry.
+    pub fn register_with_verified_output_policy(
+        &mut self,
+        plugin: &dyn Plugin,
+        binding: OutputPolicyBindingV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy_and_approver(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            None,
+            std::iter::empty(),
+        )
+    }
+
+    /// Register a Plugin with a verified closure and optional action approver.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or output-admission error when the
+    /// authority, ownership, or approver route is invalid.
+    pub fn register_with_verified_output_policy_and_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        binding: OutputPolicyBindingV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            None,
+        )
+    }
+
+    fn register_with_verified_output_policy_inner(
+        &mut self,
+        plugin: &dyn Plugin,
+        binding: OutputPolicyBindingV1,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Option<Box<dyn ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = Kind>,
+        registration: Option<PluginRegistrationV1>,
+    ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
-        self.validate_registration_roles(&registration)?;
+        if binding.owner_token() != plugin.installed_owner_token() {
+            return Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::PluginMismatch,
+            ));
+        }
+        #[cfg(debug_assertions)]
+        if let Some(registration) = registration.as_ref() {
+            self.validate_registration_roles(registration)?;
+        }
+        let (output_policy, executable_budget, artifacts, _source, owner_token) =
+            binding.into_parts();
+        let closure = OutputPolicyClosureV1::from_artifacts(
+            &output_policy.to_canonical_cbor(),
+            &executable_budget.to_canonical_cbor(),
+            artifacts.implementation_artifact(),
+            artifacts.configuration_artifact(),
+            artifacts.execution_profile_artifact(),
+            artifacts.retention_policy_artifact(),
+        )?;
+        let output_policy = closure.output_policy().clone();
+        let owned_event_types = &context.2.owned_event_types;
+        if let Some(declaration) =
+            output_policy
+                .fields()
+                .output_declarations
+                .iter()
+                .find(|declaration| {
+                    !owned_event_types
+                        .iter()
+                        .any(|kind| kind.as_str() == declaration.event_type())
+                })
+        {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: format!(
+                    "output policy declares event type '{}' outside the Plugin capability",
+                    declaration.event_type()
+                ),
+            });
+        }
+        let admission = OutputAdmissionV1::try_new_verified(
+            plugin.id(),
+            plugin.version(),
+            closure,
+            owner_token,
+        )?;
+        debug_assert_eq!(admission.owner_token(), Some(owner_token));
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
@@ -2319,7 +3074,10 @@ impl PluginRegistry {
             approver,
             &approver_event_types,
             context,
-            Some(registration),
+            RegistrationOptions {
+                registration,
+                output_admission: Some(admission),
+            },
         )
     }
 
@@ -2337,6 +3095,7 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
+    #[cfg(debug_assertions)]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
@@ -2362,7 +3121,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: &[Kind],
         context: (PluginId, String, Capability),
-        registration: Option<PluginRegistrationV1>,
+        options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
         if let Some(kind) = cap
@@ -2465,7 +3224,8 @@ impl PluginRegistry {
                 approver,
                 last_tick: None,
                 event_cursor: Seq::ZERO,
-                registration,
+                registration: options.registration,
+                output_admission: options.output_admission,
             },
         );
         self.restored_binding = None;
@@ -2500,12 +3260,156 @@ impl PluginRegistry {
         self.plugins.values().map(plugin_name_and_version)
     }
 
-    /// Register a driver directly (for tests and late-bound agent registration).
-    pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
-        self.restored_binding = None;
+    /// Iterate over canonical output-admission policy digests bound to registered Plugins.
+    pub fn output_policy_digests(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
+        self.plugins.values().filter_map(|entry| {
+            entry
+                .output_admission
+                .as_ref()
+                .map(|admission| (entry.name.as_str(), admission.policy_digest()))
+        })
+    }
+
+    /// Iterate over stable replay identities for registered output policies.
+    pub fn replay_policy_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
+        self.plugins.values().filter_map(|entry| {
+            entry.output_admission.as_ref().map(|admission| {
+                (
+                    entry.name.as_str(),
+                    replay_policy_identity_digest(entry, admission),
+                )
+            })
+        })
+    }
+
+    /// Iterate over exact retained policy closures for Replay manifests.
+    pub fn replay_policy_closures(&self) -> impl Iterator<Item = (&str, Vec<u8>)> {
+        self.plugins.values().filter_map(|entry| {
+            entry.output_admission.as_ref().and_then(|admission| {
+                admission
+                    .closure()
+                    .map(|closure| (entry.name.as_str(), closure.to_canonical_bytes()))
+            })
+        })
+    }
+
+    /// Iterate over stable identities for retained policy closures.
+    ///
+    /// The exact closure envelope is still retained separately.  This
+    /// identity excludes fresh runtime Plugin IDs while preserving the typed
+    /// policy/budget and all non-address artifact identities.
+    pub fn replay_policy_closure_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
+        self.plugins.values().filter_map(|entry| {
+            entry.output_admission.as_ref().and_then(|admission| {
+                admission
+                    .closure()
+                    .map(|closure| (entry.name.as_str(), closure.replay_identity_digest()))
+            })
+        })
+    }
+
+    /// Register a direct driver in an explicit test-support harness.
+    ///
+    /// Ordinary builds cannot call this helper without the test-support feature.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {
+        self.register_test_driver_with_configuration_details(driver, &[]);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn register_test_driver_with_configuration_details(
+        &mut self,
+        driver: Box<dyn Driver>,
+        configuration_details: &[u8],
+    ) {
+        let plugin_id = pos_core::ids::PluginId::new();
+        let plugin = GeneratedDriverPlugin {
+            id: plugin_id,
+            name: driver.name(),
+        };
+        let binding = Self::generated_output_binding_with_configuration_details(
+            &plugin,
+            configuration_details,
+        )
+        .unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "generated test-driver binding failed: {error}"
+            )))
+        });
+        self.register_test_driver_with_verified_output_policy(plugin_id, binding, driver)
+            .unwrap_or_else(|error| {
+                std::panic::resume_unwind(Box::new(format!(
+                    "generated test-driver registration failed: {error}"
+                )))
+            });
+    }
+
+    /// Register a direct fixture driver with a host-verified output binding.
+    ///
+    /// This test-support helper is for integration fixtures that exercise the
+    /// production admission path without defining a full Plugin descriptor.
+    /// The binding retains the complete closure before the driver is visible.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn register_test_driver_with_verified_output_policy(
+        &mut self,
+        plugin_id: PluginId,
+        binding: OutputPolicyBindingV1,
+        driver: Box<dyn Driver>,
+    ) -> Result<(), RuntimeError> {
+        if self.plugins.contains_key(&plugin_id) {
+            return Err(RuntimeError::DuplicatePlugin {
+                id: plugin_id,
+                name: driver.name().to_owned(),
+            });
+        }
+        let (policy, budget, artifacts, _source, owner_token) = binding.into_parts();
+        let closure = OutputPolicyClosureV1::from_artifacts(
+            &policy.to_canonical_cbor(),
+            &budget.to_canonical_cbor(),
+            artifacts.implementation_artifact(),
+            artifacts.configuration_artifact(),
+            artifacts.execution_profile_artifact(),
+            artifacts.retention_policy_artifact(),
+        )?;
+        let plugin_version = closure.output_policy().fields().plugin_version.clone();
+        let admission =
+            OutputAdmissionV1::try_new_verified(plugin_id, &plugin_version, closure, owner_token)?;
         let name = driver.name().to_owned();
         self.plugins.insert(
-            pos_core::ids::PluginId::new(),
+            plugin_id,
+            PluginEntry {
+                name,
+                version: plugin_version,
+                owned_event_types: admission
+                    .policy()
+                    .fields()
+                    .output_declarations
+                    .iter()
+                    .map(|declaration| Kind::new(declaration.event_type()))
+                    .collect(),
+                driver: Some(driver),
+                approver: None,
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: Some(admission),
+            },
+        );
+        Ok(())
+    }
+
+    /// Register a driver without an output declaration.
+    ///
+    /// Drivers registered here can process empty steps; any proposed Event is rejected
+    /// by the output-admission gate. Production Plugins use a verified policy binding.
+    pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
+        self.restored_binding = None;
+        let plugin_id = PluginId::new();
+        let name = driver.name().to_owned();
+        self.plugins.insert(
+            plugin_id,
             PluginEntry {
                 name,
                 version: "0.1.0".to_owned(),
@@ -2515,8 +3419,49 @@ impl PluginRegistry {
                 last_tick: None,
                 event_cursor: Seq::ZERO,
                 registration: None,
+                output_admission: None,
             },
         );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_test_driver_with_output_policy(
+        &mut self,
+        plugin_id: PluginId,
+        plugin_version: &str,
+        policy: pos_core::output_policy::OutputPolicyV1,
+        budget: pos_core::ExecutableBudgetPolicyV1,
+        driver: Box<dyn Driver>,
+    ) -> Result<(), RuntimeError> {
+        if self.plugins.contains_key(&plugin_id) {
+            return Err(RuntimeError::DuplicatePlugin {
+                id: plugin_id,
+                name: driver.name().to_owned(),
+            });
+        }
+        let admission = OutputAdmissionV1::try_new(plugin_id, plugin_version, policy, budget)?;
+        let name = driver.name().to_owned();
+        self.plugins.insert(
+            plugin_id,
+            PluginEntry {
+                name,
+                version: plugin_version.to_owned(),
+                owned_event_types: admission
+                    .policy()
+                    .fields()
+                    .output_declarations
+                    .iter()
+                    .map(|declaration| Kind::new(declaration.event_type()))
+                    .collect(),
+                driver: Some(driver),
+                approver: None,
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: Some(admission),
+            },
+        );
+        Ok(())
     }
 
     /// Submit a proposed action through the capability-checked envelope (ADR-057).
@@ -2570,11 +3515,42 @@ impl PluginRegistry {
             return Err(ActionRejected::CapabilityNotGranted);
         }
 
-        let Some(approver) = self.approver_for(&proposal.event_type) else {
+        self.approve_action_draft(proposal)
+    }
+
+    fn approve_action_draft(
+        &self,
+        proposal: &ProposedAction,
+    ) -> Result<EventDraft, ActionRejected> {
+        let (approver, admission) = self.action_approver_and_admission(&proposal.event_type)?;
+        let draft = Self::validate_approver_draft(proposal, approver.approve(proposal))?;
+        admission.validate_action(&draft).map_err(|error| {
+            ActionRejected::DomainValidationFailed(format!(
+                "action output admission failed: {error}"
+            ))
+        })?;
+        Ok(draft)
+    }
+
+    fn action_approver_and_admission(
+        &self,
+        event_type: &Kind,
+    ) -> Result<(&dyn ActionApprover, &OutputAdmissionV1), ActionRejected> {
+        let Some(plugin_id) = self.approver_map.get(event_type) else {
             return Err(ActionRejected::UnknownEventType);
         };
-
-        Self::validate_approver_draft(proposal, approver.approve(proposal))
+        let Some(entry) = self.plugins.get(plugin_id) else {
+            return Err(ActionRejected::UnknownEventType);
+        };
+        let Some(approver) = entry.approver.as_deref() else {
+            return Err(ActionRejected::UnknownEventType);
+        };
+        let Some(admission) = entry.output_admission.as_ref() else {
+            return Err(ActionRejected::DomainValidationFailed(
+                "action approver has no bound output policy".to_owned(),
+            ));
+        };
+        Ok((approver, admission))
     }
 
     fn validate_approver_draft(
@@ -2608,6 +3584,7 @@ impl PluginRegistry {
 
     /// Return the action approver registered for the given event type, if any.
     #[must_use]
+    #[cfg(test)]
     fn approver_for(&self, event_type: &Kind) -> Option<&dyn ActionApprover> {
         self.approver_map
             .get(event_type)
@@ -2692,26 +3669,45 @@ impl PluginRegistry {
         // Public cadence admits no projection subscriptions. The consent
         // check above rejects them before any state is materialized.
         let snapshot = ObservationSnapshot::default();
-        for (id, entry) in &mut self.plugins {
-            let Some(driver) = entry.driver.as_mut() else {
-                continue;
-            };
-            if due_driver_ids.remove(id) {
-                let observations = snapshot.view_for(driver.subscriptions());
-                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                reject_host_owned_drafts(&output)?;
-                entry.last_tick = Some(now_ns);
-                all_drafts.extend(output.drafts);
+        let mut stepped_driver_ids = Vec::new();
+        let result = (|| {
+            for (id, entry) in &mut self.plugins {
+                let Some(driver) = entry.driver.as_mut() else {
+                    continue;
+                };
+                if due_driver_ids.remove(id) {
+                    stepped_driver_ids.push(*id);
+                    let observations = snapshot.view_for(driver.subscriptions());
+                    let output = invoke_driver(driver.as_mut(), timeline, observations)?;
+                    validate_driver_output(entry, &output)?;
+                    all_drafts.extend(output.drafts);
+                }
+            }
+            debug_assert!(due_driver_ids.is_empty());
+            self.validate_protected_drafts(
+                timeline,
+                &OperationContext::Public,
+                Seq::ZERO,
+                &all_drafts,
+            )?;
+            Ok(all_drafts)
+        })();
+        match result {
+            Ok(drafts) => {
+                let stepped_driver_ids = stepped_driver_ids.into_iter().collect::<HashSet<_>>();
+                for (id, entry) in &mut self.plugins {
+                    if stepped_driver_ids.contains(id) {
+                        entry.last_tick = Some(now_ns);
+                        reset_admission_usage(entry);
+                    }
+                }
+                Ok(drafts)
+            }
+            Err(error) => {
+                let _ = self.abort_drivers(&stepped_driver_ids);
+                Err(error)
             }
         }
-        debug_assert!(due_driver_ids.is_empty());
-        self.validate_protected_drafts(
-            timeline,
-            &OperationContext::Public,
-            Seq::ZERO,
-            &all_drafts,
-        )?;
-        Ok(all_drafts)
     }
 
     /// Step cadence-ready Drivers against one host-owned immutable-prefix
@@ -2811,23 +3807,50 @@ impl PluginRegistry {
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
         self.restored_binding = None;
-        let mut all_drafts = Vec::new();
         let snapshot = self.snapshot_for_tick(timeline, Seq::ZERO, &OperationContext::Public)?;
-        for entry in self.plugins.values_mut() {
-            if let Some(driver) = entry.driver.as_mut() {
-                let observations = snapshot.view_for(driver.subscriptions());
-                let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                reject_host_owned_drafts(&output)?;
-                all_drafts.extend(output.drafts);
-            }
-        }
-        self.validate_protected_drafts(
+        let (all_drafts, staged_driver_ids) =
+            self.collect_live_driver_outputs(timeline, &snapshot)?;
+        if let Err(error) = self.validate_protected_drafts(
             timeline,
             &OperationContext::Public,
             Seq::ZERO,
             &all_drafts,
-        )?;
+        ) {
+            let _ = self.abort_drivers(&staged_driver_ids);
+            return Err(error);
+        }
+        self.plugins.values().for_each(reset_admission_usage);
         Ok(all_drafts)
+    }
+
+    fn collect_live_driver_outputs(
+        &mut self,
+        timeline: TimelineId,
+        snapshot: &ObservationSnapshot,
+    ) -> Result<(Vec<EventDraft>, Vec<PluginId>), RuntimeError> {
+        let mut all_drafts = Vec::new();
+        let mut staged_driver_ids = Vec::new();
+        let mut step_error = None;
+        for (plugin_id, entry) in &mut self.plugins {
+            if let Some(driver) = entry.driver.as_mut() {
+                staged_driver_ids.push(*plugin_id);
+                let observations = snapshot.view_for(driver.subscriptions());
+                let step_result = invoke_driver(driver.as_mut(), timeline, observations)
+                    .and_then(|output| validate_driver_output(entry, &output).map(|()| output));
+                match step_result {
+                    Ok(output) => all_drafts.extend(output.drafts),
+                    Err(error) => {
+                        step_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(error) = step_error {
+            let _ = self.abort_drivers(&staged_driver_ids);
+            return Err(error);
+        }
+        Ok((all_drafts, staged_driver_ids))
     }
 
     /// Step every Driver against one host-owned immutable-prefix anchor,
@@ -2911,8 +3934,13 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
+        output_policy::{
+            OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+            OutputPolicyV1,
+        },
         Capability, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentErrorV1,
-        Event, EventStore, Plugin, Reducer, State,
+        Event, EventStore, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+        FidelityBudgetV1, Plugin, PluginCpuReservationV1, Reducer, State, WorkloadProfileV1,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2922,6 +3950,452 @@ mod tests {
 
     fn gated_registry() -> PluginRegistry {
         PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn register_output_driver(
+        registry: &mut PluginRegistry,
+        event_types: &[&str],
+        driver: Box<dyn Driver>,
+    ) {
+        let plugin_id = PluginId::new();
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })
+        .test_ok();
+        let declarations = event_types
+            .iter()
+            .map(|event_type| {
+                OutputDeclarationV1::new(
+                    (*event_type).to_owned(),
+                    OutputAuthorityV1::Authoritative,
+                    OutputFidelityV1::L0,
+                    4_096,
+                    None,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .test_ok();
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "test".to_owned(),
+            implementation_hash: Hash::from_bytes([0x42; 32]),
+            base_configuration_digest: Hash::from_bytes([0x43; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([0x44; 32]),
+            policy_revision: 1,
+            output_declarations: declarations,
+        })
+        .test_ok();
+        registry
+            .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
+            .test_ok();
+    }
+
+    struct NamedNoopDriver(&'static str);
+
+    impl Driver for NamedNoopDriver {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+    }
+
+    #[test]
+    fn debug_test_driver_helpers_cover_success_and_failure_boundaries() {
+        let mut registry = gated_registry();
+        registry.register_test_driver(Box::new(NoopDriver));
+        assert_eq!(registry.driver_count(), 1);
+
+        let plugin = simple_plugin("fixture-driver", &["fixture.output"]);
+        let binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let wrong_id = PluginId::new();
+        let mismatch = registry.register_test_driver_with_verified_output_policy(
+            wrong_id,
+            binding,
+            Box::new(NoopDriver),
+        );
+        assert!(mismatch.is_err());
+
+        let oversized_configuration =
+            vec![b'x'; crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 + 1];
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.register_test_driver_with_configuration_details(
+                Box::new(NamedNoopDriver("oversized-configuration")),
+                &oversized_configuration,
+            );
+        }));
+        assert!(failure.is_err());
+    }
+
+    #[test]
+    fn generated_binding_reports_unknown_execution_profile() {
+        let plugin = simple_plugin("profile-fixture", &["profile.output"]);
+        let result = PluginRegistry::generated_output_binding_with_budget_input_for_profile(
+            &plugin,
+            plugin.version(),
+            ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile: WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 4_096,
+                fidelity_budgets: [
+                    FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                    plugin_id: plugin.id,
+                    cpu_reservations_us: [10, 20, 30],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: Hash::zero(),
+                max_pass_wall_duration_us: 1_000,
+            },
+            "missing-profile",
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_identity_hash_covers_declaration_and_budget_variants() {
+        let plugin_id = PluginId::new();
+        let mut replay_identities = Vec::new();
+        for workload_profile in [
+            WorkloadProfileV1::Interactive,
+            WorkloadProfileV1::Fork,
+            WorkloadProfileV1::Research,
+        ] {
+            let mut registry = gated_registry();
+            let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile,
+                cut_budget_family: 0,
+                max_event_bytes: 4_096,
+                fidelity_budgets: [
+                    FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 10,
+                        max_bytes: 10_000,
+                        max_cpu_us: 10_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                    plugin_id,
+                    cpu_reservations_us: [10, 20, 30],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: Hash::from_bytes([0x41; 32]),
+                max_pass_wall_duration_us: 1_000,
+            })
+            .test_ok();
+            let declarations = vec![
+                OutputDeclarationV1::new(
+                    "a.authoritative".to_owned(),
+                    OutputAuthorityV1::Authoritative,
+                    OutputFidelityV1::L0,
+                    64,
+                    None,
+                    None,
+                )
+                .test_ok(),
+                OutputDeclarationV1::new(
+                    "b.derived".to_owned(),
+                    OutputAuthorityV1::ReproducibleDerived,
+                    OutputFidelityV1::L1,
+                    64,
+                    Some(2),
+                    None,
+                )
+                .test_ok(),
+                OutputDeclarationV1::new(
+                    "c.ephemeral".to_owned(),
+                    OutputAuthorityV1::Ephemeral,
+                    OutputFidelityV1::L2,
+                    64,
+                    None,
+                    Some(10),
+                )
+                .test_ok(),
+            ];
+            let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+                plugin_id,
+                plugin_version: "test".to_owned(),
+                implementation_hash: Hash::from_bytes([0x42; 32]),
+                base_configuration_digest: Hash::from_bytes([0x43; 32]),
+                executable_profile_hash: budget.digest(),
+                retention_policy_hash: Hash::from_bytes([0x44; 32]),
+                policy_revision: 1,
+                output_declarations: declarations,
+            })
+            .test_ok();
+            registry
+                .register_test_driver_with_output_policy(
+                    plugin_id,
+                    "test",
+                    policy,
+                    budget,
+                    Box::new(NoopDriver),
+                )
+                .test_ok();
+            let (_, replay_identity) = registry.replay_policy_identities().next().test_ok();
+            replay_identities.push(replay_identity);
+        }
+        assert_ne!(replay_identities[0], replay_identities[1]);
+        assert_ne!(replay_identities[0], replay_identities[2]);
+        assert_ne!(replay_identities[1], replay_identities[2]);
+    }
+
+    #[test]
+    fn output_validation_and_action_lookup_fail_closed_without_admission() {
+        struct UndeclaredOutputDriver;
+
+        impl Driver for UndeclaredOutputDriver {
+            fn name(&self) -> &'static str {
+                "missing-admission"
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::new(vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("missing.output"),
+                    CanonicalBytes::from_static(b"payload"),
+                )]))
+            }
+        }
+
+        let mut missing_admission_registry = gated_registry();
+        missing_admission_registry.register_driver(Box::new(UndeclaredOutputDriver));
+        assert!(matches!(
+            missing_admission_registry.step_all(TimelineId::new()),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::MissingDeclaration { event_type }
+            )) if event_type == "missing.output"
+        ));
+
+        let mut registry = gated_registry();
+        let missing_id = PluginId::new();
+        registry
+            .approver_map
+            .insert(Kind::new("missing.approver"), missing_id);
+        assert!(matches!(
+            registry.action_approver_and_admission(&Kind::new("missing.approver")),
+            Err(ActionRejected::UnknownEventType)
+        ));
+        let no_approver_id = PluginId::new();
+        registry.plugins.insert(
+            no_approver_id,
+            PluginEntry {
+                name: "no-approver".to_owned(),
+                version: "test".to_owned(),
+                owned_event_types: Vec::new(),
+                driver: None,
+                approver: None,
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: None,
+            },
+        );
+        registry
+            .approver_map
+            .insert(Kind::new("no.approver"), no_approver_id);
+        assert!(matches!(
+            registry.action_approver_and_admission(&Kind::new("no.approver")),
+            Err(ActionRejected::UnknownEventType)
+        ));
+        let missing_policy_id = PluginId::new();
+        registry.plugins.insert(
+            missing_policy_id,
+            PluginEntry {
+                name: "missing-policy".to_owned(),
+                version: "test".to_owned(),
+                owned_event_types: Vec::new(),
+                driver: None,
+                approver: Some(Box::new(MockActionApprover)),
+                last_tick: None,
+                event_cursor: Seq::ZERO,
+                registration: None,
+                output_admission: None,
+            },
+        );
+        registry
+            .approver_map
+            .insert(Kind::new("missing.policy"), missing_policy_id);
+        assert!(matches!(
+            registry.action_approver_and_admission(&Kind::new("missing.policy")),
+            Err(ActionRejected::DomainValidationFailed(message))
+                if message == "action approver has no bound output policy"
+        ));
+    }
+
+    #[test]
+    fn foreign_policy_declaration_is_rejected() {
+        let plugin = simple_plugin("foreign-policy", &["owned.output"]);
+        let valid_binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let (valid_policy, budget, _, _, _) = valid_binding.into_parts();
+        let fields = valid_policy.fields();
+        let foreign_declaration = OutputDeclarationV1::new(
+            "foreign.output".to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            4_096,
+            None,
+            None,
+        )
+        .test_ok();
+        let foreign_policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id: fields.plugin_id,
+            plugin_version: fields.plugin_version.clone(),
+            implementation_hash: fields.implementation_hash,
+            base_configuration_digest: fields.base_configuration_digest,
+            executable_profile_hash: fields.executable_profile_hash,
+            retention_policy_hash: fields.retention_policy_hash,
+            policy_revision: fields.policy_revision,
+            output_declarations: vec![foreign_declaration],
+        })
+        .test_ok();
+        let foreign_binding = OutputPolicyBindingV1::from_installed_source_with_policy(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            foreign_policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_with_verified_output_policy(
+                &plugin,
+                foreign_binding,
+                None,
+                Some(Box::new(NoopDriver)),
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_driver_duplicate_is_rejected_before_policy_validation() {
+        let mut registry = gated_registry();
+        register_output_driver(&mut registry, &["duplicate.output"], Box::new(NoopDriver));
+        let plugin_id =
+            *registry.plugins.keys().next().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("fixture plugin is missing"))
+            });
+        let (policy, budget) = {
+            let entry = registry
+                .plugins
+                .get(&plugin_id)
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("fixture entry is missing")));
+            let admission = entry.output_admission.as_ref().unwrap_or_else(|| {
+                std::panic::resume_unwind(Box::new("fixture policy is missing"))
+            });
+            (admission.policy().clone(), admission.budget().clone())
+        };
+        let error = registry
+            .register_test_driver_with_output_policy(
+                plugin_id,
+                "test",
+                policy,
+                budget,
+                Box::new(NoopDriver),
+            )
+            .test_err();
+        assert!(matches!(error, RuntimeError::DuplicatePlugin { .. }));
     }
 
     fn gated_store() -> Box<dyn pos_core::store::EventStore> {
@@ -3383,6 +4857,55 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct OutputTransactionState {
+        staged: bool,
+        commits: usize,
+        aborts: usize,
+    }
+
+    struct OutputTransactionDriver {
+        state: Arc<Mutex<OutputTransactionState>>,
+        event_type: &'static str,
+        poison_after_step: Option<Arc<ErasureContainmentGateV1>>,
+    }
+
+    impl Driver for OutputTransactionDriver {
+        fn name(&self) -> &'static str {
+            "output-transaction"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            self.state.lock().test_ok().staged = true;
+            if let Some(gate) = &self.poison_after_step {
+                gate.poison();
+            }
+            Ok(StepOutput::new(vec![EventDraft::new(
+                EntityId::new(),
+                Kind::new(self.event_type),
+                CanonicalBytes::from_static(b"staged output"),
+            )]))
+        }
+
+        fn commit_step(&mut self) {
+            let mut state = self.state.lock().test_ok();
+            state.staged = false;
+            state.commits += 1;
+        }
+
+        fn abort_step(&mut self) {
+            let mut state = self.state.lock().test_ok();
+            if state.staged {
+                state.staged = false;
+                state.aborts += 1;
+            }
+        }
+    }
+
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     #[test]
@@ -3390,7 +4913,7 @@ mod tests {
         let mut registry = gated_registry();
         let plugin = plugin_with_caps("panicking", &["probe.event"], true, false);
         registry
-            .register(&plugin, None, Some(Box::new(PanickingDriver)))
+            .register_generated(&plugin, None, Some(Box::new(PanickingDriver)))
             .test_ok();
 
         let error = registry
@@ -3401,11 +4924,70 @@ mod tests {
     }
 
     #[test]
+    fn erasure_post_step_failure_aborts_staged_output() {
+        let timeline = TimelineId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let state = Arc::new(Mutex::new(OutputTransactionState::default()));
+        let mut registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        register_output_driver(
+            &mut registry,
+            &["probe.event"],
+            Box::new(OutputTransactionDriver {
+                state: Arc::clone(&state),
+                event_type: "probe.event",
+                poison_after_step: Some(gate),
+            }),
+        );
+
+        assert!(matches!(
+            registry.step_all_anchored(timeline, Seq::ZERO),
+            Err(RuntimeError::ErasureContainment(
+                ErasureContainmentErrorV1::RecoveryUnavailable
+            ))
+        ));
+        let state = state.lock().test_ok();
+        assert!(!state.staged);
+        assert_eq!(state.commits, 0);
+        assert_eq!(state.aborts, 1);
+        drop(state);
+    }
+
+    #[test]
+    fn legacy_commit_aborts_nonempty_staged_output() {
+        let state = Arc::new(Mutex::new(OutputTransactionState::default()));
+        let mut registry = gated_registry();
+        register_output_driver(
+            &mut registry,
+            &["probe.event"],
+            Box::new(OutputTransactionDriver {
+                state: Arc::clone(&state),
+                event_type: "probe.event",
+                poison_after_step: None,
+            }),
+        );
+        registry
+            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .test_ok();
+
+        let error = registry.commit_step_at(Seq::ZERO, 0).test_err();
+        assert!(matches!(&error, RuntimeError::UnappendedDriverOutput));
+        assert_eq!(
+            error.to_string(),
+            "nonempty Driver output must be appended before the step can be committed"
+        );
+        let state = state.lock().test_ok();
+        assert!(!state.staged);
+        assert_eq!(state.commits, 0);
+        assert_eq!(state.aborts, 1);
+        drop(state);
+    }
+
+    #[test]
     fn aborting_a_staged_driver_catches_a_driver_abort_panic() {
         let mut registry = gated_registry();
         let plugin = plugin_with_caps("abort-panicking", &[], true, false);
         registry
-            .register(&plugin, None, Some(Box::new(AbortPanickingDriver)))
+            .register_generated(&plugin, None, Some(Box::new(AbortPanickingDriver)))
             .test_ok();
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
@@ -3453,9 +5035,13 @@ mod tests {
 
         let aborted = Arc::new(Mutex::new(false));
         let mut registry = gated_registry().with_resource_limit(1);
-        registry.register_driver(Box::new(BudgetDriver {
-            aborted: Arc::clone(&aborted),
-        }));
+        register_output_driver(
+            &mut registry,
+            &["budget.event"][..],
+            Box::new(BudgetDriver {
+                aborted: Arc::clone(&aborted),
+            }),
+        );
         let error = registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_err();
@@ -3469,7 +5055,7 @@ mod tests {
         let timeline = TimelineId::new();
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "transactional",
             state: Arc::clone(&state),
             interval: Duration::from_nanos(100),
@@ -3530,8 +5116,10 @@ mod tests {
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
         let driverless = simple_plugin("restore-driverless", &[]);
-        registry.register(&driverless, None, None).test_ok();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry
+            .register_generated(&driverless, None, None)
+            .test_ok();
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "restoring",
             state: Arc::clone(&state),
             interval: Duration::from_nanos(1),
@@ -3598,7 +5186,7 @@ mod tests {
 
         let timeline = TimelineId::new();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(RestoreCommitPanickingDriver));
+        registry.register_test_driver(Box::new(RestoreCommitPanickingDriver));
         let error = registry
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
             .test_err();
@@ -3628,7 +5216,7 @@ mod tests {
         }
 
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(StepCommitPanickingDriver));
+        registry.register_test_driver(Box::new(StepCommitPanickingDriver));
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
@@ -3700,12 +5288,14 @@ mod tests {
         let second = Arc::new(Mutex::new(RestoreState::default()));
         let mut registry = gated_registry();
         let driverless = simple_plugin("failed-restore-driverless", &[]);
-        registry.register(&driverless, None, None).test_ok();
-        registry.register_driver(Box::new(RestoreDriver {
+        registry
+            .register_generated(&driverless, None, None)
+            .test_ok();
+        registry.register_test_driver(Box::new(RestoreDriver {
             state: Arc::clone(&first),
             rejects: false,
         }));
-        registry.register_driver(Box::new(RestoreDriver {
+        registry.register_test_driver(Box::new(RestoreDriver {
             state: Arc::clone(&second),
             rejects: true,
         }));
@@ -3735,13 +5325,13 @@ mod tests {
         let first = Arc::new(Mutex::new(TransactionState::default()));
         let failed = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "first",
             state: Arc::clone(&first),
             interval: Duration::from_nanos(1),
             fail: false,
         }));
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "failed",
             state: Arc::clone(&failed),
             interval: Duration::from_nanos(1),
@@ -3763,7 +5353,7 @@ mod tests {
         let timeline = TimelineId::new();
         let state = Arc::new(Mutex::new(TransactionState::default()));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(TransactionalDriver {
+        registry.register_test_driver(Box::new(TransactionalDriver {
             name: "cadenced-provider",
             state: Arc::clone(&state),
             interval: Duration::from_nanos(100),
@@ -3806,7 +5396,7 @@ mod tests {
     fn register_plugin_wires_schemas() {
         let mut reg = gated_registry();
         let p = simple_plugin("world", &["world.observation", "world.action"]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         assert!(reg.schemas.contains("world.observation"));
         assert!(reg.schemas.contains("world.action"));
         assert!(!reg.schemas.contains("agent.decision"));
@@ -3817,12 +5407,14 @@ mod tests {
     fn plugins_cannot_claim_core_owned_geographic_event_types() {
         let plugin = simple_plugin("malicious-geo", &[pos_core::GEOGRAPHIC_EVENT_TYPE]);
         let error = PluginRegistry::new()
-            .register(&plugin, None, None)
+            .register_generated(&plugin, None, None)
             .test_err();
         assert!(error.to_string().contains(pos_core::GEOGRAPHIC_EVENT_TYPE));
 
         let cell = simple_plugin("future-geo", &[pos_core::GEOGRAPHIC_CELL_EVENT_TYPE]);
-        let error = PluginRegistry::new().register(&cell, None, None).test_err();
+        let error = PluginRegistry::new()
+            .register_generated(&cell, None, None)
+            .test_err();
         assert!(error
             .to_string()
             .contains(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE));
@@ -3838,7 +5430,7 @@ mod tests {
         ] {
             let plugin = simple_plugin("malicious-consent", &[event_type]);
             assert!(matches!(
-                PluginRegistry::new().register(&plugin, None, None),
+                PluginRegistry::new().register_generated(&plugin, None, None),
                 Err(RuntimeError::ReservedConsentEventType { .. })
             ));
         }
@@ -3850,7 +5442,7 @@ mod tests {
         let mut reg = gated_registry();
         let timeline = TimelineId::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
-        reg.register(&p, Some(Box::new(CountReducer)), None)
+        reg.register_generated(&p, Some(Box::new(CountReducer)), None)
             .test_ok();
         // Apply an event and verify the reducer ran
         let event = Event {
@@ -3928,7 +5520,7 @@ mod tests {
         let plugin = plugin_with_caps("projection", &["projection.event"], false, true);
         let mut bound = gated_registry().with_consent_authority(authority);
         bound
-            .register(&plugin, Some(Box::new(CountReducer)), None)
+            .register_generated(&plugin, Some(Box::new(CountReducer)), None)
             .test_ok();
         assert!(bound.clone_consent_gate().is_some());
         let projection_event = |entity, seq| Event {
@@ -3987,8 +5579,8 @@ mod tests {
             name: "dup",
             cap: Capability::default(),
         };
-        reg.register(&p1, None, None).test_ok();
-        let err = reg.register(&p2, None, None).test_err();
+        reg.register_generated(&p1, None, None).test_ok();
+        let err = reg.register_generated(&p2, None, None).test_err();
         assert!(matches!(err, RuntimeError::DuplicatePlugin { .. }));
     }
 
@@ -4002,7 +5594,7 @@ mod tests {
             name: "dup",
             cap: Capability::default(),
         };
-        reg.register(&plugin, None, None).test_ok();
+        reg.register_generated(&plugin, None, None).test_ok();
 
         let consumed = std::cell::Cell::new(false);
         let event_types = std::iter::once_with(|| {
@@ -4010,7 +5602,7 @@ mod tests {
             Kind::new("must.not.be.consumed")
         });
         let error = reg
-            .register_with_approver(&plugin, None, None, None, event_types)
+            .register_generated_with_approver(&plugin, None, None, None, event_types)
             .test_err();
 
         assert!(matches!(error, RuntimeError::DuplicatePlugin { .. }));
@@ -4023,7 +5615,7 @@ mod tests {
         let mut reg = PluginRegistry::new();
         assert!(reg.is_empty());
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.driver_count(), 0);
         assert!(reg.contains(&p.id));
@@ -4037,7 +5629,7 @@ mod tests {
         let tl = store.create_timeline("t").test_ok();
         let mut reg = gated_registry();
         let p = simple_plugin("p", &[]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         let drafts = reg.tick_cadenced(tl.id(), 0).test_ok();
         assert!(drafts.is_empty());
     }
@@ -4048,8 +5640,8 @@ mod tests {
         let mut reg = gated_registry();
         let p1 = simple_plugin("alpha", &[]);
         let p2 = simple_plugin("beta", &[]);
-        reg.register(&p1, None, None).test_ok();
-        reg.register(&p2, None, None).test_ok();
+        reg.register_generated(&p1, None, None).test_ok();
+        reg.register_generated(&p2, None, None).test_ok();
         let names: Vec<&str> = reg.plugin_names().collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
@@ -4095,7 +5687,8 @@ mod tests {
         assert_eq!(driver.name(), "simple"); // force coverage of name()
 
         let mut reg = gated_registry();
-        reg.register(&p, None, Some(Box::new(driver))).test_ok();
+        reg.register_generated(&p, None, Some(Box::new(driver)))
+            .test_ok();
         assert_eq!(reg.driver_count(), 1);
 
         let drafts = reg.step_all(tl.id()).test_ok();
@@ -4116,7 +5709,7 @@ mod tests {
         let tl = store.create_timeline("t").test_ok();
         let p = simple_plugin("nodrive", &[]);
         let mut reg = gated_registry();
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         let drafts = reg.step_all(tl.id()).test_ok();
         assert!(drafts.is_empty());
     }
@@ -4132,7 +5725,7 @@ mod tests {
 
         let plugin = simple_plugin("registered-without-driver", &[]);
         let plugin_id = plugin.id;
-        registry.register(&plugin, None, None).test_ok();
+        registry.register_generated(&plugin, None, None).test_ok();
         let absent = registry
             .invoke_selected_driver(plugin_id, TimelineId::new(), &snapshot, &[])
             .test_err();
@@ -4251,6 +5844,7 @@ mod tests {
                 last_tick: None,
                 event_cursor: Seq::ZERO,
                 registration: None,
+                output_admission: None,
             },
         );
 
@@ -4407,13 +6001,80 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("t").test_ok();
         let mut reg = gated_registry();
-        reg.register_driver(Box::new(FailingDriver));
+        reg.register_test_driver(Box::new(FailingDriver));
 
         let error = reg.step_all(timeline.id()).test_err();
         assert!(error.to_string().contains("failing"));
 
         let error = reg.tick_cadenced(timeline.id(), 0).test_err();
         assert!(error.to_string().contains("failing"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_all_aborts_every_staged_driver_when_a_later_driver_fails() {
+        struct StagedDriver {
+            name: &'static str,
+            staged: Arc<Mutex<bool>>,
+            fails: bool,
+        }
+
+        impl Driver for StagedDriver {
+            fn name(&self) -> &'static str {
+                self.name
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                *self
+                    .staged
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                if self.fails {
+                    Err(RuntimeError::NoDriver {
+                        name: self.name.to_owned(),
+                    })
+                } else {
+                    Ok(StepOutput::empty())
+                }
+            }
+
+            fn abort_step(&mut self) {
+                *self
+                    .staged
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+            }
+        }
+
+        let mut store = gated_store();
+        let timeline = store.create_timeline("step-all-rollback").test_ok();
+        let first_staged = Arc::new(Mutex::new(false));
+        let failing_staged = Arc::new(Mutex::new(false));
+        let mut registry = gated_registry();
+        registry.register_test_driver(Box::new(StagedDriver {
+            name: "first",
+            staged: Arc::clone(&first_staged),
+            fails: false,
+        }));
+        registry.register_test_driver(Box::new(StagedDriver {
+            name: "failing",
+            staged: Arc::clone(&failing_staged),
+            fails: true,
+        }));
+
+        let error = registry.step_all(timeline.id()).test_err();
+
+        assert!(error.to_string().contains("failing"));
+        assert!(!*first_staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner));
+        assert!(!*failing_staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner));
     }
 
     #[test]
@@ -4441,7 +6102,7 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("driver-geo").test_ok();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(GeographicDriver));
+        registry.register_test_driver(Box::new(GeographicDriver));
         assert!(matches!(
             registry.step_all(timeline.id()),
             Err(RuntimeError::GeographicDraft { .. })
@@ -4496,7 +6157,11 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("driver-consent").test_ok();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(ConsentDriver));
+        register_output_driver(
+            &mut registry,
+            &[pos_core::EVENT_TYPE_CONSENT_GRANTED_V1],
+            Box::new(ConsentDriver),
+        );
         assert!(matches!(
             registry.step_all(timeline.id()),
             Err(RuntimeError::ConsentDraft { .. })
@@ -4507,7 +6172,11 @@ mod tests {
         ));
 
         let mut allowed = gated_registry();
-        allowed.register_driver(Box::new(AllowedDriver));
+        register_output_driver(
+            &mut allowed,
+            &["driver.allowed.v1"],
+            Box::new(AllowedDriver),
+        );
         assert_eq!(allowed.tick_cadenced(timeline.id(), 0).test_ok().len(), 1);
     }
 
@@ -4590,17 +6259,22 @@ mod tests {
         };
         let token = authority.record_grant_on_timeline(timeline.id(), &grant);
         reg = reg.with_consent_authority(authority);
-        reg.register_driver(Box::new(ObservingDriver {
-            target: ProjectionKey::new(observed_entity),
-            entity: EntityId::new(),
-        }));
+        register_output_driver(
+            &mut reg,
+            &["driver.observed"],
+            Box::new(ObservingDriver {
+                target: ProjectionKey::new(observed_entity),
+                entity: observed_entity,
+            }),
+        );
 
         let drafts = reg
             .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
-        reg.commit_step_at(Seq::ZERO, 0).test_ok();
+        reg.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &drafts)
+            .test_ok();
 
         let drafts = reg
             .step_all_anchored_protected(timeline.id(), Seq::ZERO, token.clone(), 0, &[])
@@ -4667,7 +6341,7 @@ mod tests {
         };
         let token = authority.record_grant_on_timeline(timeline.id(), &grant);
         let mut reg = gated_registry().with_consent_authority(authority);
-        reg.register(&plugin, None, Some(Box::new(driver)))
+        reg.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
 
         let drafts = reg
@@ -4768,6 +6442,65 @@ mod tests {
         }
     }
 
+    struct PoisonOnAppendStore {
+        inner: Box<dyn EventStore>,
+        gate: Arc<ErasureContainmentGateV1>,
+    }
+
+    impl EventStore for PoisonOnAppendStore {
+        fn bind_erasure_gate(
+            &mut self,
+            gate: Arc<ErasureContainmentGateV1>,
+        ) -> Result<(), CoreError> {
+            self.inner.bind_erasure_gate(gate)
+        }
+
+        fn create_timeline(
+            &mut self,
+            name: &str,
+        ) -> Result<pos_core::timeline::Timeline, CoreError> {
+            self.inner.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            let events = self.inner.append(timeline, drafts)?;
+            self.gate.poison();
+            Ok(events)
+        }
+
+        fn read(
+            &self,
+            timeline: TimelineId,
+            range: pos_core::store::SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: TimelineId,
+            at: Seq,
+            name: &str,
+        ) -> Result<pos_core::timeline::Timeline, CoreError> {
+            self.inner.fork(parent, at, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::timeline::Timeline>, CoreError> {
+            self.inner.list_timelines()
+        }
+
+        fn get_timeline(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
+            self.inner.get_timeline(timeline)
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn protected_append_fences_cover_missing_gate_and_store_errors() {
@@ -4810,7 +6543,7 @@ mod tests {
         )];
 
         let mut missing_gate = gated_registry().with_consent_authority(authority.clone());
-        missing_gate.register_driver(Box::new(EmptyDriver));
+        missing_gate.register_test_driver(Box::new(EmptyDriver));
         missing_gate
             .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
@@ -4829,20 +6562,20 @@ mod tests {
         ));
 
         let mut store_error = gated_registry().with_consent_authority(authority.clone());
-        store_error.register_driver(Box::new(EmptyDriver));
+        store_error.register_test_driver(Box::new(EmptyDriver));
         store_error
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .test_ok();
         let mut failing_store = AppendFailStore;
         assert!(matches!(
             store_error
-                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &append_drafts,)
+                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[],)
                 .test_err(),
             RuntimeError::Store(CoreError::Storage(_))
         ));
 
         let mut public_fence = gated_registry().with_consent_authority(authority);
-        public_fence.register_driver(Box::new(EmptyDriver));
+        public_fence.register_test_driver(Box::new(EmptyDriver));
         let drafts = public_fence
             .step_all_anchored(timeline, Seq::ZERO)
             .test_ok();
@@ -4856,7 +6589,7 @@ mod tests {
         ));
 
         let mut public_replacement = gated_registry();
-        public_replacement.register_driver(Box::new(EmptyDriver));
+        public_replacement.register_test_driver(Box::new(EmptyDriver));
         public_replacement
             .step_all_anchored(timeline, Seq::ZERO)
             .test_ok();
@@ -4903,6 +6636,56 @@ mod tests {
             .append_and_commit_step_at(public_store.as_mut(), Seq::ZERO, 0, &[])
             .test_ok()
             .is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_commit_reports_post_append_gate_failure_and_preserves_committed_state() {
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let state = Arc::new(Mutex::new(OutputTransactionState::default()));
+        let mut inner = gated_store();
+        let timeline = inner.create_timeline("post-append-gate-failure").test_ok();
+        let mut store = PoisonOnAppendStore {
+            inner,
+            gate: Arc::clone(&gate),
+        };
+        let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+        register_output_driver(
+            &mut registry,
+            &["probe.event"],
+            Box::new(OutputTransactionDriver {
+                state: Arc::clone(&state),
+                event_type: "probe.event",
+                poison_after_step: None,
+            }),
+        );
+        let drafts = registry
+            .step_all_anchored(timeline.id(), Seq::ZERO)
+            .test_ok();
+
+        let error = registry
+            .append_and_commit_step_at(&mut store, Seq::ZERO, 0, &drafts)
+            .test_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::ErasureContainmentAfterCommit {
+                event_count: 1,
+                source: ErasureContainmentErrorV1::RecoveryUnavailable,
+            }
+        ));
+        assert_eq!(
+            store
+                .read(timeline.id(), pos_core::store::SeqRange::all())
+                .test_ok()
+                .len(),
+            1
+        );
+        let state = state.lock().test_ok();
+        assert!(!state.staged);
+        assert_eq!(state.commits, 1);
+        assert_eq!(state.aborts, 0);
+        drop(state);
     }
 
     #[test]
@@ -5031,7 +6814,11 @@ mod tests {
         };
         let _token = authority.record_grant_on_timeline(timeline, &grant);
         let mut registry = gated_registry().with_consent_authority(authority);
-        registry.register_driver(Box::new(SensitiveDriver { subject }));
+        register_output_driver(
+            &mut registry,
+            &["geo.position.v1"],
+            Box::new(SensitiveDriver { subject }),
+        );
         assert!(matches!(
             registry.tick_cadenced(timeline, 0).test_err(),
             RuntimeError::Consent(ConsentError::NoConsent)
@@ -5077,12 +6864,12 @@ mod tests {
         let overflow_steps = Arc::new(AtomicUsize::new(0));
         let untouched_steps = Arc::new(AtomicUsize::new(0));
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(CadenceDriver {
+        registry.register_test_driver(Box::new(CadenceDriver {
             name: "overflow-driver",
             interval: Duration::from_nanos(2),
             steps: Arc::clone(&overflow_steps),
         }));
-        registry.register_driver(Box::new(CadenceDriver {
+        registry.register_test_driver(Box::new(CadenceDriver {
             name: "must-not-step",
             interval: Duration::from_nanos(1),
             steps: Arc::clone(&untouched_steps),
@@ -5104,7 +6891,7 @@ mod tests {
         assert_eq!(untouched_steps.load(Ordering::SeqCst), 1);
 
         let mut anchored = gated_registry();
-        anchored.register_driver(Box::new(CadenceDriver {
+        anchored.register_test_driver(Box::new(CadenceDriver {
             name: "anchored-overflow",
             interval: Duration::from_nanos(2),
             steps: Arc::new(AtomicUsize::new(0)),
@@ -5164,7 +6951,11 @@ mod tests {
             ("cadence.middle", Duration::from_nanos(2)),
             ("cadence.third", Duration::from_nanos(1)),
         ] {
-            registry.register_driver(Box::new(OrderedDriver { name, interval }));
+            register_output_driver(
+                &mut registry,
+                &[name],
+                Box::new(OrderedDriver { name, interval }),
+            );
         }
 
         let timeline = TimelineId::new();
@@ -5206,8 +6997,8 @@ mod tests {
         let timeline = store.create_timeline("t").test_ok();
         let plugin = plugin_with_caps("interval-plugin", &[], true, false);
         let mut reg = gated_registry();
-        reg.register(&plugin, None, Some(Box::new(IntervalDriver)))
-            .test_ok();
+        let _ = plugin;
+        register_output_driver(&mut reg, &["interval.tick"], Box::new(IntervalDriver));
 
         let first = reg.tick_cadenced(timeline.id(), 0).test_ok();
         assert_eq!(first.len(), 1);
@@ -5276,11 +7067,11 @@ mod tests {
         let token = authority.record_grant_on_timeline(timeline.id(), &grant);
         let mut reg = gated_registry().with_consent_authority(authority);
 
-        reg.register_driver(Box::new(SnapshotDriver {
+        reg.register_test_driver(Box::new(SnapshotDriver {
             key: shared_key.clone(),
             observed: observed.clone(),
         }));
-        reg.register_driver(Box::new(SnapshotDriver {
+        reg.register_test_driver(Box::new(SnapshotDriver {
             key: shared_key,
             observed: observed.clone(),
         }));
@@ -5306,7 +7097,7 @@ mod tests {
     fn schema_validation_after_registration() {
         let mut reg = PluginRegistry::new();
         let p = simple_plugin("agent", &["agent.decision"]);
-        reg.register(&p, None, None).test_ok();
+        reg.register_generated(&p, None, None).test_ok();
         let valid = EventDraft::new(
             EntityId::new(),
             Kind::new("agent.decision"),
@@ -5326,17 +7117,17 @@ mod tests {
     fn register_rejects_capability_mismatch() {
         let mut reg = PluginRegistry::new();
         let p = plugin_with_caps("mismatch", &["x.y"], true, false);
-        let err = reg.register(&p, None, None).test_err();
+        let err = reg.register_generated(&p, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p2 = plugin_with_caps("mismatch2", &["x.y"], false, false);
         let err = reg
-            .register(&p2, Some(Box::new(CountReducer)), None)
+            .register_generated(&p2, Some(Box::new(CountReducer)), None)
             .test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p3 = plugin_with_caps("mismatch3", &["x.y"], false, true);
-        let err = reg.register(&p3, None, None).test_err();
+        let err = reg.register_generated(&p3, None, None).test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
 
         let p4 = plugin_with_caps("mismatch4", &["x.y"], false, false);
@@ -5347,7 +7138,9 @@ mod tests {
             TimelineId::new(),
             ObservationView::empty(),
         ));
-        let err = reg.register(&p4, None, Some(Box::new(noop))).test_err();
+        let err = reg
+            .register_generated(&p4, None, Some(Box::new(noop)))
+            .test_err();
         assert!(matches!(err, RuntimeError::CapabilityMismatch { .. }));
     }
 
@@ -5375,8 +7168,8 @@ mod tests {
             },
         };
         let mut registry = PluginRegistry::new();
-        registry.register(&first, None, None).test_ok();
-        registry.register(&second, None, None).test_ok();
+        registry.register_generated(&first, None, None).test_ok();
+        registry.register_generated(&second, None, None).test_ok();
         let composition = registry.composition();
         assert_eq!(
             composition
@@ -5463,6 +7256,18 @@ mod tests {
         }
     }
 
+    struct OverPolicyActionApprover;
+
+    impl ActionApprover for OverPolicyActionApprover {
+        fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+            Ok(EventDraft::new(
+                proposal.actor_entity_id,
+                proposal.event_type.clone(),
+                CanonicalBytes::from_vec(vec![0; 5]),
+            ))
+        }
+    }
+
     struct ForgingActionApprover {
         entity: EntityId,
         event_type: Kind,
@@ -5509,7 +7314,7 @@ mod tests {
         let mut unavailable = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         unavailable
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5526,7 +7331,7 @@ mod tests {
 
         let mut missing = PluginRegistry::new().without_erasure_gate();
         missing
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5543,7 +7348,7 @@ mod tests {
         frozen_gate.freeze_timeline_for_test(timeline);
         let mut frozen = PluginRegistry::new().with_erasure_gate(frozen_gate);
         frozen
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5568,7 +7373,7 @@ mod tests {
     fn registry_with_mock_action_approver() -> PluginRegistry {
         let plugin = plugin_with_caps("approver_plugin", &["action.type"], false, false);
         let mut reg = gated_registry();
-        reg.register_with_approver(
+        reg.register_generated_with_approver(
             &plugin,
             None,
             None,
@@ -5590,7 +7395,7 @@ mod tests {
         let duplicate_plugin =
             plugin_with_caps("duplicate_approver", &["action.type"], false, false);
         let duplicate = reg
-            .register_with_approver(
+            .register_generated_with_approver(
                 &duplicate_plugin,
                 None,
                 None,
@@ -5602,13 +7407,19 @@ mod tests {
 
         let no_approver = plugin_with_caps("missing_approver", &["missing.type"], false, false);
         let missing = reg
-            .register_with_approver(&no_approver, None, None, None, [Kind::new("missing.type")])
+            .register_generated_with_approver(
+                &no_approver,
+                None,
+                None,
+                None,
+                [Kind::new("missing.type")],
+            )
             .test_err();
         assert!(matches!(missing, RuntimeError::CapabilityMismatch { .. }));
 
         let foreign_type = plugin_with_caps("foreign_type", &["owned.type"], false, false);
         let foreign = reg
-            .register_with_approver(
+            .register_generated_with_approver(
                 &foreign_type,
                 None,
                 None,
@@ -5706,6 +7517,86 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugin_registry_rejects_action_outputs_outside_registered_policy() {
+        let plugin = plugin_with_caps("oversized_approver", &["action.type"], false, false);
+        let mut reg = gated_registry();
+        let plugin_id = plugin.id();
+        let (policy, budget) = PluginRegistry::generated_output_binding_with_budget_input(
+            &plugin,
+            plugin.version(),
+            ExecutableBudgetPolicyInputV1 {
+                revision: 1,
+                workload_profile: WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 4,
+                fidelity_budgets: [
+                    FidelityBudgetV1 {
+                        level: 0,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 500_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 1,
+                        max_events: 1_000,
+                        max_bytes: 64 * 1024 * 1024,
+                        max_cpu_us: 250_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                    FidelityBudgetV1 {
+                        level: 2,
+                        max_events: 1_000,
+                        max_bytes: 16 * 1024 * 1024,
+                        max_cpu_us: 50_000,
+                        shared_host_cpu_reservation_us: 0,
+                    },
+                ],
+                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                    plugin_id,
+                    cpu_reservations_us: [10; 3],
+                }],
+                accounting_semantics: 0,
+                execution_profile_hash: Hash::from_bytes([0x41; 32]),
+                max_pass_wall_duration_us: 1_000,
+            },
+        )
+        .test_ok();
+        let binding = OutputPolicyBindingV1::from_installed_source_with_policy(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            policy,
+            budget,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        reg.register_with_verified_output_policy_and_approver(
+            &plugin,
+            binding,
+            None,
+            None,
+            Some(Box::new(OverPolicyActionApprover)),
+            [Kind::new("action.type")],
+        )
+        .test_ok();
+        let proposal = ProposedAction::new(
+            Kind::new("action.type"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"small"),
+            Kind::new("action.type.submit"),
+        );
+        let result = reg.submit_action(TimelineId::new(), &proposal);
+        assert!(matches!(
+            result,
+            Err(ActionSubmissionError::Rejected(
+                ActionRejected::DomainValidationFailed(reason)
+            )) if reason.contains("action output admission failed")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn plugin_registry_rejects_approver_drafts_that_change_authority() {
         let actor = EntityId::new();
         let forged_actor = EntityId::new();
@@ -5720,7 +7611,7 @@ mod tests {
         let plugin = plugin_with_caps("forged_actor", &["action.type"], false, false);
         let mut actor_registry = gated_registry();
         actor_registry
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5743,7 +7634,7 @@ mod tests {
         let plugin = plugin_with_caps("forged_event_type", &["action.type"], false, false);
         let mut event_type_registry = gated_registry();
         event_type_registry
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -5766,7 +7657,7 @@ mod tests {
     fn driverless_registry_ticks_without_drafts() {
         let mut driverless = gated_registry();
         let plugin = simple_plugin("coverage-driverless", &[]);
-        driverless.register(&plugin, None, None).test_ok();
+        driverless.register_generated(&plugin, None, None).test_ok();
         driverless.tick_cadenced(TimelineId::new(), 0).test_ok();
         driverless.commit_step_at(Seq::ZERO, 0).test_ok();
     }
@@ -5900,7 +7791,7 @@ mod coverage_public_error_paths {
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut mismatch = gated_registry().with_consent_authority(authority);
-        mismatch.register_driver(Box::new(MismatchedSensitiveDriver {
+        mismatch.register_test_driver(Box::new(MismatchedSensitiveDriver {
             entity: EntityId::new(),
         }));
         assert!(mismatch
@@ -5916,7 +7807,7 @@ mod coverage_public_error_paths {
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut commit = gated_registry().with_consent_authority(authority.clone());
-        commit.register_driver(Box::new(EmptyDriver));
+        commit.register_test_driver(Box::new(EmptyDriver));
         assert!(commit
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());
@@ -5932,7 +7823,7 @@ mod coverage_public_error_paths {
         let consent_grant = grant(subject);
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut fenced_append = gated_registry().with_consent_authority(authority.clone());
-        fenced_append.register_driver(Box::new(EmptyDriver));
+        fenced_append.register_test_driver(Box::new(EmptyDriver));
         assert!(fenced_append
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());
@@ -5949,7 +7840,7 @@ mod coverage_public_error_paths {
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(timeline, &grant(EntityId::new()));
         let mut protected_append = gated_registry().with_consent_authority(authority);
-        protected_append.register_driver(Box::new(EmptyDriver));
+        protected_append.register_test_driver(Box::new(EmptyDriver));
         assert!(protected_append
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());
@@ -5964,7 +7855,7 @@ mod coverage_public_error_paths {
     fn missing_gate_rejects_staged_public_append() {
         let timeline = TimelineId::new();
         let mut public_append = gated_registry();
-        public_append.register_driver(Box::new(EmptyDriver));
+        public_append.register_test_driver(Box::new(EmptyDriver));
         assert!(public_append.step_all_anchored(timeline, Seq::ZERO).is_ok());
         public_append = public_append.without_consent_gate();
         let mut store = memory_store();
@@ -6040,6 +7931,57 @@ mod erasure_gate_coverage {
         assert!(rejecting
             .append_and_commit_step_at(&mut rejecting_store, pos_core::clock::Seq::ZERO, 0, &[],)
             .is_ok());
+    }
+
+    #[test]
+    fn validate_registered_output_reports_missing_plugin() {
+        let registry = PluginRegistry::new();
+        assert!(matches!(
+            registry.validate_registered_output(PluginId::new(), &[]),
+            Err(RuntimeError::NoDriver { .. })
+        ));
+    }
+
+    #[test]
+    fn generated_binding_reports_invalid_budget_input() {
+        struct BudgetFixturePlugin;
+        impl Plugin for BudgetFixturePlugin {
+            fn id(&self) -> PluginId {
+                PluginId::new()
+            }
+            fn name(&self) -> &'static str {
+                "invalid-budget"
+            }
+            fn capability(&self) -> Capability {
+                Capability::default()
+            }
+        }
+        let plugin = BudgetFixturePlugin;
+        let result = PluginRegistry::generated_output_binding_with_budget_input(
+            &plugin,
+            plugin.version(),
+            pos_core::ExecutableBudgetPolicyInputV1 {
+                revision: 0,
+                workload_profile: pos_core::WorkloadProfileV1::Interactive,
+                cut_budget_family: 0,
+                max_event_bytes: 1,
+                fidelity_budgets: [pos_core::FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1,
+                    max_bytes: 1,
+                    max_cpu_us: 1,
+                    shared_host_cpu_reservation_us: 0,
+                }; 3],
+                plugin_cpu_reservations: vec![],
+                accounting_semantics: 0,
+                execution_profile_hash: pos_core::Hash::zero(),
+                max_pass_wall_duration_us: 0,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
     }
 }
 

@@ -65,6 +65,75 @@ const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.determinist
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
+fn reviewed_output_binding<P: Plugin + ?Sized>(
+    plugin: &P,
+    source: pos_runtime::InstalledOutputPolicySourceV1,
+    profile_id: &str,
+    configuration_details: &[u8],
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        source,
+        configuration_details,
+        profile_id,
+    )
+    .map_err(Into::into)
+}
+
+fn world_output_binding(
+    plugin: &WorldPlugin,
+    config: &WorldConfigV1,
+    body: EntityId,
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    let configuration_details =
+        config
+            .encode()
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+    let mut details = configuration_details.as_slice().to_vec();
+    details.extend_from_slice(&body.inner().to_bytes());
+    reviewed_output_binding(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::World,
+        profile_id,
+        &details,
+    )
+}
+
+fn proof_agent_output_binding(
+    plugin: &ProofAgentPlugin,
+    threshold: f64,
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    let configuration_details = threshold.to_bits().to_be_bytes();
+    reviewed_output_binding(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        profile_id,
+        &configuration_details,
+    )
+}
+
+fn proof_society_output_binding(
+    plugin: &ProofSocietyPlugin,
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    let configuration_details = SocietyDimension::all()
+        .iter()
+        .flat_map(|dimension| dimension.as_str().as_bytes().iter().copied().chain([0]))
+        .collect::<Vec<_>>();
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        &configuration_details,
+        profile_id,
+    )
+    .map_err(Into::into)
+}
+
 /// Result of one Local or Air-Gapped proof execution.
 #[derive(Debug)]
 pub struct MoatProofReport {
@@ -155,14 +224,14 @@ impl MoatProofRun {
     /// # Errors
     /// Returns host, codec, or evidence construction failures.
     pub fn run(self) -> Result<MoatProofReport, MoatProofError> {
-        let input = self.input;
-        let mode = self.mode;
+        let Self { input, mode } = self;
         result_pipeline! {
-            failure_probes(input.resource_limit) => |failure_probes|;
+            let profile_id = execution_profile_id(mode);
+            failure_probes(input.resource_limit, profile_id) => |failure_probes|;
             ProofTopology::new(input.clone()).map_err(MoatProofError::from) => |topology|;
-            plugin_versions(&topology).map_err(MoatProofError::from) => |plugin_versions|;
+            plugin_versions_for_profile(&topology, profile_id).map_err(MoatProofError::from) => |plugin_versions|;
             let factory_topology = topology.clone();
-            let registry_factory = move || build_registry(&factory_topology);
+            let registry_factory = move || build_registry_for_profile(&factory_topology, profile_id);
             let mut experiment = Experiment::new(ExperimentConfig {
                 name: format!("wave8-{}", input.scenario_id),
                 stop: StopCondition::MaxTicks(input.ticks.saturating_add(1)),
@@ -170,7 +239,7 @@ impl MoatProofRun {
             })
             .with_fork_registry_factory(registry_factory)
             .with_resource_limit(input.resource_limit);
-            register_plugins(&mut experiment, &topology).map_err(MoatProofError::from) => |()|;
+            register_plugins_for_profile(&mut experiment, &topology, profile_id).map_err(MoatProofError::from) => |()|;
             experiment.start().map_err(MoatProofError::from) => |mut parent|;
             parent.step_tick().map_err(MoatProofError::from) => |_|;
             parent.source_events_with_control().map_err(MoatProofError::from) => |events|;
@@ -466,61 +535,187 @@ impl ProofTopology {
     }
 }
 
-fn register_plugins(
-    experiment: &mut Experiment,
-    topology: &ProofTopology,
-) -> Result<(), RuntimeError> {
-    result_pipeline! {
-        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
-        experiment.register_with_approver(
-            &topology.world_plugin,
+trait ProofRegistrationSink {
+    fn register_world(
+        &mut self,
+        plugin: &WorldPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: WorldDriver,
+    ) -> Result<(), RuntimeError>;
+
+    fn register_agent(
+        &mut self,
+        plugin: &ProofAgentPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: ProofAgentDriver,
+    ) -> Result<(), RuntimeError>;
+
+    fn register_society(
+        &mut self,
+        plugin: &ProofSocietyPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: ProofSocietyDriver,
+    ) -> Result<(), RuntimeError>;
+}
+
+impl ProofRegistrationSink for Experiment {
+    fn register_world(
+        &mut self,
+        plugin: &WorldPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: WorldDriver,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy_and_approver(
+            plugin,
+            binding,
             Some(Box::new(WorldReducer)),
             Some(Box::new(driver)),
-            Some(Box::new(topology.world_plugin.clone())),
+            Some(Box::new(plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
-        ) => |()|;
-        experiment.register(
-            &topology.agent_plugin,
+        )
+    }
+
+    fn register_agent(
+        &mut self,
+        plugin: &ProofAgentPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: ProofAgentDriver,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy(
+            plugin,
+            binding,
             Some(Box::new(ProofAgentReducer)),
-            Some(Box::new(ProofAgentDriver::new(
-                topology.agent,
-                topology.input.agent_response_threshold,
-            ))),
-        ) => |()|;
-        experiment.register(
-            &topology.society_plugin,
+            Some(Box::new(driver)),
+        )
+    }
+
+    fn register_society(
+        &mut self,
+        plugin: &ProofSocietyPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: ProofSocietyDriver,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy(
+            plugin,
+            binding,
             Some(Box::new(SocietyReducer)),
-            Some(Box::new(ProofSocietyDriver::new(topology.society))),
+            Some(Box::new(driver)),
         )
     }
 }
 
-fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
-    let mut registry =
-        pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-    result_pipeline! {
-        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
-        registry.register_with_approver(
-            &topology.world_plugin,
+impl ProofRegistrationSink for pos_runtime::PluginRegistry {
+    fn register_world(
+        &mut self,
+        plugin: &WorldPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: WorldDriver,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy_and_approver(
+            plugin,
+            binding,
             Some(Box::new(WorldReducer)),
             Some(Box::new(driver)),
-            Some(Box::new(topology.world_plugin.clone())),
+            Some(Box::new(plugin.clone())),
             [Kind::new(EVENT_TYPE_ACTION_V1)],
-        ) => |()|;
-        registry.register(
-            &topology.agent_plugin,
+        )
+    }
+
+    fn register_agent(
+        &mut self,
+        plugin: &ProofAgentPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: ProofAgentDriver,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy(
+            plugin,
+            binding,
             Some(Box::new(ProofAgentReducer)),
-            Some(Box::new(ProofAgentDriver::new(
+            Some(Box::new(driver)),
+        )
+    }
+
+    fn register_society(
+        &mut self,
+        plugin: &ProofSocietyPlugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        driver: ProofSocietyDriver,
+    ) -> Result<(), RuntimeError> {
+        self.register_with_verified_output_policy(
+            plugin,
+            binding,
+            Some(Box::new(SocietyReducer)),
+            Some(Box::new(driver)),
+        )
+    }
+}
+
+fn register_plugins_for_profile<T: ProofRegistrationSink>(
+    target: &mut T,
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<(), RuntimeError> {
+    result_pipeline! {
+        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
+        world_output_binding(
+            &topology.world_plugin,
+            driver.configuration(),
+            topology.body,
+            profile_id,
+        ) => |world_closure|;
+        proof_agent_output_binding(
+            &topology.agent_plugin,
+            topology.input.agent_response_threshold,
+            profile_id,
+        ) => |agent_closure|;
+        proof_society_output_binding(&topology.society_plugin, profile_id)
+            => |society_closure|;
+        target.register_world(&topology.world_plugin, world_closure, driver) => |()|;
+        target.register_agent(
+            &topology.agent_plugin,
+            agent_closure,
+            ProofAgentDriver::new(
                 topology.agent,
                 topology.input.agent_response_threshold,
-            ))),
+            ),
         ) => |()|;
-        registry.register(
+        target.register_society(
             &topology.society_plugin,
-            Some(Box::new(SocietyReducer)),
-            Some(Box::new(ProofSocietyDriver::new(topology.society))),
-        ) => |()|;
-        Ok(registry)
+            society_closure,
+            ProofSocietyDriver::new(topology.society),
+        )
+    }
+}
+
+#[cfg(test)]
+fn register_plugins(
+    experiment: &mut Experiment,
+    topology: &ProofTopology,
+) -> Result<(), RuntimeError> {
+    register_plugins_for_profile(experiment, topology, "deterministic-local-v1")
+}
+
+fn build_registry_for_profile(
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
+    let mut registry =
+        pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
+    register_plugins_for_profile(&mut registry, topology, profile_id)?;
+    Ok(registry)
+}
+
+#[cfg(test)]
+fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
+    build_registry_for_profile(topology, "deterministic-local-v1")
+}
+
+const fn execution_profile_id(mode: ExecutionModeV1) -> &'static str {
+    match mode {
+        ExecutionModeV1::AirGapped => "deterministic-air-gapped-v1",
+        ExecutionModeV1::Local | ExecutionModeV1::Replay | ExecutionModeV1::Fork => {
+            "deterministic-local-v1"
+        }
     }
 }
 
@@ -1510,8 +1705,11 @@ fn is_endogenous_event(event_type: &str) -> bool {
     )
 }
 
-fn plugin_versions(topology: &ProofTopology) -> Result<BTreeMap<String, String>, RuntimeError> {
-    build_registry(topology).map(|registry| {
+fn plugin_versions_for_profile(
+    topology: &ProofTopology,
+    profile_id: &str,
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    build_registry_for_profile(topology, profile_id).map(|registry| {
         registry
             .plugin_versions()
             .map(|(name, version)| (name.to_owned(), version.to_owned()))
@@ -1586,16 +1784,20 @@ fn suffix_audit(baseline: &[Event], counterfactual: &[Event], fork_cut_seq: u64)
     )
 }
 
-fn failure_probes(resource_limit: u64) -> Result<Vec<PluginFailureV1>, MoatProofError> {
+fn failure_probes(
+    resource_limit: u64,
+    profile_id: &str,
+) -> Result<Vec<PluginFailureV1>, MoatProofError> {
     ["plugin_crash", "resource_exhaustion"]
         .into_iter()
-        .map(|class| failure_probe(class, resource_limit))
+        .map(|class| failure_probe(class, resource_limit, profile_id))
         .collect()
 }
 
 fn failure_probe(
     class: &'static str,
     resource_limit: u64,
+    profile_id: &str,
 ) -> Result<PluginFailureV1, MoatProofError> {
     let sibling_steps = Arc::new(AtomicU64::new(0));
     let sibling_plugin = SiblingProbePlugin {
@@ -1610,16 +1812,33 @@ fn failure_probe(
         store_config: pos_store::StoreConfig::Memory,
     })
     .with_resource_limit(resource_limit);
+    let mut failure_details = class.as_bytes().to_vec();
+    failure_details.push(0);
+    failure_details.extend_from_slice(&resource_limit.to_be_bytes());
     result_pipeline! {
-        experiment.register(
+        reviewed_output_binding(
             &sibling_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            profile_id,
+            b"successful-sibling:v1",
+        ).map_err(MoatProofError::from) => |sibling_closure|;
+        reviewed_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            profile_id,
+            &failure_details,
+        ).map_err(MoatProofError::from) => |failure_closure|;
+        experiment.register_with_verified_output_policy(
+            &sibling_plugin,
+            sibling_closure,
             None,
             Some(Box::new(SiblingProbeDriver {
                 steps: Arc::clone(&sibling_steps),
             })),
         ).map_err(MoatProofError::from) => |()|;
-        experiment.register(
+        experiment.register_with_verified_output_policy(
             &plugin,
+            failure_closure,
             None,
             Some(Box::new(FailureProbeDriver {
                 class,
@@ -2166,6 +2385,26 @@ mod tests {
         ids::EventId,
     };
 
+    struct InvalidVersionPlugin;
+
+    impl Plugin for InvalidVersionPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-moat-version"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
+
     fn input() -> MoatProofInputV1 {
         MoatProofInputV1 {
             scenario_id: "proof-test".to_owned(),
@@ -2178,6 +2417,97 @@ mod tests {
             resource_limit: 100,
             network_enabled: false,
         }
+    }
+
+    #[test]
+    fn reviewed_output_binding_rejects_wrong_profile_and_source() {
+        let plugin = ProofAgentPlugin::new();
+        assert!(reviewed_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            "unknown-profile",
+            &[],
+        )
+        .is_err());
+        assert!(reviewed_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::World,
+            "deterministic-local-v1",
+            &[],
+        )
+        .is_err());
+
+        assert!(reviewed_output_binding(
+            &InvalidVersionPlugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            "deterministic-local-v1",
+            &[],
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn world_output_binding_reports_invalid_configuration_encoding() {
+        let plugin = WorldPlugin::new();
+        let driver = world_driver(&input(), EntityId::new(), EntityId::new()).test_ok();
+        let mut config = driver.configuration().clone();
+        config.coord_convention = u8::MAX;
+        assert!(matches!(
+            world_output_binding(&plugin, &config, EntityId::new(), "deterministic-local-v1",),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn world_policy_registers_at_public_boundary_for_driver_configuration() {
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies([body]);
+        let driver = world_driver(&input(), body, EntityId::new()).test_ok();
+        let binding = world_output_binding(
+            &plugin,
+            driver.configuration(),
+            body,
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let mut declared = binding
+            .policy()
+            .fields()
+            .output_declarations
+            .iter()
+            .map(|declaration| declaration.event_type().to_owned())
+            .collect::<Vec<_>>();
+        let mut owned = plugin
+            .capability()
+            .owned_event_types
+            .iter()
+            .map(|event_type| event_type.as_str().to_owned())
+            .collect::<Vec<_>>();
+        declared.sort_unstable();
+        owned.sort_unstable();
+
+        assert_eq!(declared, owned);
+        assert!(!declared.iter().any(|event_type| {
+            matches!(event_type.as_str(), "world.action" | "world.observation")
+        }));
+
+        let mut registry = pos_runtime::PluginRegistry::new();
+        registry
+            .register_with_verified_output_policy_and_approver(
+                &plugin,
+                binding,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(driver)),
+                Some(Box::new(plugin.clone())),
+                [Kind::new(EVENT_TYPE_ACTION_V1)],
+            )
+            .test_ok();
+        assert_eq!(
+            registry.plugin_names().collect::<Vec<_>>(),
+            vec![plugin.name()]
+        );
     }
 
     #[test]
@@ -2562,7 +2892,7 @@ mod tests {
             store_config: pos_store::StoreConfig::Memory,
         });
         experiment
-            .register(
+            .register_generated(
                 &agent_duplicate.world_plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(
@@ -2673,7 +3003,7 @@ mod tests {
         assert_eq!(frontiers[0].earliest_tick, 1);
         assert_eq!(frontiers[0].cause_node_digests.len(), 1);
 
-        let failure = failure_probe("unknown", 3).test_ok();
+        let failure = failure_probe("unknown", 3, "deterministic-local-v1").test_ok();
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert!(!failure.committed);
     }
@@ -2796,7 +3126,7 @@ mod coverage_entrypoints {
         ));
 
         assert_eq!(GateStatus::from(false), GateStatus::Failed);
-        let failure = test_ok(failure_probe("unknown", 3));
+        let failure = test_ok(failure_probe("unknown", 3, "deterministic-local-v1"));
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert_eq!(suffix_audit(&[], &[], 0), (true, false));
         assert_eq!(suffix_audit(&[], &[], 0), (true, false));
@@ -3080,7 +3410,7 @@ mod run_coverage_entrypoints {
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
         });
-        test_ok(experiment.register(
+        test_ok(experiment.register_generated(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
             Some(Box::new(test_ok(world_driver(
@@ -3107,7 +3437,7 @@ mod run_coverage_entrypoints {
             store_config: pos_store::StoreConfig::Memory,
         })
         .with_resource_limit(3);
-        test_ok(experiment.register(
+        test_ok(experiment.register_generated(
             &plugin,
             None,
             Some(Box::new(FailureProbeDriver {

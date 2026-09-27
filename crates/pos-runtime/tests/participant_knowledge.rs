@@ -595,7 +595,7 @@ fn registry_with_mode(
         ambient_subscription: ambient.then(|| pos_runtime::ProjectionKey::new(EntityId::new())),
     };
     registry
-        .register(
+        .register_generated(
             &TestPlugin {
                 id: fixture.plugin_id,
             },
@@ -1088,7 +1088,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
 
     let mut driverless = gated_registry();
     driverless
-        .register(
+        .register_generated(
             &DriverlessPlugin {
                 id: fixture.plugin_id,
             },
@@ -1174,7 +1174,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
         };
         let mut registry = gated_registry();
         registry
-            .register(
+            .register_generated(
                 &TestPlugin {
                     id: fixture.plugin_id,
                 },
@@ -1215,7 +1215,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
     };
     let mut registry = gated_registry();
     registry
-        .register(
+        .register_generated(
             &TestPlugin {
                 id: fixture.plugin_id,
             },
@@ -1224,7 +1224,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
         )
         .test_ok();
     registry
-        .register(
+        .register_generated(
             &ForeignEventOwner {
                 id: PluginId::new(),
             },

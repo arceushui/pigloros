@@ -454,6 +454,51 @@ mod tests {
     const PLUGIN_HASH: [u8; 32] = [3; 32];
     const PROVIDER_HASH: [u8; 32] = [4; 32];
 
+    struct BindingPlugin {
+        id: PluginId,
+        version: &'static str,
+    }
+
+    impl pos_core::Plugin for BindingPlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "agent"
+        }
+
+        fn version(&self) -> &'static str {
+            self.version
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability {
+                owned_event_types: vec![
+                    pos_core::Kind::new(EVENT_TYPE_ACTION),
+                    pos_core::Kind::new(RECORDER_EVENT_TYPE),
+                ],
+                ..pos_core::Capability::default()
+            }
+        }
+    }
+
+    fn provider_output_binding(
+        plugin_id: PluginId,
+        plugin_version: &'static str,
+    ) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+        let plugin = BindingPlugin {
+            id: plugin_id,
+            version: plugin_version,
+        };
+        Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )?)
+    }
+
     struct HostConfigurationFixture {
         action_ids: [&'static str; 2],
         plugin_id: PluginId,
@@ -466,6 +511,7 @@ mod tests {
 
     struct DriverFixture {
         registry: PluginRegistry,
+        store: Box<dyn pos_core::EventStore>,
         calls: FixtureProviderCallCount,
         timeline: TimelineId,
         entity: EntityId,
@@ -517,11 +563,24 @@ mod tests {
             ProviderBackedAgentDriver::new(entity, catalogue, provenance, Box::new(provider));
         let mut registry = PluginRegistry::new();
         registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-        registry.register_driver(Box::new(driver));
+        let binding = provider_output_binding(host.plugin_id, host.plugin_version).test_ok();
+        registry
+            .register_test_driver_with_verified_output_policy(
+                host.plugin_id,
+                binding,
+                Box::new(driver),
+            )
+            .test_ok();
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).test_ok();
+        store
+            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+            .test_ok();
+        let timeline = store.create_timeline("provider-driver").test_ok();
         DriverFixture {
             registry,
+            store,
             calls,
-            timeline: TimelineId::new(),
+            timeline: timeline.id(),
             entity,
             host,
         }
@@ -1081,7 +1140,11 @@ mod tests {
             .test_ok();
         assert_eq!(fixture.calls.get(), 2);
         assert_eq!(first[0].payload, retry[0].payload);
-        fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
+        let committed = fixture
+            .registry
+            .append_and_commit_step_at(fixture.store.as_mut(), Seq::ZERO, 0, &retry)
+            .test_ok();
+        assert_eq!(committed.len(), retry.len());
         fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
         let next = fixture
@@ -1245,11 +1308,14 @@ mod tests {
             ProviderAttempt::NoResponse,
             ProviderAttempt::NoResponse,
         ]);
-        fixture
+        let drafts = fixture
             .registry
             .step_all_anchored(fixture.timeline, Seq::ZERO)
             .test_ok();
-        fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
+        fixture
+            .registry
+            .append_and_commit_step_at(fixture.store.as_mut(), Seq::ZERO, 0, &drafts)
+            .test_ok();
         // committed_tick is now 1; the guard fires before verifying evidence.
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
         let err = fixture
@@ -1272,7 +1338,7 @@ mod tests {
         );
         driver.staged_restore_tick = Some(5);
         let mut registry = PluginRegistry::new();
-        registry.register_driver(Box::new(driver));
+        registry.register_test_driver(Box::new(driver));
         let timeline = TimelineId::new();
         let segments = [TimelineHistorySegment::new(timeline, Seq::ZERO)];
         let err = registry.restore_driver_state(&segments, &[]).test_err();
