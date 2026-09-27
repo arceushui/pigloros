@@ -56,6 +56,7 @@ pub mod world_history;
 pub mod world_key_evidence;
 pub mod world_recording_receipt;
 pub mod world_replay;
+pub mod world_replay_handle;
 pub mod world_transform;
 
 pub use local_cut_seal::{
@@ -336,6 +337,10 @@ pub use world_replay::WorldReplayClosureAuthorityV1;
 pub use world_replay::{
     WorldReplayAdmissionV1, WorldReplayArtifactObservationV1, WorldReplayClosureErrorV1,
     WorldReplayClosureInputV1, WorldReplayClosureV1, MAX_WORLD_REPLAY_ARTIFACTS_V1,
+};
+pub use world_replay_handle::{
+    WorldReplayHandleErrorV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
+    MAX_WORLD_REPLAY_HANDLE_BYTES_V1,
 };
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,
