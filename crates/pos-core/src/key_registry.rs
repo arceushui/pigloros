@@ -183,7 +183,7 @@ impl KeyIdentityV1 {
 
     /// Check the role and epoch admitted for retained subject-data decryption.
     ///
-    /// Adapters call this before reading the registry or taking the SQLite
+    /// Adapters call this before reading the registry or taking the `SQLite`
     /// writer reservation, preserving error precedence at every boundary.
     ///
     /// # Errors
