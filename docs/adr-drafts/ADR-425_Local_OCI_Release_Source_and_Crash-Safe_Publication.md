@@ -1,6 +1,6 @@
 # ADR-425 draft — local OCI ReleaseSource and crash-safe publication
 
-**Status:** Draft for independent review; **not accepted** | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-27
+**Status:** Draft for independent review; separate acceptance required | **Wave:** 8 | **Deciders:** core team | **Date:** 2026-09-27
 
 Related: #425 · #401 · [[ADR-061_Sandboxed_Community_Plugin_Runtime_and_Decentralized_Artifact_Trust]] · [[ADR-065_KeyRegistry_Authorized_Signing_After_Destruction]]
 
@@ -8,7 +8,7 @@ Related: #425 · #401 · [[ADR-061_Sandboxed_Community_Plugin_Runtime_and_Decent
 
 ## Status and decision boundary
 
-ADR-061 revision 8 remains **Under Review** for `PluginReleaseSigning` amendment revision 2. Its accepted prior decisions select OCI packaging, while the revision says #425's *accepted* contract must still name the source-neutral boundary, final identity, collision rule, durable publication ordering, recovery, and cleanup. This local review draft fills that decision gap. It neither amends nor accepts ADR-061 and does not authorize production code.
+ADR-061 revision 10 is **Accepted**, including its complete `PluginReleaseSigning` amendment. It selects OCI packaging and makes #425 an independently accepted prerequisite: the #425 contract must name the source-neutral boundary, final identity, collision rule, durable publication ordering, recovery, and cleanup. This local review draft supplies that missing decision for independent review. It does not amend ADR-061, and production code remains unauthorized until this exact publication contract is accepted.
 
 The decision covers obtaining and publishing an immutable, unadmitted Plugin release bundle. It excludes PMF1 semantics, release signing, KeyRegistry operations, trust admission, activation, HTTPS discovery, and remote OCI discovery. #401 maps the verified bundle to its separate BLAKE3 `release_digest`; #423 and #424 own trust and admission.
 
