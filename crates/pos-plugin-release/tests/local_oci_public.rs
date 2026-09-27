@@ -15,6 +15,7 @@ use sha2::{Digest as _, Sha256};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 const TMPFS_MAGIC: u64 = 0x0102_1994;
+type ClosureInput = (BundleAddressV1, Vec<u8>, BTreeMap<String, Vec<u8>>);
 
 struct PrivateRoot(PathBuf);
 
@@ -116,8 +117,7 @@ fn bundle_with_component(
     Ok(verify_oci_closure_v1(address, manifest, blobs)?)
 }
 
-fn closure_input(
-) -> Result<(BundleAddressV1, Vec<u8>, BTreeMap<String, Vec<u8>>), Box<dyn std::error::Error>> {
+fn closure_input() -> Result<ClosureInput, Box<dyn std::error::Error>> {
     let verified = bundle()?;
     let blobs = verified
         .blobs()
@@ -190,7 +190,7 @@ fn open_rejects_an_unsupported_filesystem_before_initialization(
         return Ok(());
     }
     if fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).is_err() {
-        let _ = fs::remove_dir(&root);
+        drop(fs::remove_dir(&root));
         return Ok(());
     }
 
