@@ -5266,19 +5266,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         &mut self,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<ErasurePersistenceInventorySnapshotV1, ErasureErrorV1> {
-        let version_before =
-            sqlite_data_version(&self.conn).map_err(map_erasure_receipt_failure)?;
-        let transaction = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(map_erasure_receipt_failure)?;
-        let snapshot = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
-        let version_after =
-            sqlite_data_version(&transaction).map_err(map_erasure_receipt_failure)?;
-        if version_before != version_after {
-            return Err(ErasureErrorV1::StaleGeneration);
-        }
-        transaction.commit().map_err(map_erasure_receipt_failure)?;
+        let (snapshot, version_after) = sqlite_complete_inventory_snapshot(&mut self.conn, limits)?;
         self.erasure_inventory_data_version = version_after;
         self.erasure_inventory_generation = Some(snapshot.generation());
         Ok(snapshot)
@@ -5361,6 +5349,23 @@ fn map_erasure_receipt_failure(_error: rusqlite::Error) -> ErasureErrorV1 {
     ErasureErrorV1::ReceiptCommitFailed
 }
 
+fn sqlite_complete_inventory_snapshot(
+    conn: &mut Connection,
+    limits: ErasureRecoveryLimitsV1,
+) -> Result<(ErasurePersistenceInventorySnapshotV1, i64), ErasureErrorV1> {
+    let version_before = sqlite_data_version(conn).map_err(map_erasure_receipt_failure)?;
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(map_erasure_receipt_failure)?;
+    let snapshot = sqlite_erasure_inventory_snapshot(&transaction, limits)?;
+    let version_after = sqlite_data_version(&transaction).map_err(map_erasure_receipt_failure)?;
+    if version_before != version_after {
+        return Err(ErasureErrorV1::StaleGeneration);
+    }
+    transaction.commit().map_err(map_erasure_receipt_failure)?;
+    Ok((snapshot, version_after))
+}
+
 fn sqlite_erasure_inventory_snapshot(
     conn: &Connection,
     limits: ErasureRecoveryLimitsV1,
@@ -5435,7 +5440,40 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
         admission: PreparedErasureForkBatchV1,
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
         let result = self.commit_fork_admission_unchecked(permit, &admission);
-        match &result {
+        self.update_inventory_generation_after_fork_admission(result, &admission);
+        result
+    }
+
+    fn recover_fork_admission(
+        &mut self,
+        operation: ErasureReferenceV1,
+        successor_inventory: &ErasureVerifiedInventoryV1,
+    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+        self.with_rollback_protected_effect_interval(|conn, hasher| {
+            sqlite_recover_fork_admission(conn, hasher, operation, successor_inventory)
+        })
+    }
+}
+
+impl SqliteStore {
+    const fn invalidate_inventory_generation_after_cas(
+        &mut self,
+        result: Result<ErasureCasOutcomeV1, ErasureErrorV1>,
+    ) {
+        if matches!(
+            result,
+            Ok(ErasureCasOutcomeV1::Applied) | Err(ErasureErrorV1::ReceiptCommitFailed)
+        ) {
+            self.erasure_inventory_generation = None;
+        }
+    }
+
+    const fn update_inventory_generation_after_fork_admission(
+        &mut self,
+        result: Result<ErasureCasOutcomeV1, ErasureErrorV1>,
+        admission: &PreparedErasureForkBatchV1,
+    ) {
+        match result {
             Ok(ErasureCasOutcomeV1::Applied) => {
                 self.erasure_inventory_generation =
                     Some(admission.successor_inventory().generation());
@@ -5445,30 +5483,21 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
             }
             Ok(ErasureCasOutcomeV1::ExactRetry) | Err(_) => {}
         }
-        result
     }
 
-    fn recover_fork_admission(
-        &mut self,
-        operation: ErasureReferenceV1,
-        successor_inventory: &ErasureVerifiedInventoryV1,
-    ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+    fn with_rollback_protected_effect_interval<T>(
+        &self,
+        effect: impl FnOnce(&Connection, &dyn Hasher) -> Result<T, ErasureErrorV1>,
+    ) -> Result<T, ErasureErrorV1> {
         let interval = self.begin_protected_effect_interval()?;
-        let recovered = sqlite_recover_fork_admission(
-            &self.conn,
-            self.hasher.as_ref(),
-            operation,
-            successor_inventory,
-        );
+        let result = effect(&self.conn, self.hasher.as_ref());
         self.finish_protected_effect_interval(
             interval,
             ErasureProtectedEffectDispositionV1::Rollback,
         )?;
-        recovered
+        result
     }
-}
 
-impl SqliteStore {
     fn commit_fork_admission_unchecked(
         &self,
         permit: &ErasureTopologyTransitionPermitV1,
@@ -5693,19 +5722,7 @@ fn sqlite_recover_fork_admission(
     successor_inventory: &ErasureVerifiedInventoryV1,
 ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
     let Some(receipt) = sqlite_fork_admission_receipt(conn, operation)? else {
-        let has_orphaned_proof = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM erasure_fork_recovery_proofs WHERE operation_digest=?1
-                )",
-                params![operation.digest().as_slice()],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(map_erasure_receipt_failure)?;
-        if has_orphaned_proof {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        return Ok(None);
+        return sqlite_missing_fork_receipt(conn, operation);
     };
     let recovered = receipt.recover(operation)?;
     let proof = sqlite_fork_recovery_proof(conn, operation)?;
@@ -5718,6 +5735,26 @@ fn sqlite_recover_fork_admission(
         },
     )?;
     Ok(Some(recovered))
+}
+
+fn sqlite_missing_fork_receipt(
+    conn: &Connection,
+    operation: ErasureReferenceV1,
+) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
+    let has_orphaned_proof = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM erasure_fork_recovery_proofs WHERE operation_digest=?1
+            )",
+            params![operation.digest().as_slice()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(map_erasure_receipt_failure)?;
+    if has_orphaned_proof {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    } else {
+        Ok(None)
+    }
 }
 
 fn sqlite_fork_recovery_proof(
@@ -6222,12 +6259,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
         let result = apply_sqlite_erasure_cas(&self.conn, &mutation);
         let result = finish_erasure_transaction(&self.conn, result);
-        match &result {
-            Ok(ErasureCasOutcomeV1::Applied) | Err(ErasureErrorV1::ReceiptCommitFailed) => {
-                self.erasure_inventory_generation = None;
-            }
-            Ok(ErasureCasOutcomeV1::ExactRetry) | Err(_) => {}
-        }
+        self.invalidate_inventory_generation_after_cas(result);
         result
     }
 }

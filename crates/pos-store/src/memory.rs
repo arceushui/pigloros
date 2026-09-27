@@ -1916,7 +1916,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
             })
             .transpose()
             .and_then(|current_digest| apply_memory_erasure_cas(self, &mutation, current_digest));
-        self.invalidate_inventory_generation_after_cas(&result);
+        self.invalidate_inventory_generation_after_cas(result);
         result
     }
 }
@@ -2789,9 +2789,9 @@ impl MemoryStore {
         }
     }
 
-    fn invalidate_inventory_generation_after_cas(
+    const fn invalidate_inventory_generation_after_cas(
         &mut self,
-        result: &Result<ErasureCasOutcomeV1, ErasureErrorV1>,
+        result: Result<ErasureCasOutcomeV1, ErasureErrorV1>,
     ) {
         if matches!(result, Ok(ErasureCasOutcomeV1::Applied)) {
             self.erasure_inventory_generation = None;

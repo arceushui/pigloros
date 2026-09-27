@@ -2465,35 +2465,7 @@ impl ErasureCommandSenderV1<'_> {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(&mut Self),
     ) -> Result<(), ErasureHostErrorV1> {
-        let generation = self.generation;
-        self.host.ensure_generation(generation)?;
-        let interval = begin_protected_effect_interval(self.host)?;
-        let gate = Arc::clone(&self.host.gate);
-        let fence_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut fenced_effect = || effect(self);
-            gate.with_fence(timeline, operation, &mut fenced_effect)
-                .map_err(ErasureHostErrorV1::from)
-        }));
-        let fence_result = match fence_result {
-            Ok(result) => result,
-            Err(payload) => {
-                let _rollback_result = finish_protected_effect_interval(
-                    self.host,
-                    interval,
-                    ErasureProtectedEffectDispositionV1::Rollback,
-                );
-                self.host.poison();
-                std::panic::resume_unwind(payload);
-            }
-        };
-        let disposition = if fence_result.is_ok() {
-            ErasureProtectedEffectDispositionV1::Commit
-        } else {
-            ErasureProtectedEffectDispositionV1::Rollback
-        };
-        finish_protected_effect_interval(self.host, interval, disposition)?;
-        fence_result?;
-        self.host.ensure_generation(self.generation)
+        with_sender_protected_effect_fence(self, timeline, operation, effect)
     }
 
     /// Read one Timeline's metadata inside a larger host command fence.
@@ -3334,35 +3306,7 @@ impl ErasureReadSenderV1<'_> {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(&mut Self),
     ) -> Result<(), ErasureHostErrorV1> {
-        let generation = self.generation;
-        self.host.ensure_generation(generation)?;
-        let interval = begin_protected_effect_interval(self.host)?;
-        let gate = Arc::clone(&self.host.gate);
-        let fence_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut fenced_effect = || effect(self);
-            gate.with_fence(timeline, operation, &mut fenced_effect)
-                .map_err(ErasureHostErrorV1::from)
-        }));
-        let fence_result = match fence_result {
-            Ok(result) => result,
-            Err(payload) => {
-                let _rollback_result = finish_protected_effect_interval(
-                    self.host,
-                    interval,
-                    ErasureProtectedEffectDispositionV1::Rollback,
-                );
-                self.host.poison();
-                std::panic::resume_unwind(payload);
-            }
-        };
-        let disposition = if fence_result.is_ok() {
-            ErasureProtectedEffectDispositionV1::Commit
-        } else {
-            ErasureProtectedEffectDispositionV1::Rollback
-        };
-        finish_protected_effect_interval(self.host, interval, disposition)?;
-        fence_result?;
-        self.host.ensure_generation(self.generation)
+        with_sender_protected_effect_fence(self, timeline, operation, effect)
     }
 
     /// Read a bounded Timeline range under the current inventory generation.
@@ -3501,6 +3445,69 @@ const fn map_store_error(error: &CoreError) -> ErasureHostErrorV1 {
         CoreError::ErasureContainmentUnavailable => ErasureHostErrorV1::RecoveryUnavailable,
         _ => ErasureHostErrorV1::AdapterFailure,
     }
+}
+
+trait ProtectedEffectSender {
+    fn host(&mut self) -> &mut ErasureExecutionHostV1;
+    fn generation(&self) -> ErasureReferenceV1;
+}
+
+impl ProtectedEffectSender for ErasureCommandSenderV1<'_> {
+    fn host(&mut self) -> &mut ErasureExecutionHostV1 {
+        self.host
+    }
+
+    fn generation(&self) -> ErasureReferenceV1 {
+        self.generation
+    }
+}
+
+impl ProtectedEffectSender for ErasureReadSenderV1<'_> {
+    fn host(&mut self) -> &mut ErasureExecutionHostV1 {
+        self.host
+    }
+
+    fn generation(&self) -> ErasureReferenceV1 {
+        self.generation
+    }
+}
+
+fn with_sender_protected_effect_fence<S: ProtectedEffectSender>(
+    sender: &mut S,
+    timeline: TimelineId,
+    operation: ErasureProtectedOperationV1,
+    effect: &mut dyn FnMut(&mut S),
+) -> Result<(), ErasureHostErrorV1> {
+    let generation = sender.generation();
+    sender.host().ensure_generation(generation)?;
+    let interval = begin_protected_effect_interval(sender.host())?;
+    let gate = Arc::clone(&sender.host().gate);
+    let fence_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut fenced_effect = || effect(sender);
+        gate.with_fence(timeline, operation, &mut fenced_effect)
+            .map_err(ErasureHostErrorV1::from)
+    }));
+    let fence_result = match fence_result {
+        Ok(result) => result,
+        Err(payload) => {
+            let _rollback_result = finish_protected_effect_interval(
+                sender.host(),
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            );
+            sender.host().poison();
+            std::panic::resume_unwind(payload);
+        }
+    };
+    let disposition = if fence_result.is_ok() {
+        ErasureProtectedEffectDispositionV1::Commit
+    } else {
+        ErasureProtectedEffectDispositionV1::Rollback
+    };
+    finish_protected_effect_interval(sender.host(), interval, disposition)?;
+    fence_result?;
+    let generation = sender.generation();
+    sender.host().ensure_generation(generation)
 }
 
 fn begin_protected_effect_interval(
