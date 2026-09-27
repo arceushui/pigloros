@@ -3,7 +3,9 @@
 //! A decoded transcript does not prove a closed host recorder, an admitted
 //! MAA1 policy, actual `PublicRecord` provenance, or protected-use authority.
 
-use crate::{public_adapter_schema_digest_v1, Hash, PluginId, WorldReplayHandleV1};
+use crate::{
+    public_adapter_schema_digest_v1, AdapterAdmissionV1, Hash, PluginId, WorldReplayHandleV1,
+};
 use std::collections::BTreeMap;
 use ulid::Ulid;
 
@@ -228,6 +230,55 @@ impl AdapterTranscriptV1 {
             }
         }
         Ok(Self(input))
+    }
+
+    /// Compare every captured call with the exact MAA1 record named by MAT1.
+    ///
+    /// This structural comparison does not prove the MAA1 row was committed by
+    /// the owner, that the recorder was closed, or that payload provenance was
+    /// classified as `PublicRecord` at the controlled adapter seam.
+    ///
+    /// # Errors
+    /// Rejects another owner or MAA1 digest, or a call without one exact
+    /// matching `PluginId`, adapter tuple, and configuration digest. Both
+    /// record constructors already require the fixed public-byte schema.
+    pub fn compare_call_contracts(
+        &self,
+        admission: &AdapterAdmissionV1,
+    ) -> Result<(), AdapterTranscriptErrorV1> {
+        if admission.as_input().owner_reference != self.0.owner_reference
+            || admission.digest() != self.0.adapter_admission_digest
+        {
+            return Err(AdapterTranscriptErrorV1::InvalidIdentity);
+        }
+        let entries = &admission.as_input().entries;
+        for call in &self.0.calls {
+            let input = call.input.as_input();
+            let key = (
+                call.plugin_id,
+                input.adapter_id.as_str(),
+                input.provider_id.as_str(),
+                input.operation_id.as_str(),
+                input.protocol_version,
+            );
+            let Ok(index) = entries.binary_search_by(|entry| {
+                (
+                    entry.plugin_id,
+                    entry.adapter_id.as_str(),
+                    entry.provider_id.as_str(),
+                    entry.operation_id.as_str(),
+                    entry.protocol_version,
+                )
+                    .cmp(&key)
+            }) else {
+                return Err(AdapterTranscriptErrorV1::InvalidCall);
+            };
+            let entry = &entries[index];
+            if input.configuration_digest != entry.configuration_digest {
+                return Err(AdapterTranscriptErrorV1::InvalidCall);
+            }
+        }
+        Ok(())
     }
 
     /// Borrow structurally checked fields without granting release authority.
