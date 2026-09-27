@@ -4665,6 +4665,22 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_projection_slot_rejects_before_schema_mutation() {
+        let mut registry = gated_registry();
+        let id = PluginId::new();
+        registry
+            .install_reducer(id, "same", Some(Box::new(CountReducer)), true)
+            .test_ok();
+        let schemas_before = registry.schemas.len();
+        assert!(matches!(
+            registry.install_reducer(id, "other", Some(Box::new(CountReducer)), true),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert_eq!(registry.projections.reducer_names(), vec!["same"]);
+    }
+
+    #[test]
     fn test_driver_duplicate_is_rejected_before_policy_validation() {
         let mut registry = gated_registry();
         register_output_driver(&mut registry, &["duplicate.output"], Box::new(NoopDriver));

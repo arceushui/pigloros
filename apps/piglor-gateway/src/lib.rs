@@ -473,25 +473,18 @@ mod coverage_tests {
         let plugin = GatewayActionPlugin {
             id: PluginId::new(),
         };
-        let binding = installed_gateway_binding(&plugin);
+        let binding = gateway_output_binding(&plugin, &[]).test_ok();
         let digest = binding.policy().digest();
         let role = pos_runtime::installed_plugin_role_v1(&plugin);
         let mut registry = PluginRegistry::new().without_erasure_gate();
-        let pin = PluginPinV1::try_new(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
-            digest,
+        super::register_bound_gateway_world_action(
+            &mut registry,
+            &plugin,
+            super::WorldPlugin::new(),
+            binding,
             vec![role],
         )
         .test_ok();
-        registry
-            .register_installed_output(
-                &plugin,
-                binding,
-                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
-                None,
-            )
-            .test_ok();
         assert_eq!(
             registry.composition().plugins[0]
                 .pin

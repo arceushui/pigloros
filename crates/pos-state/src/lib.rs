@@ -2188,7 +2188,7 @@ mod tests {
             reducer: "missing-reducer".to_owned(),
             prior_snapshot_digest: None,
         };
-        let registry = ProjectionRegistry::new();
+        let mut registry = ProjectionRegistry::new();
         let subject = EntityId::new();
         let participant = EntityId::new();
         let plugin = PluginId::new();
@@ -2239,6 +2239,37 @@ mod tests {
                 &context,
             ),
             Err(AuthorityErrorV1::UnauthorizedSource)
+        );
+
+        let bound = projection_request(
+            &fixture.request,
+            Some(subject),
+            Some(participant),
+            Some((plugin, [1; 16])),
+            fixture.request.consent().clone(),
+        );
+        test_ok(registry.register_installed_reducer(
+            PluginId::new(),
+            "missing-reducer",
+            Box::new(EntityStateProjection),
+        ));
+        assert_eq!(
+            registry.materialize_authorized_projection(&bound, &fixture.decision, &context),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        test_ok(registry.register_installed_reducer(
+            plugin,
+            "missing-reducer",
+            Box::new(EntityStateProjection),
+        ));
+        assert_eq!(
+            registry.materialize_authorized_projection(&bound, &fixture.decision, &context),
+            Err(AuthorityErrorV1::UnauthorizedSource)
+        );
+        registry.register("missing-reducer", Box::new(EntityStateProjection));
+        assert_eq!(
+            registry.materialize_authorized_projection(&bound, &fixture.decision, &context),
+            Err(AuthorityErrorV1::SourceUnavailable)
         );
     }
 }
