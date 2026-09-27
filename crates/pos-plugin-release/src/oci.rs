@@ -889,17 +889,20 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (_, manifest, mut blobs) = closure()?;
         let mut value: serde_json::Value = serde_json::from_slice(&manifest)?;
+        let mut fixtures = Vec::new();
         for index in 0..3 {
             let bytes = vec![u8::try_from(index)?; 22 * 1024 * 1024];
             let digest = digest(&bytes);
-            value["layers"]
-                .as_array_mut()
-                .ok_or("fixture layers")?
-                .push(layer(
-                    &format!("migration-fixture/{}", &digest[7..]),
-                    "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
-                    &bytes,
-                ));
+            fixtures.push((digest, bytes));
+        }
+        fixtures.sort_by(|left, right| left.0.cmp(&right.0));
+        let layers = value["layers"].as_array_mut().ok_or("fixture layers")?;
+        for (digest, bytes) in fixtures {
+            layers.push(layer(
+                &format!("migration-fixture/{}", &digest[7..]),
+                "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
+                &bytes,
+            ));
             blobs.insert(digest, bytes);
         }
         assert_eq!(
