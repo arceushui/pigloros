@@ -798,7 +798,7 @@ impl SqliteStore {
         let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let erasure_gate_bound = false;
 
-        let store = Self {
+        let mut store = Self {
             conn,
             erasure_effect_lock_connection,
             hasher,
@@ -819,6 +819,10 @@ impl SqliteStore {
         store.prepare_schema(initialize_schema)?;
         store.validate_event_signature_schema()?;
         store.validate_event_sequence_invariant()?;
+        // WAL initialization may advance this connection's data_version. The
+        // bound inventory baseline must describe the fully opened store.
+        store.erasure_inventory_data_version = sqlite_data_version(&store.conn)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(store)
     }
 
