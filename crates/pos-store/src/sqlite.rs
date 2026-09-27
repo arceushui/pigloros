@@ -7672,6 +7672,66 @@ mod tests {
         store.conn.execute_batch("ROLLBACK").test_ok();
     }
 
+    #[test]
+    fn bounded_read_rejects_a_denied_snapshot_transaction() {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        let store = new_store();
+        store
+            .conn
+            .authorizer(Some(|_context: AuthContext<'_>| Authorization::Deny))
+            .test_ok();
+        assert!(matches!(
+            store.read_logical_bounded(
+                TimelineId::new(),
+                SeqRange::all(),
+                EventReadBounds::new(1, 1, 1, 1),
+                Instant::now(),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+    }
+
+    #[test]
+    fn event_row_decoder_rejects_a_non_integer_sequence() {
+        let store = new_store();
+        let decoded = store
+            .conn
+            .query_row("SELECT 'not-an-integer'", [], |row| {
+                Ok(decode_event_row(row))
+            })
+            .test_ok();
+        assert!(matches!(decoded, Err(CoreError::Storage(_))));
+    }
+
+    #[test]
+    fn timeline_creation_rejects_a_denied_existence_check() {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        let store = new_store();
+        store
+            .conn
+            .authorizer(Some(|_context: AuthContext<'_>| Authorization::Deny))
+            .test_ok();
+        let meta = TimelineMeta::root("denied-existence-check");
+        assert!(matches!(
+            SqliteStore::create_timeline_with_meta_in_transaction(
+                &store.conn,
+                store.hasher.as_ref(),
+                &meta,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+    }
+
     fn cover_sqlite_host_transition_success(
         store: &mut SqliteStore,
         gate: &ErasureContainmentGateV1,
