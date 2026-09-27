@@ -184,12 +184,8 @@ fn require_supported_store_key_owner() -> Result<(), CliError> {
     ))
 }
 
-#[cfg(unix)]
-fn require_supported_store_key_owner() -> Result<(), CliError> {
-    Ok(())
-}
-
 fn open_sqlite_store(db: &Path, key: Option<&Path>) -> Result<Box<dyn LedgerStore>, CliError> {
+    #[cfg(not(unix))]
     require_supported_store_key_owner()?;
     let key_path = key.ok_or_else(|| bad_source("store: source requires --key <path>"))?;
     let mut event_store: Box<dyn pos_core::store::EventStore> = Box::new(
