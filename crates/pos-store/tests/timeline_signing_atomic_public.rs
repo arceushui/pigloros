@@ -499,6 +499,9 @@ fn sqlite_insert_failure_discards_signed_event_and_allows_retry(
          BEGIN SELECT RAISE(ABORT, 'injected signed insertion failure'); END;",
     )?;
     drop(connection);
+    drop(store);
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
 
     assert!(append_signed(
         &mut store,
@@ -515,6 +518,9 @@ fn sqlite_insert_failure_discards_signed_event_and_allows_retry(
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("DROP TRIGGER reject_signed_insert")?;
     drop(connection);
+    drop(store);
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let committed = append_signed(
         &mut store,
         timeline.id(),
