@@ -1403,9 +1403,8 @@ mod tests {
             (5, unsigned(0)),
             (6, unsigned(0)),
         ] {
-            let mut entry = match valid.clone() {
-                Value::Array(fields) => fields,
-                _ => return Err("expected array".into()),
+            let Value::Array(mut entry) = valid.clone() else {
+                return Err("expected array".into());
             };
             entry[index] = replacement;
             let mut fields = revocation_fields(root_digest, 1, None, Vec::new());
@@ -1442,9 +1441,8 @@ mod tests {
             (2, unsigned(5)),
             (3, unsigned(1)),
         ] {
-            let mut entry = match valid.clone() {
-                Value::Array(fields) => fields,
-                _ => return Err("expected array".into()),
+            let Value::Array(mut entry) = valid.clone() else {
+                return Err("expected array".into());
             };
             entry[index] = replacement;
             let fields = revocation_fields(root_digest, 1, None, vec![Value::Array(entry)]);
