@@ -1016,7 +1016,7 @@ mod tests {
     fn uses_ordered_chunks_and_releases_no_plaintext_on_failure(
     ) -> Result<(), RecipientExportErrorV1> {
         let (recipient, private) = recipient()?;
-        let source = export(None, vec![3; CHUNK_BYTES + 1]);
+        let source = export(None, vec![3; CHUNK_BYTES * 2]);
         let mut rng = StdRng::from_seed([7; 32]);
         let mut envelope = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
         assert_eq!(envelope.ciphertext_chunks.len(), 2);
