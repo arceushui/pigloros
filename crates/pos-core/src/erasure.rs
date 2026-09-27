@@ -1035,6 +1035,20 @@ impl ErasureContainmentGateV1 {
             .ok_or(ErasureContainmentErrorV1::RecoveryUnavailable)
     }
 
+    /// Whether this still-available gate is the open fixture with no inventory.
+    ///
+    /// Production gates always return false. This does not grant authority to
+    /// install an inventory or perform a protected effect.
+    #[must_use]
+    pub fn permits_unverified_test_fixture(&self) -> bool {
+        !self.fail_closed_unbound
+            && self.ensure_available().is_ok()
+            && self
+                .authority
+                .read()
+                .is_ok_and(|authority| authority.inventory.is_none())
+    }
+
     const fn containment_rank(lifecycle: ErasureLifecycleV1) -> u8 {
         match lifecycle {
             ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => 0,
@@ -6146,6 +6160,34 @@ mod coverage_paths {
             Ok(generation)
         );
         assert_eq!(claims, Some((true, true, false, false, false)));
+        Ok(())
+    }
+
+    #[test]
+    fn unverified_inventory_permission_is_limited_to_an_available_test_fixture(
+    ) -> Result<(), ErasureErrorV1> {
+        let production = ErasureContainmentGateV1::new_fail_closed();
+        assert!(!production.permits_unverified_test_fixture());
+
+        let open = ErasureContainmentGateV1::new_test_open();
+        assert!(open.permits_unverified_test_fixture());
+        let inventory =
+            ErasureVerifiedInventoryV1::from_verified_recovery(Vec::new(), Vec::new(), 1)?;
+        assert!(open
+            .install_verified_inventory(
+                Arc::new(inventory),
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .is_ok());
+        assert!(!open.permits_unverified_test_fixture());
+
+        let poisoned = ErasureContainmentGateV1::new_test_open();
+        poisoned.poison();
+        assert!(!poisoned.permits_unverified_test_fixture());
+
+        let poisoned_authority = Arc::new(ErasureContainmentGateV1::new_test_open());
+        poison_authority(&poisoned_authority);
+        assert!(!poisoned_authority.permits_unverified_test_fixture());
         Ok(())
     }
 

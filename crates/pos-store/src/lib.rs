@@ -195,10 +195,8 @@ pub(crate) fn validate_bound_erasure_inventory_generation(
     match gate.inventory_generation() {
         Ok(generation) if Some(generation) == inventory_generation => Ok(()),
         Ok(_) => Err(CoreError::ErasureContainmentUnavailable),
-        // The open test fixture deliberately has no installed inventory. In
-        // production, the gate itself rejects protected effects until one is
-        // installed; this helper only checks consistency once it exists.
-        Err(_) => Ok(()),
+        Err(_) if gate.permits_unverified_test_fixture() => Ok(()),
+        Err(_) => Err(CoreError::ErasureContainmentUnavailable),
     }
 }
 

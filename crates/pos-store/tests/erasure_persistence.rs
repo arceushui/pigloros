@@ -158,6 +158,31 @@ fn sqlite_host_managed_topology_requires_verified_transitions(
     assert_host_managed_topology_requires_verified_transitions(SqliteStore::open_in_memory()?)
 }
 
+fn assert_poisoned_bound_gate_rejects_registry_write<S: EventStore>(
+    mut store: S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let gate = bind_test_gate(&mut store)?;
+    assert_eq!(store.load_key_registry()?, None);
+    gate.poison();
+    assert!(matches!(
+        store.save_key_registry(&pos_core::KeyRegistryStateV1::new()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert_eq!(store.load_key_registry()?, None);
+    Ok(())
+}
+
+#[test]
+fn memory_poisoned_bound_gate_rejects_registry_write() -> Result<(), Box<dyn std::error::Error>> {
+    assert_poisoned_bound_gate_rejects_registry_write(MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_poisoned_bound_gate_rejects_registry_write() -> Result<(), Box<dyn std::error::Error>> {
+    assert_poisoned_bound_gate_rejects_registry_write(SqliteStore::open_in_memory()?)
+}
+
 fn assert_direct_erasure_cas_invalidates_bound_inventory<S>(
     mut store: S,
 ) -> Result<(), Box<dyn std::error::Error>>
