@@ -622,6 +622,24 @@ fn validate_private_file(
     Ok(())
 }
 
+fn validate_new_private_file(
+    metadata: &std::fs::Metadata,
+    expected: RecipientPrivateFileIdentityV1,
+) -> Result<(), CoreError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || RecipientPrivateFileIdentityV1::from_metadata(metadata) != expected
+    {
+        return Err(CoreError::Storage(
+            "recipient new private file is not the bound private single-link file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_bound_entry(
     owner: &RecipientKeyOwnerV1,
     name: &Path,
@@ -745,10 +763,14 @@ fn write_private_key(
             "recipient private file owner differs from private directory owner".to_owned(),
         ));
     }
-    validate_private_file(&metadata, identity)?;
+    validate_new_private_file(&metadata, identity)?;
     file.write_all(private_key)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
     fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    validate_private_file(&metadata, identity)?;
     fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))?;
     verify_bound_entry(owner, name, identity)?;
     Ok(identity)
