@@ -216,6 +216,20 @@ fn edges_reject_missing_wrong_and_aliased_children() -> Result<(), Box<dyn std::
         inspect_artifact_registration_graph_v1(root.address, &[root.clone(), wrong_owner]),
         Err(ArtifactRegistrationGraphErrorV1::OwnerMismatch)
     );
+    let mut wrong_address = child.clone();
+    wrong_address.address = Hash::from_bytes([99; 32]);
+    let alias_root = node(
+        3,
+        owner_id,
+        ErasureArtifactClassV1::TimelineReplay,
+        ArtifactOptionalityV1::Required,
+        vec![edge(&wrong_address, true)],
+        Vec::new(),
+    )?;
+    assert_eq!(
+        inspect_artifact_registration_graph_v1(alias_root.address, &[alias_root, wrong_address]),
+        Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch)
+    );
     let mut alias = child;
     alias.address = root.registration.fields().child_artifacts[0].registration_address;
     alias.registration = node(
