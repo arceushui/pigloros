@@ -5428,12 +5428,18 @@ impl ErasureForkPersistencePortV1 for SqliteStore {
         operation: ErasureReferenceV1,
         successor_inventory: &ErasureVerifiedInventoryV1,
     ) -> Result<Option<ErasureForkRecoveryV1>, ErasureErrorV1> {
-        sqlite_recover_fork_admission(
+        let interval = self.begin_protected_effect_interval()?;
+        let recovered = sqlite_recover_fork_admission(
             &self.conn,
             self.hasher.as_ref(),
             operation,
             successor_inventory,
-        )
+        );
+        self.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        recovered
     }
 }
 

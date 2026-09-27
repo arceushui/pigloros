@@ -2620,6 +2620,91 @@ fn sqlite_exact_durable_fork_retry_preserves_current_inventory(
 }
 
 #[test]
+fn sqlite_stale_host_refreshes_before_exact_fork_retry() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-erasure-stale-retry-{}.sqlite",
+        TimelineId::new()
+    ));
+    let path_text = path.to_string_lossy().into_owned();
+    let authority: Arc<dyn ErasureCoordinatorAuthorityV1> = Arc::new(TestAuthority::default());
+    let mut stale_host = test_stage(
+        "open original Fork host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            Arc::clone(&authority),
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let operation = reference(43);
+    let (parent, original_child) = {
+        let mut commands = test_stage("open original Fork sender", stale_host.command_sender())?;
+        let parent = test_stage(
+            "create original Fork parent",
+            commands.create_timeline("parent"),
+        )?;
+        let child = test_stage(
+            "commit original identified Fork",
+            commands.fork_timeline_identified(operation, parent.id(), pos_core::Seq::ZERO, "child"),
+        )?;
+        (parent.id(), child.id())
+    };
+    let mut current_host = test_stage(
+        "open second Fork host",
+        open_with_authority(
+            StoreConfig::Sqlite {
+                path: path_text.clone(),
+            },
+            authority,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let intervening = {
+        let mut commands = test_stage("open second Fork sender", current_host.command_sender())?;
+        test_stage(
+            "advance durable topology",
+            commands.create_timeline("intervening"),
+        )?
+    };
+    {
+        let mut commands = test_stage("open stale retry sender", stale_host.command_sender())?;
+        assert_eq!(
+            commands.recover_fork_admission(operation).err(),
+            Some(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert_eq!(
+            commands.fork_timeline_identified(operation, parent, pos_core::Seq::ZERO, "child"),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+    }
+    {
+        let mut commands = test_stage("open refreshed retry sender", stale_host.command_sender())?;
+        let retried = test_stage(
+            "retry original Fork after host inventory refresh",
+            commands.fork_timeline_identified(operation, parent, pos_core::Seq::ZERO, "child"),
+        )?;
+        assert_eq!(retried.id(), original_child);
+    }
+    assert_eq!(stale_host.status(), ErasureHostStatusV1::Ready);
+    let mut reads = test_stage("read refreshed Fork topology", stale_host.read_sender())?;
+    let timelines = test_stage("list refreshed Fork topology", reads.timelines())?;
+    assert_eq!(timelines.len(), 3);
+    assert!(timelines
+        .iter()
+        .any(|timeline| timeline.id() == original_child));
+    assert!(timelines
+        .iter()
+        .any(|timeline| timeline.id() == intervening.id()));
+    drop(reads);
+    drop(current_host);
+    drop(stale_host);
+    remove_sqlite_store_files(path, &path_text)
+}
+
+#[test]
 fn sqlite_stale_fork_refreshes_host_inventory_before_protected_reads(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(

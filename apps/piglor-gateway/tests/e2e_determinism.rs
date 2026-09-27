@@ -223,6 +223,7 @@ impl AgentPolicy for BarrierPolicy {
 
 struct HttpResponse {
     status: u16,
+    body: Value,
 }
 
 async fn request_http(
@@ -292,8 +293,8 @@ fn request_http_blocking_with_actor(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .test_ok()?;
-    let _: Value = serde_json::from_slice(&response[header_end + 4..]).test_ok()?;
-    Ok(HttpResponse { status })
+    let body = serde_json::from_slice(&response[header_end + 4..]).test_ok()?;
+    Ok(HttpResponse { status, body })
 }
 
 struct FixtureGuard {
@@ -930,6 +931,49 @@ fn assert_replay(
 async fn multi_rate_human_ai_replay_is_deterministic() {
     let result = multi_rate_human_ai_replay_is_deterministic_impl().await;
     assert!(result.is_ok(), "multi-rate replay failed: {result:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_backed_http_action_and_poll_succeed_without_a_competing_writer(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let scenario = create_scenario().await?;
+    let action = request_http(
+        scenario.address,
+        "POST",
+        &format!("/v1/timelines/{}/actions", scenario.timeline),
+        Some(json!({
+            "entity_id": scenario.human_entity.to_string(),
+            "event_type": "world.action.v1",
+            "capability": "world.action.v1.submit",
+            "payload": {
+                "actor_entity_id": scenario.human_entity.to_string(),
+                "body_entity_id": scenario.human_body.to_string(),
+                "action_kind": "impulse",
+                "params": [1.0, 0.0],
+                "action_scope": 0,
+                "catalogue_version": 1,
+                "tick": 1
+            },
+        })),
+    )
+    .await?;
+    assert_eq!(action.status, 201);
+    let page = request_http_with_actor(
+        scenario.address,
+        "GET",
+        &format!(
+            "/v1/timelines/{}/events?from_seq=0&limit=10",
+            scenario.timeline
+        ),
+        None,
+        Some(scenario.human_entity),
+    )
+    .await?;
+    assert_eq!(page.status, 200);
+    let events = page.body["events"].as_array().test_ok()?;
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[2]["event_type"], "world.action.v1");
+    scenario.guard.shutdown().await
 }
 
 async fn multi_rate_human_ai_replay_is_deterministic_impl(

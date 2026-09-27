@@ -2354,7 +2354,7 @@ pub trait ErasureInventoryPersistencePortV1 {
 
     /// End an interval started by [`Self::begin_protected_effect_interval`].
     ///
-    /// The disposition is `Rollback` when the local Tick Boundary rejected the
+    /// The disposition is `Rollback` when the containment fence rejected the
     /// protected operation. Implementations must release or roll back only an
     /// interval owned by the matching begin call.
     ///
@@ -3866,7 +3866,7 @@ impl ErasureForkRetryScopeRequirementV1 {
     }
 }
 
-fn update_fork_child_identity(
+fn update_fork_child_fields_without_fork_point(
     hasher: &mut blake3::Hasher,
     child: &crate::TimelineMeta,
     mode_encoding: &[u8],
@@ -3927,7 +3927,7 @@ fn fork_admission_binding_digest(
     ] {
         hasher.update(&reference.digest());
     }
-    update_fork_child_identity(&mut hasher, input.child, &[0]);
+    update_fork_child_fields_without_fork_point(&mut hasher, input.child, &[0]);
     hasher.update(&parent.inner().to_bytes());
     hasher.update(&at_seq.as_u64().to_be_bytes());
     ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
@@ -3954,7 +3954,7 @@ fn fork_batch_binding_digest(
     ] {
         hasher.update(&reference.digest());
     }
-    update_fork_child_identity(&mut hasher, child, b"historical");
+    update_fork_child_fields_without_fork_point(&mut hasher, child, b"historical");
     hasher.update(&parent.inner().to_bytes());
     hasher.update(&at_seq.as_u64().to_be_bytes());
     hasher.update(
@@ -4156,7 +4156,7 @@ impl ErasureForkRecoveryV1 {
         hasher.update(&expected_inventory_generation.digest());
         hasher.update(&child_scope.digest());
         hasher.update(&successor_generation.digest());
-        update_fork_child_identity(&mut hasher, child, b"historical");
+        update_fork_child_fields_without_fork_point(&mut hasher, child, b"historical");
         let (parent, at_seq) = fork_point;
         hasher.update(&parent.inner().to_bytes());
         hasher.update(&at_seq.as_u64().to_be_bytes());

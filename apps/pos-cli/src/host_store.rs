@@ -185,7 +185,7 @@ mod hosted_cli_store_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sqlite_replay_read_stays_inside_the_host_fence() -> Result<(), Box<dyn std::error::Error>> {
+    fn sqlite_bounded_read_stays_inside_the_host_fence() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::TempDir::new()?;
         let path = directory.path().join("cli-replay.db");
         let config = StoreConfig::Sqlite {
