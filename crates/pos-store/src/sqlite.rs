@@ -5261,6 +5261,14 @@ impl crate::ErasureRejoinPersistencePortV1 for SqliteStore {
     }
 }
 
+fn rollback_stale_protected_effect_interval(conn: &Connection) -> ErasureErrorV1 {
+    if conn.execute_batch("ROLLBACK").is_ok() {
+        ErasureErrorV1::StaleGeneration
+    } else {
+        ErasureErrorV1::ReceiptCommitFailed
+    }
+}
+
 impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn complete_erasure_inventory_snapshot(
         &mut self,
@@ -5299,17 +5307,15 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             return Err(ErasureErrorV1::ReceiptCommitFailed);
         };
         if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
-            return match interval_connection.execute_batch("ROLLBACK") {
-                Ok(()) => Err(ErasureErrorV1::StaleGeneration),
-                Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
-            };
+            return Err(rollback_stale_protected_effect_interval(
+                interval_connection,
+            ));
         }
         if self.erasure_gate_bound {
             let Some(gate) = self.erasure_gate.as_deref() else {
-                return match interval_connection.execute_batch("ROLLBACK") {
-                    Ok(()) => Err(ErasureErrorV1::StaleGeneration),
-                    Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
-                };
+                return Err(rollback_stale_protected_effect_interval(
+                    interval_connection,
+                ));
             };
             if crate::validate_bound_erasure_inventory_generation(
                 self.erasure_gate_bound,
@@ -5318,10 +5324,9 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             )
             .is_err()
             {
-                return match interval_connection.execute_batch("ROLLBACK") {
-                    Ok(()) => Err(ErasureErrorV1::StaleGeneration),
-                    Err(_) => Err(ErasureErrorV1::ReceiptCommitFailed),
-                };
+                return Err(rollback_stale_protected_effect_interval(
+                    interval_connection,
+                ));
             }
         }
         Ok(ErasureProtectedEffectIntervalV1::Owned)
