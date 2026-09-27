@@ -178,8 +178,9 @@ fn scope_with_members(
 
 fn scope_with_members_and_timelines(
     scope_members: Vec<ErasureReferenceV1>,
-    scope_timeline_ids: Vec<TimelineId>,
+    mut scope_timeline_ids: Vec<TimelineId>,
 ) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+    scope_timeline_ids.sort_unstable();
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members,
