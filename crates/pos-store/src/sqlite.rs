@@ -2140,6 +2140,7 @@ struct TimelineRow {
     head_seq: i64,
 }
 
+#[derive(Clone, Copy)]
 enum TopologyInitializationPath {
     Direct,
     HostTransition,
