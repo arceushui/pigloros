@@ -645,6 +645,7 @@ fn claim_recipient_custody_directory(
     connection: &rusqlite::Connection,
     owner: &RecipientKeyOwnerV1,
 ) -> Result<(), CoreError> {
+    let grantee_id = owner.grantee_id.to_string();
     let claimed_grantee = connection
         .query_row(
             "SELECT grantee_id FROM recipient_custody_directory_claims_v1
@@ -658,7 +659,7 @@ fn claim_recipient_custody_directory(
         .optional()
         .map_err(|error| CoreError::Storage(error.to_string()))?;
     if let Some(claimed_grantee) = claimed_grantee {
-        if claimed_grantee == owner.grantee_id.as_str() {
+        if claimed_grantee == grantee_id {
             return validate_directory_inventory_grantees(connection, owner);
         }
         return Err(CoreError::Storage(
@@ -674,7 +675,7 @@ fn claim_recipient_custody_directory(
             rusqlite::params![
                 owner.directory_identity.device.as_slice(),
                 owner.directory_identity.inode.as_slice(),
-                owner.grantee_id.as_str(),
+                grantee_id,
             ],
         )
         .map(|_| ())
