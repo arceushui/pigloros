@@ -52,7 +52,12 @@ serde_bytes = "0.11"
 # Crypto
 blake3 = "1"
 ed25519-dalek = { version = "3", features = ["serde", "rand_core", "zeroize"] }
-hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
+hpke = { version = "=0.14.1", default-features = false, features = [
+  "alloc",
+  "getrandom",
+  "x25519",
+  "chacha",
+] }
 libc = "0.2"
 sha2 = "0.11"
 rand = "0.10"
