@@ -941,11 +941,12 @@ mod tests {
     }
 
     fn event(sequence: u64, payload: Vec<u8>) -> Event {
+        let payload_hash = Hash::from_bytes(*blake3::hash(&payload).as_bytes());
         Event {
             id: EventId::from_ulid(id(100 + u128::from(sequence))),
             entity: EntityId::from_ulid(id(200)),
             event_type: Kind::new("test.event"),
-            payload: CanonicalBytes::from_vec(payload.clone()),
+            payload: CanonicalBytes::from_vec(payload),
             wall_time: WallTime::from_micros(sequence),
             seq: Seq::from_u64(sequence),
             causation_id: None,
@@ -954,7 +955,7 @@ mod tests {
             signature: None,
             signature_identity: None,
             origin: None,
-            payload_hash: Hash::from_bytes(*blake3::hash(&payload).as_bytes()),
+            payload_hash,
         }
     }
 
