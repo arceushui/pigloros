@@ -5975,6 +5975,92 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     }
 }
 
+fn prepare_admitted_local_fork(
+    tx: &rusqlite::Transaction<'_>,
+    request: &CreateForkAdmittedRequestV1,
+) -> Result<(Timeline, ForkAdmissionRecordV1), ForkAdmissionErrorV1> {
+    let principal_digest = pos_core::principal_digest_v1(request.authenticated.principal())?;
+    let binding_record = tx.query_row(
+        "SELECT operation_id, owner_id, pob1_cbor FROM fork_principal_owner_bindings WHERE principal_digest = ?1",
+        params![principal_digest.as_bytes().as_slice()],
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    ).optional().map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?
+        .ok_or(ForkAdmissionErrorV1::Unauthenticated)?;
+    let binding_operation: [u8; 32] = binding_record
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+    let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+        operation_id: Hash::from_bytes(binding_operation),
+        principal_digest,
+        owner: OwnerIdV1::new(binding_record.1)
+            .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?,
+        origin: ForkAuthorityOriginV1::Local,
+    })?;
+    if binding.to_canonical_cbor() != binding_record.2 {
+        return Err(ForkAdmissionErrorV1::CorruptAuthority);
+    }
+    let parent = tx
+        .query_row(
+            "SELECT fork_seq, head_seq, chain_head FROM timelines WHERE id = ?1",
+            params![request.parent_timeline_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?
+        .ok_or(ForkAdmissionErrorV1::ParentChanged)?;
+    let prefix = parent.0.map_or(Ok(0_u64), |value| {
+        u64::try_from(value).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)
+    })?;
+    let local_head = u64::try_from(parent.1).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+    let head = prefix
+        .checked_add(local_head)
+        .ok_or(ForkAdmissionErrorV1::CorruptAuthority)?;
+    if head != request.completed_fold_cursor {
+        return Err(ForkAdmissionErrorV1::StaleFoldBoundary);
+    }
+    let chain: [u8; 32] = parent
+        .2
+        .as_slice()
+        .try_into()
+        .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+    let child = Timeline::new(TimelineMeta::forked_from(
+        request.parent_timeline_id,
+        Seq::from_u64(head),
+        &request.child_name,
+    ));
+    let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+        operation_id: request.operation_id,
+        principal_owner_binding_digest: binding.digest(),
+        creator: binding.input().owner,
+        parent_timeline_id: request.parent_timeline_id,
+        child_timeline_id: child.id(),
+        room_revision_descriptor_hash: request.room_revision_descriptor_hash,
+        parent_logical_head: head,
+        parent_chain_head_hash: Hash::from_bytes(chain),
+        completed_fold_cursor: request.completed_fold_cursor,
+        post_fold_tick_boundary: request.post_fold_tick_boundary,
+        plugin_composition_hash: request.plugin_composition_hash,
+        attribution_required: request.attribution_required,
+        origin: pos_core::ForkAttributionOriginV1::Local,
+    })
+    .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+    Ok((child, admission))
+}
+
 impl ForkAdmissionAuthorityPortV1 for SqliteStore {
     fn bind_principal_owner_trust(
         &mut self,
@@ -6025,7 +6111,7 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                 && stored_owner == binding.input().owner.as_str()
                 && existing == canonical
             {
-                Ok(binding.clone())
+                Ok(binding)
             } else {
                 Err(ForkAdmissionErrorV1::Conflict)
             }
@@ -6042,7 +6128,7 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                     "INSERT INTO fork_principal_owner_bindings (operation_id, principal_digest, owner_id, pob1_cbor) VALUES (?1, ?2, ?3, ?4)",
                     params![operation_id.as_bytes().as_slice(), principal_digest.as_bytes().as_slice(), binding.input().owner.as_str(), canonical],
                 ).map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
-                Ok(binding.clone())
+                Ok(binding)
             }
         };
         match result {
@@ -6115,89 +6201,12 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                 Err(ForkAdmissionErrorV1::CorruptAuthority)
             };
         }
-        let principal_digest = pos_core::principal_digest_v1(request.authenticated.principal())?;
-        let binding_record = tx.query_row(
-            "SELECT operation_id, owner_id, pob1_cbor FROM fork_principal_owner_bindings WHERE principal_digest = ?1",
-            params![principal_digest.as_bytes().as_slice()],
-            |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        ).optional().map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?
-            .ok_or(ForkAdmissionErrorV1::Unauthenticated)?;
-        let binding_operation: [u8; 32] = binding_record
-            .0
-            .as_slice()
-            .try_into()
-            .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
-        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
-            operation_id: Hash::from_bytes(binding_operation),
-            principal_digest,
-            owner: OwnerIdV1::new(binding_record.1)
-                .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?,
-            origin: ForkAuthorityOriginV1::Local,
-        })?;
-        if binding.to_canonical_cbor() != binding_record.2 {
-            return Err(ForkAdmissionErrorV1::CorruptAuthority);
-        }
-        let parent = tx
-            .query_row(
-                "SELECT fork_seq, head_seq, chain_head FROM timelines WHERE id = ?1",
-                params![request.parent_timeline_id.to_string()],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?
-            .ok_or(ForkAdmissionErrorV1::ParentChanged)?;
-        let prefix = parent.0.map_or(Ok(0_u64), |value| {
-            u64::try_from(value).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)
-        })?;
-        let local_head =
-            u64::try_from(parent.1).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
-        let head = prefix
-            .checked_add(local_head)
-            .ok_or(ForkAdmissionErrorV1::CorruptAuthority)?;
-        if head != request.completed_fold_cursor {
-            return Err(ForkAdmissionErrorV1::StaleFoldBoundary);
-        }
-        let chain: [u8; 32] = parent
-            .2
-            .as_slice()
-            .try_into()
-            .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
-        let child = Timeline::new(TimelineMeta::forked_from(
-            request.parent_timeline_id,
-            Seq::from_u64(head),
-            &request.child_name,
-        ));
-        let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
-            operation_id: request.operation_id,
-            principal_owner_binding_digest: binding.digest(),
-            creator: binding.input().owner,
-            parent_timeline_id: request.parent_timeline_id,
-            child_timeline_id: child.id(),
-            room_revision_descriptor_hash: request.room_revision_descriptor_hash,
-            parent_logical_head: head,
-            parent_chain_head_hash: Hash::from_bytes(chain),
-            completed_fold_cursor: request.completed_fold_cursor,
-            post_fold_tick_boundary: request.post_fold_tick_boundary,
-            plugin_composition_hash: request.plugin_composition_hash,
-            attribution_required: request.attribution_required,
-            origin: pos_core::ForkAttributionOriginV1::Local,
-        })
-        .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+        let (child, admission) = prepare_admitted_local_fork(&tx, request)?;
+        let head = admission.input().parent_logical_head;
+        let chain = admission.input().parent_chain_head_hash;
         let result = (|| {
             tx.execute("INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head) VALUES (?1, ?2, 'historical', ?3, ?4, 0, ?5)",
-                params![child.id().to_string(), request.child_name, request.parent_timeline_id.to_string(), i64::try_from(head).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?, chain.as_slice()])
+                params![child.id().to_string(), request.child_name, request.parent_timeline_id.to_string(), i64::try_from(head).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?, chain.as_bytes().as_slice()])
                 .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
             tx.execute("INSERT INTO fork_admissions (operation_id, request_digest, child_id, far1_cbor) VALUES (?1, ?2, ?3, ?4)",
                 params![request.operation_id.as_bytes().as_slice(), request_digest.as_bytes().as_slice(), child.id().to_string(), admission.to_canonical_cbor()])

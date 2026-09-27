@@ -195,7 +195,7 @@ fn far1_rejects_reserved_import_origin_code_two() -> TestResult {
 fn sqlite_corrupt_far1_or_pob1_rows_fail_closed_at_the_public_read_port() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
-    let mut store = SqliteStore::open(&path)?;
+    let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     store.bind_principal_owner_trust(trust(&authenticated)?)?;
@@ -225,7 +225,7 @@ fn sqlite_corrupt_far1_or_pob1_rows_fail_closed_at_the_public_read_port() -> Tes
 fn sqlite_corrupt_far1_bytes_fail_closed_at_the_public_read_port() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
-    let mut store = SqliteStore::open(&path)?;
+    let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     store.bind_principal_owner_trust(trust(&authenticated)?)?;
@@ -252,7 +252,7 @@ fn sqlite_corrupt_far1_bytes_fail_closed_at_the_public_read_port() -> TestResult
 fn sqlite_corrupt_far1_operation_id_row_fails_closed_at_the_public_read_port() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
-    let mut store = SqliteStore::open(&path)?;
+    let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     store.bind_principal_owner_trust(trust(&authenticated)?)?;
@@ -282,7 +282,7 @@ fn sqlite_corrupt_far1_operation_id_row_fails_closed_at_the_public_read_port() -
 fn sqlite_rolls_back_child_metadata_when_far1_insert_fails() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
-    let mut store = SqliteStore::open(&path)?;
+    let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     store.bind_principal_owner_trust(trust(&authenticated)?)?;
