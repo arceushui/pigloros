@@ -113,7 +113,7 @@ fn agent_output_binding(
 ) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
     Ok(OutputPolicyBindingV1::from_installed_source(
         plugin,
-        InstalledOutputPolicySourceV1::Agent,
+        InstalledOutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     )?)
