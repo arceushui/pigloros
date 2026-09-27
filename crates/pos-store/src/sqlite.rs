@@ -7570,6 +7570,85 @@ mod tests {
         connection.execute_batch("ROLLBACK").test_ok();
     }
 
+    #[test]
+    fn protected_interval_fails_closed_when_sqlite_rejects_validation_or_rollback() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        fn deny_rollback(context: AuthContext<'_>) -> Authorization {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Rollback
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }
+
+        let mut store = new_store();
+        store
+            .conn
+            .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Pragma { pragma_name, .. }
+                        if pragma_name.eq_ignore_ascii_case("data_version")
+                ) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+
+        store.erasure_inventory_data_version = -1;
+        store.conn.authorizer(Some(deny_rollback)).test_ok();
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+        store.conn.execute_batch("ROLLBACK").test_ok();
+
+        store.erasure_inventory_data_version = sqlite_data_version(&store.conn).test_ok();
+        store.erasure_gate = None;
+        store.conn.authorizer(Some(deny_rollback)).test_ok();
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+        store.conn.execute_batch("ROLLBACK").test_ok();
+
+        store.erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
+        store.conn.authorizer(Some(deny_rollback)).test_ok();
+        assert_eq!(
+            store.begin_protected_effect_interval(),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+        store.conn.execute_batch("ROLLBACK").test_ok();
+    }
+
     fn cover_sqlite_host_transition_success(
         store: &mut SqliteStore,
         gate: &ErasureContainmentGateV1,

@@ -8152,6 +8152,29 @@ mod tests {
     }
 
     #[test]
+    fn published_inventory_verification_poisons_on_a_stale_snapshot() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let old_inventory = host
+            .inventory
+            .as_ref()
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing inventory")))
+            .as_ref()
+            .clone();
+        let limits = host.recovery_limits;
+        host.command_sender()
+            .and_then(|mut sender| sender.create_timeline("stale-published-inventory"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(host
+            .verify_published_inventory(old_inventory, limits)
+            .is_err());
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
     fn host_store_fence_fails_closed_before_and_after_the_store_effect() {
         let mut blocked = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
