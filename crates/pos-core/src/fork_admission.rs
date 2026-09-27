@@ -293,7 +293,7 @@ fn head(output: &mut Vec<u8>, major: u8, length: usize) {
     if length < 24 {
         output.push((major << 5) | u8::try_from(length).unwrap_or(0));
     } else {
-        output.push((major << 5) | 24_u8);
+        output.push((major << 5) | 0x18_u8);
         output.push(u8::try_from(length).unwrap_or(u8::MAX));
     }
 }

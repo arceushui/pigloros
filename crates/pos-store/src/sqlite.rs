@@ -6222,13 +6222,37 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
     ) -> Result<Option<ForkAdmissionRecordV1>, ForkAdmissionErrorV1> {
         self.conn
             .query_row(
-                "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+                "SELECT operation_id, child_id, far1_cbor FROM fork_admissions WHERE child_id = ?1",
                 params![child_id.to_string()],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?
-            .map(|bytes| ForkAdmissionRecordV1::from_canonical_cbor(&bytes).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority))
+            .map(|(operation_id, stored_child_id, bytes)| {
+                let admission = ForkAdmissionRecordV1::from_canonical_cbor(&bytes)
+                    .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+                let operation_id = Hash::from_bytes(
+                    operation_id
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?,
+                );
+                let stored_child_id = TimelineId::from_ulid(
+                    ulid::Ulid::from_string(&stored_child_id)
+                        .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?,
+                );
+                (operation_id == admission.input().operation_id
+                    && stored_child_id == child_id
+                    && stored_child_id == admission.input().child_timeline_id)
+                    .then_some(admission)
+                    .ok_or(ForkAdmissionErrorV1::CorruptAuthority)
+            })
             .transpose()
             .and_then(|admission| {
                 admission.map_or(Ok(None), |admission| {
