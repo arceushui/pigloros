@@ -87,7 +87,7 @@ fn capture_rejects_wrong_request_response_attempt_and_retention() -> TestResult 
         assert!(NetworkExchangeTranscript::capture(ATTEMPT, &plan, REQUEST, response).is_err());
     }
     assert!(NetworkExchangeTranscript::capture([0; 16], &plan, REQUEST, RESPONSE).is_err());
-    let mut wrong_policy = plan.clone();
+    let mut wrong_policy = plan;
     wrong_policy.retention_policy_digest = [7; 32];
     seal(&mut wrong_policy)?;
     assert!(NetworkExchangeTranscript::capture(ATTEMPT, &wrong_policy, REQUEST, RESPONSE).is_err());
@@ -104,7 +104,7 @@ fn capture_and_replay_reject_invalid_plan_digests_and_bounds() -> TestResult {
     let mut oversized = plan.clone();
     oversized.request_length = 128 * 1024 * 1024 + 1;
     seal(&mut oversized)?;
-    let mut invalid_identifier = plan.clone();
+    let mut invalid_identifier = plan;
     invalid_identifier.capability_id = "invalid identifier".to_owned();
     seal(&mut invalid_identifier)?;
     for invalid in [changed, oversized, invalid_identifier] {
@@ -163,7 +163,7 @@ fn repeated_identical_payloads_retain_distinct_occurrence_identity() -> TestResu
         RESPONSE
     )
     .is_err());
-    let mut other_exchange = first_plan.clone();
+    let mut other_exchange = first_plan;
     other_exchange.exchange_id = [8; 16];
     seal(&mut other_exchange)?;
     assert!(NetworkExchangeTranscript::verify_replay(
