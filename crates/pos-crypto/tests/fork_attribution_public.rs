@@ -11,7 +11,7 @@ use pos_crypto::{
     signing::{generate_keypair, public_key_from_verifying_key},
 };
 
-fn hash(value: u8) -> Hash {
+const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
