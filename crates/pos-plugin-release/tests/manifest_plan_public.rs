@@ -1,16 +1,21 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use pos_plugin_release::{verify_oci_closure_v1, BundleAddressV1, ReleaseSourceErrorV1};
 use sha2::{Digest as _, Sha256};
 
 type Fixture = (serde_json::Value, BTreeMap<String, Vec<u8>>);
 
-fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+fn digest(bytes: &[u8]) -> Result<String, std::fmt::Error> {
+    let mut digest = String::from("sha256:");
+    for byte in Sha256::digest(bytes) {
+        write!(digest, "{byte:02x}")?;
+    }
+    Ok(digest)
 }
 
-fn fixture() -> Fixture {
-    let mut blobs = BTreeMap::from([(digest(b"{}"), b"{}".to_vec())]);
+fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
+    let mut blobs = BTreeMap::from([(digest(b"{}")?, b"{}".to_vec())]);
     let mut layers = Vec::new();
     for (member, media_type, bytes) in [
         (
@@ -36,7 +41,7 @@ fn fixture() -> Fixture {
         ("sbom", "application/spdx+json", &b"sbom"[..]),
         ("licence", "text/plain; charset=utf-8", &b"licence"[..]),
     ] {
-        let hash = digest(bytes);
+        let hash = digest(bytes)?;
         let member = if member == "licence" {
             format!("licence/{}", &hash[7..])
         } else {
@@ -50,24 +55,24 @@ fn fixture() -> Fixture {
         }));
         blobs.insert(hash, bytes.to_vec());
     }
-    (
+    Ok((
         serde_json::json!({
             "artifactType": "application/vnd.pigloros.plugin.release.v1",
-            "config": {"digest": digest(b"{}"), "mediaType": "application/vnd.oci.empty.v1+json", "size": 2},
+            "config": {"digest": digest(b"{}")?, "mediaType": "application/vnd.oci.empty.v1+json", "size": 2},
             "layers": layers,
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "schemaVersion": 2,
         }),
         blobs,
-    )
+    ))
 }
 
 #[test]
 fn complete_transport_closure_preserves_members_and_bytes() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (manifest, blobs) = fixture();
+    let (manifest, blobs) = fixture()?;
     let manifest = serde_json::to_vec(&manifest)?;
-    let address = BundleAddressV1::new(digest(&manifest), u64::try_from(manifest.len())?)?;
+    let address = BundleAddressV1::new(digest(&manifest)?, u64::try_from(manifest.len())?)?;
     let verified = verify_oci_closure_v1(address.clone(), manifest.clone(), blobs.clone())?;
     assert_eq!(verified.address(), &address);
     assert_eq!(verified.manifest(), manifest);
@@ -90,7 +95,7 @@ fn declared_closure_budget_includes_manifest_and_accepts_exact_limit(
         (MAX_BYTES, ReleaseSourceErrorV1::SizeMismatch),
         (MAX_BYTES + 1, ReleaseSourceErrorV1::BoundsExceeded),
     ] {
-        let (mut manifest, blobs) = fixture();
+        let (mut manifest, blobs) = fixture()?;
         manifest["layers"][1]["size"] = (32_u64 * 1024 * 1024).into();
         manifest["layers"][2]["size"] = (32_u64 * 1024 * 1024).into();
         let manifest_len = serde_json::to_vec(&manifest)?.len();
@@ -100,7 +105,7 @@ fn declared_closure_budget_includes_manifest_and_accepts_exact_limit(
             (declared_total - u64::try_from(manifest_len + other_bytes)? - 32 * 1024 * 1024).into();
         let manifest = serde_json::to_vec(&manifest)?;
         assert_eq!(manifest.len(), manifest_len);
-        let address = BundleAddressV1::new(digest(&manifest), u64::try_from(manifest.len())?)?;
+        let address = BundleAddressV1::new(digest(&manifest)?, u64::try_from(manifest.len())?)?;
         // Tiny supplied blobs deliberately disagree with the large descriptors.
         // Only an over-budget declaration must fail before blob-size checking.
         assert_eq!(
@@ -114,8 +119,8 @@ fn declared_closure_budget_includes_manifest_and_accepts_exact_limit(
 #[test]
 fn unverified_manifest_cannot_reach_declared_budget_check() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (mut manifest, blobs) = fixture();
-    let original_digest = digest(&serde_json::to_vec(&manifest)?);
+    let (mut manifest, blobs) = fixture()?;
+    let original_digest = digest(&serde_json::to_vec(&manifest)?)?;
     manifest["layers"][1]["size"] = (32_u64 * 1024 * 1024).into();
     manifest["layers"][2]["size"] = (32_u64 * 1024 * 1024).into();
     let manifest = serde_json::to_vec(&manifest)?;
