@@ -385,7 +385,7 @@ fn invocation_size(input: &AdapterInvocationInputV1) -> usize {
         + framed_size(input.exact_request_payload.len())
 }
 
-fn framed_size(length: usize) -> usize {
+const fn framed_size(length: usize) -> usize {
     head_size(length as u64) + length
 }
 
