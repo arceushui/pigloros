@@ -426,7 +426,7 @@ fn public_attribution_decoders_reject_forbidden_cbor_shapes(
     let manifest = manifest(&admission)?;
     let signed = SignedForkReproManifestV1::new(
         KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
-        manifest.clone(),
+        manifest,
         pos_core::Signature::from_bytes([9; 64]),
     )?;
     let invalid_prefixes: [&[u8]; 9] = [
