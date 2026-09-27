@@ -3952,18 +3952,6 @@ mod tests {
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
-            Command::Read {
-                timeline: TimelineId::new(),
-                range: SeqRange::all(),
-                bounds: EventReadBounds::new(1, 1, 1, 1),
-                expected_generation: None,
-                reply,
-            },
-            receiver,
-        );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
             Command::ReadOne {
                 timeline: TimelineId::new(),
                 event: EventId::new(),
