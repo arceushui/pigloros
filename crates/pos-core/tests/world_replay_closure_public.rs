@@ -248,6 +248,15 @@ fn closure_input() -> WorldReplayClosureInputV1 {
     }
 }
 
+#[test]
+fn structural_closure_accepts_zero_genesis_source_head() -> TestResult {
+    let mut input = closure_input();
+    input.source_head = Hash::zero();
+    let closure = WorldReplayClosureV1::new(input)?;
+    assert_eq!(closure.source_head(), Hash::zero());
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum AuthorityMode {
     Normal,

@@ -184,8 +184,13 @@ fn compare_event_prefix_and_state(
 ) -> Result<ForkDiff, CoreError> {
     let prefix_a = &events_a[..events_a.partition_point(|event| event.seq <= fork_seq)];
     let prefix_b = &events_b[..events_b.partition_point(|event| event.seq <= fork_seq)];
-    if prefix_a != prefix_b
-        || (fork_seq != Seq::ZERO && prefix_a.last().is_none_or(|event| event.seq != fork_seq))
+    // A zero Fork point has no shared Event with which to establish lineage;
+    // its native owner proof is not available through this provisional seam.
+    if fork_seq == Seq::ZERO
+        || prefix_a != prefix_b
+        || prefix_a.last().is_none_or(|event| event.seq != fork_seq)
+        || (events_a.get(prefix_a.len()).is_some()
+            && events_a.get(prefix_a.len()) == events_b.get(prefix_b.len()))
     {
         return Err(CoreError::ArtifactUnavailable);
     }
@@ -611,12 +616,14 @@ mod tests {
     fn public_compare_uses_an_installed_world_verifier() {
         let mut host = crate::test_support::open_exact_host();
         let gate = host.containment_gate();
-        let (fork_a, fork_b, fork_seq, entity) = {
+        let (fork_a, fork_b, fork_seq, earlier_seq, entity) = {
             let mut commands = host.command_sender().test_ok();
             let parent = commands.create_timeline("verified-compare").test_ok();
             let entity = EntityId::new();
-            let shared = commands.append(parent.id(), &[draft(entity)]).test_ok();
-            let fork_seq = shared[0].seq;
+            let shared = commands
+                .append(parent.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            let fork_seq = shared[1].seq;
             let fork_a = commands
                 .fork_timeline(parent.id(), fork_seq, "verified-a")
                 .test_ok();
@@ -626,7 +633,7 @@ mod tests {
             commands
                 .append(fork_a.id(), &[draft(entity), draft(entity)])
                 .test_ok();
-            (fork_a.id(), fork_b.id(), fork_seq, entity)
+            (fork_a.id(), fork_b.id(), fork_seq, shared[0].seq, entity)
         };
         let closure_a = crate::test_support::closure_for_host(&host, fork_a);
         let closure_b = crate::test_support::closure_for_host(&host, fork_b);
@@ -646,8 +653,20 @@ mod tests {
         assert_eq!(diff.only_in_a.len(), 2);
         assert!(diff.only_in_b.is_empty());
         assert!(diff.diverged_entities.contains(&entity));
-        assert_eq!(count_for(&registry_a, fork_a, entity), 3);
-        assert_eq!(count_for(&registry_b, fork_b, entity), 1);
+        assert_eq!(count_for(&registry_a, fork_a, entity), 4);
+        assert_eq!(count_for(&registry_b, fork_b, entity), 2);
+        for invalid_fork_seq in [earlier_seq, Seq::ZERO] {
+            assert!(matches!(
+                super::compare(
+                    &mut reads,
+                    [fork_a, fork_b],
+                    invalid_fork_seq,
+                    [&mut registry_a, &mut registry_b],
+                    [&closure_a, &closure_b],
+                ),
+                Err(CoreError::ArtifactUnavailable)
+            ));
+        }
         assert!(matches!(
             super::compare(
                 &mut reads,

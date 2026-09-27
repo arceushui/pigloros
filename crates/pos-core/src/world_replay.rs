@@ -263,10 +263,9 @@ impl WorldReplayClosureV1 {
         if lease_input.policy_hash != input.retention_policy.digest() {
             return Err(WorldReplayClosureErrorV1::PolicyMismatch);
         }
-        if input.operation_identity == Hash::zero()
-            || input.source_head == Hash::zero()
-            || input.inventory_generation == Hash::zero()
-        {
+        // A zero source head is the valid genesis hash for an empty Timeline.
+        // The native owner must verify the recorded head against the source.
+        if input.operation_identity == Hash::zero() || input.inventory_generation == Hash::zero() {
             return Err(WorldReplayClosureErrorV1::BindingIdentityMissing);
         }
         let lease_digest = input.retention_lease.digest();
