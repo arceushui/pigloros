@@ -195,8 +195,8 @@ mod hosted_cli_store_tests {
         let timeline = store.create_timeline("cli-replay")?;
         drop(store);
         let store = HostedCliStore::open(config)?;
+        let mut host = store.host.lock().map_err(|_| "CLI host lock is poisoned")?;
         let (result, read_result) = {
-            let mut host = store.host.lock().map_err(|_| "CLI host lock is poisoned")?;
             let mut sender = host.read_sender()?;
             let mut read_result = None;
             let result = sender.with_protected_effect_fence(
@@ -212,6 +212,7 @@ mod hosted_cli_store_tests {
             );
             (result, read_result)
         };
+        drop(host);
         assert!(result.is_ok(), "CLI read fence failed: {result:?}");
         assert!(
             matches!(read_result.as_ref(), Some(Ok(_))),

@@ -6907,11 +6907,12 @@ mod coverage_paths {
 
         let unavailable_gate = ErasureContainmentGateV1::new_fail_closed();
         let unavailable_timeline = TimelineId::new();
-        let mut unavailable_state = inventory_state(
+        let mut unavailable_state = inventory_state_with_timelines(
             reference(92),
             reference(93),
             reference(94),
             ErasureLifecycleV1::AccessFrozen,
+            vec![unavailable_timeline],
         )
         .unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unavailable state failed: {error:?}")))
