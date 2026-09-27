@@ -300,7 +300,11 @@ fn verify_snapshot_event_sets(
     let full_state = registry
         .state_snapshot(snap.timeline)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-    if snap.registry.keys().any(|name| !full_state.contains_key(name)) {
+    if snap
+        .registry
+        .keys()
+        .any(|name| !full_state.contains_key(name))
+    {
         return Err(SnapshotError::ArtifactUnavailable);
     }
     verify_snapshot_entities(&all_entities, &incremental_state, &full_state)?;
