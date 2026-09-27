@@ -804,6 +804,15 @@ impl KeyRegistryStateV1 {
             .copied()
     }
 
+    /// Return the highest epoch ever registered for an owner-scoped `role`.
+    ///
+    /// This remains available after the highest identity becomes pending or
+    /// destroyed, so a later enrollment can advance without reusing an epoch.
+    #[must_use]
+    pub fn highest_epoch(&self, owner_id: &OwnerIdV1, role: KeyRoleV1) -> Option<u64> {
+        self.highest_epoch.get(&(*owner_id, role)).copied()
+    }
+
     /// Return the record for an identity, including a destroyed record whose
     /// public verification key remains available.
     #[must_use]
