@@ -9,8 +9,8 @@ use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Hash,
-    Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
+    EventDraft, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -62,6 +62,7 @@ struct FixturePlugin {
     name: &'static str,
     has_driver: bool,
     has_reducer: bool,
+    owned_event_types: Vec<Kind>,
 }
 
 impl FixturePlugin {
@@ -71,7 +72,13 @@ impl FixturePlugin {
             name,
             has_driver,
             has_reducer,
+            owned_event_types: Vec::new(),
         }
+    }
+
+    fn with_owned_event_type(mut self, event_type: Kind) -> Self {
+        self.owned_event_types.push(event_type);
+        self
     }
 }
 
@@ -86,7 +93,7 @@ impl Plugin for FixturePlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: Vec::new(),
+            owned_event_types: self.owned_event_types.clone(),
             owned_entity_kinds: Vec::new(),
             has_driver: self.has_driver,
             has_reducer: self.has_reducer,
@@ -133,6 +140,35 @@ impl Driver for ObservationProbeDriver {
         }
         drop(log);
         Ok(StepOutput::empty())
+    }
+}
+
+struct HumanActionDriver {
+    entity: EntityId,
+    steps: u8,
+}
+
+impl Driver for HumanActionDriver {
+    fn name(&self) -> &'static str {
+        "human-action"
+    }
+
+    fn step(
+        &mut self,
+        _timeline: TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let emit = self.steps == 1;
+        self.steps = self.steps.saturating_add(1);
+        if emit {
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("world.action.v1"),
+                CanonicalBytes::from_static(b"\xa0"),
+            )]))
+        } else {
+            Ok(StepOutput::empty())
+        }
     }
 }
 
@@ -532,6 +568,8 @@ fn register_experiment(
 > {
     let observation = FixturePlugin::new("observation", false, true);
     let society = SocietyPlugin::new();
+    let human = FixturePlugin::new("human-action", true, false)
+        .with_owned_event_type(Kind::new("world.action.v1"));
     let fast = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
     let slow = AgentPlugin::new();
@@ -547,6 +585,16 @@ fn register_experiment(
         .test_ok()?;
     experiment
         .register(&society, Some(Box::new(SocietyReducer)), None)
+        .test_ok()?;
+    experiment
+        .register(
+            &human,
+            None,
+            Some(Box::new(HumanActionDriver {
+                entity: scenario.human_entity,
+                steps: 0,
+            })),
+        )
         .test_ok()?;
     experiment
         .register(
@@ -627,9 +675,9 @@ async fn run_tick_boundaries(
             emitted_events: 2,
         }
     );
-    // The shared erasure fence serializes protected effects. Admit the human
-    // action before the next Plugin-input fence so this fixture does not hold
-    // an AI boundary open while waiting for another protected append.
+    // The Experiment host has committed since the Gateway host opened. Its
+    // independent protected append must fail closed; the HumanActionDriver
+    // emits the simulated human Event inside the Experiment host instead.
     let human = request_http(
         scenario.address,
         "POST",
@@ -651,7 +699,7 @@ async fn run_tick_boundaries(
     )
     .await
     .map_err(|error| std::io::Error::other(format!("human action request: {error}")))?;
-    assert_eq!(human.status, 201);
+    assert_eq!(human.status, 503);
     let session_task = tokio::task::spawn_blocking(move || {
         let result = session.step_cadenced(100_000_000);
         (session, result)
@@ -673,7 +721,7 @@ async fn run_tick_boundaries(
             .map_err(|error| std::io::Error::other(format!("second tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 2,
-            emitted_events: 1,
+            emitted_events: 2,
         }
     );
     assert_eq!(
@@ -689,35 +737,33 @@ async fn run_tick_boundaries(
     Ok((session, scenario.pinned_wall_time))
 }
 
-async fn poll_events(
+async fn read_session_events_after_gateway_fail_closed(
     address: SocketAddr,
     timeline: TimelineId,
     actor: EntityId,
+    session: &pos_experiment::ExperimentSession,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut polled = Vec::new();
-    let mut from_seq = 0_u64;
-    let mut pages = 0_u8;
-    loop {
-        pages += 1;
-        assert!(pages <= 5, "polling must terminate within five pages");
-        let page = request_http_with_actor(
-            address,
-            "GET",
-            &format!("/v1/timelines/{timeline}/events?from_seq={from_seq}&limit=2"),
-            None,
-            Some(actor),
-        )
-        .await?;
-        assert_eq!(page.status, 200);
-        polled.extend(page.body["events"].as_array().test_ok()?.iter().cloned());
-        let Some(next) = page.body["next_from_seq"].as_u64() else {
-            break;
-        };
-        assert!(next > from_seq, "poll cursor must advance");
-        from_seq = next;
-    }
-    assert_eq!(polled.len(), 8);
-    Ok(polled)
+    let page = request_http_with_actor(
+        address,
+        "GET",
+        &format!("/v1/timelines/{timeline}/events?from_seq=0&limit=2"),
+        None,
+        Some(actor),
+    )
+    .await?;
+    assert_eq!(page.status, 503);
+    let events = session.source_events().test_ok()?;
+    assert_eq!(events.len(), 8);
+    Ok(events
+        .iter()
+        .map(|event| {
+            json!({
+                "seq": event.seq.as_u64(),
+                "event_type": event.event_type.as_str(),
+                "entity": event.entity.to_string(),
+            })
+        })
+        .collect())
 }
 
 fn assert_event_order(
@@ -914,11 +960,16 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
             format!("run_tick_boundaries: {error}").into()
         },
     )?;
-    let polled = poll_events(scenario.address, scenario.timeline, scenario.human_entity)
-        .await
-        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("poll_events: {error}").into()
-        })?;
+    let polled = read_session_events_after_gateway_fail_closed(
+        scenario.address,
+        scenario.timeline,
+        scenario.human_entity,
+        &session,
+    )
+    .await
+    .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+        format!("read_session_events_after_gateway_fail_closed: {error}").into()
+    })?;
     assert_event_order(
         scenario.human_entity,
         scenario.fast_entity,
@@ -931,7 +982,7 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
             format!("assert_projection_state: {error}").into()
         },
     )?;
-    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 1, 1]);
+    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
     assert_replay(&scenario, &live_snapshot, pinned_wall_time).map_err(
