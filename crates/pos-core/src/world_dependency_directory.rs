@@ -360,7 +360,7 @@ fn compare_keys(left: WorldDependencyKeyV1, right: WorldDependencyKeyV1) -> Orde
 }
 
 fn range_has_room(first: WorldDependencyKeyV1, last: WorldDependencyKeyV1, count: u64) -> bool {
-    // Artifact kinds are the contiguous codes 0..=13. Advance the first
+    // Artifact kinds are the contiguous codes 0..=14. Advance the first
     // digest by count - 1 valid keys, skipping the zero digest on a kind
     // boundary. A u64 count can cross at most one 256-bit digest boundary.
     let mut minimum_last = *first.native_digest.as_bytes();

@@ -108,6 +108,7 @@ fn all_closed_kind_codes_and_integer_width_boundaries_roundtrip() -> TestResult 
         WorldArtifactKindV1::KeyDependencyEvidence,
         WorldArtifactKindV1::TimelinePayload,
         WorldArtifactKindV1::OptionalView,
+        WorldArtifactKindV1::OutputPolicyClosure,
     ];
     for (ordinal, kind) in kinds.into_iter().enumerate() {
         let code = u8::try_from(ordinal)?;
@@ -137,7 +138,7 @@ fn all_closed_kind_codes_and_integer_width_boundaries_roundtrip() -> TestResult 
             assert_eq!(WorldArtifactLeafV1::from_canonical_cbor(&encoded)?, leaf);
         }
     }
-    for code in [14, 18, 255] {
+    for code in [15, 18, 255] {
         assert_eq!(
             WorldArtifactKindV1::from_code(code),
             Err(WorldArtifactErrorV1::UnsupportedValue)
@@ -360,7 +361,7 @@ fn wrong_shapes_and_types_are_rejected_through_public_decode() -> TestResult {
         WorldArtifactLeafV1::from_canonical_cbor(&encode(fields)?),
         Err(WorldArtifactErrorV1::InvalidEncoding)
     );
-    for (index, value) in [(1, 0), (1, 2), (3, 14), (7, 5), (8, 2), (9, 4)] {
+    for (index, value) in [(1, 0), (1, 2), (3, 15), (7, 5), (8, 2), (9, 4)] {
         let mut fields = wire();
         fields[index] = Value::Integer(value.into());
         assert_eq!(
