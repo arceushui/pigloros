@@ -37,6 +37,11 @@
 
 pub mod memory;
 pub mod stitch;
+mod timeline_range;
+
+pub use timeline_range::{
+    verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,
+};
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
