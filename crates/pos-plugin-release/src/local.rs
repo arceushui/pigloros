@@ -1460,7 +1460,12 @@ mod tests {
         assert_eq!(publisher.recover_all(), Err(expected));
         let quarantine = root.join("quarantine");
         for entry in std::fs::read_dir(&quarantine)? {
-            std::fs::remove_dir_all(entry?.path())?;
+            let path = entry?.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
         }
         std::fs::remove_dir_all(root)?;
         Ok(())
