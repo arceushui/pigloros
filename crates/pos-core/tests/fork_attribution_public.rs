@@ -1,7 +1,7 @@
 use pos_core::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
-    ForkAttributionOriginV1, ForkReproManifestInputV1, ForkReproManifestV1, Hash,
-    KeyIdentityV1, KeyRoleV1, SignedForkReproManifestV1, TimelineId,
+    ForkAttributionOriginV1, ForkReproManifestInputV1, ForkReproManifestV1, Hash, KeyIdentityV1,
+    KeyRoleV1, SignedForkReproManifestV1, TimelineId,
 };
 
 fn hash(value: u8) -> Hash {
