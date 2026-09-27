@@ -51,11 +51,10 @@ use pos_core::{
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, ErasureStateResolverV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
     ForkAdmissionHostBindingV1, ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1,
-    ForkAdmissionRecordV1, ForkAuthorityOriginV1, KeyRegistryStateV1,
-    LocalPrincipalOwnerBindingPermitV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingV1,
-    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    ForkAdmissionRecordV1, KeyRegistryStateV1, LocalPrincipalOwnerBindingPermitV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingV1, StoredErasureManifestV1,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
