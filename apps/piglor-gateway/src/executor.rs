@@ -2401,6 +2401,7 @@ mod read_page_coverage_tests {
                     .await,
                 Err(StoreExecutorError::Store(_))
             ));
+            drop(executor);
         }
         Ok(())
     }

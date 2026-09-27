@@ -694,8 +694,11 @@ impl GatewayLimits {
 pub struct EventPage {
     pub events: Vec<Event>,
     pub next_from_seq: Option<Seq>,
-    /// Installed host generation that authorized this page, when host-owned.
-    pub inventory_generation: Option<ErasureReferenceV1>,
+}
+
+pub(crate) struct GenerationBoundEventPage {
+    pub(crate) page: EventPage,
+    pub(crate) inventory_generation: Option<ErasureReferenceV1>,
 }
 
 /// JSON notice pushed on the event bus / WebSocket.
@@ -1903,6 +1906,7 @@ impl Gateway {
     ) -> Result<EventPage, GatewayError> {
         self.read_events_page_at_generation(timeline_id, from_seq, limit, None)
             .await
+            .map(|bounded| bounded.page)
     }
 
     pub(crate) async fn read_events_page_at_generation(
@@ -1911,7 +1915,7 @@ impl Gateway {
         from_seq: u64,
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
-    ) -> Result<EventPage, GatewayError> {
+    ) -> Result<GenerationBoundEventPage, GatewayError> {
         if self.authorization.is_some() {
             return Err(GatewayError::AuthorizationUnavailable);
         }
@@ -1925,7 +1929,7 @@ impl Gateway {
         from_seq: u64,
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
-    ) -> Result<EventPage, GatewayError> {
+    ) -> Result<GenerationBoundEventPage, GatewayError> {
         if limit == 0 || limit > MAX_EVENTS_PER_POLL {
             return Err(GatewayError::InvalidPageLimit {
                 maximum: MAX_EVENTS_PER_POLL,
@@ -1997,9 +2001,11 @@ impl Gateway {
             .get(limit)
             .map(|event| Seq::from_u64(event_seq(event)));
         events.truncate(limit);
-        Ok(EventPage {
-            events,
-            next_from_seq,
+        Ok(GenerationBoundEventPage {
+            page: EventPage {
+                events,
+                next_from_seq,
+            },
             inventory_generation: page.generation,
         })
     }
@@ -2023,6 +2029,7 @@ impl Gateway {
     ) -> Result<EventPage, GatewayError> {
         self.read_events_page_authorized_at_generation(timeline_id, from_seq, limit, request, None)
             .await
+            .map(|bounded| bounded.page)
     }
 
     pub(crate) async fn read_events_page_authorized_at_generation(
@@ -2032,7 +2039,7 @@ impl Gateway {
         limit: usize,
         request: GatewayAuthorizationRequest,
         expected_generation: Option<ErasureReferenceV1>,
-    ) -> Result<EventPage, GatewayError> {
+    ) -> Result<GenerationBoundEventPage, GatewayError> {
         let Some(authorization) = self.authorization.as_ref() else {
             return Err(GatewayError::AuthorizationUnavailable);
         };
@@ -2991,8 +2998,8 @@ fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
 }
 
 fn normalize_protected_read_error(
-    result: Result<EventPage, GatewayError>,
-) -> Result<EventPage, GatewayError> {
+    result: Result<GenerationBoundEventPage, GatewayError>,
+) -> Result<GenerationBoundEventPage, GatewayError> {
     result.map_err(|error| match error {
         GatewayError::EventPayloadTooLarge { .. }
         | GatewayError::EventMetadataTooLarge { .. }

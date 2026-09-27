@@ -2,9 +2,9 @@
 //! poll is the current foundation; configured host authorization protects reads).
 
 use crate::{
-    ActionRequest, CreateTimelineRequest, EventPage, EventView, EventsQuery, Gateway, GatewayError,
-    LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL, MAX_EVENTS_RESPONSE_BYTES,
-    MAX_HTTP_BODY_BYTES,
+    ActionRequest, CreateTimelineRequest, EventView, EventsQuery, Gateway, GatewayError,
+    GenerationBoundEventPage, LedgerWriteMode, SignalRequest, MAX_EVENTS_PER_POLL,
+    MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
     extract::{DefaultBodyLimit, Path, RawQuery, State},
@@ -77,9 +77,11 @@ mod coverage_tests {
             .test_ok();
         event.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
         assert!(bounded_events_response(
-            EventPage {
-                events: vec![event],
-                next_from_seq: None,
+            GenerationBoundEventPage {
+                page: crate::EventPage {
+                    events: vec![event],
+                    next_from_seq: None,
+                },
                 inventory_generation: None,
             },
             MAX_EVENTS_RESPONSE_BYTES,
@@ -256,7 +258,7 @@ async fn read_events_page(
     timeline_id: &str,
     request: &EventPageRequest,
     headers: &HeaderMap,
-) -> Result<EventPage, GatewayError> {
+) -> Result<GenerationBoundEventPage, GatewayError> {
     if gateway.has_authorization() {
         read_authorized_events(gateway, timeline_id, request, headers).await
     } else {
@@ -276,7 +278,7 @@ async fn read_authorized_events(
     timeline_id: &str,
     request: &EventPageRequest,
     headers: &HeaderMap,
-) -> Result<EventPage, GatewayError> {
+) -> Result<GenerationBoundEventPage, GatewayError> {
     let Some(actor) = headers
         .get("x-piglor-actor-entity")
         .and_then(|value| value.to_str().ok())
@@ -405,10 +407,14 @@ fn next_event_cursor(
 }
 
 fn bounded_events_response(
-    page: EventPage,
+    bounded: GenerationBoundEventPage,
     maximum_bytes: usize,
     timeline_id: &str,
 ) -> Result<serde_json::Value, GatewayError> {
+    let GenerationBoundEventPage {
+        page,
+        inventory_generation,
+    } = bounded;
     let mut events = Vec::with_capacity(page.events.len());
     let mut source = page.events.into_iter().peekable();
     loop {
@@ -426,7 +432,7 @@ fn bounded_events_response(
         let candidate = json!({
             "events": events,
             "next_from_seq": next_from_seq,
-            "next_cursor": next_event_cursor(page.inventory_generation, timeline_id, next_from_seq),
+            "next_cursor": next_event_cursor(inventory_generation, timeline_id, next_from_seq),
         });
         if serialized_len(&candidate) > maximum_bytes {
             events.pop();
@@ -439,7 +445,7 @@ fn bounded_events_response(
                 "events": events,
                 "next_from_seq": Seq::from_u64(event_seq),
                 "next_cursor": next_event_cursor(
-                    page.inventory_generation,
+                    inventory_generation,
                     timeline_id,
                     Some(Seq::from_u64(event_seq)),
                 ),
@@ -450,7 +456,7 @@ fn bounded_events_response(
         "events": events,
         "next_from_seq": page.next_from_seq,
         "next_cursor": next_event_cursor(
-            page.inventory_generation,
+            inventory_generation,
             timeline_id,
             page.next_from_seq,
         ),
@@ -1502,6 +1508,7 @@ osf_link = \"https://osf.io/example\"\n";
                 payload: Some(payload.clone()),
                 payload_hex: crate::hex_encode(bytes.as_slice()),
             };
+            // Keep the wire-size oracle independent of the cursor formatter.
             let worst_page = json!({
                 "events": [view],
                 "next_from_seq": u64::MAX,
