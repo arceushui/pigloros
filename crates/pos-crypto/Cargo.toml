@@ -12,6 +12,7 @@ serde = { workspace = true }
 ciborium = { workspace = true }
 blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
