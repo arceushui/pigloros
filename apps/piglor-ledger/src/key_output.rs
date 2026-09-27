@@ -71,7 +71,9 @@ pub(crate) fn bind_owned_secret_key(
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&absolute)
         .map_err(binding_error)?;
-    let metadata = file.metadata().map_err(binding_error)?;
+    let metadata = fault!(&absolute, FaultStage::BindMetadata)
+        .and_then(|()| file.metadata())
+        .map_err(binding_error)?;
     if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
         return Err(binding_error(
             "owned key is not a private single-link regular file",
@@ -81,7 +83,9 @@ pub(crate) fn bind_owned_secret_key(
         return Err(binding_error("owned key exceeds the supported size"));
     }
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
-    file.read_to_end(&mut encoded).map_err(binding_error)?;
+    fault!(&absolute, FaultStage::BindRead)
+        .and_then(|()| file.read_to_end(&mut encoded))
+        .map_err(binding_error)?;
     let text = std::str::from_utf8(&encoded).map_err(binding_error)?;
     let decoded =
         zeroize::Zeroizing::new(crate::hex::hex_decode(text.trim()).map_err(binding_error)?);
@@ -93,7 +97,11 @@ pub(crate) fn bind_owned_secret_key(
         ));
     }
     let file_identity = BoundFileIdentity::from_metadata(&metadata);
-    let current = std::fs::symlink_metadata(&absolute).map_err(binding_error)?;
+    #[cfg(test)]
+    swap_binding_target_for_test(&absolute, FaultStage::BindSwapBeforeInspect);
+    let current = fault!(&absolute, FaultStage::BindInspectCurrent)
+        .and_then(|()| std::fs::symlink_metadata(&absolute))
+        .map_err(binding_error)?;
     if BoundFileIdentity::from_metadata(&current) != file_identity {
         return Err(binding_error("owned key changed before binding"));
     }
@@ -131,17 +139,27 @@ pub(crate) fn bind_owned_secret_key(
             ],
         )
         .map_err(binding_error)?;
-    let bound = verify_owned_secret_key_binding(&connection, &absolute, identity, material_digest)?;
-    if bound != file_identity {
-        return Err(binding_error(
-            "owned key file identity differs from durable binding",
-        ));
-    }
-    let current = std::fs::symlink_metadata(&absolute).map_err(binding_error)?;
-    if BoundFileIdentity::from_metadata(&current) != file_identity {
-        return Err(binding_error("owned key changed during binding"));
-    }
-    Ok(())
+    verify_owned_secret_key_binding(&connection, &absolute, identity, material_digest).and_then(
+        |bound| {
+            if bound != file_identity {
+                return Err(binding_error(
+                    "owned key file identity differs from durable binding",
+                ));
+            }
+            #[cfg(test)]
+            swap_binding_target_for_test(&absolute, FaultStage::BindSwapBeforeFinalInspect);
+            fault!(&absolute, FaultStage::BindInspectFinal)
+                .and_then(|()| std::fs::symlink_metadata(&absolute))
+                .map_err(binding_error)
+                .and_then(|current| {
+                    if BoundFileIdentity::from_metadata(&current) != file_identity {
+                        Err(binding_error("owned key changed during binding"))
+                    } else {
+                        Ok(())
+                    }
+                })
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -414,6 +432,12 @@ const NO_OUTPUT: &str = "no output was created; retry is safe";
 #[cfg(all(test, unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FaultStage {
+    BindMetadata,
+    BindRead,
+    BindSwapBeforeInspect,
+    BindInspectCurrent,
+    BindSwapBeforeFinalInspect,
+    BindInspectFinal,
     DeleteOpenParent,
     DeleteOpenFile,
     DeleteAbsentDirectorySync,
@@ -505,6 +529,14 @@ fn swap_deletion_target_for_test(path: &Path) {
         let replacement = path.with_extension("replacement");
         assert!(std::fs::write(&replacement, b"replacement").is_ok());
         assert!(std::fs::rename(replacement, path).is_ok());
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn swap_binding_target_for_test(path: &Path, stage: FaultStage) {
+    if injected_fault::take(path, stage) {
+        assert!(std::fs::rename(path.with_extension("replacement"), path).is_ok());
     }
 }
 
@@ -955,6 +987,127 @@ mod binding_tests {
         assert_eq!(bindings, 0);
         assert!(moved.exists());
         assert!(key.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn binding_rejects_unsafe_file_shapes_and_malformed_key_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let database = directory.path().join("ledger.db");
+        drop(rusqlite::Connection::open(&database)?);
+
+        let folder = directory.path().join("folder.key");
+        std::fs::create_dir(&folder)?;
+        assert!(bind_owned_secret_key(&database, &folder, identity(1), digest()).is_err());
+
+        let insecure = directory.path().join("insecure.key");
+        owned_key(&insecure, 9)?;
+        std::fs::set_permissions(&insecure, std::fs::Permissions::from_mode(0o644))?;
+        assert!(bind_owned_secret_key(&database, &insecure, identity(1), digest()).is_err());
+
+        let linked = directory.path().join("linked.key");
+        owned_key(&linked, 9)?;
+        std::fs::hard_link(&linked, directory.path().join("second-link.key"))?;
+        assert!(bind_owned_secret_key(&database, &linked, identity(1), digest()).is_err());
+
+        for (index, bytes) in [
+            vec![b'9'; 129],
+            vec![0xff],
+            b"not-hex".to_vec(),
+            b"09".to_vec(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = directory.path().join(format!("malformed-{index}.key"));
+            std::fs::write(&key, bytes)?;
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
+            assert!(bind_owned_secret_key(&database, &key, identity(1), digest()).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn binding_rechecks_open_file_and_path_at_both_commit_edges(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let database = directory.path().join("ledger.db");
+        drop(rusqlite::Connection::open(&database)?);
+        for (index, stage) in [
+            FaultStage::BindMetadata,
+            FaultStage::BindRead,
+            FaultStage::BindInspectCurrent,
+            FaultStage::BindInspectFinal,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = directory.path().join(format!("fault-{index}.key"));
+            owned_key(&key, 9)?;
+            install_faults(&key, &[stage]);
+            assert!(bind_owned_secret_key(
+                &database,
+                &key,
+                identity(u64::try_from(index + 1)?),
+                digest(),
+            )
+            .is_err());
+            clear_faults();
+        }
+        for (index, stage) in [
+            FaultStage::BindSwapBeforeInspect,
+            FaultStage::BindSwapBeforeFinalInspect,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = directory.path().join(format!("swap-{index}.key"));
+            owned_key(&key, 9)?;
+            owned_key(&key.with_extension("replacement"), 9)?;
+            install_faults(&key, &[stage]);
+            assert!(bind_owned_secret_key(
+                &database,
+                &key,
+                identity(u64::try_from(index + 5)?),
+                digest(),
+            )
+            .is_err());
+            clear_faults();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn binding_rejects_wrong_sqlite_types_in_every_bound_file_field(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let database = directory.path().join("ledger.db");
+        let key = directory.path().join("secret.key");
+        owned_key(&key, 9)?;
+        drop(rusqlite::Connection::open(&database)?);
+        bind_owned_secret_key(&database, &key, identity(1), digest())?;
+        let connection = rusqlite::Connection::open(&database)?;
+        for column in ["absolute_path", "file_device", "file_inode"] {
+            let statement = format!("UPDATE ledger_owned_key_binding_v1 SET {column} = 12345678");
+            connection.execute(&statement, [])?;
+            assert!(bind_owned_secret_key(&database, &key, identity(1), digest()).is_err());
+            let value = match column {
+                "absolute_path" => key.as_os_str().as_encoded_bytes().to_vec(),
+                "file_device" => {
+                    use std::os::unix::fs::MetadataExt;
+                    std::fs::metadata(&key)?.dev().to_be_bytes().to_vec()
+                }
+                _ => {
+                    use std::os::unix::fs::MetadataExt;
+                    std::fs::metadata(&key)?.ino().to_be_bytes().to_vec()
+                }
+            };
+            connection.execute(
+                &format!("UPDATE ledger_owned_key_binding_v1 SET {column} = ?1"),
+                rusqlite::params![value],
+            )?;
+        }
         Ok(())
     }
 
