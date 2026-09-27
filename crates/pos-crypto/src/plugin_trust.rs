@@ -1225,6 +1225,90 @@ mod tests {
         )
     }
 
+    // Independently generated with hand-written canonical CBOR and Python's
+    // `cryptography` Ed25519 implementation. These are fixed external wire
+    // fixtures, deliberately not produced by `signed_record` above.
+    const GOLDEN_PTR1_HEX: &str = "8c6450545231016d74727573742e6578616d706c65182a201a01e284fff601818258209d7043381b703609599e44f8e8c09abb52faad21b96b60306764dfcb160712935820d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787378184697075626c697368657203095820a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f081826c616c7068612f706c7567696e697075626c6973686572818258209d7043381b703609599e44f8e8c09abb52faad21b96b60306764dfcb16071293584008e30fd5d68f52f16af09657e58937789e4fbf37f306204d4bf0b6756eabd5a34bd445246cbdde58cdf8bd6e3a7d9b39010f93c79543fc6001f96cf979492407";
+    const GOLDEN_PTR1_PREIMAGE_HEX: &str = "7069676c6f726f732f706c7567696e2d74727573742d726f6f742f7631008b6450545231016d74727573742e6578616d706c65182a201a01e284fff601818258209d7043381b703609599e44f8e8c09abb52faad21b96b60306764dfcb160712935820d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787378184697075626c697368657203095820a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f081826c616c7068612f706c7567696e697075626c6973686572";
+    const GOLDEN_PTR1_DIGEST_HEX: &str =
+        "ae7a0ddfc0690d64ec7f2cdb4d34dcd9d21d357a2039a2e23d4e43ce5779c5d3";
+    const GOLDEN_PRV1_HEX: &str = "8c6450525631016d74727573742e6578616d706c6507201a01e284ff5820ae7a0ddfc0690d64ec7f2cdb4d34dcd9d21d357a2039a2e23d4e43ce5779c5d3f60a8187697075626c697368657203095820a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f00a01f6818458208fafa054a5f8bebcc9f979e00f851dc064db4a18bece1c8b974f62edfefbd72d0a025820ee791594f8eff6021e834de16a79b82f550aad57c19c98ef24bbab0494c8de6a818258209d7043381b703609599e44f8e8c09abb52faad21b96b60306764dfcb160712935840bc6fb9ac3c455770c5aa68dc532cd9367be6a4edd95869547569094dae130a6c67afefe5fb3ec87742562101dcada416bfd46b057288ccf70ff749648e0d6e0c";
+    const GOLDEN_PRV1_PREIMAGE_HEX: &str = "7069676c6f726f732f706c7567696e2d7265766f636174696f6e2f7631008b6450525631016d74727573742e6578616d706c6507201a01e284ff5820ae7a0ddfc0690d64ec7f2cdb4d34dcd9d21d357a2039a2e23d4e43ce5779c5d3f60a8187697075626c697368657203095820a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f00a01f6818458208fafa054a5f8bebcc9f979e00f851dc064db4a18bece1c8b974f62edfefbd72d0a025820ee791594f8eff6021e834de16a79b82f550aad57c19c98ef24bbab0494c8de6a";
+    const GOLDEN_PRV1_DIGEST_HEX: &str =
+        "1b1b8f2b1c83bbdd0de33051b5d26c530a77d1d0fc5fb2a170eaf3b8df9395e6";
+
+    fn golden_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0, "golden hexadecimal has an odd length");
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let hexadecimal = std::str::from_utf8(pair).expect("golden hexadecimal is ASCII");
+                u8::from_str_radix(hexadecimal, 16).expect("golden hexadecimal byte is valid")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn independent_ptr1_prv1_golden_bytes_verify_and_bind_preimages(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ptr1 = golden_hex(GOLDEN_PTR1_HEX);
+        let prv1 = golden_hex(GOLDEN_PRV1_HEX);
+        let expected_ptr1_preimage = golden_hex(GOLDEN_PTR1_PREIMAGE_HEX);
+        let expected_prv1_preimage = golden_hex(GOLDEN_PRV1_PREIMAGE_HEX);
+        let expected_ptr1_digest: [u8; 32] =
+            golden_hex(GOLDEN_PTR1_DIGEST_HEX).as_slice().try_into()?;
+        let expected_prv1_digest: [u8; 32] =
+            golden_hex(GOLDEN_PRV1_DIGEST_HEX).as_slice().try_into()?;
+
+        let decoded_ptr1 = PluginTrustRootRecordV1::decode(&ptr1)?;
+        let decoded_prv1 = PluginRevocationRecordV1::decode(&prv1)?;
+        assert_eq!(decoded_ptr1.digest(), expected_ptr1_digest);
+        assert_eq!(decoded_prv1.digest(), expected_prv1_digest);
+        assert_eq!(decoded_ptr1.message, expected_ptr1_preimage);
+        assert_eq!(decoded_prv1.message, expected_prv1_preimage);
+
+        let anchor = TrustedPluginRootAnchorV1::new("trust.example", expected_ptr1_digest)?;
+        let evidence = verify_plugin_trust_v1(&anchor, &[&ptr1], &[&prv1], 0, 10)?;
+        assert_eq!(evidence.terminal_root(), (42, expected_ptr1_digest));
+        assert_eq!(evidence.terminal_revocation(), (7, expected_prv1_digest));
+        assert_eq!(
+            evidence.publisher_keys().collect::<Vec<_>>(),
+            vec![(
+                OwnerIdV1::new("publisher")?,
+                9,
+                [
+                    0xa0, 0x9a, 0xa5, 0xf4, 0x7a, 0x67, 0x59, 0x80, 0x2f, 0xf9, 0x55, 0xf8, 0xdc,
+                    0x2d, 0x2a, 0x14, 0xa5, 0xc9, 0x9d, 0x23, 0xbe, 0x97, 0xf8, 0x64, 0x12, 0x7f,
+                    0xf9, 0x38, 0x34, 0x55, 0xa4, 0xf0,
+                ],
+            )]
+        );
+        assert_eq!(
+            evidence.effective_key_revocations().collect::<Vec<_>>(),
+            vec![(
+                OwnerIdV1::new("publisher")?,
+                9,
+                [
+                    0xa0, 0x9a, 0xa5, 0xf4, 0x7a, 0x67, 0x59, 0x80, 0x2f, 0xf9, 0x55, 0xf8, 0xdc,
+                    0x2d, 0x2a, 0x14, 0xa5, 0xc9, 0x9d, 0x23, 0xbe, 0x97, 0xf8, 0x64, 0x12, 0x7f,
+                    0xf9, 0x38, 0x34, 0x55, 0xa4, 0xf0,
+                ],
+            )]
+        );
+        assert_eq!(
+            evidence
+                .effective_artifact_revocations()
+                .collect::<Vec<_>>(),
+            vec![[
+                0x8f, 0xaf, 0xa0, 0x54, 0xa5, 0xf8, 0xbe, 0xbc, 0xc9, 0xf9, 0x79, 0xe0, 0x0f, 0x85,
+                0x1d, 0xc0, 0x64, 0xdb, 0x4a, 0x18, 0xbe, 0xce, 0x1c, 0x8b, 0x97, 0x4f, 0x62, 0xed,
+                0xfe, 0xfb, 0xd7, 0x2d,
+            ]]
+        );
+        Ok(())
+    }
+
     #[test]
     fn pinned_genesis_and_empty_revocation_produce_bound_facts(
     ) -> Result<(), Box<dyn std::error::Error>> {
