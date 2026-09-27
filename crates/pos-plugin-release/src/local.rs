@@ -2151,17 +2151,17 @@ mod tests {
             NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&path, b"not a directory")?;
-        assert_eq!(
+        assert!(matches!(
             LocalOciPublisherV1::open(&path),
             Err(LocalOciPublicationErrorV1::InvalidLayout)
-        );
+        ));
         std::fs::remove_file(&path)?;
         std::fs::create_dir(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-        assert_eq!(
+        assert!(matches!(
             LocalOciPublisherV1::open(&path),
             Err(LocalOciPublicationErrorV1::InvalidLayout)
-        );
+        ));
         std::fs::remove_dir_all(path)?;
         Ok(())
     }
