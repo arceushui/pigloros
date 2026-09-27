@@ -50,6 +50,26 @@ fn only_private_file(
     Ok(path)
 }
 
+fn begin_pending_destruction(
+    store: &mut SqliteStore,
+    descriptor: pos_core::RecipientKeyDescriptorV1,
+    authorization_digest: Hash,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    let digest = registry
+        .key_record(descriptor.identity())
+        .and_then(|record| record.private_material_digest)
+        .ok_or("recipient material digest is absent")?;
+    store.begin_key_registry_destruction(KeyDestructionRequestV1::new(
+        descriptor.identity(),
+        digest,
+        authorization_digest,
+    ))?;
+    Ok(())
+}
+
 #[test]
 fn recipient_owner_public_contract_recovers_and_destroys_the_bound_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -377,6 +397,88 @@ fn recipient_owner_public_contract_rejects_directory_that_becomes_unsafe(
     let directory = temporary.path().join("recipient-private");
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))?;
     assert!(store.recover_recipient_keys(&owner).is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_keeps_pending_for_tampered_destruction_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let authorization = Hash::from_bytes([43; 32]);
+    begin_pending_destruction(&mut store, descriptor, authorization)?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "UPDATE recipient_key_inventory_v1 SET material_digest = ?1",
+        [vec![0_u8; 32]],
+    )?;
+
+    assert!(store
+        .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
+        .is_err());
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    assert!(registry.tombstone(descriptor.identity()).is_none());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_invalid_pending_inventory_bindings(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let wrong_descriptor =
+        pos_core::RecipientKeyDescriptorV1::for_grantee(EntityId::new(), 1, [0_u8; 32])?.encode();
+    for (column, value) in [
+        ("descriptor", rusqlite::types::Value::Blob(wrong_descriptor)),
+        (
+            "private_path",
+            rusqlite::types::Value::Blob(b"foreign.key".to_vec()),
+        ),
+        (
+            "material_digest",
+            rusqlite::types::Value::Blob(vec![0_u8; 31]),
+        ),
+    ] {
+        let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+        let authorization = Hash::from_bytes([44; 32]);
+        begin_pending_destruction(&mut store, descriptor, authorization)?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+        connection.execute(
+            &format!("UPDATE recipient_key_inventory_v1 SET {column} = ?1"),
+            [value],
+        )?;
+
+        assert!(store
+            .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
+            .is_err());
+        let registry = store
+            .load_key_registry()?
+            .ok_or("recipient registry is absent")?;
+        assert!(
+            registry.tombstone(descriptor.identity()).is_none(),
+            "{column}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_keeps_pending_when_private_material_changes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let authorization = Hash::from_bytes([45; 32]);
+    begin_pending_destruction(&mut store, descriptor, authorization)?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
+    std::fs::write(&path, [7_u8; 32])?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+
+    assert!(store
+        .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
+        .is_err());
+    assert!(path.exists());
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    assert!(registry.tombstone(descriptor.identity()).is_none());
     Ok(())
 }
 
