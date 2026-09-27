@@ -76,15 +76,25 @@ fn fault_selected(point: PublicationFaultPointV1) -> bool {
     PUBLICATION_FAULT.with(|fault| fault.get() == Some(point))
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn faulted_io_test<T, E>(
+    selected: bool,
+    error: E,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    if selected {
+        Err(error)
+    } else {
+        operation()
+    }
+}
+
 macro_rules! faulted_io {
     ($selected:expr_2021, $error:expr_2021, $operation:expr_2021) => {{
         #[cfg(test)]
         {
-            if $selected {
-                Err($error)
-            } else {
-                $operation
-            }
+            faulted_io_test($selected, $error, || $operation)
         }
         #[cfg(not(test))]
         {
