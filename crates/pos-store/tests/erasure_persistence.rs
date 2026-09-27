@@ -3231,6 +3231,7 @@ fn sqlite_fork_recovery_rejects_a_skipped_child_event_sequence(
         commit_fork_admission(&store, &gate, &prepared)?,
         pos_core::ErasureCasOutcomeV1::Applied
     );
+    let mut unbound = SqliteStore::open(path)?;
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
@@ -3268,12 +3269,9 @@ fn sqlite_fork_recovery_rejects_a_skipped_child_event_sequence(
     );
     drop(connection);
 
+    assert!(SqliteStore::open(path).is_err());
     assert_eq!(
-        recover_fork_admission(
-            &mut SqliteStore::open(path)?,
-            operation,
-            successor_inventory,
-        ),
+        recover_fork_admission(&mut unbound, operation, successor_inventory),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
