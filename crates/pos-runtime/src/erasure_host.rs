@@ -3655,6 +3655,8 @@ mod tests {
         EventStore,
         DeleteTimeline,
         TransitionLookup,
+        SecondTransitionLookup,
+        SecondTransitionMissing,
         MissingTransitionTimeline,
         MismatchedTopologyMetadata,
         Passthrough,
@@ -3667,6 +3669,7 @@ mod tests {
         fault: FaultModeV1,
         resolve_control: Arc<ResolveStateControlV1>,
         timeline_created_hook: Option<TimelineCreatedHookV1>,
+        transition_lookup_calls: Arc<std::sync::atomic::AtomicUsize>,
         inventory_snapshot_calls: usize,
         fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
@@ -3966,6 +3969,21 @@ mod tests {
             permit: &ErasureTopologyTransitionPermitV1,
             id: TimelineId,
         ) -> Result<Option<Timeline>, CoreError> {
+            if matches!(
+                self.fault,
+                FaultModeV1::SecondTransitionLookup | FaultModeV1::SecondTransitionMissing
+            ) && self
+                .transition_lookup_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1
+            {
+                if self.fault == FaultModeV1::SecondTransitionLookup {
+                    return Err(CoreError::Storage(
+                        "second transition lookup failed".to_owned(),
+                    ));
+                }
+                return Ok(None);
+            }
             if matches!(
                 self.fault,
                 FaultModeV1::EventStore | FaultModeV1::TransitionLookup
@@ -5627,6 +5645,7 @@ mod tests {
                 fault,
                 resolve_control: Arc::clone(&resolve_control),
                 timeline_created_hook: None,
+                transition_lookup_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 inventory_snapshot_calls: 0,
                 fork_recovery_override: None,
             },
@@ -5917,6 +5936,38 @@ mod tests {
             ),
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
+    }
+
+    #[test]
+    fn fork_preflight_rechecks_parent_at_the_transition_boundary() {
+        for (fault, expected) in [
+            (
+                FaultModeV1::SecondTransitionLookup,
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+            (
+                FaultModeV1::SecondTransitionMissing,
+                ErasureHostErrorV1::RecoveryUnavailable,
+            ),
+        ] {
+            let store = fault_store(fault);
+            let lookup_calls = Arc::clone(&store.transition_lookup_calls);
+            let mut host = ErasureExecutionHostV1::recover_verified_empty(Box::new(store), 4)
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            let parent = host
+                .command_sender()
+                .and_then(|mut sender| sender.create_timeline("recheck-parent"))
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            lookup_calls.store(0, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                host.command_sender().and_then(|mut sender| {
+                    sender.fork_timeline(parent.id(), Seq::ZERO, "recheck-child")
+                }),
+                Err(expected)
+            );
+            assert_eq!(lookup_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+        }
     }
 
     #[test]

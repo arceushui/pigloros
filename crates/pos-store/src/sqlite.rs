@@ -7742,6 +7742,48 @@ mod tests {
     }
 
     #[test]
+    fn identified_append_rejects_a_failed_head_lookup() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let mut store = new_store();
+        let timeline = store.create_timeline("denied-identified-head").test_ok();
+        let head_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads = Arc::clone(&head_reads);
+        store
+            .conn
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Read {
+                        table_name: "timelines",
+                        column_name: "head_seq"
+                    }
+                ) && reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+                {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+            .test_ok();
+        assert!(matches!(
+            store.append_or_duplicate_with_limit_visible(
+                timeline.id(),
+                append_identity(1, 1),
+                WallTime::from_micros(1),
+                &make_draft(EntityId::new(), b"denied-head"),
+                None,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        assert_eq!(head_reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .test_ok();
+    }
+
+    #[test]
     fn bounded_read_rejects_a_denied_snapshot_transaction() {
         use rusqlite::hooks::{AuthContext, Authorization};
 
