@@ -66,13 +66,14 @@ fn assert_contract(store: &mut dyn ForkAdmissionAuthorityPortV1, parent: Timelin
     assert_eq!(
         store
             .read_fork_admission(receipt.child_id)?
-            .expect("FAR1")
+            .ok_or("missing FAR1")?
             .input()
             .principal_owner_binding_digest,
         binding.digest()
     );
     let mut conflict = admission;
-    conflict.child_name = "other".to_owned();
+    conflict.child_name.clear();
+    conflict.child_name.push_str("other");
     assert_eq!(
         store.create_fork_admitted(&conflict, WallTime::from_micros(20)),
         Err(ForkAdmissionErrorV1::Conflict)
@@ -156,7 +157,7 @@ fn committed_admission_remains_readable_after_child_events() -> TestResult {
     assert_eq!(
         store
             .read_fork_admission(receipt.child_id)?
-            .expect("FAR1")
+            .ok_or("missing FAR1")?
             .digest(),
         receipt.admission_digest
     );
@@ -181,9 +182,9 @@ fn far1_rejects_reserved_import_origin_code_two() -> TestResult {
     )?;
     let mut bytes = store
         .read_fork_admission(receipt.child_id)?
-        .expect("FAR1")
+        .ok_or("missing FAR1")?
         .to_canonical_cbor();
-    *bytes.last_mut().expect("origin") = 2;
+    *bytes.last_mut().ok_or("missing origin")? = 2;
     assert_eq!(
         pos_core::ForkAdmissionRecordV1::from_canonical_cbor(&bytes),
         Err(pos_core::ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable)
