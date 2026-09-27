@@ -15669,6 +15669,40 @@ mod tests {
         sqlite_recovery_proof_rejects_corrupt_rows(&store, &proof);
     }
 
+    #[test]
+    fn sqlite_recovery_proof_subject_read_failure_is_closed() {
+        let proof_value = sqlite_recovery_proof_test_value();
+        let mut proof_bytes = Vec::new();
+        ciborium::into_writer(&proof_value, &mut proof_bytes).test_ok();
+        let proof = ErasureForkRecoveryProofV1::from_canonical_cbor(&proof_bytes).test_ok();
+        let mutation = proof.admissions().first().test_ok();
+        let store = new_store();
+        seed_sqlite_recovery_proof_test_rows(&store);
+        store
+            .conn
+            .execute_batch("DROP TABLE erasure_effects")
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_subject_is_exact(&store.conn, mutation),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let malformed = new_store();
+        seed_sqlite_recovery_proof_test_rows(&malformed);
+        malformed
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .test_ok();
+        malformed
+            .conn
+            .execute("UPDATE erasure_effects SET manifest_digest=X'00'", [])
+            .test_ok();
+        assert_eq!(
+            sqlite_recovery_proof_subject_is_exact(&malformed.conn, mutation),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+
     fn sqlite_recovery_proof_rejects_missing_extension_and_subject(
         store: &SqliteStore,
         proof_value: &ciborium::value::Value,

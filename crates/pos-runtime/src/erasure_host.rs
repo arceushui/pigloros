@@ -5975,6 +5975,37 @@ mod tests {
     }
 
     #[test]
+    fn publication_rejects_an_extra_durable_timeline() {
+        let mut host = ErasureExecutionHostV1::recover_verified_empty(
+            Box::new(MemoryStore::new().without_erasure_gate()),
+            4,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            host.apply_unaffected_topology_change(
+                None,
+                |_permit, _store| Ok(Timeline::new(TimelineMeta::root("expected-only"))),
+                |permit, store, candidate| {
+                    let timeline = store.create_timeline_for_host_transition_with_meta(
+                        permit,
+                        candidate.meta.clone(),
+                    )?;
+                    let _extra = store.create_timeline_for_host_transition_with_meta(
+                        permit,
+                        TimelineMeta::root("unexpected-extra"),
+                    )?;
+                    Ok(TopologyTransitionResultV1 {
+                        timeline,
+                        created: true,
+                    })
+                },
+            ),
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    }
+
+    #[test]
     fn mismatched_persisted_topology_metadata_poisons_the_host() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(fault_store(FaultModeV1::MismatchedTopologyMetadata)),
@@ -6688,7 +6719,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_command_fence_rejects_before_starting_an_effect() {
+    fn stale_effect_fences_reject_before_starting_an_effect() {
         let mut host = ErasureExecutionHostV1::recover_verified_empty(
             Box::new(MemoryStore::new().without_erasure_gate()),
             4,
@@ -6708,6 +6739,21 @@ mod tests {
             Err(ErasureHostErrorV1::StaleGeneration)
         );
         assert!(!ran);
+
+        let mut reader = host
+            .read_sender()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        reader.generation = ErasureReferenceV1::from_digest([9; 32]);
+        let mut read_ran = false;
+        assert_eq!(
+            reader.with_protected_effect_fence(
+                TimelineId::new(),
+                ErasureProtectedOperationV1::Read,
+                &mut |_| read_ran = true,
+            ),
+            Err(ErasureHostErrorV1::StaleGeneration)
+        );
+        assert!(!read_ran);
     }
 
     #[test]
