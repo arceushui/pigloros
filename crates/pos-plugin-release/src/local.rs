@@ -1416,6 +1416,38 @@ mod tests {
         outcome
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn published_release(
+        label: &str,
+    ) -> Result<
+        (std::path::PathBuf, LocalOciPublisherV1, BundleAddressV1),
+        Box<dyn std::error::Error>,
+    > {
+        let root = private_root(label)?;
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        let bundle = bundle()?;
+        let address = bundle.address().clone();
+        assert_eq!(
+            publisher.publish(&bundle)?,
+            PublishOutcomeV1::Published(address.clone())
+        );
+        Ok((root, publisher, address))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reader_rejects_mutation(
+        label: &str,
+        expected: ReleaseSourceErrorV1,
+        mutate: impl FnOnce(&std::path::Path, &BundleAddressV1) -> std::io::Result<()>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (root, publisher, address) = published_release(label)?;
+        let release = root.join("releases").join(&address.digest()[7..]);
+        mutate(&release, &address)?;
+        assert_eq!(publisher.read_verified(&address), Err(expected));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn initialization_faults_retry_from_private_root_without_partial_index(
@@ -1574,6 +1606,69 @@ mod tests {
             }
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reader_rejects_tampered_committed_release_shapes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        reader_rejects_mutation(
+            "reader-extra-entry",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, _| std::fs::write(release.join("unexpected"), b"unexpected"),
+        )?;
+        reader_rejects_mutation(
+            "reader-owner",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, _| std::fs::write(release.join("OWNER"), b"broken\n"),
+        )?;
+        reader_rejects_mutation(
+            "reader-layout",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, _| std::fs::write(release.join("oci-layout"), b"{}"),
+        )?;
+        reader_rejects_mutation(
+            "reader-index",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, _| std::fs::write(release.join("index.json"), b"{}"),
+        )?;
+        reader_rejects_mutation(
+            "reader-ready",
+            ReleaseSourceErrorV1::Uncommitted,
+            |release, _| std::fs::write(release.join("READY"), b"broken\n"),
+        )?;
+        reader_rejects_mutation(
+            "reader-blob-directory",
+            ReleaseSourceErrorV1::InvalidLayout,
+            |release, _| std::fs::write(release.join("blobs").join("unexpected"), b"unexpected"),
+        )?;
+        reader_rejects_mutation(
+            "reader-manifest",
+            ReleaseSourceErrorV1::InvalidDescriptor,
+            |release, address| {
+                std::fs::write(
+                    release
+                        .join("blobs")
+                        .join("sha256")
+                        .join(&address.digest()[7..]),
+                    b"{\"config\":{}}",
+                )
+            },
+        )?;
+        reader_rejects_mutation(
+            "reader-layers",
+            ReleaseSourceErrorV1::InvalidDescriptor,
+            |release, address| {
+                std::fs::write(
+                    release
+                        .join("blobs")
+                        .join("sha256")
+                        .join(&address.digest()[7..]),
+                    b"{\"layers\":[{}]}",
+                )
+            },
+        )?;
         Ok(())
     }
 
