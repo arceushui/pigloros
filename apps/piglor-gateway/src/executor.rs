@@ -2404,15 +2404,14 @@ mod read_page_coverage_tests {
     }
 
     #[test]
-    fn test_store_variants_return_pages_and_propagate_read_errors() {
+    fn test_store_variants_return_pages_and_propagate_read_errors(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for gateway_store in [false, true] {
             let mut store = MemoryStore::new();
             let bound =
                 store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
             assert!(bound.is_ok());
-            let timeline = store
-                .create_timeline("read-page-coverage")
-                .unwrap_or_else(|error| panic!("timeline fixture failed: {error:?}"));
+            let timeline = store.create_timeline("read-page-coverage")?;
             let mut state = ExecutorState {
                 store: if gateway_store {
                     ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(store)))
@@ -2434,7 +2433,7 @@ mod read_page_coverage_tests {
                 reply,
             );
             let Ok(Ok(page)) = result.blocking_recv() else {
-                panic!("expected an empty test-store page");
+                return Err("expected an empty test-store page".into());
             };
             assert!(page.events.is_empty());
             assert_eq!(page.generation, None);
@@ -2453,6 +2452,7 @@ mod read_page_coverage_tests {
                 Ok(Err(StoreExecutorError::Store(_)))
             ));
         }
+        Ok(())
     }
 
     #[test]

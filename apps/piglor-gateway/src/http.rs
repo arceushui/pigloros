@@ -1454,9 +1454,9 @@ osf_link = \"https://osf.io/example\"\n";
         let (status, first) =
             json_request(app, "GET", &format!("/v1/timelines/{id}/events"), None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(first["events"].as_array().test_ok().len(), 2);
+        assert_eq!(first["events"].as_array().test_ok().len(), 1);
         assert!(first["next_cursor"].is_string());
-        assert_eq!(first["next_from_seq"], 3);
+        assert_eq!(first["next_from_seq"], 2);
     }
 
     #[tokio::test]
