@@ -11,6 +11,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod adapter_admission;
+pub mod adapter_transcript;
 pub mod authority;
 #[cfg(test)]
 extern crate self as pos_core;
@@ -69,6 +70,12 @@ pub use adapter_admission::{
     AdapterAdmissionErrorV1, AdapterAdmissionInputV1, AdapterAdmissionV1,
     MAX_ADAPTER_ADMISSION_BYTES_V1, MAX_ADAPTER_ADMISSION_ENTRIES_V1,
     MAX_ADAPTER_CONFIGURATION_BYTES_V1,
+};
+pub use adapter_transcript::{
+    adapter_output_digest_v1, AdapterInvocationInputV1, AdapterInvocationV1,
+    AdapterTranscriptCallV1, AdapterTranscriptErrorV1, AdapterTranscriptInputV1,
+    AdapterTranscriptV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
+    MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 pub use local_cut_seal::{
     local_cut_tree_scope_v1, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,
