@@ -321,6 +321,7 @@ fn projection_event(entity: EntityId, event_type: &str, seq: u64) -> Event {
         schema_version: SchemaVersion::V1,
         signature: None,
         signature_identity: None,
+        origin: None,
         payload_hash: Hash::from_bytes([0; 32]),
     }
 }
@@ -944,6 +945,7 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
         schema_version: SchemaVersion::V1,
         signature: None,
         signature_identity: None,
+        origin: None,
         payload_hash: Hash::from_bytes([0; 32]),
     };
     test_ok(registry.restore_driver_state(

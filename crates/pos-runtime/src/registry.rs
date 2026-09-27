@@ -158,6 +158,7 @@ mod coverage_paths {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let mut location = event.clone();
@@ -237,6 +238,7 @@ mod coverage_paths {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let result = registry.restore_driver_state(
@@ -436,6 +438,7 @@ mod coverage_entrypoints {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         }
     }
@@ -3340,6 +3343,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         registry
@@ -3641,6 +3645,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         reg.projections.apply_event(&event);
@@ -3714,6 +3719,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         bound
@@ -4035,6 +4041,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let mut consent = ordinary.clone();
@@ -4336,6 +4343,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
 
@@ -4457,6 +4465,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         reg.projections.apply_event(&event);

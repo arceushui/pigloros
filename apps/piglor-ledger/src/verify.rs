@@ -1041,6 +1041,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: Some(Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
+            origin: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let supplied_public_keys = [TrustedPublicKey {
@@ -1304,6 +1305,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None, // unsigned
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;
@@ -1367,6 +1369,7 @@ mod tests {
             schema_version: SchemaVersion::V1,
             signature: None,
             signature_identity: None,
+            origin: None,
             payload_hash,
         };
         store.append_committed(tl.id(), &[event]).test_ok()?;
@@ -1386,36 +1389,41 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn verify_store_event_rejects_unbound_and_invalid_role_signatures(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn signature_rejection_event() -> pos_core::Event {
         use pos_core::{
             clock::{Seq, WallTime},
             event::{CanonicalBytes, Event, Kind, SchemaVersion},
             ids::{EntityId, EventId},
+        };
+        use pos_crypto::chain::hash_payload;
+
+        let payload = CanonicalBytes::from_static(b"signed payload");
+        Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
+            payload: payload.clone(),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: hash_payload(&payload),
+        }
+    }
+
+    #[test]
+    fn verify_store_event_rejects_unbound_and_invalid_role_signatures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use pos_core::{
             KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey, Signature,
         };
-        use pos_crypto::{chain::hash_payload, key_roles::key_material_digest};
+        use pos_crypto::key_roles::key_material_digest;
 
-        let event = || {
-            let payload = CanonicalBytes::from_static(b"signed payload");
-            Event {
-                id: EventId::new(),
-                entity: EntityId::new(),
-                event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
-                payload: payload.clone(),
-                wall_time: WallTime::from_micros(1),
-                seq: Seq::from_u64(1),
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: None,
-                signature_identity: None,
-                payload_hash: hash_payload(&payload),
-            }
-        };
-
-        let mut missing_identity_event = event();
+        let mut missing_identity_event = signature_rejection_event();
         missing_identity_event.signature = Some(pos_core::Signature::from_bytes([0; 64]));
         let (_, missing_identity_reason) = verify_store_event(
             &missing_identity_event,
@@ -1425,7 +1433,7 @@ mod tests {
         .ok_or("expected missing identity mismatch")?;
         assert!(missing_identity_reason.contains("owner/role/epoch identity"));
 
-        let mut wrong_role_event = event();
+        let mut wrong_role_event = signature_rejection_event();
         wrong_role_event.signature = Some(Signature::from_bytes([0; 64]));
         wrong_role_event.signature_identity = Some(KeyIdentityV1::new(
             "ledger-owner",
@@ -1437,7 +1445,7 @@ mod tests {
         assert!(wrong_role_reason.contains("TimelineIntegritySigning"));
 
         let wrong_role = run_store_event(
-            event(),
+            signature_rejection_event(),
             Some(&KeyRegistryStateV1::new()),
             Some(PublicKey::from_bytes([0xaa; 32])),
             Some(KeyIdentityV1::new(
@@ -1463,7 +1471,7 @@ mod tests {
             .test_ok()?;
 
         let supplied_mismatch = run_store_event(
-            event(),
+            signature_rejection_event(),
             Some(&registry),
             Some(PublicKey::from_bytes([7; 32])),
             Some(identity),
@@ -1474,7 +1482,7 @@ mod tests {
         assert!(reason.contains("persisted registry"));
 
         let no_public_key = run_store_event(
-            event(),
+            signature_rejection_event(),
             Some(&KeyRegistryStateV1::new()),
             Some(PublicKey::from_bytes([0; 32])),
             Some(identity),
@@ -1484,11 +1492,12 @@ mod tests {
         let (_, reason) = expect_mismatch(no_public_key.outcome)?;
         assert!(reason.contains("persisted registry"), "{reason}");
 
-        let no_registry_key_error = missing_registry_public_key_error(event(), identity)?;
+        let no_registry_key_error =
+            missing_registry_public_key_error(signature_rejection_event(), identity)?;
         assert!(no_registry_key_error.to_string().contains("no public key"));
 
         let invalid_signature = run_store_event(
-            event(),
+            signature_rejection_event(),
             Some(&registry),
             Some(registered_key),
             Some(identity),
