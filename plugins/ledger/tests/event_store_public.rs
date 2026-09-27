@@ -63,6 +63,14 @@ impl EventStore for CompleteFailureStore {
         self.inner.save_key_registry(registry)
     }
 
+    fn begin_key_registry_destruction(
+        &mut self,
+        request: KeyDestructionRequestV1,
+    ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), pos_core::CoreError>
+    {
+        self.inner.begin_key_registry_destruction(request)
+    }
+
     fn complete_key_registry_destruction(
         &mut self,
         _request: KeyDestructionRequestV1,

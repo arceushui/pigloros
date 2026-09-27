@@ -10,9 +10,10 @@ use std::fmt::Write;
 use std::process::Command;
 
 fn trust_anchor(identity: KeyIdentityV1, public_key_hex: &str) -> String {
+    assert_eq!(identity.owner_id.as_str(), "ledger-owner");
     format!(
         "{}/{}/{}={public_key_hex}",
-        identity.owner_id.as_str(),
+        "bGVkZ2VyLW93bmVy",
         identity.role.code(),
         identity.epoch
     )
@@ -269,7 +270,7 @@ fn public_store_verification_uses_production_host_gate_with_rotated_keys(
     for byte in material_two.public_verification_key().as_bytes() {
         write!(&mut anchor_two, "{byte:02x}")?;
     }
-    let anchors = format!("ledger-owner/2/1={anchor_one},ledger-owner/2/2={anchor_two}");
+    let anchors = format!("bGVkZ2VyLW93bmVy/2/1={anchor_one},bGVkZ2VyLW93bmVy/2/2={anchor_two}");
     let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
     assert_eq!(report.n, 2);
 
@@ -290,7 +291,7 @@ fn public_store_verification_uses_production_host_gate_with_rotated_keys(
     };
     assert!(error
         .to_string()
-        .contains("owner/role-code/epoch=hex format"));
+        .contains("base64url-owner/role-code/epoch=hex format"));
     Ok(())
 }
 
@@ -327,6 +328,6 @@ fn public_store_verification_rejects_malformed_key_anchor_sets(
     };
     assert!(error
         .to_string()
-        .contains("entries must use owner/role-code/epoch=hex format"));
+        .contains("entries must use base64url-owner/role-code/epoch=hex format"));
     Ok(())
 }

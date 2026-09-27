@@ -588,7 +588,7 @@ mod tests {
             "actor_entity_id": actor,
             "body_entity_id": body,
             "action_kind": "impulse",
-            "params": [marker],
+            "params": [f64::from(marker), 0.0],
             "action_scope": 0,
             "catalogue_version": 1,
             "tick": u64::from(marker)
@@ -630,7 +630,7 @@ mod tests {
             json!(test_world_body().inner().to_bytes())
         );
         assert_eq!(event["payload"][4], "impulse");
-        assert_eq!(event["payload"][5], json!([1]));
+        assert_eq!(event["payload"][5], json!([130, 249, 60, 0, 249, 0, 0]));
         assert_eq!(event["payload"][6], 0);
         assert_eq!(event["payload"][7], 1);
         assert_eq!(event["payload"][8], 1);
@@ -671,6 +671,12 @@ mod tests {
             ("params", json!([0xc0, 0xf9, 0x7e, 0])),
             ("params", json!([0xa2, 2, 2, 1, 1])),
             ("params", json!([0xa2, 1, 1, 1, 2])),
+            ("params", json!([1, 0.0])),
+            ("params", json!([1.0, "0.0"])),
+            ("params", json!([1.0])),
+            ("params", json!([1.0, 0.0, 0.0])),
+            ("params", json!([f64::MAX, 0.0])),
+            ("params", json!([0.0, -f64::MAX])),
             ("tick", json!(-1)),
             ("unexpected", json!(true)),
         ] {
@@ -679,25 +685,20 @@ mod tests {
             let (status, _) = json_request(app.clone(), "POST", &path, Some(rejected)).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}");
         }
-        for params in [
-            vec![0x81, 1],
-            vec![0xa1, 1, 2],
-            vec![0xa2, 1, 1, 2, 2],
-            vec![0xa2, 0x20, 2, 0x18, 24, 1],
-            vec![0xc0, 1],
-            vec![0xf9, 0x3c, 0],
+        for (params, encoded) in [
+            (json!([1.0, 0.0]), json!([130, 249, 60, 0, 249, 0, 0])),
+            (json!([1.0, -0.0]), json!([130, 249, 60, 0, 249, 128, 0])),
+            (
+                json!([0.333_333_333_333_333_3, -0.0]),
+                json!([130, 250, 62, 170, 170, 171, 249, 128, 0]),
+            ),
         ] {
             let mut accepted = request.clone();
-            accepted["payload"]["params"] = json!(params);
-            let (status, _) = json_request(app.clone(), "POST", &path, Some(accepted)).await;
+            accepted["payload"]["params"] = params;
+            let (status, event) = json_request(app.clone(), "POST", &path, Some(accepted)).await;
             assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(event["payload"][5], encoded);
         }
-        let mut oversized = request;
-        let mut params = vec![0x59, 0x13, 0x88];
-        params.extend(vec![0; 5000]);
-        oversized["payload"]["params"] = json!(params);
-        let (status, _) = json_request(app, "POST", &path, Some(oversized)).await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     fn spectator_test_app() -> Router {

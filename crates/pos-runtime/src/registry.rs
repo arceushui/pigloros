@@ -10,11 +10,11 @@ use indexmap::IndexMap;
 use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
-    ids::PluginId,
+    ids::{PluginId, TimelineId},
     ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentGateV1, ErasureGate,
     ErasureProtectedOperationV1, KnowledgeSnapshotV1, PersistedAuthorityV1, Plugin, ProposedAction,
-    Reducer, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    Reducer, Timeline, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
@@ -26,8 +26,8 @@ use crate::{
         ResolvedPluginV1,
     },
     driver::{
-        Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey, SnapshotAnchor,
-        StepOutput, TimelineHistorySegment,
+        CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
+        SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
@@ -759,6 +759,7 @@ pub struct PluginRegistry {
     composition_mode: PluginExecutionModeV1,
     resource_limit: Option<u64>,
     poisoned_driver: Option<String>,
+    restored_binding: Option<(TimelineId, Seq)>,
     consent_gate: Option<Arc<dyn ConsentGate>>,
     erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     /// Whether the current gate was supplied by the host composition root.
@@ -1045,6 +1046,7 @@ impl PluginRegistry {
             composition_mode,
             resource_limit: None,
             poisoned_driver: None,
+            restored_binding: None,
             // Every live registry has a host-owned gate, even before the
             // caller binds a durable authority. This default fails closed for
             // protected drafts instead of exposing an unguarded public path.
@@ -1348,11 +1350,36 @@ impl PluginRegistry {
                 name: id.to_string(),
             });
         };
+        Self::invoke_entry_driver(entry, timeline, snapshot, committed_events)
+    }
+
+    fn invoke_entry_driver(
+        entry: &mut PluginEntry,
+        timeline: pos_core::ids::TimelineId,
+        snapshot: &ObservationSnapshot,
+        committed_events: &[Event],
+    ) -> Result<StepOutput, RuntimeError> {
         let Some(driver) = entry.driver.as_mut() else {
             return Err(RuntimeError::NoDriver {
                 name: entry.name.clone(),
             });
         };
+        let verified_prefix_required = driver.requires_verified_event_prefix();
+        if verified_prefix_required {
+            let anchor = snapshot
+                .view_for(driver.subscriptions())
+                .anchor()
+                .ok_or_else(|| RuntimeError::MissingSnapshotAnchor {
+                    driver: driver.name().to_owned(),
+                })?;
+            validate_recovery_evidence(
+                &[TimelineHistorySegment::new(
+                    timeline,
+                    anchor.observed_through(),
+                )],
+                committed_events,
+            )?;
+        }
         let visible_events: Vec<Event> = committed_events
             .iter()
             .filter(|event| driver_visible_event(event))
@@ -1364,6 +1391,17 @@ impl PluginRegistry {
             driver.event_subscriptions(),
             entry.event_cursor,
         );
+        let observations = if verified_prefix_required {
+            observations.with_verified_prefix_events(
+                visible_events
+                    .iter()
+                    .filter(|event| driver.event_subscriptions().contains(&event.event_type))
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            observations
+        };
         invoke_driver(driver.as_mut(), timeline, observations)
             .and_then(|output| reject_host_owned_drafts(&output).map(|()| output))
     }
@@ -1466,6 +1504,7 @@ impl PluginRegistry {
         operation: OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
+        self.restored_binding = None;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
             self.collect_anchored_selection(selection)?;
@@ -1619,6 +1658,7 @@ impl PluginRegistry {
         if snapshot.plugin_id() != plugin_id || snapshot.timeline_id() != timeline {
             return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
         }
+        self.restored_binding = None;
         let (invocation, driver_name, owned_event_types) = {
             let Some(entry) = self.plugins.get_mut(&plugin_id) else {
                 return Err(RuntimeError::NoDriver {
@@ -1969,6 +2009,48 @@ impl PluginRegistry {
         self.restore_driver_state_live(timeline_segments, events)
     }
 
+    /// Fork the restored parent in the host store and transfer Driver bindings
+    /// to the child returned by that same committed operation.
+    ///
+    /// # Errors
+    /// Returns a mode, recovered-prefix, pending-step, Driver, or store error.
+    pub fn fork_restored_timeline(
+        &mut self,
+        store: &mut dyn pos_core::EventStore,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<Timeline, RuntimeError> {
+        self.ensure_live_execution()?;
+        self.ensure_no_pending_step()?;
+        if self.restored_binding != Some((parent, at_seq)) {
+            return Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Fork point differs from the restored Timeline prefix",
+            });
+        }
+        let child = store.fork(parent, at_seq, name)?;
+        let handoff = CommittedForkHandoff::new(parent, child.id());
+        for entry in self.plugins.values_mut() {
+            if let Some(driver) = entry.driver.as_mut() {
+                let name = driver.name().to_owned();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    driver.commit_fork_timeline(&handoff);
+                }))
+                .is_err()
+                {
+                    self.poisoned_driver = Some(name.clone());
+                    self.restored_binding = None;
+                    return match store.delete_timeline(child.id()) {
+                        Ok(()) => Err(RuntimeError::DriverForkPanicked { name }),
+                        Err(source) => Err(RuntimeError::DriverForkRollbackFailed { name, source }),
+                    };
+                }
+            }
+        }
+        self.restored_binding = None;
+        Ok(child)
+    }
+
     fn restore_driver_state_live(
         &mut self,
         timeline_segments: &[TimelineHistorySegment],
@@ -2029,6 +2111,9 @@ impl PluginRegistry {
             }
             entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
         }
+        self.restored_binding = timeline_segments
+            .last()
+            .map(|segment| (segment.timeline_id(), segment.through()));
         Ok(())
     }
 
@@ -2270,6 +2355,7 @@ impl PluginRegistry {
                 registration,
             },
         );
+        self.restored_binding = None;
         Ok(())
     }
 
@@ -2303,6 +2389,7 @@ impl PluginRegistry {
 
     /// Register a driver directly (for tests and late-bound agent registration).
     pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
+        self.restored_binding = None;
         let name = driver.name().to_owned();
         self.plugins.insert(
             pos_core::ids::PluginId::new(),
@@ -2446,6 +2533,7 @@ impl PluginRegistry {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
+        self.restored_binding = None;
         let mut all_drafts = Vec::new();
         let mut due_driver_ids = HashSet::new();
         let mut seen_subscriptions = HashSet::new();
@@ -2603,6 +2691,7 @@ impl PluginRegistry {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
+        self.restored_binding = None;
         let mut all_drafts = Vec::new();
         let snapshot = self.snapshot_for_tick(timeline, Seq::ZERO, &OperationContext::Public)?;
         for entry in self.plugins.values_mut() {
@@ -2704,7 +2793,7 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, PluginId, TimelineId},
         Capability, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentErrorV1,
-        Event, Plugin, Reducer, State,
+        Event, EventStore, Plugin, Reducer, State,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -2730,6 +2819,133 @@ mod tests {
                 )))
             });
         store
+    }
+
+    struct PanickingForkDriver;
+
+    impl Driver for PanickingForkDriver {
+        fn name(&self) -> &'static str {
+            "panicking-fork-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput::empty())
+        }
+
+        fn commit_fork_timeline(&mut self, _: &CommittedForkHandoff) {
+            std::panic::resume_unwind(Box::new("fork handoff fault"));
+        }
+    }
+
+    #[test]
+    fn panicking_fork_handoff_rolls_back_child_and_faults_registry() {
+        let mut store = gated_store();
+        let parent = store.create_timeline("parent").test_ok();
+        let mut registry = gated_registry();
+        registry.register_driver(Box::new(PanickingForkDriver));
+        registry
+            .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+            .test_ok();
+        assert!(matches!(
+            registry.fork_restored_timeline(store.as_mut(), parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::DriverForkPanicked { .. })
+        ));
+        assert_eq!(store.list_timelines().test_ok().len(), 1);
+        assert!(matches!(
+            registry.step_all(parent.id()),
+            Err(RuntimeError::DriverCommitPanicked { .. })
+        ));
+    }
+
+    #[test]
+    fn failed_fork_rollback_surfaces_the_store_error() {
+        struct FailedRollbackStore(Box<dyn pos_core::EventStore>);
+
+        impl pos_core::EventStore for FailedRollbackStore {
+            fn create_timeline(&mut self, name: &str) -> Result<pos_core::Timeline, CoreError> {
+                self.0.create_timeline(name)
+            }
+
+            fn append(
+                &mut self,
+                timeline: TimelineId,
+                drafts: &[EventDraft],
+            ) -> Result<Vec<Event>, CoreError> {
+                self.0.append(timeline, drafts)
+            }
+
+            fn read(
+                &self,
+                timeline: TimelineId,
+                range: pos_core::store::SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
+                self.0.read(timeline, range)
+            }
+
+            fn fork(
+                &mut self,
+                timeline: TimelineId,
+                at_seq: Seq,
+                name: &str,
+            ) -> Result<pos_core::Timeline, CoreError> {
+                self.0.fork(timeline, at_seq, name)
+            }
+
+            fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+                self.0.list_timelines()
+            }
+
+            fn get_timeline(
+                &self,
+                timeline: TimelineId,
+            ) -> Result<Option<pos_core::Timeline>, CoreError> {
+                self.0.get_timeline(timeline)
+            }
+        }
+
+        let mut store = FailedRollbackStore(gated_store());
+        let parent = store.create_timeline("parent").test_ok();
+        let mut registry = gated_registry();
+        registry.register_driver(Box::new(PanickingForkDriver));
+        registry
+            .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+            .test_ok();
+        assert!(matches!(
+            registry.fork_restored_timeline(&mut store, parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::DriverForkRollbackFailed { .. })
+        ));
+        assert_eq!(store.list_timelines().test_ok().len(), 2);
+    }
+
+    #[test]
+    fn restored_fork_rejects_replay_pending_steps_and_store_failure() {
+        let mut store = gated_store();
+        let parent = store.create_timeline("parent").test_ok();
+        let mut replay = PluginRegistry::new_replay();
+        assert!(matches!(
+            replay.fork_restored_timeline(store.as_mut(), parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::ModeMismatch { .. })
+        ));
+
+        let mut pending = gated_registry();
+        pending.step_all_anchored(parent.id(), Seq::ZERO).test_ok();
+        assert!(matches!(
+            pending.fork_restored_timeline(store.as_mut(), parent.id(), Seq::ZERO, "child"),
+            Err(RuntimeError::PendingDriverStep)
+        ));
+        pending.abort_step();
+
+        let mut restored = gated_registry();
+        restored
+            .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+            .test_ok();
+        assert!(restored
+            .fork_restored_timeline(&mut AppendFailStore, parent.id(), Seq::ZERO, "child")
+            .is_err());
     }
 
     trait TestValueExt<T> {
@@ -3690,6 +3906,64 @@ mod tests {
             .invoke_selected_driver(plugin_id, TimelineId::new(), &snapshot, &[])
             .test_err();
         assert!(matches!(absent, RuntimeError::NoDriver { .. }));
+    }
+
+    #[test]
+    fn verified_prefix_driver_rejects_missing_anchor_and_extra_history() {
+        struct PrefixDriver;
+
+        impl Driver for PrefixDriver {
+            fn name(&self) -> &'static str {
+                "verified-prefix-test"
+            }
+
+            fn requires_verified_event_prefix(&self) -> bool {
+                true
+            }
+
+            fn step(
+                &mut self,
+                _: TimelineId,
+                _: ObservationView<'_>,
+            ) -> Result<StepOutput, RuntimeError> {
+                Ok(StepOutput::empty())
+            }
+        }
+
+        let mut store = gated_store();
+        let timeline = store.create_timeline("verified-prefix").test_ok();
+        let mut registry = gated_registry();
+        registry.register_driver(Box::new(PrefixDriver));
+        let id = *registry.plugins.keys().next().test_ok();
+        assert!(matches!(
+            registry.invoke_selected_driver(
+                id,
+                timeline.id(),
+                &ObservationSnapshot::default(),
+                &[]
+            ),
+            Err(RuntimeError::MissingSnapshotAnchor { .. })
+        ));
+
+        let snapshot = ObservationSnapshot::from_anchored_subscriptions(
+            SnapshotAnchor::new(timeline.id(), Seq::ZERO),
+            std::iter::empty::<&ProjectionKey>(),
+            |_| None,
+        );
+        let committed = store
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("ordinary.event"),
+                    CanonicalBytes::from_static(b"extra"),
+                )],
+            )
+            .test_ok();
+        assert!(matches!(
+            registry.invoke_selected_driver(id, timeline.id(), &snapshot, &committed),
+            Err(RuntimeError::InvalidRecoveryEvidence { .. })
+        ));
     }
 
     #[test]
@@ -4877,12 +5151,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cover_validate_recovery_evidence_empty_segments_and_zero_bound_paths() {
-        // Empty ancestry → InvalidRecoveryEvidence (first else branch)
-        drop(validate_recovery_evidence(&[], &[]));
-        // Empty events with through=ZERO → early Ok() return
+    fn restore_driver_state_rejects_empty_ancestry_and_accepts_zero_bound() {
+        let mut registry = PluginRegistry::new();
+        assert!(matches!(
+            registry.restore_driver_state(&[], &[]),
+            Err(RuntimeError::InvalidRecoveryEvidence {
+                reason: "Timeline ancestry is empty"
+            })
+        ));
+
         let zero_segment = TimelineHistorySegment::new(TimelineId::new(), Seq::ZERO);
-        drop(validate_recovery_evidence(&[zero_segment], &[]));
+        registry
+            .restore_driver_state(&[zero_segment], &[])
+            .test_ok();
     }
 
     #[test]
