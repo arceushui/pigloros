@@ -1034,6 +1034,11 @@ struct RegistrationOptions {
     manifest_slot: Option<String>,
 }
 
+struct RegistrationCallbacks {
+    driver: Option<Box<dyn Driver>>,
+    approver: Option<Box<dyn ActionApprover>>,
+}
+
 const fn plugin_name(entry: &PluginEntry) -> &str {
     entry.name.as_str()
 }
@@ -3094,7 +3099,7 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            (driver, approver),
+            RegistrationCallbacks { driver, approver },
             approver_event_types,
             RegistrationOptions {
                 registration: Some(registration),
@@ -3176,7 +3181,7 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            (driver, approver),
+            RegistrationCallbacks { driver, approver },
             approver_event_types,
             RegistrationOptions {
                 registration: None,
@@ -3253,7 +3258,7 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            (driver, approver),
+            RegistrationCallbacks { driver, approver },
             approver_event_types,
             RegistrationOptions {
                 registration: Some(registration),
@@ -3312,7 +3317,7 @@ impl PluginRegistry {
         plugin: &dyn Plugin,
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
-        callbacks: (Option<Box<dyn Driver>>, Option<Box<dyn ActionApprover>>),
+        callbacks: RegistrationCallbacks,
         approver_event_types: impl IntoIterator<Item = Kind>,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
@@ -3395,7 +3400,7 @@ impl PluginRegistry {
         self.validate_manifest_candidate(plugin, &admission, &options)?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
-        let (driver, approver) = callbacks;
+        let RegistrationCallbacks { driver, approver } = callbacks;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
