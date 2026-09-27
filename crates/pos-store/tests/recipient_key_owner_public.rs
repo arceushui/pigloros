@@ -348,6 +348,26 @@ fn recipient_owner_public_contract_fails_closed_for_corrupt_durable_inventory(
 }
 
 #[test]
+fn recipient_owner_public_contract_fails_closed_for_malformed_file_identity_widths(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (column, value) in [
+        ("file_device", vec![0_u8; 7]),
+        ("file_inode", vec![0_u8; 7]),
+        ("file_uid", vec![0_u8; 3]),
+    ] {
+        let (temporary, store, owner, _) = enrolled_owner()?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+        connection.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+        connection.execute(
+            &format!("UPDATE recipient_key_inventory_v1 SET {column} = ?1"),
+            [value],
+        )?;
+        assert!(store.recover_recipient_keys(&owner).is_err(), "{column}");
+    }
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_rejects_file_and_symlink_owner_paths(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
