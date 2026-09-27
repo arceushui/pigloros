@@ -46,7 +46,12 @@ const fn input(
     }
 }
 
-fn destroyed_key(role: KeyRoleV1) -> (ArtifactKeyDependencyV1, KeyTombstoneV1) {
+struct DestroyedKeyFixture {
+    dependency: ArtifactKeyDependencyV1,
+    fact: KeyTombstoneV1,
+}
+
+fn destroyed_key(role: KeyRoleV1) -> DestroyedKeyFixture {
     let identity = KeyIdentityV1::new("claim-owner", role, 1);
     let digest = Hash::from_bytes([31; 32]);
     let public_key = role.is_signing().then(|| PublicKey::from_bytes([32; 32]));
@@ -61,19 +66,19 @@ fn destroyed_key(role: KeyRoleV1) -> (ArtifactKeyDependencyV1, KeyTombstoneV1) {
         .test_ok();
     let facts: Vec<_> = registry.committed_destruction_facts().collect();
     assert_eq!(facts.len(), 1);
-    (
-        ArtifactKeyDependencyV1 {
+    DestroyedKeyFixture {
+        dependency: ArtifactKeyDependencyV1 {
             identity,
             material_digest: digest,
             private_material_required: true,
         },
-        facts[0],
-    )
+        fact: facts[0],
+    }
 }
 
 #[test]
 fn exact_committed_destruction_weakens_each_artifact_without_minting_authority() {
-    let (dependency, fact) = destroyed_key(KeyRoleV1::SubjectDataEncryption);
+    let DestroyedKeyFixture { dependency, fact } = destroyed_key(KeyRoleV1::SubjectDataEncryption);
     for class in [
         ErasureArtifactClassV1::TimelineReplay,
         ErasureArtifactClassV1::ReproManifest,
@@ -102,7 +107,10 @@ fn exact_committed_destruction_weakens_each_artifact_without_minting_authority()
 
 #[test]
 fn historical_signing_destruction_preserves_only_existing_public_evidence() {
-    let (mut dependency, fact) = destroyed_key(KeyRoleV1::TimelineIntegritySigning);
+    let DestroyedKeyFixture {
+        mut dependency,
+        fact,
+    } = destroyed_key(KeyRoleV1::TimelineIntegritySigning);
     dependency.private_material_required = false;
     let artifact = ArtifactClaimInputV1 {
         registration: RegisteredArtifactV1::new(
@@ -148,7 +156,7 @@ fn historical_signing_destruction_preserves_only_existing_public_evidence() {
 
 #[test]
 fn fact_policy_matches_exact_identity_and_digest_and_rejects_conflicts() {
-    let (dependency, fact) = destroyed_key(KeyRoleV1::SubjectDataEncryption);
+    let DestroyedKeyFixture { dependency, fact } = destroyed_key(KeyRoleV1::SubjectDataEncryption);
     let artifact = input(
         ErasureArtifactClassV1::TimelineReplay,
         1,
@@ -241,8 +249,14 @@ fn fact_policy_matches_exact_identity_and_digest_and_rejects_conflicts() {
 
 #[test]
 fn pure_policy_accepts_multiple_dependencies_and_bounds_input() {
-    let (required, required_fact) = destroyed_key(KeyRoleV1::SubjectDataEncryption);
-    let (mut signing, signing_fact) = destroyed_key(KeyRoleV1::TimelineIntegritySigning);
+    let DestroyedKeyFixture {
+        dependency: required,
+        fact: required_fact,
+    } = destroyed_key(KeyRoleV1::SubjectDataEncryption);
+    let DestroyedKeyFixture {
+        dependency: mut signing,
+        fact: signing_fact,
+    } = destroyed_key(KeyRoleV1::TimelineIntegritySigning);
     signing.private_material_required = false;
     let artifact = input(
         ErasureArtifactClassV1::TimelineReplay,
@@ -265,7 +279,7 @@ fn pure_policy_accepts_multiple_dependencies_and_bounds_input() {
     assert_eq!(
         ReplayClaimEvaluatorV1::evaluate_artifact_destruction(
             artifact,
-            &vec![required; ERASURE_MAX_TARGETS + 1],
+            &vec![required; 4_097],
             &[]
         ),
         Err(ErasureErrorV1::ScopeInvalid)
@@ -274,7 +288,7 @@ fn pure_policy_accepts_multiple_dependencies_and_bounds_input() {
         ReplayClaimEvaluatorV1::evaluate_artifact_destruction(
             artifact,
             &[required],
-            &vec![required_fact; ERASURE_MAX_TARGETS + 1]
+            &vec![required_fact; 4_097]
         ),
         Err(ErasureErrorV1::ScopeInvalid)
     );
