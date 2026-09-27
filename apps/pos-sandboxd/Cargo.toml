@@ -24,8 +24,11 @@ zvariant = "=5.15.0"
 
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+zlink = { version = "=0.7.0", default-features = false, features = ["proxy", "tokio"] }
 zbus = { version = "=5.19.0", default-features = false, features = [
   "p2p",
   "tokio",
