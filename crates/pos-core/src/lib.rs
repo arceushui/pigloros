@@ -42,7 +42,9 @@ pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
 pub mod plugin;
+<<<<<<< HEAD
 pub mod recipient_key;
+pub mod repro_manifest_root;
 pub mod retention;
 pub mod state;
 pub mod store;
@@ -71,6 +73,10 @@ pub use manifest_owner_link::{
     ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
     MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
     MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
+pub use repro_manifest_root::{
+    ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,
+    MAX_REPRO_MANIFEST_LABEL_BYTES_V1, MAX_REPRO_MANIFEST_ROOT_BYTES_V1,
 };
 pub use world_artifact::{
     WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
