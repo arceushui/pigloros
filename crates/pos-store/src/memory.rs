@@ -3875,6 +3875,36 @@ mod tests {
             .test_ok();
     }
 
+    fn cover_memory_host_transition_edge_cases(
+        store: &mut MemoryStore,
+        permit: &ErasureTopologyTransitionPermitV1,
+        root: &Timeline,
+        child: Timeline,
+    ) {
+        assert!(store
+            .create_timeline_for_host_transition_with_meta(permit, root.meta.clone())
+            .is_err());
+        assert!(store
+            .fork_for_host_transition_with_meta(permit, root.id(), Seq::ZERO, child.meta)
+            .is_err());
+
+        let adopted = store
+            .create_timeline_for_host_transition_with_meta(
+                permit,
+                TimelineMeta::root("host-ledger-adopted"),
+            )
+            .test_ok();
+        let (reused_adopted, created) = store
+            .initialize_timeline_with_key_registry_for_host_transition_with_meta(
+                permit,
+                &TimelineMeta::root("host-ledger-adopted"),
+                &KeyRegistryStateV1::new(),
+            )
+            .test_ok();
+        assert_eq!(reused_adopted.id(), adopted.id());
+        assert!(!created);
+    }
+
     fn cover_memory_host_transition_success(
         store: &mut MemoryStore,
         gate: &ErasureContainmentGateV1,
@@ -3887,9 +3917,6 @@ mod tests {
                     TimelineMeta::root("host-root"),
                 )
                 .test_ok();
-            assert!(store
-                .create_timeline_for_host_transition_with_meta(permit, root.meta.clone())
-                .is_err());
             let meta_root = store
                 .create_timeline_for_host_transition_with_meta(
                     permit,
@@ -3941,14 +3968,6 @@ mod tests {
                 .fork_for_host_transition_with_meta(permit, root.id(), Seq::ZERO, child_meta)
                 .test_ok();
             assert_eq!(child.meta.fork_point, Some((root.id(), Seq::ZERO)));
-            assert!(store
-                .fork_for_host_transition_with_meta(
-                    permit,
-                    root.id(),
-                    Seq::ZERO,
-                    child.meta.clone()
-                )
-                .is_err());
             let ordinary_child = store
                 .fork_for_host_transition_with_meta(
                     permit,
@@ -3959,21 +3978,7 @@ mod tests {
                 .test_ok();
             assert_eq!(ordinary_child.meta.fork_point, Some((root.id(), Seq::ZERO)));
 
-            let adopted = store
-                .create_timeline_for_host_transition_with_meta(
-                    permit,
-                    TimelineMeta::root("host-ledger-adopted"),
-                )
-                .test_ok();
-            let (reused_adopted, created) = store
-                .initialize_timeline_with_key_registry_for_host_transition_with_meta(
-                    permit,
-                    &TimelineMeta::root("host-ledger-adopted"),
-                    &KeyRegistryStateV1::new(),
-                )
-                .test_ok();
-            assert_eq!(reused_adopted.id(), adopted.id());
-            assert!(!created);
+            cover_memory_host_transition_edge_cases(store, permit, &root, child);
 
             let ledger_meta = TimelineMeta::root("host-ledger-existing");
             let existing = store
