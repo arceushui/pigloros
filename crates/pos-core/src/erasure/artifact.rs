@@ -474,15 +474,17 @@ impl ReplayClaimEvaluatorV1 {
         } else {
             input.state
         };
-        let evaluated = Self::evaluate(
+        Self::evaluate(
             input.current_claim,
             &[ArtifactClaimInputV1 { state, ..input }],
-        )?;
-        let artifact = evaluated.artifacts[0];
-        Ok(ArtifactDestructionDispositionV1 {
-            replay_claim: artifact.to,
-            redaction_state: artifact.redaction_state,
-            required_private_material_destroyed,
+        )
+        .map(|evaluated| {
+            let artifact = evaluated.artifacts[0];
+            ArtifactDestructionDispositionV1 {
+                replay_claim: artifact.to,
+                redaction_state: artifact.redaction_state,
+                required_private_material_destroyed,
+            }
         })
     }
 
