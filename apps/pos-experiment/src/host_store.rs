@@ -52,14 +52,10 @@ impl HostedExperimentStore {
 impl EventStore for HostedExperimentStore {
     fn bind_erasure_gate(
         &mut self,
-        gate: Arc<pos_core::ErasureContainmentGateV1>,
+        _gate: Arc<pos_core::ErasureContainmentGateV1>,
     ) -> Result<(), CoreError> {
-        let gate: Arc<dyn pos_core::ErasureGate> = gate;
-        if Arc::ptr_eq(&self.gate, &gate) {
-            Ok(())
-        } else {
-            Err(CoreError::ErasureContainmentUnavailable)
-        }
+        // The host owns the concrete gate; this adapter exposes only its read-only view.
+        Err(CoreError::ErasureContainmentUnavailable)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {

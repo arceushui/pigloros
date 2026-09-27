@@ -2210,6 +2210,14 @@ impl SqliteStore {
         }
     }
 
+    fn with_direct_topology_mutation<T>(
+        &mut self,
+        effect: impl FnOnce(&mut Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        self.ensure_direct_topology_mutation_allowed()?;
+        effect(self)
+    }
+
     fn append_or_duplicate_with_limit(
         &self,
         timeline: TimelineId,
@@ -4028,23 +4036,25 @@ impl EventStore for SqliteStore {
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        let meta = TimelineMeta::root(name);
-        let timeline = Timeline::new(meta);
-        let chain_head = self.hasher.genesis_hash();
-        self.conn
-            .execute(
-                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-                 VALUES (?1, ?2, ?3, NULL, NULL, 0, ?4)",
-                params![
-                    timeline.id().to_string(),
-                    timeline.meta.name.as_deref(),
-                    mode_str(timeline.mode()),
-                    chain_head.as_bytes().as_slice(),
-                ],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        Ok(timeline)
+        self.with_direct_topology_mutation(|store| {
+            let meta = TimelineMeta::root(name);
+            let timeline = Timeline::new(meta);
+            let chain_head = store.hasher.genesis_hash();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                     VALUES (?1, ?2, ?3, NULL, NULL, 0, ?4)",
+                    params![
+                        timeline.id().to_string(),
+                        timeline.meta.name.as_deref(),
+                        mode_str(timeline.mode()),
+                        chain_head.as_bytes().as_slice(),
+                    ],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            Ok(timeline)
+        })
     }
 
     fn create_timeline_for_host_transition_with_meta(
@@ -4265,14 +4275,7 @@ impl EventStore for SqliteStore {
         request: KeyDestructionRequestV1,
     ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
         let scope = begin_immediate_scope(&self.conn)?;
-        let version_check = self.validate_erasure_inventory_data_version();
-        #[cfg(test)]
-        if version_check.is_ok() {
-            if let Some((started, release)) = self.destruction_transaction_hook.take() {
-                assert!(started.send(()).is_ok());
-                assert!(release.recv().is_ok());
-            }
-        }
+        let version_check = self.check_key_destruction_inventory_version();
         let result = version_check.and_then(|()| {
             (|| {
                 let mut registry = self.load_key_registry()?.ok_or_else(|| {
@@ -4286,6 +4289,18 @@ impl EventStore for SqliteStore {
             })()
         });
         finish_immediate_scope(&self.conn, scope, result)
+    }
+
+    fn check_key_destruction_inventory_version(&mut self) -> Result<(), CoreError> {
+        let version_check = self.validate_erasure_inventory_data_version();
+        #[cfg(test)]
+        if version_check.is_ok() {
+            if let Some((started, release)) = self.destruction_transaction_hook.take() {
+                assert!(started.send(()).is_ok());
+                assert!(release.recv().is_ok());
+            }
+        }
+        version_check
     }
 
     fn complete_key_registry_destruction(
@@ -4666,11 +4681,12 @@ impl EventStore for SqliteStore {
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
-            store
-                .ensure_generic_timeline_visibility(parent)
-                .and_then(|()| store.fork_unchecked(parent, at_seq, name))
+        self.with_direct_topology_mutation(|store| {
+            store.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, |store| {
+                store
+                    .ensure_generic_timeline_visibility(parent)
+                    .and_then(|()| store.fork_unchecked(parent, at_seq, name))
+            })
         })
     }
 
@@ -4798,8 +4814,8 @@ impl EventStore for SqliteStore {
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        let mut create = |store: &mut Self| {
+        self.with_direct_topology_mutation(|store| {
+            let mut create = |store: &mut Self| {
             let id = meta.id;
             // Resolve fork parent before the duplicate-id check so storage failures on the
             // parent lookup are exercised (and fail closed before INSERT).
@@ -4859,13 +4875,14 @@ impl EventStore for SqliteStore {
                 insert_rows(&store.conn)?;
             }
             Ok(timeline)
-        };
-        match meta.fork_point {
-            Some((parent, _)) => {
-                self.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
+            };
+            match meta.fork_point {
+                Some((parent, _)) => {
+                    store.with_erasure_fence(parent, ErasureProtectedOperationV1::Fork, &mut create)
+                }
+                None => create(store),
             }
-            None => create(self),
-        }
+        })
     }
 
     fn append_committed(
@@ -4956,97 +4973,98 @@ impl EventStore for SqliteStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        self.ensure_admin_visibility(id).and_then(|()| {
-            let id_str = id.to_string();
-            // Refuse delete while child forks still reference this timeline.
-            let child_count_query = self.conn.query_row(
-                "SELECT COUNT(*) FROM timelines WHERE parent_id = ?1",
-                params![id_str],
-                |row| row.get(0),
-            );
-            let child_count: i64 =
-                child_count_query.map_err(|error| Self::storage_error(&error))?;
-            if child_count > 0 {
-                return Err(CoreError::Storage(
-                    "cannot delete timeline that still has forks".to_owned(),
-                ));
-            }
-
-            let tx = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM append_identities
-             WHERE event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_admission_dedup WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_admission_links WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_admission_snapshots
-                 WHERE event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_cell_admission_fences WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_cell_admission_dedup WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_cell_admission_links WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_cell_admission_snapshots WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            let enrollment = Self::enrollment_state_in_transaction(&tx)?;
-            let enrollment_result = if enrollment.permits_geographic_admission_target(id) {
-                enrollment
-                    .revoke()
-                    .and_then(|revoked| Self::write_enrollment_state(&tx, &revoked))
-            } else {
-                Ok(())
-            };
-            enrollment_result.and_then(|()| {
-                tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
-                    .map_err(|e| CoreError::Storage(e.to_string()))?;
-                tx.execute(
-                    "DELETE FROM geographic_presence WHERE timeline_id = ?1",
+        self.with_direct_topology_mutation(|store| {
+            store.ensure_admin_visibility(id).and_then(|()| {
+                let id_str = id.to_string();
+                // Refuse delete while child forks still reference this timeline.
+                let child_count_query = store.conn.query_row(
+                    "SELECT COUNT(*) FROM timelines WHERE parent_id = ?1",
                     params![id_str],
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-                tx.execute(
-                    "DELETE FROM timeline_owners WHERE timeline_id = ?1",
-                    params![id_str],
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
-                let deleted = tx
-                    .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
-                    .map_err(|e| CoreError::Storage(e.to_string()))?;
-                if deleted == 0 {
-                    return Err(CoreError::TimelineNotFound(id));
+                    |row| row.get(0),
+                );
+                let child_count: i64 =
+                    child_count_query.map_err(|error| Self::storage_error(&error))?;
+                if child_count > 0 {
+                    return Err(CoreError::Storage(
+                        "cannot delete timeline that still has forks".to_owned(),
+                    ));
                 }
-                tx.commit().map_err(|e| CoreError::Storage(e.to_string()))
+
+                let tx = store
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM append_identities
+             WHERE event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_admission_dedup WHERE timeline_id = ?1",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_admission_links WHERE timeline_id = ?1",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_admission_snapshots
+                 WHERE event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_cell_admission_fences WHERE timeline_id = ?1",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_cell_admission_dedup WHERE timeline_id = ?1",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_cell_admission_links WHERE timeline_id = ?1",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_cell_admission_snapshots WHERE timeline_id = ?1",
+                    params![id_str],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+                let enrollment = Self::enrollment_state_in_transaction(&tx)?;
+                let enrollment_result = if enrollment.permits_geographic_admission_target(id) {
+                    enrollment
+                        .revoke()
+                        .and_then(|revoked| Self::write_enrollment_state(&tx, &revoked))
+                } else {
+                    Ok(())
+                };
+                enrollment_result.and_then(|()| {
+                    tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
+                        .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    tx.execute(
+                        "DELETE FROM geographic_presence WHERE timeline_id = ?1",
+                        params![id_str],
+                    )
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    tx.execute(
+                        "DELETE FROM timeline_owners WHERE timeline_id = ?1",
+                        params![id_str],
+                    )
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    let deleted = tx
+                        .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
+                        .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    if deleted == 0 {
+                        return Err(CoreError::TimelineNotFound(id));
+                    }
+                    tx.commit().map_err(|e| CoreError::Storage(e.to_string()))
+                })
             })
         })
     }
@@ -5068,44 +5086,48 @@ impl EventStore for SqliteStore {
         meta: TimelineMeta,
         events: &[Event],
     ) -> Result<Timeline, CoreError> {
-        self.ensure_direct_topology_mutation_allowed()?;
-        // Single transaction so create+append is all-or-nothing for concurrent readers.
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let expected_id = meta.id;
-        let result = (|| {
-            self.create_timeline_with_meta(meta)?;
-            self.append_committed(expected_id, events)?;
-            #[cfg(test)]
-            if FAIL_IMPORT_VANISH.with(std::cell::Cell::get) {
-                // Delete row so get_timeline returns Ok(None) inside this transaction.
-                drop(self.conn.execute(
-                    "DELETE FROM timelines WHERE id = ?1",
-                    params![expected_id.to_string()],
-                ));
-            }
-            #[cfg(test)]
-            if FAIL_IMPORT_GET_STORAGE.with(std::cell::Cell::get) {
-                drop(self.conn.execute_batch("DROP TABLE timelines"));
-            }
-            self.get_timeline(expected_id)?
-                .ok_or(CoreError::TimelineNotFound(expected_id))
-        })();
-        match result {
-            Ok(tl) => {
-                self.conn
-                    .execute_batch("COMMIT")
-                    .map_err(|e| CoreError::Storage(e.to_string()))?;
-                Ok(tl)
-            }
-            Err(err) => {
-                match self.conn.execute_batch("ROLLBACK") {
-                    Ok(()) | Err(_) => {}
+        self.with_direct_topology_mutation(|store| {
+            // Single transaction so create+append is all-or-nothing for concurrent readers.
+            store
+                .conn
+                .execute_batch(begin_immediate_sql())
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            let expected_id = meta.id;
+            let result = (|| {
+                store.create_timeline_with_meta(meta)?;
+                store.append_committed(expected_id, events)?;
+                #[cfg(test)]
+                if FAIL_IMPORT_VANISH.with(std::cell::Cell::get) {
+                    // Delete row so get_timeline returns Ok(None) inside this transaction.
+                    drop(store.conn.execute(
+                        "DELETE FROM timelines WHERE id = ?1",
+                        params![expected_id.to_string()],
+                    ));
                 }
-                Err(err)
+                #[cfg(test)]
+                if FAIL_IMPORT_GET_STORAGE.with(std::cell::Cell::get) {
+                    drop(store.conn.execute_batch("DROP TABLE timelines"));
+                }
+                store
+                    .get_timeline(expected_id)?
+                    .ok_or(CoreError::TimelineNotFound(expected_id))
+            })();
+            match result {
+                Ok(tl) => {
+                    store
+                        .conn
+                        .execute_batch("COMMIT")
+                        .map_err(|e| CoreError::Storage(e.to_string()))?;
+                    Ok(tl)
+                }
+                Err(err) => {
+                    match store.conn.execute_batch("ROLLBACK") {
+                        Ok(()) | Err(_) => {}
+                    }
+                    Err(err)
+                }
             }
-        }
+        })
     }
 }
 
@@ -7133,17 +7155,45 @@ fn decode_event_security_context(
     ))
 }
 
+struct RawEventRow {
+    seq: i64,
+    event_id: String,
+    entity_id: String,
+    event_type: String,
+    payload: Vec<u8>,
+    wall_time: i64,
+    causation_id: Option<String>,
+    correlation_id: Option<String>,
+    schema_version: i64,
+}
+
+fn read_event_row_fields(row: &rusqlite::Row<'_>) -> Result<RawEventRow, CoreError> {
+    let storage_error = |error: rusqlite::Error| CoreError::Storage(error.to_string());
+    Ok(RawEventRow {
+        seq: row.get(0).map_err(storage_error)?,
+        event_id: row.get(1).map_err(storage_error)?,
+        entity_id: row.get(2).map_err(storage_error)?,
+        event_type: row.get(3).map_err(storage_error)?,
+        payload: row.get(4).map_err(storage_error)?,
+        wall_time: row.get(5).map_err(storage_error)?,
+        causation_id: row.get(6).map_err(storage_error)?,
+        correlation_id: row.get(7).map_err(storage_error)?,
+        schema_version: row.get(8).map_err(storage_error)?,
+    })
+}
+
 fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
-    let seq: i64 = row.get(0).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let event_id: String = row.get(1).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let entity_id: String = row.get(2).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let event_type: String = row.get(3).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let payload: Vec<u8> = row.get(4).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let wall_time: i64 = row.get(5).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let causation_id: Option<String> = row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let correlation_id: Option<String> =
-        row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let schema_version: i64 = row.get(8).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let RawEventRow {
+        seq,
+        event_id,
+        entity_id,
+        event_type,
+        payload,
+        wall_time,
+        causation_id,
+        correlation_id,
+        schema_version,
+    } = read_event_row_fields(row)?;
     if schema_version != i64::from(SchemaVersion::V1.as_u32()) {
         return Err(CoreError::Serialization(
             "unsupported event schema version".to_owned(),

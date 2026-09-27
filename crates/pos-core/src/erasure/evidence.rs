@@ -1878,6 +1878,15 @@ impl ErasureScopeCommitmentV1 {
     ///
     /// Returns a closed scope error for an empty, duplicate, or oversized scope.
     pub fn new(input: ErasureScopeCommitmentInputV1) -> Result<Self, ErasureErrorV1> {
+        Self::validate_input(&input)?;
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    fn validate_input(input: &ErasureScopeCommitmentInputV1) -> Result<(), ErasureErrorV1> {
         if input.scope_members.is_empty()
             || !strictly_increasing(&input.scope_members)
             || input.scope_timeline_ids.len() > ERASURE_MAX_INVENTORY_TIMELINES
@@ -1890,11 +1899,7 @@ impl ErasureScopeCommitmentV1 {
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        Self {
-            input,
-            content_digest: reference_zero(),
-        }
-        .with_digest()
+        Ok(())
     }
 
     /// Return the ERQ1 digest.

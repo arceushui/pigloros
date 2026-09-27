@@ -67,14 +67,10 @@ impl HostedCliStore {
 impl pos_core::store::EventStore for HostedCliStore {
     fn bind_erasure_gate(
         &mut self,
-        gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
+        _gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
     ) -> Result<(), pos_core::CoreError> {
-        let gate: std::sync::Arc<dyn pos_core::ErasureGate> = gate;
-        if std::sync::Arc::ptr_eq(&self.gate, &gate) {
-            Ok(())
-        } else {
-            Err(pos_core::CoreError::ErasureContainmentUnavailable)
-        }
+        // The host owns the concrete gate; this adapter exposes only its read-only view.
+        Err(pos_core::CoreError::ErasureContainmentUnavailable)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<pos_core::Timeline, pos_core::CoreError> {

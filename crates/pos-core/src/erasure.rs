@@ -770,38 +770,7 @@ impl ErasureContainmentGateV1 {
             .fence_lock
             .lock()
             .map_err(containment_recovery_failure)?;
-        if bindings
-            .iter()
-            .any(|(_, scope)| !state.scope_contains(*scope))
-        {
-            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
-        }
-        validate_committed_scope_timeline_bindings(state, bindings)
-            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
-        let expected_scopes: BTreeSet<_> = state
-            .scope
-            .as_ref()
-            .into_iter()
-            .flat_map(|scope| scope.scope_members().iter().copied())
-            .chain(state.scope_forks())
-            .collect();
-        let bound_scopes: BTreeSet<_> = bindings.iter().map(|(_, scope)| *scope).collect();
-        if expected_scopes != bound_scopes {
-            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
-        }
-        let mut bound_timelines = BTreeSet::new();
-        if bindings
-            .iter()
-            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
-        {
-            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
-        }
-        if unaffected
-            .iter()
-            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
-        {
-            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
-        }
+        Self::validate_state_topology_bindings(state, bindings, unaffected)?;
         let request = state.request().reference();
         let current = self
             .authority
@@ -841,6 +810,46 @@ impl ErasureContainmentGateV1 {
             .authority
             .write()
             .map_err(containment_recovery_failure)? = Arc::new(candidate);
+        Ok(())
+    }
+
+    fn validate_state_topology_bindings(
+        state: &ErasureVerifiedStateV1,
+        bindings: &[(TimelineId, ErasureReferenceV1)],
+        unaffected: &[(TimelineId, ErasureReferenceV1)],
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        if bindings
+            .iter()
+            .any(|(_, scope)| !state.scope_contains(*scope))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        validate_committed_scope_timeline_bindings(state, bindings)
+            .map_err(|_| ErasureContainmentErrorV1::RecoveryUnavailable)?;
+        let expected_scopes: BTreeSet<_> = state
+            .scope
+            .as_ref()
+            .into_iter()
+            .flat_map(|scope| scope.scope_members().iter().copied())
+            .chain(state.scope_forks())
+            .collect();
+        let bound_scopes: BTreeSet<_> = bindings.iter().map(|(_, scope)| *scope).collect();
+        if expected_scopes != bound_scopes {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        let mut bound_timelines = BTreeSet::new();
+        if bindings
+            .iter()
+            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
+        if unaffected
+            .iter()
+            .any(|(timeline, _)| !bound_timelines.insert(*timeline))
+        {
+            return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
+        }
         Ok(())
     }
 
@@ -947,11 +956,7 @@ impl ErasureContainmentGateV1 {
             return Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         }
         let generation = candidate.generation();
-        let _fence = self
-            .fence_lock
-            .lock()
-            .map_err(containment_recovery_failure)?;
-        self.ensure_available()?;
+        let _fence = self.lock_available_fence()?;
         self.validate_inventory_successor(&candidate)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(candidate),
@@ -962,6 +967,17 @@ impl ErasureContainmentGateV1 {
             .write()
             .map_err(containment_recovery_failure)? = Arc::new(replacement);
         Ok(generation)
+    }
+
+    fn lock_available_fence(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, ()>, ErasureContainmentErrorV1> {
+        let fence = self
+            .fence_lock
+            .lock()
+            .map_err(containment_recovery_failure)?;
+        self.ensure_available()?;
+        Ok(fence)
     }
 
     /// Run one durable coordinator transition and publish its verified
@@ -997,8 +1013,7 @@ impl ErasureContainmentGateV1 {
             claimed_store_identity: RefCell::new(None),
             _private: (),
         };
-        let (candidate, result) = transition(&permit).map_err(containment_recovery_failure)?;
-        self.validate_inventory_successor(&candidate)?;
+        let (candidate, result) = self.complete_inventory_transition(transition, &permit)?;
         let replacement = ErasureGateStateV1 {
             inventory: Some(Arc::new(candidate.clone())),
             ..ErasureGateStateV1::default()
@@ -1007,6 +1022,16 @@ impl ErasureContainmentGateV1 {
             .authority
             .write()
             .map_err(containment_recovery_failure)? = Arc::new(replacement);
+        Ok((candidate, result))
+    }
+
+    fn complete_inventory_transition<T>(
+        &self,
+        transition: &mut ErasureInventoryTransitionV1<'_, T>,
+        permit: &ErasureTopologyTransitionPermitV1,
+    ) -> Result<(ErasureVerifiedInventoryV1, T), ErasureContainmentErrorV1> {
+        let (candidate, result) = transition(permit).map_err(containment_recovery_failure)?;
+        self.validate_inventory_successor(&candidate)?;
         Ok((candidate, result))
     }
 
@@ -2651,15 +2676,7 @@ impl ErasureVerifiedInventoryV1 {
         proof: &ErasureVerifiedTopologyProofV1,
         topology: &[TimelineId],
     ) -> Result<(), ErasureErrorV1> {
-        if proof.manifest_digest != state.manifest_digest()
-            || proof.bindings.len().checked_add(proof.unaffected.len()) != Some(topology.len())
-            || proof
-                .bindings
-                .iter()
-                .any(|(_, scope)| !state.scope_contains(*scope))
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
+        Self::validate_member_topology_metadata(state, proof, topology)?;
         validate_committed_scope_timeline_bindings(state, &proof.bindings)?;
         let mut observed = Vec::new();
         observed
@@ -2674,6 +2691,23 @@ impl ErasureVerifiedInventoryV1 {
                 .then_some(())
                 .ok_or(ErasureErrorV1::ProvenanceMissing)
             })
+    }
+
+    fn validate_member_topology_metadata(
+        state: &ErasureVerifiedStateV1,
+        proof: &ErasureVerifiedTopologyProofV1,
+        topology: &[TimelineId],
+    ) -> Result<(), ErasureErrorV1> {
+        if proof.manifest_digest != state.manifest_digest()
+            || proof.bindings.len().checked_add(proof.unaffected.len()) != Some(topology.len())
+            || proof
+                .bindings
+                .iter()
+                .any(|(_, scope)| !state.scope_contains(*scope))
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(())
     }
 
     /// Return the complete-inventory generation bound to cache and cursor use.
@@ -2770,10 +2804,7 @@ impl ErasureVerifiedInventoryV1 {
         &self,
         parent: TimelineId,
     ) -> Result<Vec<ErasureForkScopeRequirementV1>, ErasureErrorV1> {
-        self.validate_fork_parent_has_admitted_lineage(parent)?;
-        let classifications = self
-            .classification_for(parent)
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let classifications = self.admitted_fork_parent_classifications(parent)?;
         self.members
             .iter()
             .zip(classifications)
@@ -2799,6 +2830,15 @@ impl ErasureVerifiedInventoryV1 {
                 })
             })
             .collect()
+    }
+
+    fn admitted_fork_parent_classifications(
+        &self,
+        parent: TimelineId,
+    ) -> Result<&[ErasureInventoryClassificationV1], ErasureErrorV1> {
+        self.validate_fork_parent_has_admitted_lineage(parent)?;
+        self.classification_for(parent)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 
     /// Require positive exclusion of a Timeline/Fork from every recovered
@@ -2979,18 +3019,7 @@ impl ErasureVerifiedInventoryV1 {
             .classifications
             .binary_search_by_key(&parent, |(timeline, _)| *timeline)
             .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        self.validate_fork_parent_has_admitted_lineage(parent)?;
-        if self.members.iter().any(|(state, _)| {
-            state
-                .scope()
-                .is_some_and(|scope| scope.scope_members().contains(&input.child_scope))
-                || state
-                    .scope_extensions()
-                    .iter()
-                    .any(|extension| extension.fork() == input.child_scope)
-        }) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
+        self.validate_fork_child_scope_admission(parent, input.child_scope)?;
         self.validate_prepared_fork_admissions(&input, &mut admissions)?;
 
         let Self {
@@ -3007,6 +3036,26 @@ impl ErasureVerifiedInventoryV1 {
             admissions,
             parent_index,
         )
+    }
+
+    fn validate_fork_child_scope_admission(
+        &self,
+        parent: TimelineId,
+        child_scope: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.validate_fork_parent_has_admitted_lineage(parent)?;
+        if self.members.iter().any(|(state, _)| {
+            state
+                .scope()
+                .is_some_and(|scope| scope.scope_members().contains(&child_scope))
+                || state
+                    .scope_extensions()
+                    .iter()
+                    .any(|extension| extension.fork() == child_scope)
+        }) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(())
     }
 
     fn prepare_successor_fork_batch(
@@ -3059,11 +3108,7 @@ impl ErasureVerifiedInventoryV1 {
                     admission_index += 1;
                 }
                 (false, None) => {
-                    proof
-                        .unaffected
-                        .try_reserve(1)
-                        .map_err(allocation_failure)?;
-                    proof.unaffected.push(input.child.id);
+                    Self::append_unaffected_child(&mut proof, input.child.id)?;
                 }
                 (true, None | Some(_)) | (false, Some(_)) => {
                     return Err(ErasureErrorV1::PolicyConflict)
@@ -3081,6 +3126,18 @@ impl ErasureVerifiedInventoryV1 {
         let successor =
             Self::from_verified_recovery_with_limits(successor_members, topology, limits)?;
         PreparedErasureForkBatchV1::new(input, admissions, successor)
+    }
+
+    fn append_unaffected_child(
+        proof: &mut ErasureVerifiedTopologyProofV1,
+        child: TimelineId,
+    ) -> Result<(), ErasureErrorV1> {
+        proof
+            .unaffected
+            .try_reserve(1)
+            .map_err(allocation_failure)?;
+        proof.unaffected.push(child);
+        Ok(())
     }
 
     /// Order and verify one complete set of future-Fork admission mutations.
@@ -4257,20 +4314,13 @@ impl PreparedErasureForkAdmissionV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let binding_digest = Self::compute_binding_digest(
-            &input,
-            &extension,
-            &mutation,
-            predecessor,
-            parent,
-            at_seq,
-        )?;
-        Ok(Self {
-            input,
-            extension,
-            mutation,
-            binding_digest,
-        })
+        Self::compute_binding_digest(&input, &extension, &mutation, predecessor, parent, at_seq)
+            .map(|binding_digest| Self {
+                input,
+                extension,
+                mutation,
+                binding_digest,
+            })
     }
 
     fn compute_binding_digest(

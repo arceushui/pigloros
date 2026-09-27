@@ -1568,11 +1568,7 @@ impl ErasureExecutionHostV1 {
             .install_verified_inventory(Arc::clone(&retained_inventory), limits)
             .map_err(ErasureHostErrorV1::from);
         #[cfg(test)]
-        let publication = if self.fail_inventory_publication {
-            Err(ErasureHostErrorV1::RecoveryUnavailable)
-        } else {
-            publication
-        };
+        let publication = self.maybe_fail_inventory_publication(publication);
         let generation = match publication {
             Ok(generation) => generation,
             Err(error) => {
@@ -1588,6 +1584,18 @@ impl ErasureExecutionHostV1 {
             request_count,
         };
         Ok(generation)
+    }
+
+    #[cfg(test)]
+    const fn maybe_fail_inventory_publication(
+        &self,
+        publication: Result<ErasureReferenceV1, ErasureHostErrorV1>,
+    ) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
+        if self.fail_inventory_publication {
+            Err(ErasureHostErrorV1::RecoveryUnavailable)
+        } else {
+            publication
+        }
     }
 
     fn apply_root_topology_change(

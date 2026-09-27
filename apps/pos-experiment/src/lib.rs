@@ -2489,15 +2489,23 @@ impl BacktestRunner {
         mut store: HostedExperimentStore,
     ) -> Result<BacktestResult, ExperimentError> {
         let host_gate = store.containment_gate();
+        self.ensure_configured_host_gate_matches(&host_gate)
+            .and_then(|()| self.run_on_store_with_gate_bindings(&mut store, host_gate))
+    }
+
+    fn ensure_configured_host_gate_matches(
+        &self,
+        host_gate: &Arc<dyn ErasureGate>,
+    ) -> Result<(), ExperimentError> {
         if let Some(configured) = self.erasure_gate.as_ref() {
             let configured: Arc<dyn ErasureGate> = configured.clone();
-            if !Arc::ptr_eq(&configured, &host_gate) {
+            if !Arc::ptr_eq(&configured, host_gate) {
                 return Err(ExperimentError::Store(
                     pos_core::CoreError::ErasureContainmentUnavailable,
                 ));
             }
         }
-        self.run_on_store_with_gate_bindings(&mut store, host_gate)
+        Ok(())
     }
 
     /// Run backtest phases on an already-opened store (test seam for fault injection).
