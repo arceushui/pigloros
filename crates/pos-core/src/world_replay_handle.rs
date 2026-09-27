@@ -199,14 +199,16 @@ impl Reader<'_> {
     }
 
     fn unsigned(&mut self) -> Result<u64, WorldReplayHandleErrorV1> {
-        self.take(1).and_then(|head| match head[0] {
-            0..=23 => Ok(u64::from(head[0])),
-            0x18 => self.take_number::<1>(),
-            0x19 => self.take_number::<2>(),
-            0x1a => self.take_number::<4>(),
-            0x1b => self.take_number::<8>(),
-            _ => Err(WorldReplayHandleErrorV1::InvalidEncoding),
-        })
+        self.take(1)
+            .map(|head| head[0])
+            .and_then(|head| match head {
+                0..=23 => Ok(u64::from(head)),
+                0x18 => self.take_number::<1>(),
+                0x19 => self.take_number::<2>(),
+                0x1a => self.take_number::<4>(),
+                0x1b => self.take_number::<8>(),
+                _ => Err(WorldReplayHandleErrorV1::InvalidEncoding),
+            })
     }
 
     fn take_number<const N: usize>(&mut self) -> Result<u64, WorldReplayHandleErrorV1> {
