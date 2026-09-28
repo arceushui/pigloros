@@ -5,7 +5,7 @@
 /// publication authority through this wrapper.
 struct HostedExperimentStore {
     host: Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: Arc<pos_core::ErasureContainmentGateV1>,
+    gate: Arc<dyn pos_core::ErasureGate>,
 }
 
 impl HostedExperimentStore {
@@ -32,7 +32,7 @@ impl HostedExperimentStore {
         })
     }
 
-    fn containment_gate(&self) -> Arc<pos_core::ErasureContainmentGateV1> {
+    fn containment_gate(&self) -> Arc<dyn pos_core::ErasureGate> {
         Arc::clone(&self.gate)
     }
 
@@ -52,13 +52,10 @@ impl HostedExperimentStore {
 impl EventStore for HostedExperimentStore {
     fn bind_erasure_gate(
         &mut self,
-        gate: Arc<pos_core::ErasureContainmentGateV1>,
+        _gate: Arc<pos_core::ErasureContainmentGateV1>,
     ) -> Result<(), CoreError> {
-        if Arc::ptr_eq(&self.gate, &gate) {
-            Ok(())
-        } else {
-            Err(CoreError::ErasureContainmentUnavailable)
-        }
+        // The host owns the concrete gate; this adapter exposes only its read-only view.
+        Err(CoreError::ErasureContainmentUnavailable)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
@@ -148,8 +145,6 @@ mod host_store_tests {
     #[test]
     fn delegates_the_experiment_store_surface() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
-        let host_gate = store.containment_gate();
-        store.bind_erasure_gate(Arc::clone(&host_gate))?;
         assert!(store
             .bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))
             .is_err());

@@ -4,7 +4,7 @@
 /// authority never escape `ErasureExecutionHostV1`.
 struct HostedCliStore {
     host: std::sync::Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
+    gate: std::sync::Arc<dyn pos_core::ErasureGate>,
 }
 
 impl HostedCliStore {
@@ -59,21 +59,18 @@ impl HostedCliStore {
             })
     }
 
-    fn containment_gate(&self) -> std::sync::Arc<pos_core::ErasureContainmentGateV1> {
-        self.gate.clone()
+    fn containment_gate(&self) -> std::sync::Arc<dyn pos_core::ErasureGate> {
+        std::sync::Arc::clone(&self.gate)
     }
 }
 
 impl pos_core::store::EventStore for HostedCliStore {
     fn bind_erasure_gate(
         &mut self,
-        gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
+        _gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
     ) -> Result<(), pos_core::CoreError> {
-        if std::sync::Arc::ptr_eq(&self.gate, &gate) {
-            Ok(())
-        } else {
-            Err(pos_core::CoreError::ErasureContainmentUnavailable)
-        }
+        // The host owns the concrete gate; this adapter exposes only its read-only view.
+        Err(pos_core::CoreError::ErasureContainmentUnavailable)
     }
 
     fn create_timeline(&mut self, name: &str) -> Result<pos_core::Timeline, pos_core::CoreError> {
@@ -184,10 +181,30 @@ mod hosted_cli_store_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sqlite_bounded_read_uses_the_host_fence() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join("cli-replay.db");
+        let config = StoreConfig::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+        };
+        let mut store = HostedCliStore::open(config.clone())?;
+        let timeline = store.create_timeline("cli-replay")?;
+        drop(store);
+        let store = HostedCliStore::open(config)?;
+        assert!(store
+            .read_bounded(
+                timeline.id(),
+                SeqRange::all(),
+                pos_core::store::EventReadBounds::new(8, 32, 4, 4),
+            )?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delegates_the_cli_store_surface() -> Result<(), Box<dyn std::error::Error>> {
         let mut store = HostedCliStore::open(StoreConfig::Memory)?;
-        let gate = std::sync::Arc::clone(&store.gate);
-        store.bind_erasure_gate(gate)?;
         assert!(store
             .bind_erasure_gate(std::sync::Arc::new(
                 pos_core::ErasureContainmentGateV1::new_test_open()

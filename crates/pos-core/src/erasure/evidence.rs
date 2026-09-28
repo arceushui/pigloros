@@ -6,7 +6,7 @@ use super::{
     ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
-    ErasureStateV1, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+    ErasureStateV1, TimelineId, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
     ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
     ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_CAS_EFFECT_TAG_V1,
     ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
@@ -14,13 +14,14 @@ use super::{
     ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
     ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_INVENTORY_CATEGORY_COUNT,
     ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ATTEMPT_OUTCOMES,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS,
-    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
-    ERASURE_OBLIGATION_SET_MAX_BYTES, ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1,
-    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1,
-    ERASURE_RECOVERY_ERROR_TAG_V1, ERASURE_RETRY_ADMISSION_MAX_BYTES,
-    ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, ERQ1, ERS1, VERSION,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_INVENTORY_TIMELINES, ERASURE_MAX_OBLIGATIONS,
+    ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS,
+    ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_MAX_BYTES, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1, ERASURE_RECOVERY_ERROR_TAG_V1,
+    ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1,
+    ERASURE_SCOPE_LEDGER_MAX_BYTES, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -230,23 +231,65 @@ pub(super) fn scope_commitment_value(record: &ErasureScopeCommitmentV1) -> Value
         text(ERASURE_SCOPE_COMMITMENT_TAG_V1),
         uint(VERSION),
         digest(record.input.request),
-        references_value(&record.input.scope_members),
+        affected_scope_value(record),
         digest(record.input.target_closure),
         optional_digest(record.input.lineage_rule),
     ])
+}
+
+fn affected_scope_value(record: &ErasureScopeCommitmentV1) -> Value {
+    // Encode both canonical entry kinds in the single ADR-060 affected-scope array.
+    Value::Array(
+        record
+            .input
+            .scope_members
+            .iter()
+            .copied()
+            .map(|reference| Value::Array(vec![uint(0), digest(reference)]))
+            .chain(
+                record
+                    .input
+                    .scope_timeline_ids
+                    .iter()
+                    .copied()
+                    .map(|timeline| Value::Array(vec![uint(1), timeline_id_value(timeline)])),
+            )
+            .collect(),
+    )
+}
+
+fn affected_scope_from_value(
+    value: &Value,
+) -> Result<(Vec<ErasureReferenceV1>, Vec<TimelineId>), ErasureErrorV1> {
+    let entries = array(value, ERASURE_MAX_INVENTORY_TIMELINES)?;
+    let mut scope_members = Vec::new();
+    let mut scope_timeline_ids = Vec::new();
+    let mut timeline_entries_started = false;
+    for entry in entries {
+        let fields = exact_array(entry, 2)?;
+        match unsigned(&fields[0])? {
+            0 if !timeline_entries_started => {
+                scope_members.push(bytes32(&fields[1])?);
+            }
+            1 => {
+                timeline_entries_started = true;
+                scope_timeline_ids.push(timeline_id_from_value(&fields[1])?);
+            }
+            _ => return Err(ErasureErrorV1::InvalidEncoding),
+        }
+    }
+    Ok((scope_members, scope_timeline_ids))
 }
 
 pub(super) fn scope_commitment_from_fields(
     fields: &[Value],
 ) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
     header(fields, ERASURE_SCOPE_COMMITMENT_TAG_V1)?;
+    let (scope_members, scope_timeline_ids) = affected_scope_from_value(&fields[3])?;
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: bytes32(&fields[2])?,
-        scope_members: bounded_references_from_value(
-            &fields[3],
-            ERASURE_MAX_SCOPE_EXTENSIONS,
-            true,
-        )?,
+        scope_members,
+        scope_timeline_ids,
         target_closure: bytes32(&fields[4])?,
         lineage_rule: optional_bytes32(&fields[5])?,
     })
@@ -463,21 +506,38 @@ pub(super) fn scope_extension_value(record: &ErasureScopeExtensionV1) -> Value {
         uint(VERSION),
         digest(record.input.request),
         digest(record.input.scope_commitment),
-        digest(record.input.fork),
+        fork_scope_reference_value(record.input.fork, record.input.child_timeline),
         digest(record.input.lineage_rule),
         optional_digest(record.input.predecessor_extension),
         digest(record.input.admission_provenance),
     ])
 }
 
+fn fork_scope_reference_value(fork: ErasureReferenceV1, child_timeline: TimelineId) -> Value {
+    // Keep the Fork reference and its child Timeline as one typed scope reference.
+    Value::Array(vec![digest(fork), timeline_id_value(child_timeline)])
+}
+
+fn fork_scope_reference_from_value(
+    value: &Value,
+) -> Result<(ErasureReferenceV1, TimelineId), ErasureErrorV1> {
+    exact_array(value, 2).and_then(|fields| {
+        bytes32(&fields[0]).and_then(|fork| {
+            timeline_id_from_value(&fields[1]).map(|child_timeline| (fork, child_timeline))
+        })
+    })
+}
+
 pub(super) fn scope_extension_from_fields(
     fields: &[Value],
 ) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
     header(fields, ERASURE_SCOPE_EXTENSION_TAG_V1)?;
+    let (fork, child_timeline) = fork_scope_reference_from_value(&fields[4])?;
     ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: bytes32(&fields[2])?,
         scope_commitment: bytes32(&fields[3])?,
-        fork: bytes32(&fields[4])?,
+        fork,
+        child_timeline,
         lineage_rule: bytes32(&fields[5])?,
         predecessor_extension: optional_bytes32(&fields[6])?,
         admission_provenance: bytes32(&fields[7])?,
@@ -1271,6 +1331,20 @@ pub(super) fn acknowledgements_are_closure_subset(
 pub(super) fn references_value(references: &[ErasureReferenceV1]) -> Value {
     Value::Array(references.iter().copied().map(digest).collect())
 }
+pub(super) fn timeline_id_value(timeline: TimelineId) -> Value {
+    Value::Bytes(timeline.inner().to_bytes().to_vec())
+}
+fn timeline_id_from_value(value: &Value) -> Result<TimelineId, ErasureErrorV1> {
+    match value {
+        Value::Bytes(bytes) => bytes
+            .as_slice()
+            .try_into()
+            .map(ulid::Ulid::from_bytes)
+            .map(TimelineId::from_ulid)
+            .map_err(|_| ErasureErrorV1::InvalidEncoding),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
+}
 pub(super) fn references_from_value(
     value: &Value,
     required: bool,
@@ -1778,6 +1852,8 @@ pub struct ErasureScopeCommitmentInputV1 {
     pub request: ErasureReferenceV1,
     /// Canonical Timeline/Fork members resolved by the host.
     pub scope_members: Vec<ErasureReferenceV1>,
+    /// Exact affected Timeline/Fork identifiers resolved at the initial freeze.
+    pub scope_timeline_ids: Vec<TimelineId>,
     /// Digest of the exact frozen target closure.
     pub target_closure: ErasureReferenceV1,
     /// Immutable future-Fork lineage-expansion rule admitted before freeze.
@@ -1802,17 +1878,28 @@ impl ErasureScopeCommitmentV1 {
     ///
     /// Returns a closed scope error for an empty, duplicate, or oversized scope.
     pub fn new(input: ErasureScopeCommitmentInputV1) -> Result<Self, ErasureErrorV1> {
-        if input.scope_members.is_empty()
-            || input.scope_members.len() > ERASURE_MAX_SCOPE_EXTENSIONS
-            || !strictly_increasing(&input.scope_members)
-        {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
+        Self::validate_input(&input)?;
         Self {
             input,
             content_digest: reference_zero(),
         }
         .with_digest()
+    }
+
+    fn validate_input(input: &ErasureScopeCommitmentInputV1) -> Result<(), ErasureErrorV1> {
+        if input.scope_members.is_empty()
+            || !strictly_increasing(&input.scope_members)
+            || input.scope_timeline_ids.len() > ERASURE_MAX_INVENTORY_TIMELINES
+            || input
+                .scope_members
+                .len()
+                .saturating_add(input.scope_timeline_ids.len())
+                > ERASURE_MAX_INVENTORY_TIMELINES
+            || !strictly_increasing(&input.scope_timeline_ids)
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        Ok(())
     }
 
     /// Return the ERQ1 digest.
@@ -1824,6 +1911,11 @@ impl ErasureScopeCommitmentV1 {
     #[must_use]
     pub fn scope_members(&self) -> &[ErasureReferenceV1] {
         &self.input.scope_members
+    }
+    /// Return the exact Timeline/Fork identifiers included by the initial freeze.
+    #[must_use]
+    pub fn scope_timeline_ids(&self) -> &[TimelineId] {
+        &self.input.scope_timeline_ids
     }
     /// Return the frozen target-closure digest.
     #[must_use]
@@ -1860,7 +1952,7 @@ impl ErasureScopeCommitmentV1 {
         decode_limited(
             bytes,
             ERASURE_SCOPE_LEDGER_MAX_BYTES,
-            ERASURE_MAX_SCOPE_EXTENSIONS,
+            ERASURE_MAX_INVENTORY_TIMELINES,
         )
         .and_then(|value| exact_array(&value, 6).and_then(scope_commitment_from_fields))
     }
@@ -3613,6 +3705,8 @@ pub struct ErasureScopeExtensionInputV1 {
     pub scope_commitment: ErasureReferenceV1,
     /// Canonical Timeline/Fork scope reference being appended.
     pub fork: ErasureReferenceV1,
+    /// Exact child Timeline/Fork identifier admitted by this extension.
+    pub child_timeline: TimelineId,
     /// The non-null lineage rule pinned by the initial commitment.
     pub lineage_rule: ErasureReferenceV1,
     /// Immediately preceding extension address, if one exists.
@@ -3658,6 +3752,12 @@ impl ErasureScopeExtensionV1 {
     #[must_use]
     pub const fn fork(&self) -> ErasureReferenceV1 {
         self.input.fork
+    }
+
+    /// Return the exact child Timeline/Fork identifier admitted by this extension.
+    #[must_use]
+    pub const fn child_timeline(&self) -> TimelineId {
+        self.input.child_timeline
     }
 
     /// Return the pinned lineage-expansion rule.

@@ -5,8 +5,8 @@ use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, EntityId, ErasureArtifactClassV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, EventDraft, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1,
-    SchemaVersion,
+    ErasureReplayClaimV1, EventDraft, KeyRegistryStateV1, Kind, RegisteredArtifactV1,
+    ReplayClaimEvaluatorV1, SchemaVersion,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -177,14 +177,28 @@ fn assert_gate_removal_cannot_rebind<S: RemoveGate>(
     mut store: S,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let timeline = store.create_timeline("bound-then-removed")?;
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
     let mut removed = store.without_erasure_gate();
     let replacement =
         removed.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     assert!(replacement.is_err());
     assert_eq!(
         removed
+            .create_timeline("unpermitted-after-gate-removal")
+            .err()
+            .map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    assert_eq!(
+        removed
             .append(timeline.id(), &[draft()])
+            .err()
+            .map(|error| error.to_string()),
+        Some("erasure containment boundary is unavailable".to_owned())
+    );
+    assert_eq!(
+        removed
+            .save_key_registry(&KeyRegistryStateV1::new())
             .err()
             .map(|error| error.to_string()),
         Some("erasure containment boundary is unavailable".to_owned())

@@ -139,7 +139,7 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
         store::{EventStore, SeqRange},
-        CoreError, ErasureContainmentGateV1, Event, Reducer, State,
+        CoreError, ErasureContainmentGateV1, ErasureGate, Event, Reducer, State,
     };
     use pos_plugin_world::{
         encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldDriver,
@@ -387,7 +387,7 @@ mod tests {
         (host, timeline, bodies, action, committed)
     }
 
-    fn world_registry(gate: Arc<ErasureContainmentGateV1>) -> ProjectionRegistry {
+    fn world_registry(gate: Arc<dyn ErasureGate>) -> ProjectionRegistry {
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("world", Box::new(WorldReducer));
         registry

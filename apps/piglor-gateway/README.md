@@ -18,21 +18,25 @@ cargo run -p piglor-gateway --locked -- serve 127.0.0.1:8080 /tmp/piglor-gw.db
 
 The Gateway remains an ingress/store façade; it does not run simulation drivers. For the
 ADR-019 two-process demonstration, start the Gateway with an explicit SQLite file, create a
-Timeline through `POST /v1/timelines`, then run `pos-experiment` against that exact file and
-returned ID:
+Timeline through `POST /v1/timelines`, then stop the Gateway before running `pos-experiment`
+against that exact file and returned ID. Restart the Gateway after the experiment exits:
 
 ```bash
 cargo run -p piglor-gateway --locked -- \
   serve 127.0.0.1:8080 /tmp/piglor-126.db
 
+# Record the Timeline ID from POST /v1/timelines, then stop Gateway (Ctrl-C).
 cargo run -p pos-experiment --locked -- \
   multi-rate-demo /tmp/piglor-126.db <timeline-id> \
   --ticks 20 --quantum-ms 100 --pace-ms 100
+
+cargo run -p piglor-gateway --locked -- \
+  serve 127.0.0.1:8080 /tmp/piglor-126.db
 ```
 
 The experiment is finite and uses caller-supplied simulation time for deterministic driver
-cadence; wall-clock sleep only paces output. Human actions and society signals may be posted
-through this Gateway while it runs. See the
+cadence; wall-clock sleep only paces output. After the restart, a host-configured Gateway can
+accept human actions and society signals; the default action route remains fail-closed. See the
 [`pos-experiment` demo guide](../pos-experiment/README.md) for exact requests, overrides,
 restart guidance, and the same-file requirement. Arbitrary raw-SQL writers remain outside
 the supported multi-process boundary.
@@ -102,14 +106,18 @@ HTTP (axum) → Gateway → EventStore (Memory | SQLite)
 
 This crate is a **store façade**, not a full `pos-runtime` host. Poll returns Events already appended to a bundled memory or SQLite store, including imported Events. Count, payload, metadata, Fork-depth, and response bounds apply regardless of Event origin. Custom `EventStore` adapters must implement the bounded-read and bounded root-count capabilities; safe defaults refuse Gateway operations instead of falling back to allocating reads or lists. When a `GatewayAuthorization` is configured, timeline reads require the host-provided actor context and are rechecked under the same authority fence used by action appends; no adapter credential or bearer value enters the Timeline.
 
-### Supported SQLite write boundary
+### SQLite and host ownership
 
-The supported multi-process boundary permits PiglorOS Gateway and experiment-host
-processes to open the same SQLite Timeline through `EventStore`. Immediate writer
-transactions and a bounded busy timeout serialize their appends, and Gateway
-ceilings are enforced atomically by the adapter. Arbitrary SQL mutation by tools
-that bypass `EventStore` remains unsupported while the file is open. Imported
-Events remain safely bounded on read.
+One erasure host owns the verified inventory generation used by its Gateway
+routes. Its `EventStore` adapter serializes writes with immediate SQLite
+transactions and a bounded busy timeout, and enforces Gateway ceilings
+atomically. A separate process can advance the same SQLite file, but an
+already-open host then rejects protected reads and writes rather than using a
+stale inventory. Stop and restart that host to recover the complete committed
+inventory before serving routes again. Concurrent Gateway and experiment
+commands require the same host command stream, not two independently opened
+hosts. Arbitrary SQL mutation that bypasses `EventStore` remains unsupported.
+Imported Events remain safely bounded on read.
 
 An external client does not reuse the 10,000-owned-Event ceiling as
 a logical read limit: Forks may expose inherited plus owned Events beyond that

@@ -9,8 +9,8 @@ use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Hash,
-    Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
+    Event, EventDraft, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -20,6 +20,7 @@ use pos_plugin_agent::{
 use pos_plugin_society::{
     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 };
+use pos_plugin_world::{encode_actuator_pair_v1, ActionKindV1, WorldActionV1};
 use pos_runtime::{
     Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
 };
@@ -62,6 +63,7 @@ struct FixturePlugin {
     name: &'static str,
     has_driver: bool,
     has_reducer: bool,
+    owned_event_types: Vec<Kind>,
 }
 
 impl FixturePlugin {
@@ -71,7 +73,13 @@ impl FixturePlugin {
             name,
             has_driver,
             has_reducer,
+            owned_event_types: Vec::new(),
         }
+    }
+
+    fn with_owned_event_type(mut self, event_type: Kind) -> Self {
+        self.owned_event_types.push(event_type);
+        self
     }
 }
 
@@ -86,7 +94,7 @@ impl Plugin for FixturePlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: Vec::new(),
+            owned_event_types: self.owned_event_types.clone(),
             owned_entity_kinds: Vec::new(),
             has_driver: self.has_driver,
             has_reducer: self.has_reducer,
@@ -133,6 +141,36 @@ impl Driver for ObservationProbeDriver {
         }
         drop(log);
         Ok(StepOutput::empty())
+    }
+}
+
+struct HumanActionDriver {
+    entity: EntityId,
+    payload: CanonicalBytes,
+    steps: u8,
+}
+
+impl Driver for HumanActionDriver {
+    fn name(&self) -> &'static str {
+        "human-action"
+    }
+
+    fn step(
+        &mut self,
+        _timeline: TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let emit = self.steps == 1;
+        self.steps = self.steps.saturating_add(1);
+        if emit {
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("world.action.v1"),
+                self.payload.clone(),
+            )]))
+        } else {
+            Ok(StepOutput::empty())
+        }
     }
 }
 
@@ -310,8 +348,9 @@ impl Drop for FixtureGuard {
     }
 }
 
-fn replay_registry(erasure_gate: Arc<pos_core::ErasureContainmentGateV1>) -> ProjectionRegistry {
-    let mut registry = ProjectionRegistry::new().with_erasure_gate(erasure_gate);
+fn replay_registry() -> ProjectionRegistry {
+    let mut registry = ProjectionRegistry::new()
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     registry.register("observation", Box::new(EntityStateProjection));
     registry.register("society", Box::new(SocietyReducer));
     registry.register("agent", Box::new(AgentReducer));
@@ -415,7 +454,7 @@ struct MultiRateScenario {
     society_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
-    erasure_gate: Arc<ErasureContainmentGateV1>,
+    pinned_wall_time: WallTime,
     fast_decisions: Arc<AtomicUsize>,
     slow_decisions: Arc<AtomicUsize>,
     probe_log: Arc<Mutex<Vec<u64>>>,
@@ -434,12 +473,42 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
     let address = listener.local_addr().test_ok()?;
     let human_body = EntityId::new();
     let human_entity = EntityId::new();
-    let host = ErasureExecutionHostV1::open_verified_empty(
+    let society_entity = EntityId::new();
+    let fast_entity = EntityId::new();
+    let slow_entity = EntityId::new();
+    let pinned_wall_time = WallTime::from_micros(u64::try_from(i64::MAX).test_ok()?);
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
         StoreConfig::Sqlite { path: path.clone() },
         pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
     )
     .test_ok()?;
-    let erasure_gate = host.containment_gate();
+    let timeline = {
+        let mut sender = host.command_sender().test_ok()?;
+        let timeline = sender.create_timeline("multi-rate-e2e").test_ok()?;
+        let first = draft_signal(
+            society_entity,
+            &SocietySignal {
+                dimension: SocietyDimension::Trust,
+                value: 0.75,
+                subject: None,
+                object: None,
+            },
+        );
+        let pending = draft_signal(
+            fast_entity,
+            &SocietySignal {
+                dimension: SocietyDimension::Trust,
+                value: 0.25,
+                subject: None,
+                object: None,
+            },
+        )
+        .with_wall_time(pinned_wall_time);
+        let seeded = sender.append(timeline.id(), &[first, pending]).test_ok()?;
+        assert_eq!(seeded.len(), 2);
+        assert_eq!(seeded[1].seq.as_u64(), 2);
+        timeline.id()
+    };
     let state = AppState {
         gateway: Gateway::new_with_erasure_host_and_authorization(
             host,
@@ -466,33 +535,6 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         server_shutdown: Some(server_shutdown),
         server: Some(server),
     };
-    let created = request_http(
-        address,
-        "POST",
-        "/v1/timelines",
-        Some(json!({"name": "multi-rate-e2e"})),
-    )
-    .await?;
-    assert_eq!(created.status, 201);
-    let timeline_text = created.body["id"].as_str().test_ok()?;
-    let timeline = TimelineId::from_ulid(ulid::Ulid::from_string(timeline_text).test_ok()?);
-    let society_entity = EntityId::new();
-    let fast_entity = EntityId::new();
-    let slow_entity = EntityId::new();
-    let signal = request_http(
-        address,
-        "POST",
-        &format!("/v1/timelines/{timeline}/signals"),
-        Some(json!({
-            "entity_id": society_entity.to_string(),
-            "dimension": "trust",
-            "value": 0.75,
-            "subject": null,
-            "object": null,
-        })),
-    )
-    .await?;
-    assert_eq!(signal.status, 201);
     Ok(MultiRateScenario {
         _database: database,
         path,
@@ -503,7 +545,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         society_entity,
         fast_entity,
         slow_entity,
-        erasure_gate,
+        pinned_wall_time,
         fast_decisions: Arc::new(AtomicUsize::new(0)),
         slow_decisions: Arc::new(AtomicUsize::new(0)),
         probe_log: Arc::new(Mutex::new(Vec::new())),
@@ -512,6 +554,22 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         release_rx: Some(release_rx),
         guard,
     })
+}
+
+fn human_action_payload(
+    scenario: &MultiRateScenario,
+) -> Result<CanonicalBytes, Box<dyn std::error::Error + Send + Sync>> {
+    WorldActionV1 {
+        actor_entity_id: scenario.human_entity,
+        body_entity_id: scenario.human_body,
+        action_kind: ActionKindV1::Impulse,
+        params_cbor: encode_actuator_pair_v1(1.0, 0.0).test_ok()?,
+        action_scope: 0,
+        catalogue_version: 1,
+        tick: 1,
+    }
+    .encode()
+    .test_ok()
 }
 
 fn register_experiment(
@@ -526,6 +584,9 @@ fn register_experiment(
 > {
     let observation = FixturePlugin::new("observation", false, true);
     let society = SocietyPlugin::new();
+    let human = FixturePlugin::new("human-action", true, false)
+        .with_owned_event_type(Kind::new("world.action.v1"));
+    let human_action = human_action_payload(scenario)?;
     let fast = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
     let slow = AgentPlugin::new();
@@ -541,6 +602,17 @@ fn register_experiment(
         .test_ok()?;
     experiment
         .register(&society, Some(Box::new(SocietyReducer)), None)
+        .test_ok()?;
+    experiment
+        .register(
+            &human,
+            None,
+            Some(Box::new(HumanActionDriver {
+                entity: scenario.human_entity,
+                payload: human_action,
+                steps: 0,
+            })),
+        )
         .test_ok()?;
     experiment
         .register(
@@ -611,48 +683,19 @@ async fn run_tick_boundaries(
     mut session: pos_experiment::ExperimentSession,
 ) -> Result<(pos_experiment::ExperimentSession, WallTime), Box<dyn std::error::Error + Send + Sync>>
 {
-    let pinned_wall_time = WallTime::from_micros(u64::try_from(i64::MAX).test_ok()?);
-    let mut pending_store = open_store(StoreConfig::Sqlite {
-        path: scenario.path.clone(),
-    })
-    .test_ok()
-    .map_err(|error| std::io::Error::other(format!("open pending store: {error}")))?;
-    pending_store
-        .bind_erasure_gate(scenario.erasure_gate.clone())
-        .test_ok()
-        .map_err(|error| std::io::Error::other(format!("bind pending gate: {error}")))?;
-    let pending = pending_store
-        .append(
-            scenario.timeline,
-            &[draft_signal(
-                scenario.fast_entity,
-                &SocietySignal {
-                    dimension: SocietyDimension::Trust,
-                    value: 0.25,
-                    subject: None,
-                    object: None,
-                },
-            )
-            .with_wall_time(pinned_wall_time)],
-        )
-        .test_ok()
-        .map_err(|error| std::io::Error::other(format!("append pending signal: {error}")))?;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].seq.as_u64(), 2);
-    drop(pending_store);
     assert_eq!(
         session
             .step_cadenced(0)
             .test_ok()
             .map_err(|error| std::io::Error::other(format!("first tick: {error}")))?,
         TickOutcome::Advanced {
-            folded_events: 3,
+            folded_events: 2,
             emitted_events: 2,
         }
     );
-    // The shared erasure fence serializes protected effects. Admit the human
-    // action before the next Plugin-input fence so this fixture does not hold
-    // an AI boundary open while waiting for another protected append.
+    // The Experiment host has committed since the Gateway host opened. Its
+    // independent protected append must fail closed; the HumanActionDriver
+    // emits the simulated human Event inside the Experiment host instead.
     let human = request_http(
         scenario.address,
         "POST",
@@ -674,7 +717,7 @@ async fn run_tick_boundaries(
     )
     .await
     .map_err(|error| std::io::Error::other(format!("human action request: {error}")))?;
-    assert_eq!(human.status, 201);
+    assert_eq!(human.status, 503);
     let session_task = tokio::task::spawn_blocking(move || {
         let result = session.step_cadenced(100_000_000);
         (session, result)
@@ -696,7 +739,7 @@ async fn run_tick_boundaries(
             .map_err(|error| std::io::Error::other(format!("second tick: {error}")))?,
         TickOutcome::Advanced {
             folded_events: 2,
-            emitted_events: 1,
+            emitted_events: 2,
         }
     );
     assert_eq!(
@@ -709,80 +752,59 @@ async fn run_tick_boundaries(
             emitted_events: 2,
         }
     );
-    Ok((session, pinned_wall_time))
+    Ok((session, scenario.pinned_wall_time))
 }
 
-async fn poll_events(
+async fn read_session_events_after_gateway_fail_closed(
     address: SocketAddr,
     timeline: TimelineId,
     actor: EntityId,
-) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut polled = Vec::new();
-    let mut from_seq = 0_u64;
-    let mut pages = 0_u8;
-    loop {
-        pages += 1;
-        assert!(pages <= 5, "polling must terminate within five pages");
-        let page = request_http_with_actor(
-            address,
-            "GET",
-            &format!("/v1/timelines/{timeline}/events?from_seq={from_seq}&limit=2"),
-            None,
-            Some(actor),
-        )
-        .await?;
-        assert_eq!(page.status, 200);
-        polled.extend(page.body["events"].as_array().test_ok()?.iter().cloned());
-        let Some(next) = page.body["next_from_seq"].as_u64() else {
-            break;
-        };
-        assert!(next > from_seq, "poll cursor must advance");
-        from_seq = next;
-    }
-    assert_eq!(polled.len(), 8);
-    Ok(polled)
+    session: &pos_experiment::ExperimentSession,
+) -> Result<Vec<Event>, Box<dyn std::error::Error + Send + Sync>> {
+    let page = request_http_with_actor(
+        address,
+        "GET",
+        &format!("/v1/timelines/{timeline}/events?from_seq=0&limit=2"),
+        None,
+        Some(actor),
+    )
+    .await?;
+    assert_eq!(page.status, 503);
+    let events = session.source_events().test_ok()?;
+    assert_eq!(events.len(), 8);
+    Ok(events)
 }
 
 fn assert_event_order(
     human_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
-    polled: &[Value],
+    events: &[Event],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for (index, event) in polled.iter().enumerate() {
-        assert_eq!(
-            event["seq"].as_u64().test_ok()?,
-            u64::try_from(index + 1).test_ok()?
-        );
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.seq.as_u64(), u64::try_from(index + 1).test_ok()?);
     }
-    let human_seq = polled
+    let human_seq = events
         .iter()
         .find(|event| {
-            event["event_type"] == "world.action.v1" && event["entity"] == human_entity.to_string()
+            event.event_type.as_str() == "world.action.v1" && event.entity == human_entity
         })
-        .and_then(|event| event["seq"].as_u64())
+        .map(|event| event.seq.as_u64())
         .test_ok()?;
-    let blocked_fast_seq = polled
+    let blocked_fast_seq = events
         .iter()
         .filter(|event| {
-            event["event_type"] == EVENT_TYPE_ACTION && event["entity"] == fast_entity.to_string()
+            event.event_type.as_str() == EVENT_TYPE_ACTION && event.entity == fast_entity
         })
-        .filter_map(|event| event["seq"].as_u64())
+        .map(|event| event.seq.as_u64())
         .find(|seq| *seq > human_seq)
         .test_ok()?;
     assert!(human_seq < blocked_fast_seq);
-    let agent_order = polled
+    let agent_order = events
         .iter()
-        .filter(|event| event["event_type"] == EVENT_TYPE_ACTION)
-        .map(
-            |event| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
-                Ok((
-                    event["seq"].as_u64().test_ok()?,
-                    event["entity"].as_str().test_ok()?.to_owned(),
-                ))
-            },
-        )
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter(|event| event.event_type.as_str() == EVENT_TYPE_ACTION)
+        .map(|event| (event.seq.as_u64(), event.entity.to_string()))
+        .collect::<Vec<_>>();
     assert_eq!(
         agent_order,
         vec![
@@ -796,11 +818,13 @@ fn assert_event_order(
     Ok(())
 }
 
+type LiveProjectionState = (&'static str, EntityId, pos_core::State);
+
 fn assert_projection_state(
     scenario: &MultiRateScenario,
     session: &pos_experiment::ExperimentSession,
     authority: &ConsentAuthority,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<LiveProjectionState>, Box<dyn std::error::Error + Send + Sync>> {
     let read_state = |reducer: &str, subject: EntityId| {
         let token = authority.record_grant_on_timeline(
             scenario.timeline,
@@ -850,15 +874,20 @@ fn assert_projection_state(
             .and_then(Value::as_str),
         Some(EVENT_TYPE_ACTION)
     );
-    let events = session.source_events().test_ok()?;
-    let mut replayed = replay_registry(scenario.erasure_gate.clone());
-    replayed.fold_events(&events);
-    snapshot_json(&replayed, scenario.timeline)
+    Ok(vec![
+        ("observation", scenario.human_entity, observation_human),
+        ("observation", scenario.fast_entity, observation_fast),
+        ("observation", scenario.slow_entity, observation_slow),
+        ("society", scenario.society_entity, society),
+        ("society", scenario.fast_entity, society_fast),
+        ("agent", scenario.fast_entity, agent_fast),
+        ("agent", scenario.slow_entity, agent_slow),
+    ])
 }
 
 fn assert_replay(
     scenario: &MultiRateScenario,
-    live_snapshot: &Value,
+    live_states: &[LiveProjectionState],
     pinned_wall_time: WallTime,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let first_store = open_store(StoreConfig::Sqlite {
@@ -867,7 +896,7 @@ fn assert_replay(
     .test_ok()?;
     let mut first_store = first_store;
     first_store
-        .bind_erasure_gate(scenario.erasure_gate.clone())
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok()?;
     let stored = first_store
         .read(scenario.timeline, SeqRange::all())
@@ -880,39 +909,87 @@ fn assert_replay(
         stored[1].wall_time > stored[2].wall_time,
         "sequence order must deliberately conflict with wall-clock order"
     );
-    let mut first_replay = replay_registry(scenario.erasure_gate.clone());
+    let mut first_replay = replay_registry();
     first_replay.fold_events(&stored);
+    let replayed_states = first_replay.state_snapshot(scenario.timeline).test_ok()?;
+    for (reducer, entity, live_state) in live_states {
+        let replayed_state = replayed_states
+            .get(*reducer)
+            .and_then(|states| states.get(entity))
+            .test_ok()?;
+        assert_eq!(replayed_state, live_state, "{reducer} live/replay mismatch");
+    }
     let second_store = open_store(StoreConfig::Sqlite {
         path: scenario.path.clone(),
     })
     .test_ok()?;
     let mut second_store = second_store;
     second_store
-        .bind_erasure_gate(scenario.erasure_gate.clone())
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .test_ok()?;
-    let mut second_replay = replay_registry(scenario.erasure_gate.clone());
+    let mut second_replay = replay_registry();
     let second_events = second_store
         .read(scenario.timeline, SeqRange::all())
         .test_ok()?;
     second_replay.fold_events(&second_events);
     assert_eq!(
-        snapshot_json(&first_replay, scenario.timeline)?,
-        *live_snapshot
-    );
-    assert_eq!(
         snapshot_json(&second_replay, scenario.timeline)?,
-        *live_snapshot
+        snapshot_json(&first_replay, scenario.timeline)?
     );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn multi_rate_human_ai_replay_is_deterministic() {
-    let result = multi_rate_human_ai_replay_is_deterministic_impl().await;
+async fn multi_rate_simulated_human_and_ai_replay_is_deterministic() {
+    let result = multi_rate_simulated_human_and_ai_replay_is_deterministic_impl().await;
     assert!(result.is_ok(), "multi-rate replay failed: {result:?}");
 }
 
-async fn multi_rate_human_ai_replay_is_deterministic_impl(
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_backed_http_action_and_poll_succeed_without_a_competing_writer(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let scenario = create_scenario().await?;
+    let action = request_http(
+        scenario.address,
+        "POST",
+        &format!("/v1/timelines/{}/actions", scenario.timeline),
+        Some(json!({
+            "entity_id": scenario.human_entity.to_string(),
+            "event_type": "world.action.v1",
+            "capability": "world.action.v1.submit",
+            "payload": {
+                "actor_entity_id": scenario.human_entity.to_string(),
+                "body_entity_id": scenario.human_body.to_string(),
+                "action_kind": "impulse",
+                "params": [1.0, 0.0],
+                "action_scope": 0,
+                "catalogue_version": 1,
+                "tick": 1
+            },
+        })),
+    )
+    .await?;
+    assert_eq!(action.status, 201);
+    let page = request_http_with_actor(
+        scenario.address,
+        "GET",
+        &format!(
+            "/v1/timelines/{}/events?from_seq=0&limit=10",
+            scenario.timeline
+        ),
+        None,
+        Some(scenario.human_entity),
+    )
+    .await?;
+    assert_eq!(page.status, 200);
+    let events = page.body["events"].as_array().test_ok()?;
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[2]["event_type"], "world.action.v1");
+    scenario.guard.shutdown().await?;
+    Ok(())
+}
+
+async fn multi_rate_simulated_human_and_ai_replay_is_deterministic_impl(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut scenario =
         create_scenario()
@@ -937,27 +1014,32 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
             format!("run_tick_boundaries: {error}").into()
         },
     )?;
-    let polled = poll_events(scenario.address, scenario.timeline, scenario.human_entity)
-        .await
-        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("poll_events: {error}").into()
-        })?;
+    let events = read_session_events_after_gateway_fail_closed(
+        scenario.address,
+        scenario.timeline,
+        scenario.human_entity,
+        &session,
+    )
+    .await
+    .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+        format!("read_session_events_after_gateway_fail_closed: {error}").into()
+    })?;
     assert_event_order(
         scenario.human_entity,
         scenario.fast_entity,
         scenario.slow_entity,
-        &polled,
+        &events,
     )?;
 
-    let live_snapshot = assert_projection_state(&scenario, &session, &authority).map_err(
+    let live_states = assert_projection_state(&scenario, &session, &authority).map_err(
         |error| -> Box<dyn std::error::Error + Send + Sync> {
             format!("assert_projection_state: {error}").into()
         },
     )?;
-    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 1, 1]);
+    assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
-    assert_replay(&scenario, &live_snapshot, pinned_wall_time).map_err(
+    assert_replay(&scenario, &live_states, pinned_wall_time).map_err(
         |error| -> Box<dyn std::error::Error + Send + Sync> {
             format!("assert_replay: {error}").into()
         },
@@ -965,6 +1047,88 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
     scenario.guard.shutdown().await.map_err(
         |error| -> Box<dyn std::error::Error + Send + Sync> { format!("shutdown: {error}").into() },
     )?;
+    assert_recovered_http_events(
+        &scenario.path,
+        scenario.timeline,
+        scenario.human_body,
+        scenario.human_entity,
+        &events,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn assert_recovered_http_events(
+    path: &str,
+    timeline: TimelineId,
+    human_body: EntityId,
+    human_entity: EntityId,
+    events: &[Event],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .test_ok()?;
+    let address = listener.local_addr().test_ok()?;
+    let state = AppState {
+        gateway: Gateway::new_with_erasure_host_and_authorization(
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Sqlite {
+                    path: path.to_owned(),
+                },
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok()?,
+            [human_body],
+            gateway_authorization_for(human_entity)?,
+        )?,
+        ledger_view: LedgerView::default(),
+        ledger_write: LedgerWriteMode::Disabled,
+    };
+    let (server_shutdown, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(async {
+                match shutdown_rx.await {
+                    Ok(()) | Err(_) => {}
+                }
+            })
+            .await
+    });
+    let guard = FixtureGuard {
+        policy_release: None,
+        server_shutdown: Some(server_shutdown),
+        server: Some(server),
+    };
+    let mut from_seq = 0;
+    for (page_index, expected_page) in events.chunks(2).enumerate() {
+        let page = request_http_with_actor(
+            address,
+            "GET",
+            &format!("/v1/timelines/{timeline}/events?from_seq={from_seq}&limit=2"),
+            None,
+            Some(human_entity),
+        )
+        .await?;
+        assert_eq!(page.status, 200);
+        let actual_page = page.body["events"].as_array().test_ok()?;
+        assert_eq!(actual_page.len(), expected_page.len());
+        for (actual, expected) in actual_page.iter().zip(expected_page) {
+            assert_eq!(actual["seq"], expected.seq.as_u64());
+            assert_eq!(actual["event_type"], expected.event_type.as_str());
+            assert_eq!(actual["entity"], expected.entity.to_string());
+        }
+        let next = page.body["next_from_seq"].as_u64();
+        assert_eq!(
+            next,
+            events
+                .get((page_index + 1) * 2)
+                .map(|event| event.seq.as_u64())
+        );
+        if let Some(next) = next {
+            from_seq = next;
+        }
+    }
+    guard.shutdown().await?;
     Ok(())
 }
 

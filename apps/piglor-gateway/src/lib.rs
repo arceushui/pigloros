@@ -25,6 +25,8 @@ pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 
 #[cfg(test)]
 use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
+#[cfg(test)]
+use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -35,8 +37,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1,
-    ErasureReferenceV1, Plugin, ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
+    Plugin, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -665,7 +667,7 @@ fn gateway_action_registry_builder(
 fn gateway_action_registry_with_authority_and_erasure_gate(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    gate: Arc<ErasureContainmentGateV1>,
+    gate: Arc<dyn ErasureGate>,
 ) -> Arc<PluginRegistry> {
     let mut registry = gateway_action_registry_builder(bodies, authority);
     registry.bind_erasure_gate(gate);
@@ -5767,29 +5769,44 @@ mod tests {
         drop(second);
     }
 
+    fn checked_sqlite_ceiling_result<T, E: std::fmt::Debug>(
+        result: Result<T, E>,
+        stage: &str,
+    ) -> T {
+        assert!(result.is_ok(), "{stage}: {:?}", result.as_ref().err());
+        result.test_ok()
+    }
+
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn sqlite_gateways_enforce_one_atomic_event_ceiling() {
+    async fn sqlite_gateway_enforces_full_event_ceiling_under_one_host() {
         let database = TemporarySqliteFile::new("atomic-ceiling");
         let path = database.path.clone();
-        let mut seed = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        let open = || open_store(StoreConfig::Sqlite { path: path.clone() });
+        let mut seed = checked_sqlite_ceiling_result(open(), "open seed");
         Gateway::bind_test_erasure_gate(seed.as_mut());
-        let timeline = seed.create_timeline("sqlite").test_ok();
+        let timeline = checked_sqlite_ceiling_result(seed.create_timeline("sqlite"), "create root");
+        drop(seed);
+        let mut seed = checked_sqlite_ceiling_result(open(), "reopen seed after root");
+        Gateway::bind_test_erasure_gate(seed.as_mut());
         let entity = EntityId::new();
         let prefill = EventDraft::new(
             entity,
             Kind::new(EVENT_TYPE_ACTION),
             json_to_cbor(&serde_json::json!({"writer": "prefill"})),
         );
-        seed.append(
-            timeline.id(),
-            &vec![prefill; usize::try_from(MAX_EVENTS_PER_TIMELINE - 1).test_ok()],
-        )
-        .test_ok();
+        checked_sqlite_ceiling_result(
+            seed.append(
+                timeline.id(),
+                &vec![prefill; usize::try_from(MAX_EVENTS_PER_TIMELINE - 1).test_ok()],
+            ),
+            "prefill",
+        );
         drop(seed);
 
-        let first = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok());
-        let second = Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok());
+        let gateway = Gateway::new(checked_sqlite_ceiling_result(open(), "open gateway"));
+        let first = gateway.clone();
+        let second = gateway.clone();
         let timeline_id = timeline.id().to_string();
         let entity_id = entity.to_string();
         let payload_a = serde_json::json!({"writer": "a"});
@@ -5819,9 +5836,13 @@ mod tests {
         };
         barrier.wait().await;
         let (a, b) = tokio::join!(first_task, second_task);
-        let a = a.test_ok();
-        let b = b.test_ok();
-        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let a = checked_sqlite_ceiling_result(a, "join first");
+        let b = checked_sqlite_ceiling_result(b, "join second");
+        assert_eq!(
+            usize::from(a.is_ok()) + usize::from(b.is_ok()),
+            1,
+            "first: {a:?}; second: {b:?}"
+        );
         let rejected = if let Err(error) = a {
             error
         } else {
@@ -5833,17 +5854,21 @@ mod tests {
                 maximum: MAX_EVENTS_PER_TIMELINE
             }
         ));
-        let mut fresh = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
+        drop(gateway);
+        let mut fresh = checked_sqlite_ceiling_result(open(), "open fresh");
         Gateway::bind_test_erasure_gate(fresh.as_mut());
         assert_eq!(
-            fresh.get_timeline(timeline.id()).test_ok().test_ok().head,
+            checked_sqlite_ceiling_result(fresh.get_timeline(timeline.id()), "read root")
+                .test_ok()
+                .head,
             Seq::from_u64(MAX_EVENTS_PER_TIMELINE)
         );
         assert_eq!(
-            fresh
-                .read_own(timeline.id(), SeqRange::all())
-                .test_ok()
-                .len(),
+            checked_sqlite_ceiling_result(
+                fresh.read_own(timeline.id(), SeqRange::all()),
+                "read events",
+            )
+            .len(),
             usize::try_from(MAX_EVENTS_PER_TIMELINE).test_ok()
         );
     }
@@ -7023,10 +7048,11 @@ mod coverage_entrypoints {
         drop(gateway);
 
         let owner_key = OwnTracksOwnerKey([7; 32]);
+        let owntracks_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let owntracks = Gateway::new_with_owntracks_ingress_and_erasure_gate(
             pos_store::sqlite::SqliteStore::open_in_memory()?,
             &owner_key,
-            gate,
+            owntracks_gate,
         )?;
         drop(owntracks);
         Ok(())

@@ -240,12 +240,24 @@ struct ActiveGraph {
 }
 
 fn completed_graph(
+    targets: Vec<ErasureRequiredTargetV1>,
+    lineage_rule: Option<ErasureReferenceV1>,
+) -> Result<CompletedGraph, ErasureErrorV1> {
+    completed_graph_with_affected_timeline(targets, lineage_rule, None)
+}
+
+fn completed_graph_with_affected_timeline(
     mut targets: Vec<ErasureRequiredTargetV1>,
     lineage_rule: Option<ErasureReferenceV1>,
+    affected_timeline: Option<TimelineId>,
 ) -> Result<CompletedGraph, ErasureErrorV1> {
     targets.sort_unstable();
     let request = request()?;
     let port = port(targets.clone(), lineage_rule);
+    let port = match affected_timeline {
+        Some(timeline) => port.with_verified_topology(vec![(timeline, reference(7))], Vec::new()),
+        None => port,
+    };
     let adapter = port.clone();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     coordinator.submit(request.clone(), request.provenance())?;
@@ -300,6 +312,7 @@ fn scope(
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request,
         scope_members: vec![reference(7)],
+        scope_timeline_ids: Vec::new(),
         target_closure: target_closure_digest(targets),
         lineage_rule: Some(lineage_rule),
     })
@@ -314,6 +327,7 @@ fn extension(
         request,
         scope_commitment: scope.reference(),
         fork: reference(160),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule,
         predecessor_extension: None,
         admission_provenance: reference(161),
@@ -693,7 +707,7 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(
         (3, Value::Text("wrong-optional-reference".to_owned())),
         (4, Value::Bytes(vec![0_u8])),
         (5, Value::Text("wrong-error-code".to_owned())),
-        (5, Value::Integer(16_u64.into())),
+        (5, Value::Integer(17_u64.into())),
     ] {
         let mut malformed = fields.clone();
         malformed[index] = replacement;
@@ -1133,7 +1147,11 @@ fn recovery_failure_subject_identifies_rejected_fixed_objects() -> Result<(), Er
             expected_error,
         )?;
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].failure_subject(), subject);
+        assert_eq!(
+            failures[0].failure_subject(),
+            subject,
+            "manifest field {manifest_field} identified the wrong rejected object"
+        );
         assert_eq!(failures[0].error(), expected_error);
     }
     Ok(())
@@ -1356,7 +1374,7 @@ fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(),
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .digest();
     let parent = TimelineId::new();
-    let child = TimelineId::new();
+    let child = extension.child_timeline();
     let input = ErasureForkAdmissionInputV1 {
         operation: reference(180),
         expected_inventory_generation: reference(181),
@@ -1388,7 +1406,7 @@ fn coordinator_prepares_bound_erse1_and_child_without_committing() -> Result<(),
             ErasureForkAdmissionInputV1 {
                 operation: reference(183),
                 child: TimelineMeta {
-                    id: TimelineId::new(),
+                    id: child,
                     name: None,
                     owner: Some(EntityId::new()),
                     ..input.child.clone()
@@ -1423,7 +1441,7 @@ fn fork_input(extension: ErasureScopeExtensionV1) -> ErasureForkAdmissionInputV1
         expected_inventory_generation: reference(181),
         child_scope: extension.fork(),
         child: TimelineMeta {
-            id: TimelineId::new(),
+            id: extension.child_timeline(),
             mode: TimelineMode::Historical,
             name: Some("failure-child".to_owned()),
             owner: None,
@@ -1562,14 +1580,18 @@ fn fork_preparation_rejects_unbound_child_metadata() -> Result<(), ErasureErrorV
 #[test]
 fn coordinator_verifies_complete_nonempty_inventory() -> Result<(), ErasureErrorV1> {
     let lineage_rule = reference(170);
-    let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
+    let timeline = TimelineId::new();
+    let graph = completed_graph_with_affected_timeline(
+        vec![target(10)],
+        Some(lineage_rule),
+        Some(timeline),
+    )?;
     let request = graph.request.reference();
     let manifest = graph
         .adapter
         .current_manifest(request)
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .digest();
-    let timeline = TimelineId::new();
     let observation = ErasureInventoryObservationV1::new(
         vec![(request, manifest)],
         vec![timeline],

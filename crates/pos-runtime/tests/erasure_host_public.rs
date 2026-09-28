@@ -60,3 +60,26 @@ fn memory_store_is_contained_by_the_public_host_api() -> Result<(), Box<dyn Erro
 fn sqlite_store_is_contained_by_the_public_host_api() -> Result<(), Box<dyn Error + Send + Sync>> {
     assert_hosted_store_parity(StoreConfig::SqliteInMemory)
 }
+
+#[test]
+fn command_effect_panic_poisons_the_public_host() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut host = ErasureExecutionHostV1::open_verified_empty(
+        StoreConfig::Memory,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    let timeline = host
+        .command_sender()?
+        .create_timeline("command-effect-panic")?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        host.command_sender().and_then(|mut commands| {
+            commands.with_protected_effect_fence(
+                timeline.id(),
+                ErasureProtectedOperationV1::ProposedAction,
+                &mut |_| std::panic::resume_unwind(Box::new("injected command effect panic")),
+            )
+        })
+    }));
+    assert!(result.is_err());
+    assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Poisoned);
+    Ok(())
+}

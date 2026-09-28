@@ -2522,51 +2522,59 @@ fn execute_submit_identified_action_command(
     }
 }
 
-fn execute_host_action(
+fn with_host_action_fence<T>(
     host: &mut ErasureExecutionHostV1,
-    context: &ActionCommandContext<'_>,
-    reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
-) {
-    let mut reply = Some(reply);
-    let outcome = host
+    timeline: TimelineId,
+    mut action: impl FnMut(
+        &mut pos_runtime::ErasureCommandSenderV1<'_>,
+    ) -> Result<T, ActionCommandError>,
+) -> Result<T, ActionCommandError> {
+    let mut result = Err(host_action_error(ErasureHostErrorV1::RecoveryUnavailable));
+    let fence_result = host
         .command_sender()
         .map_err(host_action_error)
         .and_then(|mut sender| {
             let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
-                let result = prepare_and_append_action(
-                    sender.timeline(context.timeline).map_err(host_action_error),
-                    |draft| {
-                        sender
-                            .append_bounded(
-                                context.timeline,
-                                std::slice::from_ref(draft),
-                                context.maximum,
-                            )
-                            .map_err(host_action_error)
-                    },
-                    context.timeline,
-                    context.registry,
-                    context.proposal,
-                    context.authorization,
-                    context.decision,
-                );
-                retain_action_release(context, &result);
-                let release = reply.take();
-                if let Some(reply) = release {
-                    drop(reply.send(result));
-                }
+                result = action(sender);
             };
             sender
                 .with_protected_effect_fence(
-                    context.timeline,
+                    timeline,
                     ErasureProtectedOperationV1::ProposedAction,
                     &mut effect,
                 )
                 .map_err(host_action_error)
         });
-    if let (Err(error), Some(reply)) = (outcome, reply) {
-        drop(reply.send(Err(error)));
-    }
+    fence_result?;
+    result
+}
+
+fn execute_host_action(
+    host: &mut ErasureExecutionHostV1,
+    context: &ActionCommandContext<'_>,
+    reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
+) {
+    let result = with_host_action_fence(host, context.timeline, |sender| {
+        prepare_and_append_action(
+            sender.timeline(context.timeline).map_err(host_action_error),
+            |draft| {
+                sender
+                    .append_bounded(
+                        context.timeline,
+                        std::slice::from_ref(draft),
+                        context.maximum,
+                    )
+                    .map_err(host_action_error)
+            },
+            context.timeline,
+            context.registry,
+            context.proposal,
+            context.authorization,
+            context.decision,
+        )
+    });
+    retain_action_release(context, &result);
+    drop(reply.send(result));
 }
 
 fn execute_host_identified_action(
@@ -2577,59 +2585,40 @@ fn execute_host_identified_action(
         Result<(IdentifiedAppend, GatewayAuthorizationDecision), ActionCommandError>,
     >,
 ) {
-    let mut reply = Some(reply);
-    let outcome = host
-        .command_sender()
-        .map_err(host_action_error)
-        .and_then(|mut sender| {
-            let mut effect = |sender: &mut pos_runtime::ErasureCommandSenderV1<'_>| {
-                let result = prepare_action(
-                    sender.timeline(context.timeline).map_err(host_action_error),
-                    context.timeline,
-                    context.registry,
-                    context.proposal,
-                    context.authorization,
-                    context.decision,
-                )
-                .and_then(|(decision, draft)| {
-                    sender
-                        .append_intent_or_duplicate_bounded(
-                            context.timeline,
-                            identity,
-                            AppendIntent::new(&draft),
-                            context.maximum,
-                        )
-                        .map_err(host_action_error)
-                        .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
-                        .and_then(|outcome| {
-                            resolve_identified_outcome(
-                                outcome,
-                                |event| {
-                                    sender
-                                        .event_by_id(context.timeline, event)
-                                        .map_err(host_action_error)
-                                },
-                                decision,
-                            )
-                        })
-                });
-                retain_identified_action_release(context, &result);
-                let release = reply.take();
-                if let Some(reply) = release {
-                    drop(reply.send(result));
-                }
-            };
+    let result = with_host_action_fence(host, context.timeline, |sender| {
+        prepare_action(
+            sender.timeline(context.timeline).map_err(host_action_error),
+            context.timeline,
+            context.registry,
+            context.proposal,
+            context.authorization,
+            context.decision,
+        )
+        .and_then(|(decision, draft)| {
             sender
-                .with_protected_effect_fence(
+                .append_intent_or_duplicate_bounded(
                     context.timeline,
-                    ErasureProtectedOperationV1::ProposedAction,
-                    &mut effect,
+                    identity,
+                    AppendIntent::new(&draft),
+                    context.maximum,
                 )
                 .map_err(host_action_error)
-        });
-    if let (Err(error), Some(reply)) = (outcome, reply) {
-        drop(reply.send(Err(error)));
-    }
+                .and_then(|outcome| outcome.ok_or_else(event_limit_reached))
+                .and_then(|outcome| {
+                    resolve_identified_outcome(
+                        outcome,
+                        |event| {
+                            sender
+                                .event_by_id(context.timeline, event)
+                                .map_err(host_action_error)
+                        },
+                        decision,
+                    )
+                })
+        })
+    });
+    retain_identified_action_release(context, &result);
+    drop(reply.send(result));
 }
 
 fn publish_action_notice(
@@ -3182,6 +3171,67 @@ mod tests {
             reply,
         );
         assert!(result.blocking_recv().test_ok()?.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn poisoned_host_rejects_both_action_command_shapes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let timeline = host
+            .command_sender()?
+            .create_timeline("poisoned-action-host")?
+            .id();
+        let panic_result = {
+            let mut sender = host.command_sender()?;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _result = sender.with_protected_effect_fence(
+                    timeline,
+                    super::ErasureProtectedOperationV1::ProposedAction,
+                    &mut |_sender| std::panic::resume_unwind(Box::new("poison this test host")),
+                );
+            }))
+        };
+        assert!(panic_result.is_err());
+
+        let (authorization, decision, proposal) = action_fixture(timeline)?;
+        let registry = PluginRegistry::new();
+        let bus = broadcast::channel(1).0;
+        let context = ActionCommandContext {
+            timeline,
+            registry: &registry,
+            proposal: &proposal,
+            authorization: &authorization,
+            decision: &decision,
+            bus: &bus,
+            maximum: 1,
+        };
+        let mut state = ExecutorState {
+            store: ExecutorStore::Host(Box::new(host)),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        execute_submit_action_command(&mut state, &context, reply);
+        assert!(receiver.blocking_recv().test_ok()?.is_err());
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        execute_submit_identified_action_command(
+            &mut state,
+            &context,
+            AppendIdentity::new(
+                AppendDedupKey::from_keyed_hash([13; 32]),
+                AppendDedupScope::from_keyed_hash([14; 32]),
+            ),
+            reply,
+        );
+        assert!(receiver.blocking_recv().test_ok()?.is_err());
         Ok(())
     }
 

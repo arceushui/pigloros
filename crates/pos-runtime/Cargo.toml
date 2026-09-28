@@ -17,6 +17,7 @@ indexmap = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../pos-core", features = ["test-support"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -135,10 +135,37 @@ evidence_roundtrip!(scope_commitment_roundtrips, ErasureScopeCommitmentV1, {
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: reference(1),
         scope_members: vec![reference(2)],
+        scope_timeline_ids: Vec::new(),
         target_closure: reference(3),
         lineage_rule: Some(reference(4)),
     })
 });
+
+#[test]
+fn scope_commitment_accepts_more_than_the_extension_limit_of_scope_references(
+) -> Result<(), ErasureErrorV1> {
+    let members = (0_u64..=4_096)
+        .map(|index| {
+            let mut digest = [0_u8; 32];
+            digest[24..].copy_from_slice(&index.to_be_bytes());
+            pos_core::ErasureReferenceV1::from_digest(digest)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(members.len(), pos_core::ERASURE_MAX_SCOPE_EXTENSIONS + 1);
+    let commitment = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: reference(1),
+        scope_members: members.clone(),
+        scope_timeline_ids: Vec::new(),
+        target_closure: reference(2),
+        lineage_rule: None,
+    })?;
+    assert_eq!(commitment.scope_members(), members.as_slice());
+    assert_eq!(
+        ErasureScopeCommitmentV1::from_canonical_cbor(&commitment.to_canonical_cbor()?)?,
+        commitment
+    );
+    Ok(())
+}
 
 evidence_roundtrip!(freeze_provenance_roundtrips, ErasureFreezeProvenanceV1, {
     ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
@@ -195,6 +222,7 @@ evidence_roundtrip!(scope_extension_roundtrips, ErasureScopeExtensionV1, {
         request: reference(1),
         scope_commitment: reference(2),
         fork: reference(3),
+        child_timeline: pos_core::TimelineId::new(),
         lineage_rule: reference(4),
         predecessor_extension: None,
         admission_provenance: reference(5),

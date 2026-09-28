@@ -62,7 +62,7 @@ const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 100
 
 struct OpenedCliStore {
     store: HostedCliStore,
-    erasure_gate: std::sync::Arc<pos_core::ErasureContainmentGateV1>,
+    erasure_gate: std::sync::Arc<dyn pos_core::ErasureGate>,
 }
 
 /// Open a store through the CLI composition seam.
@@ -547,8 +547,8 @@ fn run_timeline_compare(
         path: path.to_owned(),
     })?;
 
-    let mut reg_a = pos_state::ProjectionRegistry::new()
-        .with_erasure_gate(std::sync::Arc::clone(&erasure_gate));
+    let registry_gate = std::sync::Arc::clone(&erasure_gate);
+    let mut reg_a = pos_state::ProjectionRegistry::new().with_erasure_gate(registry_gate);
     reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
 
     let mut reg_b = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);

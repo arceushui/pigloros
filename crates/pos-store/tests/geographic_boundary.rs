@@ -1,6 +1,6 @@
 use pos_core::geo_admission::GeoLocationAdmissionStore;
 use pos_core::{
-    CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
+    CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, CoreError, EntityId,
     ErasureContainmentGateV1, Event, EventDraft, EventId, Kind, SchemaVersion, Seq, SeqRange,
     Timeline, TimelineMeta, WallTime,
 };
@@ -361,6 +361,17 @@ fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() 
             ],
         )
         .test_ok();
+    let chain_head = pos_crypto::chain::hash_event(
+        &pos_core::Hash::zero(),
+        event.id.to_string().as_bytes(),
+        &event.payload,
+    );
+    connection
+        .execute(
+            "UPDATE timelines SET head_seq=1, chain_head=?2 WHERE id=?1",
+            rusqlite::params![timeline.id().to_string(), chain_head.as_bytes().as_slice()],
+        )
+        .test_ok();
     let marker_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM geographic_presence", [], |row| {
             row.get(0)
@@ -368,9 +379,15 @@ fn sqlite_existing_geo_rows_are_detected_at_read_time_without_marker_backfill() 
         .test_ok();
     assert_eq!(marker_count, 0);
 
-    assert_eq!(store.root_timeline_count_bounded(1).test_ok(), 0);
-
-    assert!(store.read(timeline.id(), SeqRange::all()).is_err());
+    assert!(matches!(
+        store.root_timeline_count_bounded(1),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    let mut reopened =
+        pos_store::sqlite::SqliteStore::open(database.path().to_str().test_ok()).test_ok();
+    bind_test_erasure_gate(&mut reopened);
+    assert_eq!(reopened.root_timeline_count_bounded(1).test_ok(), 0);
+    assert!(reopened.read(timeline.id(), SeqRange::all()).is_err());
     let marker_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM geographic_presence", [], |row| {
             row.get(0)
@@ -401,7 +418,7 @@ fn sqlite_public_adapter_still_reads_ordinary_events() {
 }
 
 #[test]
-fn sqlite_event_id_lookup_propagates_storage_errors() {
+fn sqlite_event_id_lookup_fails_closed_after_events_table_removal() {
     let database = tempfile::NamedTempFile::new().test_ok();
     let mut store =
         pos_store::sqlite::SqliteStore::open(database.path().to_str().test_ok()).test_ok();
@@ -410,9 +427,9 @@ fn sqlite_event_id_lookup_propagates_storage_errors() {
     let connection = rusqlite::Connection::open(database.path()).test_ok();
     connection.execute("DROP TABLE events", []).test_ok();
 
-    assert!(store
-        .read_event_by_id(timeline.id(), EventId::new())
-        .test_err()
-        .to_string()
-        .contains("storage error"));
+    assert!(matches!(
+        store.read_event_by_id(timeline.id(), EventId::new()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(pos_store::sqlite::SqliteStore::open(database.path().to_str().test_ok()).is_err());
 }

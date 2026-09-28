@@ -499,6 +499,9 @@ fn sqlite_insert_failure_discards_signed_event_and_allows_retry(
          BEGIN SELECT RAISE(ABORT, 'injected signed insertion failure'); END;",
     )?;
     drop(connection);
+    drop(store);
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
 
     assert!(append_signed(
         &mut store,
@@ -515,6 +518,9 @@ fn sqlite_insert_failure_discards_signed_event_and_allows_retry(
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("DROP TRIGGER reject_signed_insert")?;
     drop(connection);
+    drop(store);
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let committed = append_signed(
         &mut store,
         timeline.id(),
@@ -626,13 +632,29 @@ fn sqlite_rotation_waits_until_signed_event_commit() -> Result<(), Box<dyn std::
             Ok((signed, rotation_result, rotation_waited))
         })?;
     let signed = signed?;
-    rotation_result?;
+    assert!(matches!(
+        rotation_result,
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
     assert!(rotation_waited);
+    assert_rotated_registry_and_signed_event(path, &rotated, timeline.id(), signed)
+}
+
+fn assert_rotated_registry_and_signed_event(
+    path: &str,
+    rotated: &KeyRegistryStateV1,
+    timeline_id: pos_core::TimelineId,
+    signed: Event,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut resumed_rotation_store = SqliteStore::open(path)?;
+    resumed_rotation_store
+        .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    resumed_rotation_store.save_key_registry(rotated)?;
     let mut reopened = SqliteStore::open(path)?;
     reopened.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let persisted = reopened.load_key_registry()?.ok_or("missing registry")?;
-    assert_eq!(persisted, rotated);
-    assert_eq!(reopened.read(timeline.id(), SeqRange::all())?, vec![signed]);
+    assert_eq!(&persisted, rotated);
+    assert_eq!(reopened.read(timeline_id, SeqRange::all())?, vec![signed]);
     Ok(())
 }
 
@@ -680,5 +702,20 @@ fn sqlite_destruction_winning_first_rejects_late_signing() -> Result<(), Box<dyn
         .is_err());
     assert!(signer.read_own(timeline.id(), SeqRange::all())?.is_empty());
     assert_eq!(unexpected_calls.get(), 0);
+    Ok(())
+}
+
+#[test]
+fn sqlite_existing_ledger_initialization_requires_bound_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteStore::open_in_memory()?;
+    store.create_timeline("existing-ledger")?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
+
+    assert!(matches!(
+        store.initialize_timeline_with_key_registry("existing-ledger", &KeyRegistryStateV1::new()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(store.load_key_registry()?.is_none());
     Ok(())
 }

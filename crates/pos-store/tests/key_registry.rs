@@ -569,7 +569,14 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
 
     assert!(destruction_waited);
     assert!(sign_result.is_ok());
-    assert!(destroy_result.is_ok());
+    assert!(matches!(
+        destroy_result,
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+
+    let mut resumed_destruction_store = SqliteStore::open(path)?;
+    bind_test_erasure_gate(&mut resumed_destruction_store)?;
+    destroy_store(&mut resumed_destruction_store, destruction_request)?;
 
     let mut late_signing_store = SqliteStore::open(path)?;
     bind_test_erasure_gate(&mut late_signing_store)?;

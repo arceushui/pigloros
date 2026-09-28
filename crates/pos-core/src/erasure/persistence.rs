@@ -2230,6 +2230,7 @@ fn reconstruct_frozen_graph(
         scope: ErasureScopeCommitmentInputV1 {
             request: scope.request(),
             scope_members: scope.scope_members().to_vec(),
+            scope_timeline_ids: scope.scope_timeline_ids().to_vec(),
             target_closure: scope.target_closure(),
             lineage_rule: scope.lineage_rule(),
         },
@@ -2621,6 +2622,7 @@ mod tests {
         ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request,
             scope_members: vec![reference(42)],
+            scope_timeline_ids: Vec::new(),
             target_closure: target_closure_digest(&[target()]),
             lineage_rule: Some(reference(43)),
         })
@@ -2666,6 +2668,7 @@ mod tests {
         let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request,
             scope_members: vec![reference(42)],
+            scope_timeline_ids: Vec::new(),
             target_closure,
             lineage_rule: None,
         })?;
@@ -2721,6 +2724,7 @@ mod tests {
             scope: ErasureScopeCommitmentInputV1 {
                 request,
                 scope_members: vec![reference(42)],
+                scope_timeline_ids: Vec::new(),
                 target_closure,
                 lineage_rule: None,
             },
@@ -2980,6 +2984,7 @@ mod tests {
             request: request.reference(),
             scope_commitment: reference(48),
             fork: reference(49),
+            child_timeline: crate::TimelineId::new(),
             lineage_rule: reference(50),
             predecessor_extension: None,
             admission_provenance: reference(51),
@@ -3914,6 +3919,7 @@ mod tests {
         let wrong_scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
             request: request.reference(),
             scope_members: vec![reference(42)],
+            scope_timeline_ids: Vec::new(),
             target_closure: reference(76),
             lineage_rule: None,
         })?;

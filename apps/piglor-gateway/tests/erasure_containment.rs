@@ -233,6 +233,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
         let scope = ErasureScopeCommitmentInputV1 {
             request,
             scope_members: vec![reference(9)],
+            scope_timeline_ids: Vec::new(),
             target_closure: target_closure_digest(&targets),
             lineage_rule: Some(reference(100)),
         };
@@ -295,6 +296,7 @@ impl ErasureCoordinatorAuthorityV1 for HealthAuthority {
             request: requirement.request(),
             scope_commitment: requirement.scope_commitment(),
             fork: input.child_scope,
+            child_timeline: input.child.id,
             lineage_rule: requirement.lineage_rule(),
             predecessor_extension: requirement.predecessor_extension(),
             admission_provenance: reference(20),

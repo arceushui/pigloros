@@ -614,6 +614,7 @@ impl PublicCoordinatorPort {
     }
 
     /// Replace one field of a manifest-owned object and repair both addresses.
+    /// Keep the previous object so other graph references remain resolvable.
     ///
     /// # Errors
     ///
@@ -641,7 +642,6 @@ impl PublicCoordinatorPort {
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         let changed_object = replace_array_field(&object, object_field, replacement)?;
         let changed_reference = addressed(object_tag, &changed_object);
-        storage.objects.remove(&previous);
         storage.objects.insert(changed_reference, changed_object);
         let changed_manifest = replace_array_field(
             &manifest,
@@ -1660,9 +1660,21 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
             policy: self.config.policy,
             trust: self.config.trust,
         })?;
+        let mut scope_timeline_ids = self
+            .topology_observation
+            .borrow()
+            .as_ref()
+            .into_iter()
+            .flat_map(|(bindings, _)| bindings.iter())
+            .filter_map(|(timeline, member)| {
+                (*member == self.config.scope_member).then_some(*timeline)
+            })
+            .collect::<Vec<_>>();
+        scope_timeline_ids.sort_unstable();
         let scope = ErasureScopeCommitmentInputV1 {
             request,
             scope_members: vec![self.config.scope_member],
+            scope_timeline_ids,
             target_closure: target_closure_digest(&self.config.targets),
             lineage_rule: self.config.lineage_rule,
         };

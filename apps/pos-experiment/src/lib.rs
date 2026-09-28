@@ -11,7 +11,6 @@
 
 include!("host_store.rs");
 
-use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::WallTime,
     crypto::Hash,
@@ -21,6 +20,7 @@ use pos_core::{
     ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureHostErrorV1, Event,
     ReproManifest, Seq, Timeline,
 };
+use pos_core::{ErasureContainmentGateV1, ErasureGate};
 use pos_runtime::PluginRegistry;
 use pos_store::StoreConfig;
 use std::collections::HashSet;
@@ -135,7 +135,8 @@ fn bind_registry_erasure_gate_inner(
     let registry_gate = registry
         .clone_erasure_gate()
         .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-    if !Arc::ptr_eq(&registry_gate, &gate) {
+    let gate_interface: Arc<dyn ErasureGate> = gate.clone();
+    if !Arc::ptr_eq(&registry_gate, &gate_interface) {
         return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     }
     store.bind_erasure_gate(gate)
@@ -164,23 +165,19 @@ fn map_action_submission_error(error: pos_runtime::ActionSubmissionError) -> Exp
     }
 }
 
-fn bind_registry_to_host_gate(
+fn ensure_registry_erasure_gate(
     registry: &mut PluginRegistry,
-    gate: Arc<ErasureContainmentGateV1>,
-) -> Result<(), ExperimentError> {
+    gate: Arc<dyn ErasureGate>,
+) -> Result<(), pos_core::CoreError> {
     if !registry.erasure_gate_is_bound() {
         registry.bind_erasure_gate(gate);
         return Ok(());
     }
     let Some(existing) = registry.clone_erasure_gate() else {
-        return Err(ExperimentError::Store(
-            pos_core::CoreError::ErasureContainmentUnavailable,
-        ));
+        return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     };
     if !Arc::ptr_eq(&existing, &gate) {
-        return Err(ExperimentError::Store(
-            pos_core::CoreError::ErasureContainmentUnavailable,
-        ));
+        return Err(pos_core::CoreError::ErasureContainmentUnavailable);
     }
     Ok(())
 }
@@ -214,58 +211,27 @@ fn bind_fork_registry_erasure_gate(
     Ok(())
 }
 
+#[cfg(test)]
 fn bind_backtest_erasure_gate(
     store: &mut dyn pos_core::store::EventStore,
     registry: &mut PluginRegistry,
     gate: Arc<ErasureContainmentGateV1>,
 ) -> Result<Arc<ErasureContainmentGateV1>, pos_core::CoreError> {
-    if registry.erasure_gate_is_bound() {
-        let existing = registry
-            .clone_erasure_gate()
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-        if !Arc::ptr_eq(&existing, &gate) {
-            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
-        }
-    } else {
-        registry.bind_erasure_gate(gate.clone());
-    }
+    let gate_interface: Arc<dyn ErasureGate> = gate.clone();
+    ensure_registry_erasure_gate(registry, gate_interface)?;
     store.bind_erasure_gate(gate.clone())?;
     Ok(gate)
-}
-
-fn inherit_backtest_erasure_gate(
-    registry: &mut PluginRegistry,
-    gate: Arc<ErasureContainmentGateV1>,
-) -> Result<(), pos_core::CoreError> {
-    if registry.erasure_gate_is_bound() {
-        let existing = registry
-            .clone_erasure_gate()
-            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
-        if !Arc::ptr_eq(&existing, &gate) {
-            return Err(pos_core::CoreError::ErasureContainmentUnavailable);
-        }
-    } else {
-        registry.bind_erasure_gate(gate);
-    }
-    Ok(())
-}
-
-fn require_backtest_erasure_gate(
-    gate: Option<Arc<ErasureContainmentGateV1>>,
-) -> Result<Arc<ErasureContainmentGateV1>, pos_core::CoreError> {
-    gate.ok_or(pos_core::CoreError::ErasureContainmentUnavailable)
 }
 
 fn start_backtest_train(
     store: &mut dyn pos_core::store::EventStore,
     registry: &mut PluginRegistry,
-    gate: Option<Arc<ErasureContainmentGateV1>>,
+    runtime_gate: Arc<dyn ErasureGate>,
     name: &str,
-) -> Result<(Arc<ErasureContainmentGateV1>, Timeline), pos_core::CoreError> {
-    let gate = require_backtest_erasure_gate(gate)?;
-    let gate = bind_backtest_erasure_gate(store, registry, gate)?;
+) -> Result<(Arc<dyn ErasureGate>, Timeline), pos_core::CoreError> {
+    ensure_registry_erasure_gate(registry, Arc::clone(&runtime_gate))?;
     let timeline = store.create_timeline(name)?;
-    Ok((gate, timeline))
+    Ok((runtime_gate, timeline))
 }
 
 // Experiment hosts may close their own session, but they are not a Gateway
@@ -1039,9 +1005,9 @@ fn prepare_backtest_eval_registry(
     timeline: pos_core::ids::TimelineId,
     train_head: pos_core::clock::Seq,
     registry: &mut PluginRegistry,
-    gate: Arc<ErasureContainmentGateV1>,
+    gate: Arc<dyn ErasureGate>,
 ) -> Result<Vec<pos_core::Event>, ExperimentError> {
-    inherit_backtest_erasure_gate(registry, gate)?;
+    ensure_registry_erasure_gate(registry, gate).map_err(ExperimentError::Store)?;
     restore_inherited_eval_events(store, timeline, train_head, registry)
 }
 
@@ -1229,10 +1195,18 @@ impl Experiment {
         mut store: Box<dyn pos_core::store::EventStore>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
+        bind_store_to_experiment_gate(store.as_mut(), &self.registry, self.erasure_gate.clone())?;
+        self.finish_start_with_bound_store(store, recovery_store_config)
+    }
+
+    fn finish_start_with_bound_store(
+        self,
+        mut store: Box<dyn pos_core::store::EventStore>,
+        recovery_store_config: Option<StoreConfig>,
+    ) -> Result<ExperimentSession, ExperimentError> {
         let registry = self.registry;
         let parent_composition = registry.composition();
-        let timeline = bind_store_to_experiment_gate(store.as_mut(), &registry, self.erasure_gate)
-            .and_then(|()| store.create_timeline(&self.config.name))?;
+        let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
             config: self.config,
             registry,
@@ -1263,9 +1237,8 @@ impl Experiment {
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let gate = store.containment_gate();
-        bind_registry_to_host_gate(&mut self.registry, gate.clone())?;
-        self.erasure_gate = Some(gate);
-        self.start_with_store_and_recipe(Box::new(store), recovery_store_config)
+        ensure_registry_erasure_gate(&mut self.registry, gate)?;
+        self.finish_start_with_bound_store(Box::new(store), recovery_store_config)
     }
 
     /// Resume an existing durable Timeline with a fresh Driver registry.
@@ -1298,9 +1271,8 @@ impl Experiment {
         store_config: StoreConfig,
     ) -> Result<ExperimentSession, ExperimentError> {
         let gate = store.containment_gate();
-        bind_registry_to_host_gate(&mut self.registry, gate.clone())?;
-        self.erasure_gate = Some(gate);
-        self.resume_with_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
+        ensure_registry_erasure_gate(&mut self.registry, gate)?;
+        self.resume_bound_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
     }
 
     /// Resume a durable Timeline through a host-supplied `EventStore` adapter.
@@ -2506,39 +2478,50 @@ impl BacktestRunner {
     }
 
     fn run_with_hosted_store(
-        mut self,
+        self,
         mut store: HostedExperimentStore,
     ) -> Result<BacktestResult, ExperimentError> {
         let host_gate = store.containment_gate();
-        if self
-            .erasure_gate
-            .as_ref()
-            .is_some_and(|configured| !Arc::ptr_eq(configured, &host_gate))
-        {
+        self.ensure_no_external_erasure_gate()
+            .and_then(|()| self.run_on_store_with_gate_bindings(&mut store, host_gate))
+    }
+
+    const fn ensure_no_external_erasure_gate(&self) -> Result<(), ExperimentError> {
+        if self.erasure_gate.is_some() {
             return Err(ExperimentError::Store(
                 pos_core::CoreError::ErasureContainmentUnavailable,
             ));
         }
-        self.erasure_gate = Some(host_gate);
-        self.run_on_store(&mut store)
+        Ok(())
     }
 
     /// Run backtest phases on an already-opened store (test seam for fault injection).
+    #[cfg(test)]
     fn run_on_store(
         self,
         store: &mut dyn pos_core::store::EventStore,
+    ) -> Result<BacktestResult, ExperimentError> {
+        let store_gate = self
+            .erasure_gate
+            .clone()
+            .ok_or(pos_core::CoreError::ErasureContainmentUnavailable)?;
+        store.bind_erasure_gate(store_gate.clone())?;
+        let runtime_gate: Arc<dyn ErasureGate> = store_gate;
+        self.run_on_store_with_gate_bindings(store, runtime_gate)
+    }
+
+    fn run_on_store_with_gate_bindings(
+        self,
+        store: &mut dyn pos_core::store::EventStore,
+        runtime_gate: Arc<dyn ErasureGate>,
     ) -> Result<BacktestResult, ExperimentError> {
         let store_config = self.config.store_config.clone();
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
         let mut train_registry = (self.registry_factory)();
-        let (erasure_gate, train_tl) = start_backtest_train(
-            store,
-            &mut train_registry,
-            self.erasure_gate.clone(),
-            &train_name,
-        )?;
+        let (erasure_gate, train_tl) =
+            start_backtest_train(store, &mut train_registry, runtime_gate, &train_name)?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
@@ -3882,7 +3865,7 @@ mod tests {
     }
 
     struct InterleavingDriver {
-        path: String,
+        store: Arc<Mutex<Option<SharedEventStore>>>,
         entity: EntityId,
         subscriptions: Vec<ProjectionKey>,
         seen_counts: Arc<Mutex<Vec<u64>>>,
@@ -3914,9 +3897,8 @@ mod tests {
                 return Ok(StepOutput::empty());
             }
             self.injected = true;
-            let mut gateway_store =
-                pos_store::sqlite::SqliteStore::open(&self.path).map_err(RuntimeError::Store)?;
-            bind_test_store_gate(&mut gateway_store).map_err(RuntimeError::Store)?;
+            let shared_store = self.store.lock().test_ok().clone().test_ok();
+            let mut gateway_store = lock_store(&shared_store).test_ok();
             let mut human = EventDraft::new(
                 self.entity,
                 Kind::new("world.action"),
@@ -3926,6 +3908,7 @@ mod tests {
             gateway_store
                 .append(timeline, &[human])
                 .map_err(RuntimeError::Store)?;
+            drop(gateway_store);
             let mut ai = EventDraft::new(
                 self.entity,
                 Kind::new("agent.decision"),
@@ -4370,18 +4353,19 @@ mod tests {
         let path = database.path().to_str().test_ok().to_owned();
         let entity = EntityId::new();
         let seen_counts = Arc::new(Mutex::new(Vec::new()));
+        let driver_store: Arc<Mutex<Option<SharedEventStore>>> = Arc::new(Mutex::new(None));
         let plugin = make_plugin_with_reducer("interleaving", &["world.action", "agent.decision"]);
         let mut experiment = Experiment::new(ExperimentConfig {
             name: "interleaved-action".to_owned(),
             stop: StopCondition::MaxTicks(10),
-            store_config: StoreConfig::Sqlite { path: path.clone() },
+            store_config: StoreConfig::Sqlite { path },
         });
         experiment
             .register(
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(InterleavingDriver {
-                    path,
+                    store: Arc::clone(&driver_store),
                     entity,
                     subscriptions: vec![ProjectionKey::new(entity)],
                     seen_counts: Arc::clone(&seen_counts),
@@ -4390,6 +4374,7 @@ mod tests {
             )
             .test_ok();
         let mut session = protect_session(experiment.start().test_ok(), entity);
+        *driver_store.lock().test_ok() = Some(Arc::clone(&session.store));
         assert_eq!(
             session.step_tick().test_ok(),
             TickOutcome::Advanced {
@@ -5707,7 +5692,7 @@ mod tests {
             Err(CoreError::ErasureContainmentUnavailable)
         ));
         assert!(matches!(
-            inherit_backtest_erasure_gate(&mut registry, gate),
+            ensure_registry_erasure_gate(&mut registry, gate),
             Err(CoreError::ErasureContainmentUnavailable)
         ));
     }
@@ -5724,7 +5709,7 @@ mod tests {
             Err(CoreError::ErasureContainmentUnavailable)
         ));
         assert!(matches!(
-            inherit_backtest_erasure_gate(&mut registry, host_gate),
+            ensure_registry_erasure_gate(&mut registry, host_gate),
             Err(CoreError::ErasureContainmentUnavailable)
         ));
     }
@@ -7358,6 +7343,8 @@ mod coverage_entrypoints {
         let child = ok(result.branch("coverage-result-child"));
         assert_eq!(child.meta.name.as_deref(), Some("coverage-result-child"));
 
+        drop(store);
+        let mut store = ok(open_store(store_config.clone()));
         ok(store.append(
             timeline.id(),
             &[EventDraft::new(
@@ -7849,6 +7836,34 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn backtest_store_seams_reject_missing_and_foreign_gates() {
+        let config = || BacktestConfig {
+            experiment_name: "backtest-gate-boundary".to_owned(),
+            train_ticks: 0,
+            eval_ticks: 0,
+            store_config: StoreConfig::Memory,
+        };
+        let mut raw_store = pos_store::memory::MemoryStore::new();
+        assert!(matches!(
+            BacktestRunner::new(config(), PluginRegistry::new).run_on_store(&mut raw_store),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+
+        let hosted_store = ok(HostedExperimentStore::open(StoreConfig::Memory));
+        let foreign_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        assert!(matches!(
+            BacktestRunner::new(config(), PluginRegistry::new)
+                .with_erasure_gate(foreign_gate)
+                .run_with_hosted_store(hosted_store),
+            Err(ExperimentError::Store(
+                pos_core::CoreError::ErasureContainmentUnavailable
+            ))
+        ));
+    }
+
+    #[test]
     fn host_gate_binding_and_startup_errors_are_closed() {
         let unbound_store = ok(open_store_with_gate(StoreConfig::Memory, None));
         assert!(matches!(
@@ -7865,9 +7880,9 @@ mod coverage_entrypoints {
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut registry = PluginRegistry::new();
-        ok(bind_registry_to_host_gate(&mut registry, gate.clone()));
-        ok(bind_registry_to_host_gate(&mut registry, gate));
-        assert!(bind_registry_to_host_gate(
+        ok(ensure_registry_erasure_gate(&mut registry, gate.clone()));
+        ok(ensure_registry_erasure_gate(&mut registry, gate));
+        assert!(ensure_registry_erasure_gate(
             &mut registry,
             Arc::new(ErasureContainmentGateV1::new_test_open())
         )
@@ -7882,7 +7897,7 @@ mod coverage_entrypoints {
             bind_registry_erasure_gate(&mut store, &missing_bound_gate, gate.clone()),
             Err(pos_core::CoreError::ErasureContainmentUnavailable)
         ));
-        assert!(bind_registry_to_host_gate(&mut missing_bound_gate, gate).is_err());
+        assert!(ensure_registry_erasure_gate(&mut missing_bound_gate, gate).is_err());
 
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let registry = PluginRegistry::new().with_erasure_gate(gate);
@@ -9252,8 +9267,7 @@ mod fault_injection_tests {
                 })),
             )
             .test_ok();
-        let mut session = experiment.start().test_ok();
-        assert_eq!(session.append_events(&[]).test_ok(), 0);
+        drop(pos_store::sqlite::SqliteStore::open(path.to_str().test_ok()).test_ok());
         Connection::open(&path)
             .test_ok()
             .execute_batch(
@@ -9264,6 +9278,8 @@ mod fault_injection_tests {
                  END;",
             )
             .test_ok();
+        let mut session = experiment.start().test_ok();
+        assert_eq!(session.append_events(&[]).test_ok(), 0);
 
         assert!(matches!(session.step(), Err(ExperimentError::Store(_))));
         assert!(matches!(
@@ -9386,7 +9402,7 @@ mod fault_injection_tests {
                 })),
             )
             .test_ok();
-        let mut session = experiment.start().test_ok();
+        drop(pos_store::sqlite::SqliteStore::open(path.to_str().test_ok()).test_ok());
         Connection::open(&path)
             .test_ok()
             .execute_batch(
@@ -9397,6 +9413,7 @@ mod fault_injection_tests {
                  END;",
             )
             .test_ok();
+        let mut session = experiment.start().test_ok();
 
         assert!(matches!(
             session.append_events(&[EventDraft::new(
