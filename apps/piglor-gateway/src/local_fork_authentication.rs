@@ -830,11 +830,15 @@ mod tests {
         expect_invalid(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
-            fs::Permissions::from_mode(0o400),
+            fs::Permissions::from_mode(0o600),
         ));
         test_ok(fs::write(
             directory.path().join(AUTH_CREDENTIAL_NAME),
             vec![1; MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 + 1],
+        ));
+        test_ok(fs::set_permissions(
+            directory.path().join(AUTH_CREDENTIAL_NAME),
+            fs::Permissions::from_mode(0o400),
         ));
         expect_invalid(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
     }
