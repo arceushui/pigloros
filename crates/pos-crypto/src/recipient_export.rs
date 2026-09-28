@@ -1694,10 +1694,10 @@ mod tests {
         noncanonical.extend_from_slice(&[0x98, 11]);
         noncanonical.extend_from_slice(&payload[1..]);
         let encoded = encrypt_payload(&noncanonical, recipient, [5; 16], &mut rng)?;
-        assert_eq!(
+        assert!(matches!(
             decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::NonCanonical)
-        );
+        ));
 
         let mut fork = export(Some(0), b"source".to_vec());
         fork.parent_fork_hash = None;
