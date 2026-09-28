@@ -1,7 +1,7 @@
 //! Small shared deterministic-CBOR head encoder for native V1 records.
 
 /// Write the preferred definite-length header for one CBOR major type.
-pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
+pub fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     let prefix = major << 5;
     let bytes = value.to_be_bytes();
     match value {
