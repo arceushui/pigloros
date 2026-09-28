@@ -842,7 +842,7 @@ fn refold_host_projection_prefix(
     registry: &mut PluginRegistry,
     timeline: TimelineId,
     through: pos_core::clock::Seq,
-) -> Result<(), ExperimentError> {
+) -> Result<Vec<Event>, ExperimentError> {
     let (events, generation) = lock_store(store).and_then(|store| {
         let events = read_completed_prefix(store.as_ref(), timeline, through)?;
         let generation = registry
@@ -851,7 +851,7 @@ fn refold_host_projection_prefix(
         Ok((events, generation))
     })?;
     registry.refold_projection_events(timeline, &events, generation)?;
-    Ok(())
+    Ok(events)
 }
 
 fn append_driver_drafts(
@@ -2116,15 +2116,19 @@ impl ExperimentSession {
         {
             fold_captured_range(&mut self.boundary, &mut self.registry, &before)
         } else {
-            if let Err(error) = refold_host_projection_prefix(
+            let refreshed = refold_host_projection_prefix(
                 &self.store,
                 &mut self.registry,
                 self.timeline.id(),
                 before.through,
-            ) {
-                self.health = SessionHealth::Faulted;
-                return Err(error);
-            }
+            );
+            committed_events = match refreshed {
+                Ok(events) => events,
+                Err(error) => {
+                    self.health = SessionHealth::Faulted;
+                    return Err(error);
+                }
+            };
             self.boundary.folded_through = before.through;
             FoldedEventCount(u64::try_from(before.events.len()).unwrap_or(u64::MAX))
         };
