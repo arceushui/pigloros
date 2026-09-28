@@ -198,17 +198,21 @@ pub use fork_attribution::{
 };
 pub use fork_event_provenance::{
     EventOriginRecordInputV1, EventOriginRecordV1, ForkAppendOperationInputV1,
-    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkClassifierRegistrationInputV1,
+    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkAppendSourcePermitV1,
+    ForkClassifiedAppendReceiptV1, ForkClassifierRegistrationInputV1,
+    ForkClassifierRegistrationReceiptV1, ForkClassifierRegistrationRequestV1,
     ForkClassifierRegistrationV1, ForkClassifierSourceInputV1, ForkClassifierSourceV1,
     ForkClassifierTableInputV1, ForkClassifierTableV1, ForkEventAppendRequestV1,
+    ForkEventAuthorityBindingV1, ForkEventAuthorityErrorV1, ForkEventAuthorityHostV1,
     ForkEventClassificationV1, ForkEventClassifierV1, ForkEventOriginKindV1,
-    ForkEventProvenanceErrorV1, ForkEventSourceDescriptorV1, ForkEventSourceV1,
-    ForkExternalInputRouteV1, ForkInterventionAdmissionInputV1, ForkInterventionAdmissionV1,
-    MAX_EVENT_ORIGIN_RECORD_BYTES_V1, MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1,
-    MAX_FORK_EVENT_APPEND_PAYLOAD_BYTES_V1, MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1,
-    MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1, MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
-    MAX_FORK_EVENT_REGISTRAR_BYTES_V1, MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1,
-    MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
+    ForkEventProvenanceAuthorityPortV1, ForkEventProvenanceErrorV1, ForkEventSourceDescriptorV1,
+    ForkEventSourceV1, ForkExternalInputRouteV1, ForkInterventionAdmissionInputV1,
+    ForkInterventionAdmissionV1, MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
+    MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1, MAX_FORK_EVENT_APPEND_PAYLOAD_BYTES_V1,
+    MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1, MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1,
+    MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1, MAX_FORK_EVENT_REGISTRAR_BYTES_V1,
+    MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
 };
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
 pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};

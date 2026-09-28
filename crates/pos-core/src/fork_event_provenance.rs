@@ -3,7 +3,12 @@
 //! These codecs establish neither Fork admission nor append authority. A
 //! trusted host must use them with the admitted-Fork append transaction.
 
-use crate::{CorrelationId, EntityId, EventId, Hash, TimelineId, WallTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::{
+    CorrelationId, EntityId, Event, EventDraft, EventId, ForkAdmissionRecordV1, Hash, TimelineId,
+    WallTime,
+};
 
 /// Maximum accepted `EOR1` bytes.
 pub const MAX_EVENT_ORIGIN_RECORD_BYTES_V1: usize = 384;
@@ -53,6 +58,235 @@ pub enum ForkEventProvenanceErrorV1 {
     SourceRejected,
     #[error("Fork Event classifier has duplicate routes")]
     DuplicateSourceRoute,
+}
+
+/// Closed storage-boundary failures for classifier registration and classified append.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ForkEventAuthorityErrorV1 {
+    #[error("Fork Event authority request is invalid")]
+    InvalidRequest,
+    #[error("Fork Event authority permit is unavailable")]
+    Unauthenticated,
+    #[error("Fork Event authority conflicts with a committed operation")]
+    Conflict,
+    #[error("Fork Event authority is corrupt")]
+    CorruptAuthority,
+    #[error("Fork Event authority storage outcome is indeterminate")]
+    StorageIndeterminate,
+}
+
+/// Opaque binding issued by one trusted classifier composition root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForkEventAuthorityBindingV1 {
+    host_id: u64,
+}
+
+/// Opaque permit to register one trusted host classifier for an admitted Fork.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifierRegistrationRequestV1 {
+    binding: ForkEventAuthorityBindingV1,
+    operation_id: Hash,
+    admission: ForkAdmissionRecordV1,
+    source: ForkClassifierSourceV1,
+}
+
+impl ForkClassifierRegistrationRequestV1 {
+    #[must_use]
+    pub const fn binding(&self) -> ForkEventAuthorityBindingV1 {
+        self.binding
+    }
+    #[must_use]
+    pub const fn operation_id(&self) -> Hash {
+        self.operation_id
+    }
+    #[must_use]
+    pub const fn admission(&self) -> &ForkAdmissionRecordV1 {
+        &self.admission
+    }
+    #[must_use]
+    pub const fn source(&self) -> &ForkClassifierSourceV1 {
+        &self.source
+    }
+}
+
+/// Opaque permit for one host-resolved classified append source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkAppendSourcePermitV1 {
+    binding: ForkEventAuthorityBindingV1,
+    child_timeline_id: TimelineId,
+    fork_admission_digest: Hash,
+    source: ForkAppendSourceIdentityV1,
+}
+
+impl ForkAppendSourcePermitV1 {
+    #[must_use]
+    pub const fn binding(&self) -> ForkEventAuthorityBindingV1 {
+        self.binding
+    }
+    #[must_use]
+    pub const fn child_timeline_id(&self) -> TimelineId {
+        self.child_timeline_id
+    }
+    #[must_use]
+    pub const fn fork_admission_digest(&self) -> Hash {
+        self.fork_admission_digest
+    }
+    #[must_use]
+    pub const fn source(&self) -> &ForkAppendSourceIdentityV1 {
+        &self.source
+    }
+}
+
+/// Receipt returned only after a complete immutable classifier registration commits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForkClassifierRegistrationReceiptV1 {
+    pub child_timeline_id: TimelineId,
+    pub classifier_revision_digest: Hash,
+    pub registration_digest: Hash,
+}
+
+/// Receipt returned only after one Event and all provenance rows commit together.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifiedAppendReceiptV1 {
+    pub event: Event,
+    pub operation: ForkAppendOperationV1,
+}
+
+/// Host-owned classifier composition root.
+#[derive(Debug)]
+pub struct ForkEventAuthorityHostV1 {
+    binding: ForkEventAuthorityBindingV1,
+    registrar_identifier: String,
+    routes: Vec<ForkExternalInputRouteV1>,
+}
+
+static NEXT_FORK_EVENT_AUTHORITY_HOST_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ForkEventAuthorityHostV1 {
+    /// Construct trusted immutable classifier configuration.
+    pub fn new(
+        registrar_identifier: String,
+        mut routes: Vec<ForkExternalInputRouteV1>,
+    ) -> Result<Self, ForkEventProvenanceErrorV1> {
+        validate_classifier_fields(
+            Hash::from_bytes([1; 32]),
+            &registrar_identifier,
+            &mut routes,
+        )?;
+        Ok(Self {
+            binding: ForkEventAuthorityBindingV1 {
+                host_id: NEXT_FORK_EVENT_AUTHORITY_HOST_ID.fetch_add(1, Ordering::Relaxed),
+            },
+            registrar_identifier,
+            routes,
+        })
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> ForkEventAuthorityBindingV1 {
+        self.binding
+    }
+
+    /// Permit registration using only a locally admitted Fork record.
+    pub fn permit_registration(
+        &self,
+        operation_id: Hash,
+        admission: ForkAdmissionRecordV1,
+    ) -> Result<ForkClassifierRegistrationRequestV1, ForkEventProvenanceErrorV1> {
+        if operation_id == Hash::zero() {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        let source = ForkClassifierSourceV1::new(ForkClassifierSourceInputV1 {
+            room_revision_descriptor_hash: admission.input().room_revision_descriptor_hash,
+            registrar_identifier: self.registrar_identifier.clone(),
+            routes: self.routes.clone(),
+        })?;
+        Ok(ForkClassifierRegistrationRequestV1 {
+            binding: self.binding,
+            operation_id,
+            admission,
+            source,
+        })
+    }
+
+    /// Permit a host-internal append after the caller has resolved admitted authority.
+    #[must_use]
+    pub fn permit_host_internal(
+        &self,
+        child_timeline_id: TimelineId,
+        fork_admission_digest: Hash,
+    ) -> ForkAppendSourcePermitV1 {
+        ForkAppendSourcePermitV1 {
+            binding: self.binding,
+            child_timeline_id,
+            fork_admission_digest,
+            source: ForkAppendSourceIdentityV1::HostInternal,
+        }
+    }
+
+    /// Permit one configured external route for the exact admitted Fork.
+    pub fn permit_external_input(
+        &self,
+        child_timeline_id: TimelineId,
+        fork_admission_digest: Hash,
+        adapter_identifier: String,
+        source: ForkEventSourceDescriptorV1,
+    ) -> Result<ForkAppendSourcePermitV1, ForkEventProvenanceErrorV1> {
+        let known = self
+            .routes
+            .binary_search_by(|route| route.source.cmp(&source))
+            .is_ok();
+        let source = ForkAppendSourceIdentityV1::ExternalInput {
+            adapter_identifier,
+            source,
+        };
+        source.validate()?;
+        if !known {
+            return Err(ForkEventProvenanceErrorV1::SourceRejected);
+        }
+        Ok(ForkAppendSourcePermitV1 {
+            binding: self.binding,
+            child_timeline_id,
+            fork_admission_digest,
+            source,
+        })
+    }
+}
+
+/// Durable classifier registration, classified append, operation recovery, and suffix-read port.
+pub trait ForkEventProvenanceAuthorityPortV1 {
+    fn bind_fork_event_authority_host(
+        &mut self,
+        binding: ForkEventAuthorityBindingV1,
+    ) -> Result<(), ForkEventAuthorityErrorV1>;
+    fn register_classifier(
+        &mut self,
+        request: &ForkClassifierRegistrationRequestV1,
+    ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1>;
+    fn append_classified(
+        &mut self,
+        permit: &ForkAppendSourcePermitV1,
+        operation_id: Hash,
+        draft: EventDraft,
+    ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1>;
+    fn recover_classified_append(
+        &self,
+        permit: &ForkAppendSourcePermitV1,
+        operation_id: Hash,
+        draft: &EventDraft,
+    ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1>;
+    fn read_fork_event_suffix(
+        &self,
+        child_timeline_id: TimelineId,
+        from_logical_seq: u64,
+    ) -> Result<
+        Vec<(
+            EventOriginRecordV1,
+            Option<ForkInterventionAdmissionV1>,
+            ForkAppendOperationV1,
+        )>,
+        ForkEventAuthorityErrorV1,
+    >;
 }
 
 /// The source class selected by the trusted host.

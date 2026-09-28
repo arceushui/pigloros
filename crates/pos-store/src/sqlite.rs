@@ -887,6 +887,38 @@ impl SqliteStore {
                  child_id TEXT NOT NULL UNIQUE,
                  far1_cbor BLOB NOT NULL UNIQUE
              );
+             CREATE TABLE IF NOT EXISTS fork_classifier_sources (
+                 descriptor_hash BLOB NOT NULL CHECK (length(descriptor_hash) = 32),
+                 registrar_identifier TEXT NOT NULL,
+                 fcs1_cbor BLOB NOT NULL UNIQUE,
+                 PRIMARY KEY (descriptor_hash, registrar_identifier)
+             );
+             CREATE TABLE IF NOT EXISTS fork_classifier_tables (
+                 child_id TEXT PRIMARY KEY,
+                 fct1_digest BLOB NOT NULL UNIQUE CHECK (length(fct1_digest) = 32),
+                 fct1_cbor BLOB NOT NULL UNIQUE
+             );
+             CREATE TABLE IF NOT EXISTS fork_classifier_registrations (
+                 operation_id BLOB PRIMARY KEY CHECK (length(operation_id) = 32),
+                 child_id TEXT NOT NULL UNIQUE,
+                 fcr1_cbor BLOB NOT NULL UNIQUE
+             );
+             CREATE TABLE IF NOT EXISTS fork_event_origins (
+                 event_id TEXT PRIMARY KEY,
+                 eor1_cbor BLOB NOT NULL UNIQUE
+             );
+             CREATE TABLE IF NOT EXISTS fork_intervention_admissions (
+                 event_id TEXT PRIMARY KEY,
+                 fia1_cbor BLOB NOT NULL UNIQUE
+             );
+             CREATE TABLE IF NOT EXISTS fork_append_operations (
+                 operation_id BLOB PRIMARY KEY CHECK (length(operation_id) = 32),
+                 child_id TEXT NOT NULL,
+                 local_seq INTEGER NOT NULL,
+                 event_id TEXT NOT NULL UNIQUE,
+                 fop1_cbor BLOB NOT NULL UNIQUE,
+                 UNIQUE(child_id, local_seq)
+             );
              CREATE TABLE IF NOT EXISTS events (
                  timeline_id TEXT NOT NULL,
                  seq         INTEGER NOT NULL,
@@ -907,9 +939,16 @@ impl SqliteStore {
                  origin_logical_seq INTEGER NOT NULL CHECK (origin_logical_seq >= 1),
                  PRIMARY KEY (timeline_id, seq)
              );
-             CREATE TRIGGER IF NOT EXISTS fork_admitted_event_guard
+             DROP TRIGGER IF EXISTS fork_admitted_event_guard;
+             CREATE TRIGGER fork_admitted_event_guard
              BEFORE INSERT ON events
              WHEN EXISTS (SELECT 1 FROM fork_admissions WHERE child_id = NEW.timeline_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM fork_append_operations
+                  WHERE child_id = NEW.timeline_id
+                    AND local_seq = NEW.seq
+                    AND event_id = NEW.event_id
+              )
              BEGIN
                  SELECT RAISE(ABORT, 'admitted Fork append requires classified authority');
              END;
@@ -1030,6 +1069,44 @@ impl SqliteStore {
                      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                      state_cbor BLOB NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS fork_classifier_sources (
+                     descriptor_hash BLOB NOT NULL CHECK (length(descriptor_hash) = 32),
+                     registrar_identifier TEXT NOT NULL,
+                     fcs1_cbor BLOB NOT NULL UNIQUE,
+                     PRIMARY KEY (descriptor_hash, registrar_identifier)
+                 );
+                 CREATE TABLE IF NOT EXISTS fork_classifier_tables (
+                     child_id TEXT PRIMARY KEY,
+                     fct1_digest BLOB NOT NULL UNIQUE CHECK (length(fct1_digest) = 32),
+                     fct1_cbor BLOB NOT NULL UNIQUE
+                 );
+                 CREATE TABLE IF NOT EXISTS fork_classifier_registrations (
+                     operation_id BLOB PRIMARY KEY CHECK (length(operation_id) = 32),
+                     child_id TEXT NOT NULL UNIQUE,
+                     fcr1_cbor BLOB NOT NULL UNIQUE
+                 );
+                 CREATE TABLE IF NOT EXISTS fork_event_origins (
+                     event_id TEXT PRIMARY KEY,
+                     eor1_cbor BLOB NOT NULL UNIQUE
+                 );
+                 CREATE TABLE IF NOT EXISTS fork_intervention_admissions (
+                     event_id TEXT PRIMARY KEY,
+                     fia1_cbor BLOB NOT NULL UNIQUE
+                 );
+                 CREATE TABLE IF NOT EXISTS fork_append_operations (
+                     operation_id BLOB PRIMARY KEY CHECK (length(operation_id) = 32),
+                     child_id TEXT NOT NULL,
+                     local_seq INTEGER NOT NULL,
+                     event_id TEXT NOT NULL UNIQUE,
+                     fop1_cbor BLOB NOT NULL UNIQUE,
+                     UNIQUE(child_id, local_seq)
+                 );
+                 DROP TRIGGER IF EXISTS fork_admitted_event_guard;
+                 CREATE TRIGGER fork_admitted_event_guard
+                 BEFORE INSERT ON events
+                 WHEN EXISTS (SELECT 1 FROM fork_admissions WHERE child_id = NEW.timeline_id)
+                  AND NOT EXISTS (SELECT 1 FROM fork_append_operations WHERE child_id = NEW.timeline_id AND local_seq = NEW.seq AND event_id = NEW.event_id)
+                 BEGIN SELECT RAISE(ABORT, 'admitted Fork append requires classified authority'); END;
                  COMMIT;",
             )
             .map_err(Self::into_storage_error)
