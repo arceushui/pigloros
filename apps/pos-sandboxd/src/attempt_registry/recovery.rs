@@ -311,6 +311,7 @@ fn validate_record_prefix(bytes: &[u8], attempt_id: [u8; 16]) -> RegistryResult<
 mod tests {
     use super::super::tests::with_io_fault;
     use std::fs;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use super::*;
@@ -546,6 +547,23 @@ mod tests {
         let decoded =
             parse_content(&directory_record()?, [1; 16], false)?.ok_or("missing directory")?;
         assert_eq!(decoded.directory_identities(), Some([(7, 11), (7, 13)]));
+        Ok(())
+    }
+
+    #[test]
+    fn non_utf8_registry_component_is_rejected_before_record_read() -> TestResult {
+        let (directory, held) = fixture()?;
+        let path = directory
+            .path()
+            .join("registry")
+            .join(std::ffi::OsStr::from_bytes(&[0xff]));
+        fs::write(&path, planned()?)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        assert!(matches!(
+            SystemdAttemptRecovery::from_directory(held),
+            Err(SystemdAttemptRegistryError::InvalidIntent)
+        ));
+        assert!(path.is_file());
         Ok(())
     }
 
