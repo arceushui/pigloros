@@ -39,7 +39,7 @@ mod envelope_cases {
                 let mut certificate = Certificate::from_der(CERTIFICATE)?;
                 if marker != 0 {
                     certificate.tbs_certificate.serial_number =
-                        x509_cert::serial_number::SerialNumber::new(&[marker])?;
+                        x509_cert::serial_number::SerialNumber::new(&[100 + marker])?;
                 }
                 let padding_oid = ObjectIdentifier::new("1.2.3.4")?;
                 certificate
