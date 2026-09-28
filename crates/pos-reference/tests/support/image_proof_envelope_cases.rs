@@ -1,4 +1,5 @@
 mod envelope_cases {
+    include!("image_proof_identity_cases.rs");
     use super::*;
     use der::{Reader, Tag, Tagged};
 
