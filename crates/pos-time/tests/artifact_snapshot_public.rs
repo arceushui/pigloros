@@ -156,11 +156,12 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         generation,
     )
     .test_ok();
-    let unknown_closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-        unknown_timeline,
-        generation,
-    )
-    .test_ok();
+    let unknown_closure =
+        WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+            unknown_timeline,
+            generation,
+        )
+        .test_ok();
     let mut known_registry = registry(&gate);
     let known_snapshot = snapshot(
         &mut reads,
