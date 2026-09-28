@@ -2991,8 +2991,8 @@ impl ErasureVerifiedInventoryV1 {
     /// Returns [`ErasureErrorV1::StaleGeneration`] when the supplied inventory
     /// generation is stale. Returns [`ErasureErrorV1::PolicyConflict`] for an
     /// existing child, an omitted/duplicate/extraneous request mutation, a
-    /// child-scope identity already present in any frozen base scope or
-    /// extension, or inconsistent child metadata and ERSE1 evidence.
+    /// child-scope identity already present in an affected request's frozen
+    /// base scope or extension, or inconsistent child metadata and ERSE1 evidence.
     pub fn prepare_fork_batch(
         self,
         input: ErasureForkAdmissionInputV1,
@@ -3049,16 +3049,22 @@ impl ErasureVerifiedInventoryV1 {
         parent: TimelineId,
         child_scope: ErasureReferenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.validate_fork_parent_has_admitted_lineage(parent)?;
-        if self.members.iter().any(|(state, _)| {
-            state
-                .scope()
-                .is_some_and(|scope| scope.scope_members().contains(&child_scope))
-                || state
-                    .scope_extensions()
-                    .iter()
-                    .any(|extension| extension.fork() == child_scope)
-        }) {
+        let classifications = self.admitted_fork_parent_classifications(parent)?;
+        if self
+            .members
+            .iter()
+            .zip(classifications)
+            .any(|((state, _), classification)| {
+                classification.membership.included_scope().is_some()
+                    && (state
+                        .scope()
+                        .is_some_and(|scope| scope.scope_members().contains(&child_scope))
+                        || state
+                            .scope_extensions()
+                            .iter()
+                            .any(|extension| extension.fork() == child_scope))
+            })
+        {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         Ok(())
@@ -7223,7 +7229,7 @@ mod coverage_paths {
     }
 
     #[test]
-    fn fork_batch_rejects_child_scope_already_in_an_unaffected_extension(
+    fn fork_batch_allows_child_scope_used_only_by_an_unaffected_request(
     ) -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
         let existing_child = TimelineId::new();
@@ -7317,8 +7323,36 @@ mod coverage_paths {
         );
         let admission = PreparedErasureForkAdmissionV1::new(input.clone(), extension, mutation)?;
 
+        let batch = inventory.prepare_fork_batch(input, vec![admission])?;
+        assert_eq!(batch.admissions().len(), 1);
+        assert_eq!(batch.child().id, child);
+        let requirements = batch
+            .successor_inventory()
+            .fork_retry_scope_requirements(parent, child, child_scope)?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(requirements.len(), 1);
         assert_eq!(
-            inventory.prepare_fork_batch(input, vec![admission]),
+            requirements[0].requirement().request(),
+            affected.request().reference()
+        );
+
+        let repeated = ErasureForkAdmissionInputV1 {
+            operation: reference(102),
+            expected_inventory_generation: batch.successor_inventory().generation(),
+            child_scope,
+            child: crate::TimelineMeta {
+                id: TimelineId::new(),
+                mode: crate::TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+        assert_eq!(
+            batch
+                .successor_inventory()
+                .clone()
+                .prepare_fork_batch(repeated, Vec::new()),
             Err(ErasureErrorV1::PolicyConflict)
         );
         Ok(())

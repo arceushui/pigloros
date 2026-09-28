@@ -1104,10 +1104,7 @@ async fn assert_recovered_http_events(
         let page = request_http_with_actor(
             address,
             "GET",
-            &format!(
-                "/v1/timelines/{}/events?from_seq={from_seq}&limit=2",
-                timeline
-            ),
+            &format!("/v1/timelines/{timeline}/events?from_seq={from_seq}&limit=2"),
             None,
             Some(human_entity),
         )
