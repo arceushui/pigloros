@@ -207,7 +207,7 @@ fn names(directory: &File) -> RegistryResult<Vec<String>> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::super::super::tests::with_io_fault;
+    use super::super::super::tests::{in_lock_test_process, with_io_fault};
     use super::*;
     use crate::{SystemdAttemptRegistry, TransientServiceUnitName};
     use std::fs;
@@ -316,6 +316,9 @@ mod tests {
 
     #[test]
     fn rejects_unknown_unsafe_and_contradictory_directory_state() -> TestResult {
+        if !in_lock_test_process("attempt_registry::recovery::directories::tests::rejects_unknown_unsafe_and_contradictory_directory_state")? {
+            return Ok(());
+        }
         for fault in 0..11 {
             let (directory, recovery) = fixture()?;
             let attempts = directory.path().join("attempts");
@@ -352,6 +355,9 @@ mod tests {
 
     #[test]
     fn temporary_record_cannot_authorize_existing_directory() -> TestResult {
+        if !in_lock_test_process("attempt_registry::recovery::directories::tests::temporary_record_cannot_authorize_existing_directory")? {
+            return Ok(());
+        }
         let (directory, recovery) = fixture()?;
         drop(recovery);
         fs::rename(
@@ -374,6 +380,9 @@ mod tests {
 
     #[test]
     fn held_inventory_rejects_parent_and_uncommitted_identity_substitution() -> TestResult {
+        if !in_lock_test_process("attempt_registry::recovery::directories::tests::held_inventory_rejects_parent_and_uncommitted_identity_substitution")? {
+            return Ok(());
+        }
         for fault in 0..4 {
             let (directory, recovery) = fixture()?;
             let inventory = recovery.inventory_unmounted_directories()?;
@@ -398,6 +407,9 @@ mod tests {
 
     #[test]
     fn every_inventory_io_boundary_propagates_failure_without_removing_evidence() -> TestResult {
+        if !in_lock_test_process("attempt_registry::recovery::directories::tests::every_inventory_io_boundary_propagates_failure_without_removing_evidence")? {
+            return Ok(());
+        }
         let (directory, recovery) = fixture()?;
         let (result, count) = with_io_fault(None, || recovery.inventory_unmounted_directories());
         drop(result?);
