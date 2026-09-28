@@ -1073,7 +1073,7 @@ async fn multi_rate_simulated_human_and_ai_replay_is_deterministic_impl(
         axum::serve(listener, router(state))
             .with_graceful_shutdown(async {
                 match shutdown_rx.await {
-                    Ok(()) | Err(()) => {}
+                    Ok(()) | Err(_) => {}
                 }
             })
             .await
