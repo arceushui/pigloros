@@ -416,12 +416,14 @@ mod coverage_entrypoints {
         let timeline = TimelineId::new();
         assert!(matches!(
             PluginRegistry::new()
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .without_consent_gate()
                 .tick_cadenced(timeline, 0),
             Err(RuntimeError::ConsentOperationUnavailable)
         ));
         assert!(matches!(
             PluginRegistry::new()
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .without_consent_gate()
                 .step_all(timeline),
             Err(RuntimeError::ConsentOperationUnavailable)
@@ -3728,7 +3730,7 @@ mod tests {
                 grant_seq: 1,
             },
         );
-        let unbound = PluginRegistry::new();
+        let unbound = gated_registry();
         assert!(unbound.clone_consent_gate().is_some());
         assert!(PluginRegistry::new()
             .with_consent_gate(Arc::new(ConsentAuthority::new()))
