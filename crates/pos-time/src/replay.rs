@@ -393,6 +393,17 @@ mod tests {
         registry
     }
 
+    fn assert_committed_world_step_shape(committed: &[Event]) {
+        assert_eq!(committed.len(), 3);
+        assert_eq!(
+            committed
+                .iter()
+                .filter(|event| event.event_type.as_str() == EVENT_TYPE_CONFIG_V1)
+                .count(),
+            1
+        );
+    }
+
     fn assert_world_states(
         registry: &ProjectionRegistry,
         timeline: TimelineId,
@@ -418,14 +429,7 @@ mod tests {
             .iter()
             .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .collect();
-        assert_eq!(committed.len(), 3);
-        assert_eq!(
-            committed
-                .iter()
-                .filter(|event| event.event_type.as_str() == EVENT_TYPE_CONFIG_V1)
-                .count(),
-            1
-        );
+        assert_committed_world_step_shape(&committed);
         assert_eq!(observations.len(), 2);
         assert_eq!(observations[0].entity, bodies[0]);
         assert_eq!(observations[1].entity, bodies[1]);
