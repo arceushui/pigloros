@@ -41,6 +41,10 @@ fn public_proof_verification_rejects_certificate_extension_violations() -> TestR
             SandboxImageProofError::UnsupportedProfile,
         ),
         ("2.5.29.17", &[5, 0][..], SandboxImageProofError::Malformed),
+        ("2.5.29.19", &[5, 0][..], SandboxImageProofError::Malformed),
+        ("2.5.29.30", &[5, 0][..], SandboxImageProofError::Malformed),
+        ("2.5.29.15", &[5, 0][..], SandboxImageProofError::Malformed),
+        ("2.5.29.37", &[5, 0][..], SandboxImageProofError::Malformed),
         (
             "2.5.29.17",
             &[0x30, 0][..],
@@ -213,5 +217,88 @@ fn public_proof_verification_rejects_ambiguous_and_excessive_certificate_sets() 
         })?;
         assert_eq!(verify(&fixture(&proof, CERTIFICATE)?, NOW)?, Err(expected));
     }
+    Ok(())
+}
+
+#[test]
+fn public_proof_verification_rejects_non_x509_certificate_choices() -> TestResult {
+    let proof = edit_cms(PROOF, |cms_data| {
+        cms_data.certificates = Some(
+            vec![CertificateChoices::Other(
+                cms::cert::OtherCertificateFormat {
+                    other_cert_format: ObjectIdentifier::new("1.2.3.4")?,
+                    other_cert: der::Any::null(),
+                },
+            )]
+            .try_into()?,
+        );
+        Ok(())
+    })?;
+    assert_eq!(
+        verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+        Err(SandboxImageProofError::UnsupportedProfile)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_proof_verification_rejects_unused_key_and_signature_bits() -> TestResult {
+    for key in [true, false] {
+        let (proof, certificate) = edited_certificate(|certificate| {
+            let bits = der::asn1::BitString::new(1, vec![0; 256])?;
+            if key {
+                certificate
+                    .tbs_certificate
+                    .subject_public_key_info
+                    .subject_public_key = bits;
+            } else {
+                certificate.signature = bits;
+            }
+            Ok(())
+        })?;
+        assert_eq!(
+            verify(&fixture(&proof, &certificate)?, NOW)?,
+            Err(SandboxImageProofError::Malformed)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_proof_verification_rejects_malformed_subject_key_identifier() -> TestResult {
+    let original = Certificate::from_der(CERTIFICATE)?;
+    let (_, key_id) = original
+        .tbs_certificate
+        .get::<SubjectKeyIdentifier>()?
+        .ok_or("missing SKI")?;
+    let (proof, certificate) = edited_certificate(|certificate| {
+        let extension = certificate
+            .tbs_certificate
+            .extensions
+            .as_mut()
+            .ok_or("missing extensions")?
+            .iter_mut()
+            .find(|extension| extension.extn_id.to_string() == "2.5.29.14")
+            .ok_or("missing SKI extension")?;
+        extension.extn_value = OctetString::new([5, 0])?;
+        Ok(())
+    })?;
+    let proof = edit_cms(&proof, |cms_data| {
+        let mut signer = cms_data
+            .signer_infos
+            .0
+            .get(0)
+            .ok_or("missing signer")?
+            .clone();
+        signer.sid = SignerIdentifier::SubjectKeyIdentifier(key_id);
+        signer.version = CmsVersion::V3;
+        cms_data.version = CmsVersion::V3;
+        cms_data.signer_infos = vec![signer].try_into()?;
+        Ok(())
+    })?;
+    assert_eq!(
+        verify(&fixture(&proof, &certificate)?, NOW)?,
+        Err(SandboxImageProofError::Malformed)
+    );
     Ok(())
 }

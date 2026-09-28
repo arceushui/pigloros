@@ -8,15 +8,130 @@ mod envelope_cases {
         edit: impl FnOnce(&mut der::Any) -> TestResult,
     ) -> TestResult<Vec<u8>> {
         let mut outer = ContentInfo::from_der(proof)?;
-        let mut reader = der::SliceReader::new(outer.content.value())?;
+        edit_children(&mut outer.content, |fields| {
+            edit(fields.get_mut(index).ok_or("missing CMS field")?)
+        })?;
+        Ok(outer.to_der()?)
+    }
+
+    fn edit_children(
+        value: &mut der::Any,
+        edit: impl FnOnce(&mut Vec<der::Any>) -> TestResult,
+    ) -> TestResult {
+        let mut reader = der::SliceReader::new(value.value())?;
         let mut fields: Vec<der::Any> = Vec::new();
         while !reader.is_finished() {
             fields.push(reader.decode()?);
         }
-        edit(fields.get_mut(index).ok_or("missing CMS field")?)?;
+        edit(&mut fields)?;
         let encoded: Result<Vec<_>, _> = fields.iter().map(Encode::to_der).collect();
-        outer.content = der::Any::new(Tag::Sequence, encoded?.concat())?;
-        Ok(outer.to_der()?)
+        *value = der::Any::new(value.tag(), encoded?.concat())?;
+        Ok(())
+    }
+
+    #[test]
+    fn public_proof_verification_rejects_truncated_envelope_prefixes() -> TestResult {
+        for count in 0..5 {
+            let mut outer = ContentInfo::from_der(PROOF)?;
+            edit_children(&mut outer.content, |fields| {
+                fields.truncate(count);
+                Ok(())
+            })?;
+            assert_eq!(
+                verify(&fixture(&outer.to_der()?, CERTIFICATE)?, NOW)?,
+                Err(SandboxImageProofError::Malformed),
+                "SignedData prefix {count}"
+            );
+            let proof = edit_field(PROOF, 4, |signers| {
+                let mut signer = der::Any::from_der(signers.value())?;
+                edit_children(&mut signer, |fields| {
+                    fields.truncate(count);
+                    Ok(())
+                })?;
+                *signers = der::Any::new(Tag::Set, signer.to_der()?)?;
+                Ok(())
+            })?;
+            assert_eq!(
+                verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+                Err(SandboxImageProofError::Malformed),
+                "SignerInfo prefix {count}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn public_proof_verification_rejects_wrong_container_types() -> TestResult {
+        let mut outer = ContentInfo::from_der(PROOF)?;
+        outer.content_type = ObjectIdentifier::new("1.2.3.4")?;
+        assert_eq!(
+            verify(&fixture(&outer.to_der()?, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::UnsupportedProfile)
+        );
+        for index in [0, 4] {
+            let proof = edit_field(PROOF, index, |field| {
+                *field = der::Any::null();
+                Ok(())
+            })?;
+            assert_eq!(
+                verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+                Err(SandboxImageProofError::Malformed)
+            );
+        }
+        let proof = edit_field(PROOF, 4, |signers| {
+            *signers = der::Any::new(Tag::Set, der::Any::null().to_der()?)?;
+            Ok(())
+        })?;
+        assert_eq!(
+            verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::Malformed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_proof_verification_rejects_normalized_nested_der_set() -> TestResult {
+        let canonical = edit_cms(PROOF, |cms_data| {
+            let mut signer = cms_data
+                .signer_infos
+                .0
+                .get(0)
+                .ok_or("missing signer")?
+                .clone();
+            let SignerIdentifier::IssuerAndSerialNumber(sid) = &mut signer.sid else {
+                return Err("expected issuer SID".into());
+            };
+            sid.issuer = "CN=proof+OU=unit".parse()?;
+            cms_data.signer_infos = vec![signer].try_into()?;
+            Ok(())
+        })?;
+        let proof = edit_field(&canonical, 4, |signers| {
+            edit_children(signers, |entries| {
+                edit_children(entries.get_mut(0).ok_or("missing signer")?, |fields| {
+                    edit_children(fields.get_mut(1).ok_or("missing SID")?, |sid| {
+                        edit_children(sid.get_mut(0).ok_or("missing issuer")?, |rdns| {
+                            edit_children(rdns.get_mut(0).ok_or("missing RDN")?, |attributes| {
+                                assert_eq!(attributes.len(), 2);
+                                attributes.reverse();
+                                Ok(())
+                            })
+                        })
+                    })
+                })
+            })
+        })?;
+        assert_ne!(proof, canonical);
+        // The library normalizes this nested SET; only the complete roundtrip
+        // distinguishes it from a canonical but unauthorized issuer SID.
+        assert_eq!(
+            verify(&fixture(&canonical, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::UnauthorizedSigner)
+        );
+        assert_eq!(
+            verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::Malformed)
+        );
+        Ok(())
     }
 
     #[test]

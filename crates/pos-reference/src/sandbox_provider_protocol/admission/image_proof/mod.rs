@@ -60,19 +60,7 @@ pub(super) fn verify(
     // The immutable admitted image already enforces SIM1's proof length,
     // SHA-256 and 1 MiB cap before this DER decoder can allocate.
     let manifest = image.manifest();
-    let outer = ContentInfo::from_der(&manifest.root_hash_signature.der_bytes)?;
-    if outer.to_der()? != manifest.root_hash_signature.der_bytes {
-        return Err(SandboxImageProofError::Malformed);
-    }
-    if outer.content_type != SIGNED_DATA {
-        return Err(SandboxImageProofError::UnsupportedProfile);
-    }
-    // Bound eager CMS collections before their allocating/sorting decoders.
-    envelope::validate(&outer.content)?;
-    let cms_data: SignedData = outer.content.decode_as()?;
-    if cms_data.to_der()? != outer.content.to_der()? {
-        return Err(SandboxImageProofError::Malformed);
-    }
+    let cms_data = decode(&manifest.root_hash_signature.der_bytes)?;
     let signer = validate_profile(&cms_data)?;
     let certificates = certificates::decode(&cms_data)?;
     let selected = certificates::select_signer(
@@ -87,6 +75,31 @@ pub(super) fn verify(
         &content,
         signer.signature.as_bytes(),
     )
+}
+
+fn decode(encoded: &[u8]) -> Result<SignedData, SandboxImageProofError> {
+    let mut outer = ContentInfo::from_der(encoded)?;
+    if outer.content_type != SIGNED_DATA {
+        return Err(SandboxImageProofError::UnsupportedProfile);
+    }
+    // Bound eager CMS collections before their allocating/sorting decoders.
+    envelope::validate(&outer.content)?;
+    let cms_data: SignedData = outer.content.decode_as()?;
+    // Check the complete value after decoding the inner CMS types as well:
+    // DER SET normalization must never change authenticated proof bytes.
+    der::Any::encode_from(&cms_data)
+        .and_then(|content| {
+            outer.content = content;
+            outer.to_der()
+        })
+        .map_err(SandboxImageProofError::from)
+        .and_then(|canonical| {
+            if canonical == encoded {
+                Ok(cms_data)
+            } else {
+                Err(SandboxImageProofError::Malformed)
+            }
+        })
 }
 
 fn validate_profile(cms_data: &SignedData) -> Result<&SignerInfo, SandboxImageProofError> {

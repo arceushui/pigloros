@@ -6,7 +6,7 @@ use cms::{
     cert::CertificateChoices,
     signed_data::{SignedData, SignerIdentifier},
 };
-use der::{asn1::UintRef, Decode, Encode, Sequence};
+use der::{asn1::UintRef, Decode, Encode};
 use rustls_pki_types::{CertificateDer, UnixTime};
 use sha2::{Digest, Sha256};
 use x509_cert::{
@@ -21,6 +21,7 @@ use super::{algorithm, SandboxImageProofError as Error, RSA, RSA_SHA256};
 
 pub(super) struct ProofCertificate<'a> {
     parsed: &'a Certificate,
+    public_key: &'a [u8],
     der: Vec<u8>,
 }
 
@@ -38,9 +39,15 @@ pub(super) fn decode(signed: &SignedData) -> Result<Vec<ProofCertificate<'_>>, E
             let CertificateChoices::Certificate(parsed) = choice else {
                 return Err(Error::UnsupportedProfile);
             };
-            let der = parsed.to_der()?;
-            validate_certificate_syntax(parsed)?;
-            Ok(ProofCertificate { parsed, der })
+            let public_key = validate_certificate_syntax(parsed)?;
+            parsed
+                .to_der()
+                .map_err(Error::from)
+                .map(|der| ProofCertificate {
+                    parsed,
+                    public_key,
+                    der,
+                })
         })
         .collect()
 }
@@ -73,13 +80,7 @@ pub(super) fn select_signer(
     Ok(selected)
 }
 
-#[derive(Sequence)]
-struct RsaPublicKey<'a> {
-    modulus: UintRef<'a>,
-    exponent: UintRef<'a>,
-}
-
-fn validate_certificate_syntax(certificate: &Certificate) -> Result<(), Error> {
+fn validate_certificate_syntax(certificate: &Certificate) -> Result<&[u8], Error> {
     let tbs = &certificate.tbs_certificate;
     if !algorithm(&certificate.signature_algorithm, RSA_SHA256)
         || !algorithm(&tbs.signature, RSA_SHA256)
@@ -93,8 +94,8 @@ fn validate_certificate_syntax(certificate: &Certificate) -> Result<(), Error> {
         .subject_public_key
         .as_bytes()
         .ok_or(Error::Malformed)?;
-    let key = RsaPublicKey::from_der(key_bytes)?;
-    if key.modulus.as_bytes().len() != 256 || key.modulus.as_bytes()[0] < 128 {
+    let [modulus, _exponent] = <[UintRef<'_>; 2]>::from_der(key_bytes)?;
+    if modulus.as_bytes().len() != 256 || modulus.as_bytes()[0] < 128 {
         return Err(Error::UnsupportedProfile);
     }
     let mut extensions = BTreeSet::new();
@@ -113,7 +114,7 @@ fn validate_certificate_syntax(certificate: &Certificate) -> Result<(), Error> {
             return Err(Error::UnsupportedProfile);
         }
     }
-    Ok(())
+    Ok(key_bytes)
 }
 
 fn validate_usage(certificate: &Certificate, signer: bool) -> Result<(), Error> {
@@ -170,16 +171,19 @@ fn self_issued(certificate: &ProofCertificate<'_>) -> bool {
 
 fn verify_self_signature(certificate: &ProofCertificate<'_>) -> Result<(), Error> {
     let parsed = certificate.parsed;
-    let key = parsed
-        .tbs_certificate
-        .subject_public_key_info
-        .subject_public_key
-        .as_bytes()
-        .ok_or(Error::Malformed)?;
     let signature = parsed.signature.as_bytes().ok_or(Error::Malformed)?;
-    ring::signature::UnparsedPublicKey::new(&ring::signature::RSA_PKCS1_2048_8192_SHA256, key)
-        .verify(&parsed.tbs_certificate.to_der()?, signature)
-        .map_err(|_| Error::InvalidSignature)
+    parsed
+        .tbs_certificate
+        .to_der()
+        .map_err(Error::from)
+        .and_then(|tbs| {
+            ring::signature::UnparsedPublicKey::new(
+                &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                certificate.public_key,
+            )
+            .verify(&tbs, signature)
+            .map_err(|_| Error::InvalidSignature)
+        })
 }
 
 pub(super) fn verify_message(
@@ -230,7 +234,6 @@ pub(super) fn verify_path(
             )?;
         }
     }
-    verify_self_signature(&certificates[root])?;
     // Trust-anchor extraction does not enforce EKU. A critical root EKU is
     // therefore unsupported rather than silently treated as understood.
     if certificates[root]
@@ -243,6 +246,7 @@ pub(super) fn verify_path(
     }
     let root_der = CertificateDer::from(certificates[root].der.as_slice());
     let anchor = webpki::anchor_from_trusted_cert(&root_der).map_err(|_| Error::InvalidPath)?;
+    verify_self_signature(&certificates[root])?;
     let anchors = [anchor];
     let intermediates: Vec<_> = certificates
         .iter()

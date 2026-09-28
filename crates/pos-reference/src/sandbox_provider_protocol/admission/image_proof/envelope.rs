@@ -45,27 +45,32 @@ pub(super) fn validate(content: &Any) -> Result<(), Error> {
 
 fn sequence(value: AnyRef<'_>) -> Result<SliceReader<'_>, Error> {
     value.tag().assert_eq(Tag::Sequence)?;
-    Ok(SliceReader::new(value.value())?)
+    SliceReader::new(value.value()).map_err(Error::from)
 }
 
 fn bounded_elements(body: &[u8], maximum: usize, limit_error: Error) -> Result<Vec<&[u8]>, Error> {
-    let mut reader = SliceReader::new(body)?;
-    let mut elements = Vec::new();
-    while !reader.is_finished() {
-        if elements.len() == maximum {
-            return Err(limit_error);
-        }
-        let encoded = reader.tlv_bytes()?;
-        if elements.last().is_some_and(|previous| *previous >= encoded) {
-            return Err(Error::Malformed);
-        }
-        elements.push(encoded);
-    }
-    Ok(elements)
+    SliceReader::new(body)
+        .map_err(Error::from)
+        .and_then(|mut reader| {
+            let mut elements = Vec::new();
+            while !reader.is_finished() {
+                if elements.len() == maximum {
+                    return Err(limit_error);
+                }
+                let encoded = reader.tlv_bytes()?;
+                if elements.last().is_some_and(|previous| *previous >= encoded) {
+                    return Err(Error::Malformed);
+                }
+                elements.push(encoded);
+            }
+            Ok(elements)
+        })
 }
 
 fn reject_attributes(encoded: &[u8]) -> Result<(), Error> {
-    let mut reader = sequence(AnyRef::from_der(encoded)?)?;
+    let mut reader = AnyRef::from_der(encoded)
+        .map_err(Error::from)
+        .and_then(sequence)?;
     let _version: AnyRef<'_> = reader.decode()?;
     let _sid: AnyRef<'_> = reader.decode()?;
     let _digest: AnyRef<'_> = reader.decode()?;

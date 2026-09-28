@@ -1,5 +1,6 @@
 mod image_proof_cases {
     include!("image_proof_certificate_cases.rs");
+    include!("image_proof_chain_cases.rs");
     include!("image_proof_envelope_cases.rs");
 
     use super::*;
@@ -10,7 +11,7 @@ mod image_proof_cases {
         signed_data::{SignedData, SignerIdentifier},
     };
     use der::{
-        asn1::{ObjectIdentifier, OctetString},
+        asn1::{ObjectIdentifier, OctetString, SetOfVec},
         Decode, Encode,
     };
     use pos_reference::sandbox_provider_protocol::{
@@ -168,10 +169,10 @@ mod image_proof_cases {
                     cms_data.encap_content_info.econtent = Some(der::Any::null());
                 }
                 ProfileDefect::Crls => {
-                    cms_data.crls = Some(RevocationInfoChoices(Default::default()));
+                    cms_data.crls = Some(RevocationInfoChoices(SetOfVec::default()));
                 }
                 ProfileDefect::NoDigest => {
-                    cms_data.digest_algorithms = Default::default();
+                    cms_data.digest_algorithms = SetOfVec::default();
                 }
                 ProfileDefect::ExtraDigest => {
                     let original = digest.clone();
@@ -195,10 +196,10 @@ mod image_proof_cases {
                     signer.version = CmsVersion::V3;
                 }
                 ProfileDefect::SignedAttributes => {
-                    signer.signed_attrs = Some(Default::default());
+                    signer.signed_attrs = Some(SetOfVec::default());
                 }
                 ProfileDefect::UnsignedAttributes => {
-                    signer.unsigned_attrs = Some(Default::default());
+                    signer.unsigned_attrs = Some(SetOfVec::default());
                 }
                 ProfileDefect::DigestAlgorithm => {
                     digest.oid = other;
