@@ -2440,32 +2440,41 @@ pub struct ErasureCommandSenderV1<'host> {
 impl ErasureCommandSenderV1<'_> {
     fn with_authorization_fence<T>(
         &mut self,
+        target_timeline: TimelineId,
         request: &AuthorizationRequestV1,
         mut effect: impl FnMut(&mut Self) -> T,
     ) -> Result<T, ErasureHostErrorV1> {
         let mut result = None;
+        let mut authority_result = Ok(());
         let mut consent_result = Ok(());
         self.with_protected_effect_fence(
-            request.authority_timeline(),
+            target_timeline,
             ErasureProtectedOperationV1::Read,
             &mut |sender| {
-                if let Some(consent_timeline) = request.consent_timeline() {
-                    consent_result = sender.with_protected_effect_fence(
-                        consent_timeline,
-                        ErasureProtectedOperationV1::Read,
-                        &mut |sender| result = Some(effect(sender)),
-                    );
-                } else {
-                    result = Some(effect(sender));
-                }
+                authority_result = sender.with_protected_effect_fence(
+                    request.authority_timeline(),
+                    ErasureProtectedOperationV1::Read,
+                    &mut |sender| {
+                        if let Some(consent_timeline) = request.consent_timeline() {
+                            consent_result = sender.with_protected_effect_fence(
+                                consent_timeline,
+                                ErasureProtectedOperationV1::Read,
+                                &mut |sender| result = Some(effect(sender)),
+                            );
+                        } else {
+                            result = Some(effect(sender));
+                        }
+                    },
+                );
             },
         )?;
+        authority_result?;
         consent_result?;
         result.ok_or(ErasureHostErrorV1::RecoveryUnavailable)
     }
 
     /// Cache one freshly evaluated active decision under the installed host
-    /// generation and the authority and consent Timeline fences.
+    /// generation and the resource, authority, and consent Timeline fences.
     ///
     /// The key is an opaque lookup handle. Callers cannot choose its generation
     /// or insert a decision made outside this protected host command.
@@ -2474,13 +2483,15 @@ impl ErasureCommandSenderV1<'_> {
     /// Returns a payload-free host error when either Timeline is unavailable.
     pub fn cache_authorization(
         &mut self,
+        target_timeline: TimelineId,
         request: &AuthorizationRequestV1,
         authority: &PersistedAuthorityV1,
         registry: &AuthorityRegistrySnapshotV1,
     ) -> Result<Option<AuthorizationCacheKeyV1>, ErasureHostErrorV1> {
-        self.with_authorization_fence(request, |sender| {
+        self.with_authorization_fence(target_timeline, request, |sender| {
             let decision = AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
             sender.host.authorization_cache.insert_active(
+                target_timeline,
                 decision,
                 request,
                 authority,
@@ -2504,7 +2515,7 @@ impl ErasureCommandSenderV1<'_> {
         authority: &PersistedAuthorityV1,
         registry: &AuthorityRegistrySnapshotV1,
     ) -> Result<Option<AuthorizationDecisionV1>, ErasureHostErrorV1> {
-        let result = self.with_authorization_fence(request, |sender| {
+        let result = self.with_authorization_fence(key.target_timeline(), request, |sender| {
             sender
                 .host
                 .authorization_cache

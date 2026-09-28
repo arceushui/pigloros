@@ -15,6 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AuthorizationCacheKeyV1 {
     request_digest: Hash,
+    target_timeline: TimelineId,
     authority_timeline: TimelineId,
     grant_chain_bindings: Vec<Hash>,
     consent_policy_revision: Hash,
@@ -27,11 +28,13 @@ impl AuthorizationCacheKeyV1 {
     #[must_use]
     fn from_decision(
         decision: &AuthorizationDecisionV1,
+        target_timeline: TimelineId,
         revocation_epoch: u64,
         inventory_generation: ErasureReferenceV1,
     ) -> Self {
         Self {
             request_digest: decision.request_digest(),
+            target_timeline,
             authority_timeline: decision.authority_timeline(),
             grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
             consent_policy_revision: decision.consent_policy_revision(),
@@ -54,6 +57,10 @@ impl AuthorizationCacheKeyV1 {
     #[must_use]
     pub const fn inventory_generation(&self) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest(self.inventory_generation)
+    }
+
+    pub(crate) const fn target_timeline(&self) -> TimelineId {
+        self.target_timeline
     }
 }
 
@@ -105,6 +112,7 @@ impl AuthorizationCacheV1 {
     /// is expired, or has no capability chain.
     pub(crate) fn insert_active(
         &mut self,
+        target_timeline: TimelineId,
         decision: AuthorizationDecisionV1,
         request: &AuthorizationRequestV1,
         authority: &PersistedAuthorityV1,
@@ -149,6 +157,7 @@ impl AuthorizationCacheV1 {
         }
         let key = AuthorizationCacheKeyV1::from_decision(
             &decision,
+            target_timeline,
             authority.revocation_epoch(),
             inventory_generation,
         );
@@ -199,12 +208,14 @@ impl AuthorizationCacheV1 {
 
     /// Invalidate every leaf decision derived from this grant or any parent grant.
     pub(crate) fn invalidate_grant(&mut self, grant_id: Hash) -> usize {
-        self.retain_counted(|entry| !entry.grant_ids.contains(&grant_id))
+        self.retain_and_count_evicted(|entry| !entry.grant_ids.contains(&grant_id))
     }
 
     /// Invalidate every decision derived from one revoked consent reference.
     pub(crate) fn invalidate_consent(&mut self, consent_reference: Hash) -> usize {
-        self.retain_counted(|entry| !entry.consent_references.contains(&consent_reference))
+        self.retain_and_count_evicted(|entry| {
+            !entry.consent_references.contains(&consent_reference)
+        })
     }
 
     /// Drop stale epochs for one authority Timeline while leaving unrelated Timelines intact.
@@ -237,7 +248,7 @@ impl AuthorizationCacheV1 {
         self.entries.remove(key);
     }
 
-    fn retain_counted(
+    fn retain_and_count_evicted(
         &mut self,
         mut keep: impl FnMut(&AuthorizationCacheEntryV1) -> bool,
     ) -> usize {
@@ -540,6 +551,7 @@ mod tests {
         let mut by_time = AuthorizationCacheV1::new();
         let key = by_time
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
@@ -574,6 +586,7 @@ mod tests {
         let mut by_position = AuthorizationCacheV1::new();
         let key = by_position
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision,
                 &fixture.request,
                 &fixture.authority,
@@ -609,6 +622,7 @@ mod tests {
         let mut cache = AuthorizationCacheV1::new();
         assert!(cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision,
                 &request,
                 &fixture.authority,
@@ -626,6 +640,7 @@ mod tests {
         let mut cache = AuthorizationCacheV1::new();
         let key = cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision,
                 &fixture.request,
                 &fixture.authority,
@@ -660,6 +675,7 @@ mod tests {
         let mut grant_cache = AuthorizationCacheV1::new();
         assert!(grant_cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
@@ -673,6 +689,7 @@ mod tests {
         let mut consent_cache = AuthorizationCacheV1::new();
         assert!(consent_cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
@@ -688,6 +705,7 @@ mod tests {
         let mut epoch_cache = AuthorizationCacheV1::new();
         assert!(epoch_cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision,
                 &fixture.request,
                 &fixture.authority,
@@ -697,6 +715,7 @@ mod tests {
             .is_some());
         assert!(epoch_cache
             .insert_active(
+                other.request.authority_timeline(),
                 other.decision,
                 &other.request,
                 &other.authority,
@@ -719,6 +738,7 @@ mod tests {
         let mut cache = AuthorizationCacheV1::new();
         assert!(cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision.clone(),
                 &mismatched.request,
                 &fixture.authority,
@@ -728,6 +748,7 @@ mod tests {
             .is_none());
         assert!(cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision.clone(),
                 &fixture.request,
                 &mismatched_chain.authority,
@@ -740,6 +761,7 @@ mod tests {
         assert!(!denied.decision.is_allowed());
         assert!(cache
             .insert_active(
+                denied.request.authority_timeline(),
                 denied.decision,
                 &denied.request,
                 &denied.authority,
@@ -758,6 +780,7 @@ mod tests {
         let mut cache = AuthorizationCacheV1::new();
         let key = cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
@@ -779,6 +802,7 @@ mod tests {
         assert!(cache.is_empty());
         let key = cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision.clone(),
                 &fixture.request,
                 &fixture.authority,
@@ -800,6 +824,7 @@ mod tests {
         assert!(cache.is_empty());
         assert!(cache
             .insert_active(
+                fixture.request.authority_timeline(),
                 fixture.decision,
                 &fixture.request,
                 &fixture.authority,
@@ -817,8 +842,10 @@ mod tests {
             limits,
         ));
         let timeline = test_ok(test_ok(host.command_sender()).create_timeline("authority"));
+        let resource = test_ok(test_ok(host.command_sender()).create_timeline("resource"));
         let fixture = active_decision(timeline.id());
         let key = test_ok(test_ok(host.command_sender()).cache_authorization(
+            resource.id(),
             &fixture.request,
             &fixture.authority,
             &fixture.registry,
@@ -844,13 +871,14 @@ mod tests {
         ))
         .is_none());
         let key = test_ok(test_ok(host.command_sender()).cache_authorization(
+            resource.id(),
             &fixture.request,
             &fixture.authority,
             &fixture.registry,
         ))
         .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
         host.containment_gate()
-            .freeze_timeline_for_test(timeline.id());
+            .freeze_timeline_for_test(resource.id());
         assert!(test_ok(host.command_sender())
             .cached_authorization(
                 &key,
@@ -873,6 +901,7 @@ mod tests {
         let timeline = test_ok(test_ok(host.command_sender()).create_timeline("authority"));
         let fixture = active_decision(timeline.id());
         let key = test_ok(test_ok(host.command_sender()).cache_authorization(
+            timeline.id(),
             &fixture.request,
             &fixture.authority,
             &fixture.registry,
