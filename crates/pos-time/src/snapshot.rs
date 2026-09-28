@@ -1555,7 +1555,7 @@ mod extra_tests {
                 SNAPSHOT_DIGEST,
                 &snapshot_evaluation(ArtifactStateV1::Retained),
             ),
-            Err(SnapshotError::InconsistentState)
+            Err(SnapshotError::Inconsistent { entity }) if entity == phantom
         ));
     }
 
