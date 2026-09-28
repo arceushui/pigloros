@@ -1371,8 +1371,13 @@ mod tests {
         let (recipient, private) = recipient()?;
         let payload = encode_payload(&export(None, b"source".to_vec()))?;
         let mut rng = StdRng::from_seed([12; 32]);
-        for index in 0..11 {
+        for index in [0, 1, 2, 3, 8, 10] {
             let malformed = rewrite_payload(&payload, |fields| fields[index] = Value::Null)?;
+            let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+            assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        }
+        for index in [4, 5, 6, 7, 9] {
+            let malformed = rewrite_payload(&payload, |fields| fields[index] = Value::Bool(true))?;
             let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
             assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
         }
@@ -1381,11 +1386,22 @@ mod tests {
             let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
             assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
         }
-        for index in 0..12 {
+        for index in [0, 1, 2, 3, 4, 5, 8, 11] {
             let malformed = rewrite_payload(&payload, |fields| {
                 if let Value::Array(events) = &mut fields[10] {
                     if let Some(Value::Array(event)) = events.first_mut() {
                         event[index] = Value::Null;
+                    }
+                }
+            })?;
+            let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+            assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        }
+        for index in [6, 7, 9, 10] {
+            let malformed = rewrite_payload(&payload, |fields| {
+                if let Value::Array(events) = &mut fields[10] {
+                    if let Some(Value::Array(event)) = events.first_mut() {
+                        event[index] = Value::Bool(true);
                     }
                 }
             })?;
