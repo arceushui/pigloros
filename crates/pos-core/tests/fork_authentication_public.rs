@@ -64,10 +64,14 @@ fn mutate(
 }
 
 fn fields(value: &mut Value) -> &mut Vec<Value> {
-    let Value::Array(fields) = value else {
-        panic!("fixture must be a CBOR array");
-    };
-    fields
+    assert!(
+        matches!(value, Value::Array(_)),
+        "fixture must be a CBOR array"
+    );
+    match value {
+        Value::Array(fields) => fields,
+        _ => unreachable!(),
+    }
 }
 
 #[test]
@@ -97,7 +101,7 @@ fn fap1_public_decoder_rejects_every_nested_field_shape() -> Result<(), Box<dyn 
         (
             mutate(&canonical, |value| {
                 let adapters = fields(&mut fields(value)[2]);
-                adapters[0] = Value::Integer(0_u8.into());
+                adapters[0] = Value::Integer(0_u8.into())
             })?,
             ForkAuthenticationCodecErrorV1::InvalidEncoding,
         ),
@@ -135,7 +139,7 @@ fn fap1_public_decoder_rejects_every_nested_field_shape() -> Result<(), Box<dyn 
         let bytes = mutate(&canonical, |value| {
             let adapters = fields(&mut fields(value)[2]);
             let adapter = fields(&mut adapters[0]);
-            adapter[field] = replacement;
+            adapter[field] = replacement
         })?;
         assert_eq!(
             ForkAuthenticationPolicyV1::from_canonical_cbor(&bytes),
@@ -145,7 +149,7 @@ fn fap1_public_decoder_rejects_every_nested_field_shape() -> Result<(), Box<dyn 
 
     let zero_key = mutate(&canonical, |value| {
         let adapters = fields(&mut fields(value)[2]);
-        fields(&mut adapters[0])[1] = Value::Bytes(vec![0; 32]);
+        fields(&mut adapters[0])[1] = Value::Bytes(vec![0; 32])
     })?;
     assert_eq!(
         ForkAuthenticationPolicyV1::from_canonical_cbor(&zero_key),
@@ -182,7 +186,7 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
         (
             mutate(&canonical, |value| {
                 let rows = fields(&mut fields(value)[4]);
-                rows[0] = Value::Integer(0_u8.into());
+                rows[0] = Value::Integer(0_u8.into())
             })?,
             ForkAuthenticationCodecErrorV1::InvalidEncoding,
         ),
@@ -214,7 +218,7 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
     for (field, replacement, expected) in row_cases {
         let bytes = mutate(&canonical, |value| {
             let rows = fields(&mut fields(value)[4]);
-            fields(&mut rows[0])[field] = replacement;
+            fields(&mut rows[0])[field] = replacement
         })?;
         assert_eq!(
             LocalAccountRegistryV1::from_canonical_cbor(&bytes, 1000),
@@ -224,7 +228,7 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
 
     let forbidden_uid = mutate(&canonical, |value| {
         let rows = fields(&mut fields(value)[4]);
-        fields(&mut rows[0])[0] = Value::Integer(0_u8.into());
+        fields(&mut rows[0])[0] = Value::Integer(0_u8.into())
     })?;
     assert_eq!(
         LocalAccountRegistryV1::from_canonical_cbor(&forbidden_uid, 1000),
