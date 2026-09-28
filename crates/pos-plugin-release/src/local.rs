@@ -267,7 +267,10 @@ impl LocalOciPublisherV1 {
     /// directory owned by the effective UID. Every child is then opened below
     /// the retained root descriptor with no symlink or mount traversal.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, LocalOciPublicationErrorV1> {
-        let root = open_root(root.as_ref())?;
+        open_root(root.as_ref()).and_then(Self::initialize_root)
+    }
+
+    fn initialize_root(root: File) -> Result<Self, LocalOciPublicationErrorV1> {
         let owner = rustix::process::geteuid().as_raw();
         validate_private_directory(&root, owner)?;
         validate_local_filesystem(&root)?;
