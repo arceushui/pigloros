@@ -1616,6 +1616,40 @@ mod tests {
     }
 
     #[test]
+    fn projection_refold_replaces_state_only_at_the_captured_generation() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        registry.register("events", Box::new(EntityStateProjection));
+        let event = make_event(entity);
+        registry.fold_events(timeline, &[event.clone(), event.clone()]);
+
+        assert_eq!(
+            registry.refold_events(
+                timeline,
+                std::slice::from_ref(&event),
+                Some(ErasureReferenceV1::from_digest([3; 32])),
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        let count = |registry: &ProjectionRegistry| {
+            test_ok(registry.state_for_reducer(timeline, "events", &entity))
+                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
+        };
+        assert_eq!(count(&registry), Some(2));
+
+        test_ok(registry.refold_events(timeline, std::slice::from_ref(&event), None));
+        assert_eq!(count(&registry), Some(1));
+
+        gate.block_timeline(timeline);
+        assert_eq!(
+            registry.refold_events(timeline, std::slice::from_ref(&event), None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(on))]
     fn public_state_snapshot_fails_closed_without_timeline_access() {
         let timeline = TimelineId::new();
