@@ -198,10 +198,10 @@ fn snapshot_verification_rejects_old_or_missing_host_generation() {
         );
         let encoded = serde_json::to_value(&captured).test_ok();
         let mut missing_generation = encoded.clone();
-        missing_generation
-            .as_object_mut()
-            .expect("snapshot serializes as an object")
-            .remove("inventory_generation");
+        let serde_json::Value::Object(ref mut fields) = missing_generation else {
+            panic!("snapshot serializes as an object");
+        };
+        fields.remove("inventory_generation");
         assert!(serde_json::from_value::<pos_time::Snapshot>(missing_generation).is_err());
         let mut null_generation = encoded;
         null_generation["inventory_generation"] = serde_json::Value::Null;
