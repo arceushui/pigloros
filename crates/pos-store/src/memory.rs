@@ -1468,13 +1468,13 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
             .cloned()
             .ok_or(ForkAdmissionErrorV1::Unauthenticated)?;
         let parent_head = self
-            .logical_head(request.parent_timeline_id())
+            .logical_head_unchecked(request.parent_timeline_id())
             .map_err(|_| ForkAdmissionErrorV1::ParentChanged)?;
         if parent_head.as_u64() != request.completed_fold_cursor() {
             return Err(ForkAdmissionErrorV1::StaleFoldBoundary);
         }
         let parent_hash = self
-            .compute_chain_hash_at(request.parent_timeline_id(), parent_head)
+            .compute_chain_hash_at_unchecked(request.parent_timeline_id(), parent_head)
             .map_err(|_| ForkAdmissionErrorV1::ParentChanged)?;
         let child = Timeline::new(TimelineMeta::forked_from(
             request.parent_timeline_id(),
@@ -1522,7 +1522,7 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
             return Err(ForkAdmissionErrorV1::CorruptAuthority);
         };
         let parent_hash = self
-            .compute_chain_hash_at(
+            .compute_chain_hash_at_unchecked(
                 admission.input().parent_timeline_id,
                 pos_core::Seq::from_u64(admission.input().parent_logical_head),
             )

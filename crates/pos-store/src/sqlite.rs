@@ -6434,16 +6434,28 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
             return Err(ForkAdmissionErrorV1::CorruptAuthority);
         }
         let child = self
-            .get_timeline(child_id)
+            .conn
+            .query_row(
+                "SELECT parent_id, fork_seq FROM timelines WHERE id = ?1",
+                params![child_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .optional()
             .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?
             .ok_or(ForkAdmissionErrorV1::CorruptAuthority)?;
         let input = admission.input();
         if input.child_timeline_id != child_id
-            || child.meta.fork_point
-                != Some((
-                    input.parent_timeline_id,
-                    Seq::from_u64(input.parent_logical_head),
-                ))
+            || child.0.as_deref() != Some(input.parent_timeline_id.to_string().as_str())
+            || child.1
+                != Some(
+                    i64::try_from(input.parent_logical_head)
+                        .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?,
+                )
             || self
                 .compute_chain_hash_at(
                     input.parent_timeline_id,

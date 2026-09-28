@@ -457,6 +457,11 @@ fn sqlite_rolls_back_child_metadata_when_far1_insert_fails() -> TestResult {
         store.create_fork_admitted(&request(&host, parent.id(), &authenticated)?),
         Err(ForkAdmissionErrorV1::StorageIndeterminate)
     );
-    assert_eq!(store.list_timelines()?.len(), 1);
+    let timeline_count: i64 = rusqlite::Connection::open(&path)?.query_row(
+        "SELECT count(*) FROM timelines",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(timeline_count, 1);
     Ok(())
 }
