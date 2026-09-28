@@ -1035,6 +1035,7 @@ struct ProviderEntryPermit<'a> {
 
 struct SelectorProviderRequestAdmission<'a> {
     owner: &'a SelectorAdmission,
+    admitted: Arc<AdmittedSelectorProvider>,
     attempt_id: [u8; 16],
     entry_active: bool,
 }
@@ -1179,10 +1180,13 @@ impl SelectorAdmission {
         Ok(())
     }
 
-    fn release(&self, attempt_id: [u8; 16]) {
+    fn release(&self, attempt_id: [u8; 16], admitted: &Arc<AdmittedSelectorProvider>) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        if !Arc::ptr_eq(&state.admitted, admitted) {
+            return;
+        }
         if let std::collections::btree_map::Entry::Occupied(mut entry) =
             state.attempts.entry(attempt_id)
         {
@@ -1200,20 +1204,25 @@ impl SelectorAdmission {
     fn begin_provider_execution(
         &self,
         attempt_id: [u8; 16],
+        admitted: &Arc<AdmittedSelectorProvider>,
     ) -> Result<ProviderEntryPermit<'_>, ProviderTransportError> {
-        self.start_provider_entry(attempt_id)?;
+        self.start_provider_entry(attempt_id, admitted)?;
         Ok(ProviderEntryPermit {
             owner: self,
             attempt_id,
         })
     }
 
-    fn start_provider_entry(&self, attempt_id: [u8; 16]) -> Result<(), ProviderTransportError> {
+    fn start_provider_entry(
+        &self,
+        attempt_id: [u8; 16],
+        admitted: &Arc<AdmittedSelectorProvider>,
+    ) -> Result<(), ProviderTransportError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| ProviderTransportError::BeforeAdmission)?;
-        if !state.open {
+        if !state.open || !Arc::ptr_eq(&state.admitted, admitted) {
             return Err(ProviderTransportError::BeforeAdmission);
         }
         let attempt = state
@@ -1275,7 +1284,7 @@ impl SelectorAdmission {
 
 impl Drop for SelectorAdmissionLease<'_> {
     fn drop(&mut self) {
-        self.owner.release(self.attempt_id);
+        self.owner.release(self.attempt_id, &self.admitted);
     }
 }
 
@@ -1289,7 +1298,8 @@ impl Drop for ProviderEntryPermit<'_> {
 impl SelectorAdmissionLease<'_> {
     #[cfg(test)]
     fn begin_provider_execution(&self) -> Result<ProviderEntryPermit<'_>, ProviderTransportError> {
-        self.owner.begin_provider_execution(self.attempt_id)
+        self.owner
+            .begin_provider_execution(self.attempt_id, &self.admitted)
     }
 
     #[cfg(test)]
@@ -1304,9 +1314,10 @@ impl SelectorAdmissionLease<'_> {
 }
 
 impl<'a> SelectorProviderRequestAdmission<'a> {
-    const fn new(admission: &SelectorAdmissionLease<'a>) -> Self {
+    fn new(admission: &SelectorAdmissionLease<'a>) -> Self {
         Self {
             owner: admission.owner,
+            admitted: Arc::clone(&admission.admitted),
             attempt_id: admission.attempt_id,
             entry_active: false,
         }
@@ -1318,7 +1329,8 @@ impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
         if self.entry_active {
             return Err(ProviderTransportError::BeforeAdmission);
         }
-        self.owner.start_provider_entry(self.attempt_id)?;
+        self.owner
+            .start_provider_entry(self.attempt_id, &self.admitted)?;
         self.entry_active = true;
         Ok(())
     }
@@ -3622,6 +3634,15 @@ mod tests {
 
     #[test]
     fn transport_retry_cannot_cross_a_closed_selector_snapshot() -> TestResult {
+        assert_transport_generation_fence(false)
+    }
+
+    #[test]
+    fn transport_cannot_reuse_a_successor_attempt_from_a_stale_lease() -> TestResult {
+        assert_transport_generation_fence(true)
+    }
+
+    fn assert_transport_generation_fence(reopen_with_successor: bool) -> TestResult {
         let transport_fixture =
             crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let directory = tempfile::tempdir()?;
@@ -3636,7 +3657,10 @@ mod tests {
         let (release_provider_tx, release_provider_rx) = std::sync::mpsc::channel();
         let (execution_tx, execution_rx) = std::sync::mpsc::channel();
 
-        thread::scope(|scope| -> TestResult {
+        let successor_lease = thread::scope(|scope| -> TestResult<_> {
+            // Keep the listener alive after the first connection closes so an
+            // unauthorized retry cannot hide behind a connection failure.
+            let listener = &listener;
             let provider = scope.spawn(move || {
                 (|| -> TestResult {
                     let (mut stream, _) = listener.accept()?;
@@ -3667,14 +3691,51 @@ mod tests {
             request_entered_rx.recv_timeout(Duration::from_secs(1))?;
             let closed = admission.close_and_snapshot()?;
             assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+            let successor_lease = if reopen_with_successor {
+                let (_, successor, _) =
+                    crate::selector::installation::tests::root_selector_fixture()?;
+                admission.admit_successor(&closed.admitted, successor)?;
+                Some(admission.acquire([1; 16])?)
+            } else {
+                None
+            };
             release_provider_tx.send(())?;
             assert!(matches!(
                 execution_rx.recv_timeout(Duration::from_secs(1))?,
                 Err(ProviderTransportError::BeforeAdmission)
             ));
             provider.join().map_err(|_| "provider thread panicked")??;
-            Ok(())
+            Ok(successor_lease)
         })?;
+        listener.set_nonblocking(true)?;
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        if let Some(current) = successor_lease {
+            let mut stale_request = SelectorProviderRequestAdmission::new(&lease);
+            assert!(matches!(
+                transport.execute_staged(
+                    &transport_fixture.provider,
+                    &transport_fixture.commitment,
+                    &transport_fixture.spx1,
+                    &mut std::io::Cursor::new(b"input"),
+                    Duration::from_secs(1),
+                    &mut stale_request,
+                ),
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+            drop(stale_request);
+            drop(lease);
+            // A stale request's drop must not release the successor's slot.
+            let mut current_request = SelectorProviderRequestAdmission::new(&current);
+            assert!(current_request.begin().is_ok());
+            current_request.entered();
+        }
         Ok(())
     }
 
@@ -3710,7 +3771,9 @@ mod tests {
 
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;
-        assert!(admission.begin_provider_execution([1; 16]).is_err());
+        assert!(admission
+            .begin_provider_execution([1; 16], &admission.current()?)
+            .is_err());
         admission.finish_provider_entry([1; 16], false);
         let lease = admission.acquire([1; 16])?;
         let mut provider_requests = SelectorProviderRequestAdmission::new(&lease);
@@ -3750,7 +3813,7 @@ mod tests {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;
         let current = admission.current()?;
-        admission.release([9; 16]);
+        admission.release([9; 16], &current);
 
         let (_, foreign, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let foreign = Arc::new(foreign);
@@ -4045,6 +4108,7 @@ mod tests {
     fn selector_admission_capacity_and_release_edges_fail_closed() -> TestResult {
         let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;
+        let current = admission.current()?;
         {
             let mut state = admission
                 .state
@@ -4065,7 +4129,7 @@ mod tests {
             admission.acquire([u8::MAX; 16]),
             Err(SelectorBoundaryError::SelectorUnavailable)
         ));
-        admission.release([1; 16]);
+        admission.release([1; 16], &current);
         assert_eq!(
             admission
                 .state
@@ -4083,7 +4147,7 @@ mod tests {
             .get_mut(&[1; 16])
             .ok_or("retained admission missing")?
             .active_requests = 1;
-        admission.release([1; 16]);
+        admission.release([1; 16], &current);
         assert_eq!(
             admission
                 .state
@@ -4114,12 +4178,12 @@ mod tests {
         assert!(poisoned.admit_successor(&previous, successor).is_err());
         assert!(poisoned.retire_previous(&previous).is_err());
         assert!(matches!(
-            poisoned.begin_provider_execution([1; 16]),
+            poisoned.begin_provider_execution([1; 16], &previous),
             Err(ProviderTransportError::BeforeAdmission)
         ));
         assert!(poisoned.retain_provider_state([1; 16]).is_err());
         poisoned.finish_provider_entry([1; 16], false);
-        poisoned.release([1; 16]);
+        poisoned.release([1; 16], &previous);
 
         let poisoned_namespaces = EvaluationNamespaceBindings::default();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
