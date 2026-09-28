@@ -107,8 +107,8 @@ pub use sandbox_provider_contract::{
 };
 pub use trust_policy_snapshot::{
     MinimumArtifactVersionV1, TrustPolicyRootV1, TrustPolicySnapshotAuthenticationErrorV1,
-    TrustPolicySnapshotContractErrorV1,
-    TrustPolicySnapshotV1, MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1, TRUST_POLICY_SNAPSHOT_MAGIC_V1,
+    TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1, MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1,
+    TRUST_POLICY_SNAPSHOT_MAGIC_V1,
 };
 pub use verification_preflight::{
     preflight_verification_v1, ArtifactClosureStatusV1, ArtifactRevocationStatusV1,

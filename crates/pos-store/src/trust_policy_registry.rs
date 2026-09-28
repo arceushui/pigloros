@@ -459,7 +459,9 @@ fn parse_utc_seconds(value: &str) -> Option<u64> {
         return None;
     }
     let number = |start: usize, end: usize| {
-        value.get(start..end).and_then(|part| part.parse::<i64>().ok())
+        value
+            .get(start..end)
+            .and_then(|part| part.parse::<i64>().ok())
     };
     let year = number(0, 4)?;
     let month = number(5, 7)?;
@@ -615,11 +617,9 @@ mod tests {
             Err(TrustPolicyRegistryErrorV1::StaleSnapshot)
         ));
         drop(registry);
-        let mut reopened = DeploymentTrustPolicyRegistryV1::open_current(
-            &path,
-            release(&snapshot, &genesis),
-        )
-        .expect("restart on durable successor");
+        let mut reopened =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                .expect("restart on durable successor");
         reopened
             .with_admitted_epf1_at(
                 &successor_bytes,
@@ -628,11 +628,12 @@ mod tests {
                 |_| Ok(()),
             )
             .expect("same successor after restart");
-        let audit_count: i64 = reopened.connection.query_row(
-            "SELECT COUNT(*) FROM deployment_trust_audit",
-            [],
-            |row| row.get(0),
-        ).expect("audit count");
+        let audit_count: i64 = reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM deployment_trust_audit", [], |row| {
+                row.get(0)
+            })
+            .expect("audit count");
         assert_eq!(audit_count, 2);
     }
 
@@ -648,11 +649,9 @@ mod tests {
             &genesis,
         )
         .expect("genesis");
-        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(
-            &path,
-            release(&snapshot, &genesis),
-        )
-        .expect("open state");
+        let mut registry =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                .expect("open state");
         let profile = fixture_profile();
         let mut nonzero = snapshot.clone();
         nonzero.epoch = 2;
@@ -687,11 +686,9 @@ mod tests {
         ));
         assert!(!callback_called);
         drop(registry);
-        let mut reopened = DeploymentTrustPolicyRegistryV1::open_current(
-            &path,
-            release(&snapshot, &genesis),
-        )
-        .expect("revocation remains committed after restart");
+        let mut reopened =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                .expect("revocation remains committed after restart");
         assert!(matches!(
             reopened.with_admitted_epf1_at(
                 &genesis,
@@ -726,11 +723,9 @@ mod tests {
                 &genesis,
             )
             .expect("genesis");
-            let mut registry = DeploymentTrustPolicyRegistryV1::open_current(
-                &path,
-                release(&snapshot, &genesis),
-            )
-            .expect("open state");
+            let mut registry =
+                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                    .expect("open state");
             let mut revoked_key = snapshot.clone();
             revoked_key.epoch = 2;
             revoked_key.previous_snapshot_digest = Some(raw_digest(&genesis));
@@ -771,11 +766,9 @@ mod tests {
             &genesis,
         )
         .expect("genesis");
-        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(
-            &path,
-            release(&snapshot, &genesis),
-        )
-        .expect("open state");
+        let mut registry =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                .expect("open state");
         let profile = fixture_profile();
         let mut forged = snapshot.clone();
         forged.epoch = 2;
@@ -876,11 +869,9 @@ mod tests {
                 &genesis,
             )
             .expect("genesis");
-            let mut registry = DeploymentTrustPolicyRegistryV1::open_current(
-                &path,
-                release(&snapshot, &genesis),
-            )
-            .expect("open state");
+            let mut registry =
+                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                    .expect("open state");
             let mut successor = snapshot.clone();
             successor.epoch = 2;
             successor.previous_snapshot_digest = Some(raw_digest(&genesis));
@@ -906,13 +897,14 @@ mod tests {
                 }
             };
             assert_eq!(
-                registry.with_admitted_epf1_at(
-                    &signed(successor),
-                    request(&snapshot, &profile),
-                    TEST_NOW,
-                    |_| Ok(())
-                )
-                .expect_err("signed successor denies profile"),
+                registry
+                    .with_admitted_epf1_at(
+                        &signed(successor),
+                        request(&snapshot, &profile),
+                        TEST_NOW,
+                        |_| Ok(())
+                    )
+                    .expect_err("signed successor denies profile"),
                 expected
             );
             assert!(matches!(
@@ -950,11 +942,9 @@ mod tests {
             &genesis,
         )
         .expect("genesis");
-        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(
-            &path,
-            release(&snapshot, &genesis),
-        )
-        .expect("open state");
+        let mut registry =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                .expect("open state");
         std::fs::remove_file(&path).expect("remove temporary database path");
         let profile = fixture_profile();
         assert!(matches!(
