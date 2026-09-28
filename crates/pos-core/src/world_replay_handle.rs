@@ -180,20 +180,20 @@ impl Reader<'_> {
 
     fn hash(&mut self) -> Result<Hash, WorldReplayHandleErrorV1> {
         self.fixed(&[0x58, 0x20]).and_then(|()| {
-            self.take(32).and_then(|bytes| {
-                <[u8; 32]>::try_from(bytes)
-                    .map(Hash::from_bytes)
-                    .map_err(|_| WorldReplayHandleErrorV1::InvalidEncoding)
+            self.take(32).map(|bytes| {
+                let mut digest = [0; 32];
+                digest.copy_from_slice(bytes);
+                Hash::from_bytes(digest)
             })
         })
     }
 
     fn timeline(&mut self) -> Result<TimelineId, WorldReplayHandleErrorV1> {
         self.fixed(&[0x50]).and_then(|()| {
-            self.take(16).and_then(|bytes| {
-                <[u8; 16]>::try_from(bytes)
-                    .map(|value| TimelineId::from_ulid(Ulid::from(u128::from_be_bytes(value))))
-                    .map_err(|_| WorldReplayHandleErrorV1::InvalidEncoding)
+            self.take(16).map(|bytes| {
+                let mut value = [0; 16];
+                value.copy_from_slice(bytes);
+                TimelineId::from_ulid(Ulid::from(u128::from_be_bytes(value)))
             })
         })
     }

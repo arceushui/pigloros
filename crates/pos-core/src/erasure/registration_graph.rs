@@ -81,9 +81,13 @@ pub fn inspect_artifact_registration_graph_v1(
         return Err(ArtifactRegistrationGraphErrorV1::BoundExceeded);
     }
     let mut by_address = BTreeMap::new();
+    let mut identities = BTreeSet::new();
     for node in nodes {
         if by_address.insert(node.address, node).is_some() {
             return Err(ArtifactRegistrationGraphErrorV1::DuplicateAddress);
+        }
+        if !identities.insert((node.owner_id, node.artifact_class, node.artifact_digest)) {
+            return Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch);
         }
     }
     let root_node = by_address
@@ -95,17 +99,17 @@ pub fn inspect_artifact_registration_graph_v1(
     let mut traversal = GraphTraversal {
         nodes: &by_address,
         visiting: BTreeSet::new(),
-        visited: BTreeSet::new(),
+        subtree_heights: BTreeMap::new(),
         keys: BTreeSet::new(),
         edges: 0,
         registration_bytes: 0,
     };
     traversal.visit(root, 1)?;
-    if traversal.visited.len() != nodes.len() {
+    if traversal.subtree_heights.len() != nodes.len() {
         return Err(ArtifactRegistrationGraphErrorV1::ExtraRegistration);
     }
     Ok(ArtifactRegistrationGraphSummaryV1 {
-        registrations: traversal.visited.len(),
+        registrations: traversal.subtree_heights.len(),
         edges: traversal.edges,
         keys: traversal.keys.len(),
         registration_bytes: traversal.registration_bytes,
@@ -115,7 +119,7 @@ pub fn inspect_artifact_registration_graph_v1(
 struct GraphTraversal<'a> {
     nodes: &'a BTreeMap<Hash, &'a ArtifactRegistrationGraphNodeV1>,
     visiting: BTreeSet<Hash>,
-    visited: BTreeSet<Hash>,
+    subtree_heights: BTreeMap<Hash, usize>,
     keys: BTreeSet<KeyIdentityV1>,
     edges: usize,
     registration_bytes: usize,
@@ -126,15 +130,18 @@ impl GraphTraversal<'_> {
         &mut self,
         address: Hash,
         depth: usize,
-    ) -> Result<(), ArtifactRegistrationGraphErrorV1> {
+    ) -> Result<usize, ArtifactRegistrationGraphErrorV1> {
         if self.visiting.contains(&address) {
             return Err(ArtifactRegistrationGraphErrorV1::Cycle);
         }
         if depth > MAX_ARTIFACT_GRAPH_DEPTH_V1 {
             return Err(ArtifactRegistrationGraphErrorV1::BoundExceeded);
         }
-        if self.visited.contains(&address) {
-            return Ok(());
+        if let Some(height) = self.subtree_heights.get(&address).copied() {
+            if depth + height - 1 > MAX_ARTIFACT_GRAPH_DEPTH_V1 {
+                return Err(ArtifactRegistrationGraphErrorV1::BoundExceeded);
+            }
+            return Ok(height);
         }
         let node = *self
             .nodes
@@ -167,6 +174,7 @@ impl GraphTraversal<'_> {
             self.keys.insert(key.identity);
         }
         self.visiting.insert(address);
+        let mut height = 1;
         for edge in &fields.child_artifacts {
             let child = *self
                 .nodes
@@ -177,7 +185,7 @@ impl GraphTraversal<'_> {
             {
                 return Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch);
             }
-            self.visit(edge.registration_address, depth + 1)?;
+            height = height.max(1 + self.visit(edge.registration_address, depth + 1)?);
         }
         // Do this after traversal so a corrupt catalog alias cannot conceal a
         // cycle that the traversal must reject independently.
@@ -185,8 +193,8 @@ impl GraphTraversal<'_> {
             return Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch);
         }
         self.visiting.remove(&address);
-        self.visited.insert(address);
-        Ok(())
+        self.subtree_heights.insert(address, height);
+        Ok(height)
     }
 }
 
@@ -223,7 +231,7 @@ mod tests {
         for (prior, expected) in [
             (
                 MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1 - record_bytes,
-                Ok(()),
+                Ok(1),
             ),
             (
                 MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1 - record_bytes + 1,
@@ -233,7 +241,7 @@ mod tests {
             let mut traversal = GraphTraversal {
                 nodes: &nodes,
                 visiting: BTreeSet::new(),
-                visited: BTreeSet::new(),
+                subtree_heights: BTreeMap::new(),
                 keys: BTreeSet::new(),
                 edges: 0,
                 registration_bytes: prior,
