@@ -4,8 +4,6 @@
 //! reference evaluator a second implementation of the public wire contract.
 
 mod admission;
-#[cfg(all(test, unix))]
-pub(crate) use admission::ImageReadFault;
 mod audit;
 mod authority;
 mod codec;

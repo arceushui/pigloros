@@ -2470,7 +2470,7 @@ mod tests {
                         *blake3::hash(&image).as_bytes(),
                     )?
                     .file();
-                let fault = crate::sandbox_provider_protocol::ImageReadFault::new(file, offset)?;
+                let fault = crate::image_read_fault::ImageReadFault::new(file, offset)?;
                 let service = service(admitted)?;
                 assert_service_error(
                     &service,

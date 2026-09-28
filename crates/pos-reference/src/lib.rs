@@ -16,6 +16,13 @@ pub mod control_framing;
 
 mod non_interference_report;
 
+// A public test-only module keeps crate-scoped helpers compatible with both
+// unreachable_pub and redundant_pub_crate, like the test fixtures below.
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod image_read_fault;
+
 pub use non_interference_report::{
     verify_non_interference_report_v1, IndependentNonInterferenceReportErrorV1,
 };
