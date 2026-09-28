@@ -1,6 +1,7 @@
 //! Immutable TPS1 trust-policy snapshots defined by ADR-058.
 
 use ciborium::value::Value;
+use ed25519_dalek::{Signature, VerifyingKey};
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
@@ -19,6 +20,33 @@ const MAX_REVOKED_ARTIFACTS: usize = 4_096;
 const MAX_MINIMUM_VERSIONS: usize = 256;
 const MAX_NESTED_ARRAY_ITEMS: u64 = 4_097;
 const MAX_NESTING_DEPTH: u8 = 3;
+const OPERATOR_SIGNATURE_DOMAIN_V1: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
+
+/// Authentication failures are separate from the structural TPS1 codec.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrustPolicySnapshotAuthenticationErrorV1 {
+    /// The snapshot is not canonical or structurally valid.
+    InvalidSnapshot,
+    /// The pinned release role is not the deployment-operator role.
+    InvalidOperatorRole,
+    /// The pinned operator public key is invalid.
+    InvalidOperatorKey,
+    /// The exact domain-separated signature does not verify.
+    InvalidOperatorSignature,
+}
+
+impl std::fmt::Display for TrustPolicySnapshotAuthenticationErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidSnapshot => "invalid canonical TPS1 snapshot",
+            Self::InvalidOperatorRole => "invalid TPS1 operator role",
+            Self::InvalidOperatorKey => "invalid TPS1 operator verification key",
+            Self::InvalidOperatorSignature => "invalid TPS1 operator signature",
+        })
+    }
+}
+
+impl std::error::Error for TrustPolicySnapshotAuthenticationErrorV1 {}
 
 /// Closed safe errors exposed by the TPS1 contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,9 +94,9 @@ pub struct MinimumArtifactVersionV1 {
 
 /// Complete immutable trust-policy snapshot represented by a TPS1 record.
 ///
-/// This type validates the record shape and canonical encoding. Admission
-/// policy and cryptographic signature authentication require an external
-/// deployment trust authority and are intentionally outside this contract.
+/// This type validates the record shape and canonical encoding. Its signature
+/// verifier requires an independently pinned operator key; deployment
+/// admission and durable continuity belong to the host trust registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrustPolicySnapshotV1 {
     pub policy_id: String,
@@ -84,6 +112,47 @@ pub struct TrustPolicySnapshotV1 {
 }
 
 impl TrustPolicySnapshotV1 {
+    /// Build the exact Ed25519 message over TPS1 fields 0 through 10.
+    ///
+    /// # Errors
+    /// Returns a structural error if the snapshot is invalid.
+    pub fn operator_signature_message_v1(
+        &self,
+    ) -> Result<Vec<u8>, TrustPolicySnapshotContractErrorV1> {
+        self.validate()?;
+        let mut fields = encode_snapshot_fields(self);
+        fields.truncate(FIELD_COUNT - 1);
+        encode_value(&Value::Array(fields)).map(|unsigned| {
+            let mut message =
+                Vec::with_capacity(OPERATOR_SIGNATURE_DOMAIN_V1.len() + unsigned.len());
+            message.extend_from_slice(OPERATOR_SIGNATURE_DOMAIN_V1);
+            message.extend_from_slice(&unsigned);
+            message
+        })
+    }
+
+    /// Authenticate the operator signature using a release-pinned key and role.
+    /// TPS1 artifact roots cannot authorize their own operator signature.
+    ///
+    /// # Errors
+    /// Returns a closed error for invalid shape, role, key, or signature.
+    pub fn verify_operator_signature_v1(
+        &self,
+        operator_public_key: &[u8; 32],
+        operator_role: &str,
+    ) -> Result<(), TrustPolicySnapshotAuthenticationErrorV1> {
+        if operator_role != "deployment-operator" {
+            return Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorRole);
+        }
+        let message = self
+            .operator_signature_message_v1()
+            .map_err(|_| TrustPolicySnapshotAuthenticationErrorV1::InvalidSnapshot)?;
+        let key = VerifyingKey::from_bytes(operator_public_key)
+            .map_err(|_| TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorKey)?;
+        key.verify_strict(&message, &Signature::from_bytes(&self.operator_signature))
+            .map_err(|_| TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorSignature)
+    }
+
     /// Validate TPS1 field bounds, list ordering, and structural constraints.
     ///
     /// # Errors
@@ -225,7 +294,11 @@ fn strictly_ordered_by<T>(values: &[T], less_than: impl Fn(&T, &T) -> bool) -> b
 }
 
 fn encode_snapshot(snapshot: &TrustPolicySnapshotV1) -> Value {
-    Value::Array(vec![
+    Value::Array(encode_snapshot_fields(snapshot))
+}
+
+fn encode_snapshot_fields(snapshot: &TrustPolicySnapshotV1) -> Vec<Value> {
+    vec![
         Value::Text(TRUST_POLICY_SNAPSHOT_MAGIC_V1.to_owned()),
         Value::Integer(1_u64.into()),
         Value::Text(snapshot.policy_id.clone()),
@@ -257,7 +330,7 @@ fn encode_snapshot(snapshot: &TrustPolicySnapshotV1) -> Value {
         Value::Text(snapshot.offline_valid_through.clone()),
         optional_digest(snapshot.previous_snapshot_digest.as_ref()),
         Value::Bytes(snapshot.operator_signature.to_vec()),
-    ])
+    ]
 }
 
 fn encode_trust_root(root: &TrustPolicyRootV1) -> Value {
@@ -453,5 +526,65 @@ fn optional_digest_value(
     match value {
         Value::Null => Ok(None),
         _ => fixed_bytes::<32>(value).map(Some),
+    }
+}
+
+#[cfg(test)]
+mod operator_authentication_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn signed_snapshot() -> (TrustPolicySnapshotV1, SigningKey) {
+        let bytes = crate::draft_trust_policy_snapshot_bytes_v1().expect("draft TPS1 fixture");
+        let mut snapshot =
+            TrustPolicySnapshotV1::from_canonical_cbor(&bytes).expect("canonical TPS1 fixture");
+        let signer = SigningKey::from_bytes(&[17; 32]);
+        let message = snapshot
+            .operator_signature_message_v1()
+            .expect("valid signature message");
+        snapshot.operator_signature = signer.sign(&message).to_bytes();
+        (snapshot, signer)
+    }
+
+    #[test]
+    fn exact_operator_preimage_has_domain_and_eleven_fields() {
+        let (snapshot, _) = signed_snapshot();
+        let message = snapshot
+            .operator_signature_message_v1()
+            .expect("valid signature message");
+        assert!(message.starts_with(OPERATOR_SIGNATURE_DOMAIN_V1));
+        let unsigned = &message[OPERATOR_SIGNATURE_DOMAIN_V1.len()..];
+        let value = decode_value(unsigned).expect("canonical unsigned CBOR");
+        assert_eq!(array(&value, 11).expect("eleven fields").len(), 11);
+        assert_ne!(unsigned, snapshot.to_canonical_cbor().expect("full TPS1"));
+    }
+
+    #[test]
+    fn signed_snapshot_requires_pinned_operator_role_key_and_exact_fields() {
+        let (mut snapshot, signer) = signed_snapshot();
+        let operator_key = signer.verifying_key().to_bytes();
+        assert_eq!(
+            snapshot.verify_operator_signature_v1(&operator_key, "deployment-operator"),
+            Ok(())
+        );
+        assert_eq!(
+            snapshot.verify_operator_signature_v1(&operator_key, "artifact-root"),
+            Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorRole)
+        );
+        let foreign_key = SigningKey::from_bytes(&[18; 32]).verifying_key().to_bytes();
+        assert_eq!(
+            snapshot.verify_operator_signature_v1(&foreign_key, "deployment-operator"),
+            Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorSignature)
+        );
+        snapshot.epoch += 1;
+        assert_eq!(
+            snapshot.verify_operator_signature_v1(&operator_key, "deployment-operator"),
+            Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorSignature)
+        );
+        snapshot.epoch = 0;
+        assert_eq!(
+            snapshot.verify_operator_signature_v1(&operator_key, "deployment-operator"),
+            Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidSnapshot)
+        );
     }
 }
