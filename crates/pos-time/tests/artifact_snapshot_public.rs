@@ -1,6 +1,6 @@
 use pos_core::{
-    ErasureGate, ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, Reducer, State,
-    TimelineId, WorldReplayClosureV1,
+    ErasureGate, ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, Reducer, State, TimelineId,
+    WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -140,12 +140,11 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         generation,
     )
     .test_ok();
-    let unknown_closure =
-        WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-            unknown_timeline,
-            generation,
-        )
-        .test_ok();
+    let unknown_closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+        unknown_timeline,
+        generation,
+    )
+    .test_ok();
     let mut reads = host.read_sender().test_ok();
 
     let mut known_registry = registry(&gate);
