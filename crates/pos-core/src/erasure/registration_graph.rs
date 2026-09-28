@@ -86,7 +86,12 @@ pub fn inspect_artifact_registration_graph_v1(
         if by_address.insert(node.address, node).is_some() {
             return Err(ArtifactRegistrationGraphErrorV1::DuplicateAddress);
         }
-        if !identities.insert((node.owner_id, node.artifact_class, node.artifact_digest)) {
+        let fields = node.registration.fields();
+        if !identities.insert((
+            fields.owner_reference,
+            fields.artifact_class,
+            fields.artifact_digest,
+        )) {
             return Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch);
         }
     }
