@@ -6142,10 +6142,9 @@ fn sqlite_binding_for_admission(
         }
         if binding.digest() == input.principal_owner_binding_digest
             && binding.input().owner == input.creator
+            && matching.replace(binding).is_some()
         {
-            if matching.replace(binding).is_some() {
-                return Err(ForkAdmissionErrorV1::CorruptAuthority);
-            }
+            return Err(ForkAdmissionErrorV1::CorruptAuthority);
         }
     }
     matching.ok_or(ForkAdmissionErrorV1::CorruptAuthority)
