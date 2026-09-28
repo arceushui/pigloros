@@ -25,7 +25,7 @@ const COMMAND_DOMAIN: &[u8] = b"pigloros/fork-admission-host-command/v1";
 const RECOVERY_DOMAIN: &[u8] = b"pigloros/fork-admission-recovery/v1";
 
 const MAX_POC1_BYTES: usize = 307;
-const MAX_FCC1_BYTES: usize = 412;
+const MAX_FCC1_BYTES: usize = 411;
 const FAI1_BYTES: usize = 143;
 const FAO1_BYTES: usize = 109;
 const FRC1_BYTES: usize = 110;
@@ -45,22 +45,22 @@ pub enum ForkAuthenticationSignatureErrorV1 {
     InvalidRecord,
 }
 
-/// A verified APS1 whose policy provenance has been checked.
+/// A verified FAE1 whose policy provenance has been checked.
 ///
 /// The host signing API requires this type so a caller cannot substitute a
-/// merely decodable APS1 for policy-verified authentication evidence.
+/// merely decodable FAE1 for policy-verified authentication evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedAuthenticatedPrincipalEvidenceV1(AuthenticatedPrincipalEvidenceV1);
 
 impl VerifiedAuthenticatedPrincipalEvidenceV1 {
-    /// Return the exact policy-verified APS1.
+    /// Return the exact policy-verified FAE1.
     #[must_use]
     pub const fn evidence(&self) -> &AuthenticatedPrincipalEvidenceV1 {
         &self.0
     }
 }
 
-/// Verify APS1 against the selected FAP1 adapter policy.
+/// Verify FAE1 against the selected FAP1 adapter policy.
 ///
 /// This verifies only the exact ADR-106 adapter signature and policy facts. It
 /// does not resolve an Owner, check expiry, or grant durable authority.
@@ -209,7 +209,7 @@ impl ForkHostSigningKeyV1 {
         Ok(sign_preimage(&self.signing_key, OPEN_DOMAIN, challenge))
     }
 
-    /// Sign one exact POC1 or FCC1 plus policy-verified APS1.
+    /// Sign one exact POC1 or FCC1 plus policy-verified FAE1.
     ///
     /// # Errors
     /// Rejects malformed/noncanonical command bytes. The typed evidence cannot
@@ -529,8 +529,8 @@ mod tests {
             verify_authenticated_principal_evidence_v1(&wrong_binding, evidence.clone()),
             Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
         );
-        let mut altered = evidence.to_canonical_cbor().expect("APS1 CBOR");
-        let last = altered.last_mut().expect("APS1 is nonempty");
+        let mut altered = evidence.to_canonical_cbor().expect("FAE1 CBOR");
+        let last = altered.last_mut().expect("FAE1 is nonempty");
         *last ^= 1;
         let altered = AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&altered)
             .expect("signature bytes remain structurally valid");
@@ -589,7 +589,7 @@ mod tests {
         ]));
         let evidence = verified_evidence();
         let command = host.sign_command(&poc1, &evidence).expect("POC1 is valid");
-        let evidence_bytes = evidence.evidence().to_canonical_cbor().expect("APS1 CBOR");
+        let evidence_bytes = evidence.evidence().to_canonical_cbor().expect("FAE1 CBOR");
         let mut command_input = poc1.clone();
         command_input.extend_from_slice(&evidence_bytes);
         verify_host_signature(host.public_key(), COMMAND_DOMAIN, &command_input, &command);
@@ -631,6 +631,41 @@ mod tests {
         assert_eq!(frc1.len(), FRC1_BYTES);
         let recovery = host.sign_recovery(&frc1).expect("FRC1 is valid");
         verify_host_signature(host.public_key(), RECOVERY_DOMAIN, &frc1, &recovery);
+    }
+
+    #[test]
+    fn fcc1_reachable_maximum_is_accepted_and_one_byte_over_is_rejected() {
+        let host = ForkHostSigningKeyV1::from_seed([4; 32]).expect("nonzero host seed");
+        let evidence = verified_evidence();
+        let fcc1 = encode(Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            bytes(0xff, 32),
+            bytes(0xfe, 32),
+            bytes(0xfd, 32),
+            bytes(0xfc, 32),
+            bytes(0xfb, 32),
+            bytes(0xff, 16),
+            Value::Integer(u64::MAX.into()),
+            Value::Integer(u64::MAX.into()),
+            bytes(0xfa, 32),
+            bytes(0xf9, 32),
+            Value::Integer(1.into()),
+            Value::Text("c".repeat(128)),
+        ]));
+        assert_eq!(fcc1.len(), MAX_FCC1_BYTES);
+        assert_eq!(
+            &fcc1[..8],
+            &[0x8e, 0x64, b'F', b'C', b'C', b'1', 0x01, 0x58]
+        );
+        assert!(host.sign_command(&fcc1, &evidence).is_ok());
+
+        let mut oversized = fcc1;
+        oversized.push(0);
+        assert_eq!(
+            host.sign_command(&oversized, &evidence),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
     }
 
     #[test]
