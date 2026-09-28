@@ -315,11 +315,9 @@ mod coverage_tests {
 
     #[test]
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
-        let registry = super::gateway_test_fixtures::action_registry_builder(
-            std::iter::empty(),
-            None,
-        )
-        .test_ok();
+        let registry =
+            super::gateway_test_fixtures::action_registry_builder(std::iter::empty(), None)
+                .test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
         assert!(matches!(
             super::gateway_action_registry_builder(std::iter::empty(), None),
@@ -927,7 +925,7 @@ fn gateway_action_registry_builder(
 mod gateway_test_fixtures {
     use super::*;
 
-    pub(super) fn action_registry_builder(
+    pub fn action_registry_builder(
         bodies: impl IntoIterator<Item = EntityId>,
         authority: Option<ConsentAuthority>,
     ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
@@ -959,7 +957,7 @@ mod gateway_test_fixtures {
         Ok(registry)
     }
 
-    pub(super) fn gateway_with_erasure_host_and_authorization(
+    pub fn gateway_with_erasure_host_and_authorization(
         host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
