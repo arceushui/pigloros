@@ -1047,6 +1047,24 @@ mod tests {
         Ok(result)
     }
 
+    fn replace_event_field(fields: &mut [Value], index: usize, value: Value) {
+        if let Value::Array(events) = &mut fields[10] {
+            if let Some(Value::Array(event)) = events.first_mut() {
+                event[index] = value;
+            }
+        }
+    }
+
+    fn replace_identity_field(fields: &mut [Value], index: usize, value: Value) {
+        if let Value::Array(events) = &mut fields[10] {
+            if let Some(Value::Array(event)) = events.first_mut() {
+                if let Value::Array(identity) = &mut event[10] {
+                    identity[index] = value;
+                }
+            }
+        }
+    }
+
     fn encrypt_payload(
         payload: &[u8],
         recipient: RecipientKeyDescriptorV1,
@@ -1562,6 +1580,78 @@ mod tests {
                 }
             },
         ];
+        for edit in edits {
+            let malformed = rewrite_payload(&payload, edit)?;
+            let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+            assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_invalid_source_shapes_before_encryption() -> Result<(), RecipientExportErrorV1> {
+        let (recipient, _) = recipient()?;
+        let edits: [fn(&mut TimelineExport); 6] = [
+            |source| source.timeline.head = Seq::from_u64(2),
+            |source| source.events[0].seq = Seq::from_u64(2),
+            |source| source.events[0].event_type = Kind::new(String::new()),
+            |source| {
+                source.events[0].event_type = Kind::new("x".repeat(MAX_EVENT_TYPE_BYTES + 1));
+            },
+            |source| source.timeline.meta.name = Some("x".repeat(MAX_NAME_BYTES + 1)),
+            |source| source.events[0].signature = Some(Signature::from_bytes([1; 64])),
+        ];
+        let mut rng = StdRng::from_seed([17; 32]);
+        for edit in edits {
+            let mut source = export(None, b"source".to_vec());
+            edit(&mut source);
+            assert!(encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng).is_err());
+        }
+        let mut source = export(None, b"source".to_vec());
+        source.events[0].payload = CanonicalBytes::from_vec(vec![0; MAX_EVENT_PAYLOAD_BYTES + 1]);
+        assert_eq!(
+            encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::FieldOutOfBounds)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_authenticated_signed_event_and_source_substitution(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        let mut source = export(None, b"source".to_vec());
+        source.events[0].signature = Some(Signature::from_bytes([1; 64]));
+        source.events[0].signature_identity = Some(KeyIdentityV1::from_parts(
+            pos_core::OwnerIdV1::new("source")
+                .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?,
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
+        let payload = encode_payload(&source)?;
+        let edits: [fn(&mut Vec<Value>); 10] = [
+            |fields| fields[2] = Value::Bytes(Ulid::from(4_u128).to_bytes().to_vec()),
+            |fields| fields[8] = Value::Integer(2_u64.into()),
+            |fields| replace_event_field(fields, 5, Value::Integer(2_u64.into())),
+            |fields| replace_event_field(fields, 9, Value::Null),
+            |fields| {
+                replace_event_field(
+                    fields,
+                    10,
+                    Value::Array(vec![Value::Text("source".to_owned())]),
+                );
+            },
+            |fields| replace_identity_field(fields, 0, Value::Text(String::new())),
+            |fields| replace_identity_field(fields, 1, Value::Integer(256_u64.into())),
+            |fields| replace_identity_field(fields, 1, Value::Integer(255_u64.into())),
+            |fields| replace_identity_field(fields, 2, Value::Integer(0_u64.into())),
+            |fields| {
+                replace_event_field(fields, 2, Value::Text("x".repeat(MAX_EVENT_TYPE_BYTES + 1)));
+            },
+        ];
+        let mut rng = StdRng::from_seed([18; 32]);
         for edit in edits {
             let malformed = rewrite_payload(&payload, edit)?;
             let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
