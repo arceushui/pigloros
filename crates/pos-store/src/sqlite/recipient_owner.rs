@@ -421,8 +421,8 @@ impl SqliteStore {
     ///
     /// # Errors
     ///
-    /// Returns a storage error if the custody directory is unsafe, entropy or
-    /// key derivation fails, material cannot be durably written, or the
+    /// Returns a storage error if the custody directory is unsafe, entropy
+    /// acquisition fails, material cannot be durably written, or the
     /// registry/inventory transaction cannot commit.
     pub fn enroll_recipient_key(
         &mut self,
