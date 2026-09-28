@@ -551,7 +551,11 @@ mod tests {
             verify_authenticated_principal_evidence_v1(&missing, evidence.clone()),
             Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
         );
-        let invalid_key = policy([0xff; 32])?;
+        let malformed_key = (1..=u8::MAX)
+            .map(|byte| [byte; 32])
+            .find(|bytes| VerifyingKey::from_bytes(bytes).is_err())
+            .ok_or_else(|| std::io::Error::other("no malformed Ed25519 key fixture found"))?;
+        let invalid_key = policy(malformed_key)?;
         assert_eq!(
             verify_authenticated_principal_evidence_v1(&invalid_key, evidence),
             Err(ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
