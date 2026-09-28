@@ -858,11 +858,6 @@ fn bound_name(path: &Path) -> Result<&Path, CoreError> {
             "recipient private key path has no file name".to_owned(),
         ));
     };
-    if Path::new(name).components().count() != 1 {
-        return Err(CoreError::Storage(
-            "recipient private key path is not a directory entry".to_owned(),
-        ));
-    }
     Ok(Path::new(name))
 }
 
@@ -880,24 +875,6 @@ fn validate_private_file(
     {
         return Err(CoreError::Storage(
             "recipient private file is not the bound private single-link file".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_new_private_file(
-    metadata: &std::fs::Metadata,
-    expected: RecipientPrivateFileIdentityV1,
-) -> Result<(), CoreError> {
-    use std::os::unix::fs::MetadataExt;
-
-    if !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.mode() & 0o777 != 0o600
-        || RecipientPrivateFileIdentityV1::from_metadata(metadata) != expected
-    {
-        return Err(CoreError::Storage(
-            "recipient new private file is not the bound private single-link file".to_owned(),
         ));
     }
     Ok(())
@@ -1026,7 +1003,6 @@ fn write_private_key(
             "recipient private file owner differs from private directory owner".to_owned(),
         ));
     }
-    validate_new_private_file(&metadata, identity)?;
     file.write_all(private_key)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
     recipient_fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
