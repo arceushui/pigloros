@@ -1591,12 +1591,12 @@ mod tests {
         let timeline = TimelineId::new();
         let entity = EntityId::new();
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        let mut source = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut source = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         source.register("events", Box::new(EntityStateProjection));
         source.apply_event(timeline, &make_event(entity));
         let snapshot = test_ok(source.state_snapshot(timeline));
 
-        let mut restored = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut restored = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         restored.register("events", Box::new(EntityStateProjection));
         assert_eq!(
             restored.restore_from_snapshot(
@@ -1620,7 +1620,7 @@ mod tests {
         let timeline = TimelineId::new();
         let entity = EntityId::new();
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry.register("events", Box::new(EntityStateProjection));
         let event = make_event(entity);
         registry.fold_events(timeline, &[event.clone(), event.clone()]);
