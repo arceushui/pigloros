@@ -61,3 +61,76 @@ trust anchor or grant it authority.
 Hosted workspace tests execute `sim1_pkcs7_interoperability`. The runtime
 OpenSSL dependency ban remains in force: OpenSSL is only the offline fixture
 producer, never a production verifier or subprocess fallback.
+
+## Public proof-verifier cases
+
+`sandbox_admission_contract_public` also uses these fixtures through
+`AdmittedSandboxProvider::verify_image_proof`, with independently signed
+SIM1/APT1/TRS1/RVS1 test records. The test admission time is Unix second
+1,800,000,000, never the test runner's wall clock.
+
+Additional OpenSSL 3.0.13 fixtures use fresh RSA-2048 keys and the same detached
+signing command above. Their private keys were discarded:
+
+- `chain-proof.der`: one root (serial 10), one intermediate (serial 11), and
+  a signer (serial 12). Subjects are `CN=SIM1 fixture root`,
+  `CN=SIM1 fixture intermediate`, and `CN=SIM1 fixture leaf` respectively.
+  The root is self-signed with `-days 1`; intermediate and signer are issued
+  with `openssl x509 -req -CA ... -CAkey ... -days 3650 -sha256`.
+  Both CAs have critical BasicConstraints and keyCertSign KU, with path lengths
+  1 and 0. The signer has critical CA:FALSE, digitalSignature KU and codeSigning
+  EKU. Signing adds the intermediate and root PEM certificates with `-certfile`.
+  OpenSSL 3.0.13's `smime` encoder retains the chain insertion order, so finalize
+  the DER certificate set with
+  `openssl cms -cmsout -inform DER -in chain-unsorted.der -outform DER -out chain-proof.der`.
+  This changes only certificate-set ordering; certificate and signature bytes
+  remain unchanged. The verifier rejects the unsorted input.
+  At the test time the root is expired, while leaf and intermediate are valid:
+  this exercises ADR-087's explicit root-time policy.
+- `optional-usage-proof.der`: self-signed serial 20, subject
+  `CN=SIM1 fixture optional usage`, `-days 3650`, and critical CA:FALSE.
+  KU and EKU are absent, proving that their presence is not mandatory.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `chain-proof.der` | 2826 | `3bca9d38d46ee28016af9c56d509f7b57f5af74fee267f640ebf47ca52d15367` |
+| `chain-signer.der` | 820 | `cfeaea01e4fc1038d8fa122ad715ba98226401dd2b5ef9149626b6bc10f488fe` |
+| `optional-usage-proof.der` | 1201 | `6c36c7edd53d4df1f977aa59f945d8649ae55466ca29776bc0f8747020a55e39` |
+| `optional-usage-signer.der` | 795 | `28766a02f3f9ea2d4b21e8835e1807a4ceb920f321c0da4b867582c178905535` |
+
+These fixtures exercise proof verification only. They still do not supply a
+mountable image or systemd/kernel acceptance evidence.
+
+## Hosted allocation evidence
+
+The `sim1-proof-risk` workflow builds the public admission test executable and
+runs seven adversarial cases in separate
+[Massif](https://valgrind.org/docs/manual/ms-manual.html) processes. All cases use
+`AdmittedSandboxProvider::verify_image_proof`.
+
+| Input | Asserted proof size | Exercised boundary |
+| --- | --- | --- |
+| Excessive digest set | > 1020 KiB, <= 1024 KiB | Rejection before eager SET decoding |
+| Oversized certificate | > 1020 KiB, <= 1024 KiB | Per-certificate bound before decoding |
+| Forbidden attributes | > 1020 KiB, <= 1024 KiB | Rejection before attribute decoding |
+| Oversized issuer SID | > 1020 KiB, <= 1024 KiB | SID cannot exceed its matching certificate |
+| Reverse-ordered issuer RDN | > 60 KiB, <= 64 KiB | Canonical order checked before eager sorting |
+| Canonical issuer RDN | > 60 KiB, <= 64 KiB | Large allowed nested SET decoded before signer rejection |
+| Eight exactly-64-KiB certificates | > 512 KiB, <= 516 KiB | Inclusive size/count limits, eager CMS decoding, path rejection |
+
+Mutated certificate signatures are not valid; these fixtures measure rejection
+paths, not new trusted chains. The SID size bound follows from the certificate
+bound: a matching issuer/serial or SKI identity is contained within the selected
+certificate's DER. Canonical RDN order is checked with borrowed elements before
+the library can normalize an unauthorized issuer's SET.
+
+The artifact retains the raw heap traces, readable allocation trees, exact
+source and checkout commits, executable hash, compiler/profiler versions and
+machine-readable peak measurements. The collector requires exactly one passing
+test per process and a nonempty peak snapshot; a missing or filtered-out test
+cannot produce successful evidence.
+
+Measurements include fixture construction and the test harness. They exclude
+stack and RSS, and do not establish a production memory ceiling or replace
+systemd/kernel conformance. Inspect the allocation trees and independent review
+alongside the recorded peak before accepting the resource-risk evidence.

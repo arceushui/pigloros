@@ -1,0 +1,61 @@
+name: sim1-proof-risk
+
+on:
+  pull_request:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - crates/pos-reference/**
+      - scripts/measure_sim1_proof_heap.py
+      - .github/workflows/sim1-proof-risk.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sim1-proof-risk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  heap-measurement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+      RUSTFLAGS: -D warnings
+      PROFILE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: test
+      - name: Install heap profiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends valgrind
+      - name: Build the public admission test executable
+        run: |
+          set -euo pipefail
+          cargo test -p pos-reference --test sandbox_admission_contract_public \
+            --all-features --locked --no-run --message-format=json > /tmp/sim1-build.json
+      - name: Measure adversarial near-limit proof inputs
+        run: python3 scripts/measure_sim1_proof_heap.py /tmp/sim1-build.json sim1-heap-report
+      - name: Check all public admission cases on the measured build
+        run: |
+          cargo test -p pos-reference --test sandbox_admission_contract_public \
+            --all-features --locked -- --include-ignored
+      - name: Retain heap traces and exact-source metadata
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sim1-proof-heap-${{ github.event.pull_request.head.sha || github.sha }}
+          path: sim1-heap-report/
+          if-no-files-found: error
+          retention-days: 30

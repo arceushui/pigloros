@@ -72,7 +72,8 @@ pub use admission::{
     AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
     AuthenticatedSandboxProviderReceipt, AuthenticatedSandboxProviderResult, HostCapabilityProfile,
     HostFeatureProof, LocalNetworkAdmission, NetworkProxyLimits, ProviderConformanceReport,
-    SandboxAdmissionError, SandboxProviderAdmissionInputs, SelectorGrantCommitment,
+    SandboxAdmissionError, SandboxImageProofError, SandboxProviderAdmissionInputs,
+    SelectorGrantCommitment, VerifiedSandboxImageProof,
 };
 pub use audit::SandboxAuditRecord;
 pub use authority::{
