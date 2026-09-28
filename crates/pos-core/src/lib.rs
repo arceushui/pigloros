@@ -23,6 +23,7 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod fork_attribution;
+pub mod fork_authentication;
 pub mod geo_access;
 pub mod geo_admission;
 pub mod geo_cell_admission;
