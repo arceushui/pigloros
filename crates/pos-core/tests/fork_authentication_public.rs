@@ -54,24 +54,19 @@ fn record() -> Result<AuthenticatedPrincipalRecordV1, ForkAuthenticationCodecErr
 
 fn mutate(
     bytes: &[u8],
-    change: impl FnOnce(&mut Value),
+    change: impl FnOnce(&mut Value) -> std::io::Result<()>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut value = ciborium::from_reader(bytes)?;
-    change(&mut value);
+    change(&mut value)?;
     let mut result = Vec::new();
     ciborium::into_writer(&value, &mut result)?;
     Ok(result)
 }
 
-fn fields(value: &mut Value) -> &mut Vec<Value> {
-    assert!(
-        matches!(value, Value::Array(_)),
-        "fixture must be a CBOR array"
-    );
-    match value {
-        Value::Array(fields) => fields,
-        _ => unreachable!(),
-    }
+fn fields(value: &mut Value) -> std::io::Result<&mut Vec<Value>> {
+    value
+        .as_array_mut()
+        .ok_or_else(|| std::io::Error::other("fixture must be a CBOR array"))
 }
 
 #[test]
@@ -82,26 +77,30 @@ fn fap1_public_decoder_rejects_every_nested_field_shape() -> Result<(), Box<dyn 
         (vec![0x80], ForkAuthenticationCodecErrorV1::InvalidEncoding),
         (
             mutate(&canonical, |value| {
-                fields(value)[0] = Value::Bytes(b"FAP1".to_vec())
+                fields(value)?[0] = Value::Bytes(b"FAP1".to_vec());
+                Ok(())
             })?,
             ForkAuthenticationCodecErrorV1::InvalidEncoding,
         ),
         (
             mutate(&canonical, |value| {
-                fields(value)[1] = Value::Integer(2_u8.into())
+                fields(value)?[1] = Value::Integer(2_u8.into());
+                Ok(())
             })?,
             ForkAuthenticationCodecErrorV1::UnsupportedVersion,
         ),
         (
             mutate(&canonical, |value| {
-                fields(value)[2] = Value::Integer(0_u8.into())
+                fields(value)?[2] = Value::Integer(0_u8.into());
+                Ok(())
             })?,
             ForkAuthenticationCodecErrorV1::FieldOutOfBounds,
         ),
         (
             mutate(&canonical, |value| {
-                let adapters = fields(&mut fields(value)[2]);
-                adapters[0] = Value::Integer(0_u8.into())
+                let adapters = fields(&mut fields(value)?[2])?;
+                adapters[0] = Value::Integer(0_u8.into());
+                Ok(())
             })?,
             ForkAuthenticationCodecErrorV1::InvalidEncoding,
         ),
@@ -137,9 +136,10 @@ fn fap1_public_decoder_rejects_every_nested_field_shape() -> Result<(), Box<dyn 
     ];
     for (field, replacement, expected) in nested_cases {
         let bytes = mutate(&canonical, |value| {
-            let adapters = fields(&mut fields(value)[2]);
-            let adapter = fields(&mut adapters[0]);
-            adapter[field] = replacement
+            let adapters = fields(&mut fields(value)?[2])?;
+            let adapter = fields(&mut adapters[0])?;
+            adapter[field] = replacement;
+            Ok(())
         })?;
         assert_eq!(
             ForkAuthenticationPolicyV1::from_canonical_cbor(&bytes),
@@ -148,8 +148,9 @@ fn fap1_public_decoder_rejects_every_nested_field_shape() -> Result<(), Box<dyn 
     }
 
     let zero_key = mutate(&canonical, |value| {
-        let adapters = fields(&mut fields(value)[2]);
-        fields(&mut adapters[0])[1] = Value::Bytes(vec![0; 32])
+        let adapters = fields(&mut fields(value)?[2])?;
+        fields(&mut adapters[0])?[1] = Value::Bytes(vec![0; 32]);
+        Ok(())
     })?;
     assert_eq!(
         ForkAuthenticationPolicyV1::from_canonical_cbor(&zero_key),
@@ -173,20 +174,23 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
         (vec![0x80], ForkAuthenticationCodecErrorV1::InvalidEncoding),
         (
             mutate(&canonical, |value| {
-                fields(value)[1] = Value::Integer(2_u8.into())
+                fields(value)?[1] = Value::Integer(2_u8.into());
+                Ok(())
             })?,
             ForkAuthenticationCodecErrorV1::UnsupportedVersion,
         ),
         (
             mutate(&canonical, |value| {
-                fields(value)[4] = Value::Bytes(Vec::new())
+                fields(value)?[4] = Value::Bytes(Vec::new());
+                Ok(())
             })?,
             ForkAuthenticationCodecErrorV1::FieldOutOfBounds,
         ),
         (
             mutate(&canonical, |value| {
-                let rows = fields(&mut fields(value)[4]);
-                rows[0] = Value::Integer(0_u8.into())
+                let rows = fields(&mut fields(value)?[4])?;
+                rows[0] = Value::Integer(0_u8.into());
+                Ok(())
             })?,
             ForkAuthenticationCodecErrorV1::InvalidEncoding,
         ),
@@ -217,8 +221,9 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
     ];
     for (field, replacement, expected) in row_cases {
         let bytes = mutate(&canonical, |value| {
-            let rows = fields(&mut fields(value)[4]);
-            fields(&mut rows[0])[field] = replacement
+            let rows = fields(&mut fields(value)?[4])?;
+            fields(&mut rows[0])?[field] = replacement;
+            Ok(())
         })?;
         assert_eq!(
             LocalAccountRegistryV1::from_canonical_cbor(&bytes, 1000),
@@ -227,8 +232,9 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
     }
 
     let forbidden_uid = mutate(&canonical, |value| {
-        let rows = fields(&mut fields(value)[4]);
-        fields(&mut rows[0])[0] = Value::Integer(0_u8.into())
+        let rows = fields(&mut fields(value)?[4])?;
+        fields(&mut rows[0])?[0] = Value::Integer(0_u8.into());
+        Ok(())
     })?;
     assert_eq!(
         LocalAccountRegistryV1::from_canonical_cbor(&forbidden_uid, 1000),
@@ -287,14 +293,18 @@ fn apr1_and_fae1_public_decoders_reject_record_and_evidence_field_shapes(
         ),
     ];
     for (field, replacement, expected) in record_cases {
-        let bytes = mutate(&apr, |value| fields(value)[field] = replacement)?;
+        let bytes = mutate(&apr, |value| {
+            fields(value)?[field] = replacement;
+            Ok(())
+        })?;
         assert_eq!(
             AuthenticatedPrincipalRecordV1::from_canonical_cbor(&bytes),
             Err(expected)
         );
     }
     let invalid_interval = mutate(&apr, |value| {
-        fields(value)[6] = Value::Integer(100_u8.into())
+        fields(value)?[6] = Value::Integer(100_u8.into());
+        Ok(())
     })?;
     assert_eq!(
         AuthenticatedPrincipalRecordV1::from_canonical_cbor(&invalid_interval),
@@ -314,19 +324,31 @@ fn apr1_and_fae1_public_decoders_reject_record_and_evidence_field_shapes(
     let cases: Vec<(Vec<u8>, ForkAuthenticationCodecErrorV1)> = vec![
         (vec![0x80], ForkAuthenticationCodecErrorV1::InvalidEncoding),
         (
-            mutate(&fae, |value| fields(value)[1] = Value::Integer(2_u8.into()))?,
+            mutate(&fae, |value| {
+                fields(value)?[1] = Value::Integer(2_u8.into());
+                Ok(())
+            })?,
             ForkAuthenticationCodecErrorV1::UnsupportedVersion,
         ),
         (
-            mutate(&fae, |value| fields(value)[2] = Value::Integer(0_u8.into()))?,
+            mutate(&fae, |value| {
+                fields(value)?[2] = Value::Integer(0_u8.into());
+                Ok(())
+            })?,
             ForkAuthenticationCodecErrorV1::FieldOutOfBounds,
         ),
         (
-            mutate(&fae, |value| fields(value)[3] = Value::Integer(0_u8.into()))?,
+            mutate(&fae, |value| {
+                fields(value)?[3] = Value::Integer(0_u8.into());
+                Ok(())
+            })?,
             ForkAuthenticationCodecErrorV1::InvalidEncoding,
         ),
         (
-            mutate(&fae, |value| fields(value)[2] = Value::Bytes(vec![0xff]))?,
+            mutate(&fae, |value| {
+                fields(value)?[2] = Value::Bytes(vec![0xff]);
+                Ok(())
+            })?,
             ForkAuthenticationCodecErrorV1::InvalidEncoding,
         ),
     ];
