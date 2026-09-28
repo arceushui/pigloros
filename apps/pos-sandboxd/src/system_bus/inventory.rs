@@ -106,7 +106,7 @@ impl SystemdAttemptUnitObservation {
 impl SystemdTransientUnitTransport {
     /// Observe loaded units in the complete `pigloros-attempt-` name prefix.
     ///
-    /// Queries without a state filter, validates canonical nonzero AttemptId
+    /// Queries without a state filter, validates canonical nonzero `AttemptId`
     /// service names, rejects duplicate names/paths, and resolves every name
     /// back to its listed object. Results are sorted by name. A caller must
     /// separately bound the operation and establish complete host visibility,
