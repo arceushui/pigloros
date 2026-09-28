@@ -6363,7 +6363,7 @@ mod tests {
             .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
-        reg.commit_step_at(Seq::ZERO, 0).test_ok();
+        reg.abort_step();
 
         // The runtime fence remains open, while a missing projection fence
         // must still stop the protected Driver input path.
