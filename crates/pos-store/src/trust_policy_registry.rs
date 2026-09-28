@@ -521,23 +521,21 @@ mod tests {
         SigningKey::from_bytes(&[29; 32])
     }
 
-    fn signed(mut snapshot: TrustPolicySnapshotV1) -> Vec<u8> {
-        let message = snapshot
-            .operator_signature_message_v1()
-            .expect("valid operator message");
+    fn signed(mut snapshot: TrustPolicySnapshotV1) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let message = snapshot.operator_signature_message_v1()?;
         snapshot.operator_signature = signer().sign(&message).to_bytes();
-        snapshot.to_canonical_cbor().expect("canonical signed TPS1")
+        Ok(snapshot.to_canonical_cbor()?)
     }
 
-    fn fixture_snapshot() -> TrustPolicySnapshotV1 {
-        let bytes = pos_conformance::draft_trust_policy_snapshot_bytes_v1()
-            .expect("draft structural TPS1 fixture");
-        TrustPolicySnapshotV1::from_canonical_cbor(&bytes).expect("canonical TPS1 fixture")
+    fn fixture_snapshot() -> Result<TrustPolicySnapshotV1, Box<dyn std::error::Error>> {
+        let bytes = pos_conformance::draft_trust_policy_snapshot_bytes_v1()?;
+        Ok(TrustPolicySnapshotV1::from_canonical_cbor(&bytes)?)
     }
 
-    fn fixture_profile() -> Vec<u8> {
-        pos_conformance::draft_execution_profile_bytes_v1("deterministic-local-v1")
-            .expect("canonical EPF1 fixture")
+    fn fixture_profile() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(pos_conformance::draft_execution_profile_bytes_v1(
+            "deterministic-local-v1",
+        )?)
     }
 
     fn release(snapshot: &TrustPolicySnapshotV1, genesis: &[u8]) -> OperatorReleaseTrustV1 {
@@ -560,58 +558,56 @@ mod tests {
     }
 
     #[test]
-    fn genesis_requires_explicit_provisioning_and_reopens_with_signature() {
-        let directory = tempfile::tempdir().expect("temporary trust directory");
+    fn genesis_requires_explicit_provisioning_and_reopens_with_signature(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
         let path = directory.path().join("trust.db");
-        let snapshot = fixture_snapshot();
-        let genesis = signed(snapshot.clone());
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
         let anchor = release(&snapshot, &genesis);
         assert!(matches!(
             DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis)),
             Err(TrustPolicyRegistryErrorV1::MissingState)
         ));
-        DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)
-            .expect("explicit genesis");
+        DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)?;
         assert!(
             DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis).is_err()
         );
-        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)
-            .expect("reopen authenticated state");
-        let profile = fixture_profile();
-        let evidence = registry
-            .with_admitted_epf1_at(&genesis, request(&snapshot, &profile), TEST_NOW, |proof| {
-                Ok((proof.epoch(), proof.digest(), proof.raw_epf1_digest()))
-            })
-            .expect("unchanged signed policy");
+        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)?;
+        let profile = fixture_profile()?;
+        let evidence = registry.with_admitted_epf1_at(
+            &genesis,
+            request(&snapshot, &profile),
+            TEST_NOW,
+            |proof| Ok((proof.epoch(), proof.digest(), proof.raw_epf1_digest())),
+        )?;
         assert_eq!(evidence.0, 1);
         assert_eq!(evidence.1, raw_digest(&genesis));
         assert_eq!(evidence.2, raw_digest(&profile));
+        Ok(())
     }
 
     #[test]
-    fn successor_is_durable_and_stale_epoch_fails_closed() {
-        let directory = tempfile::tempdir().expect("temporary trust directory");
+    fn successor_is_durable_and_stale_epoch_fails_closed() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
         let path = directory.path().join("trust.db");
-        let snapshot = fixture_snapshot();
-        let genesis = signed(snapshot.clone());
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
         let anchor = release(&snapshot, &genesis);
-        DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)
-            .expect("explicit genesis");
+        DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)?;
         let mut successor = snapshot.clone();
         successor.epoch = 2;
         successor.previous_snapshot_digest = Some(raw_digest(&genesis));
-        let successor_bytes = signed(successor.clone());
-        let profile = fixture_profile();
-        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)
-            .expect("open current state");
-        registry
-            .with_admitted_epf1_at(
-                &successor_bytes,
-                request(&successor, &profile),
-                TEST_NOW,
-                |_| Ok(()),
-            )
-            .expect("signed successor");
+        let successor_bytes = signed(successor.clone())?;
+        let profile = fixture_profile()?;
+        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)?;
+        registry.with_admitted_epf1_at(
+            &successor_bytes,
+            request(&successor, &profile),
+            TEST_NOW,
+            |_| Ok(()),
+        )?;
         assert!(matches!(
             registry.with_admitted_epf1_at(
                 &genesis,
@@ -623,48 +619,44 @@ mod tests {
         ));
         drop(registry);
         let mut reopened =
-            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
-                .expect("restart on durable successor");
-        reopened
-            .with_admitted_epf1_at(
-                &successor_bytes,
-                request(&successor, &profile),
-                TEST_NOW,
-                |_| Ok(()),
-            )
-            .expect("same successor after restart");
-        let audit_count: i64 = reopened
-            .connection
-            .query_row("SELECT COUNT(*) FROM deployment_trust_audit", [], |row| {
-                row.get(0)
-            })
-            .expect("audit count");
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        reopened.with_admitted_epf1_at(
+            &successor_bytes,
+            request(&successor, &profile),
+            TEST_NOW,
+            |_| Ok(()),
+        )?;
+        let audit_count: i64 = reopened.connection.query_row(
+            "SELECT COUNT(*) FROM deployment_trust_audit",
+            [],
+            |row| row.get(0),
+        )?;
         assert_eq!(audit_count, 2);
+        Ok(())
     }
 
     #[test]
-    fn forged_position_and_raw_digest_revocation_reject() {
-        let snapshot = fixture_snapshot();
-        let genesis = signed(snapshot.clone());
-        let directory = tempfile::tempdir().expect("temporary trust directory");
+    fn forged_position_and_raw_digest_revocation_reject() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let directory = tempfile::tempdir()?;
         let path = directory.path().join("trust.db");
         DeploymentTrustPolicyRegistryV1::provision_explicit(
             &path,
             &release(&snapshot, &genesis),
             &genesis,
-        )
-        .expect("genesis");
+        )?;
         let mut registry =
-            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
-                .expect("open state");
-        let profile = fixture_profile();
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        let profile = fixture_profile()?;
         let mut nonzero = snapshot.clone();
         nonzero.epoch = 2;
         nonzero.previous_snapshot_digest = Some(raw_digest(&genesis));
         nonzero.effective_timeline_position = 1;
         assert!(matches!(
             registry.with_admitted_epf1_at(
-                &signed(nonzero),
+                &signed(nonzero)?,
                 request(&snapshot, &profile),
                 TEST_NOW,
                 |_| Ok(())
@@ -675,7 +667,7 @@ mod tests {
         revoked.epoch = 2;
         revoked.previous_snapshot_digest = Some(raw_digest(&genesis));
         revoked.revoked_artifact_digests.push(raw_digest(&profile));
-        let revoked_bytes = signed(revoked);
+        let revoked_bytes = signed(revoked)?;
         let mut callback_called = false;
         assert!(matches!(
             registry.with_admitted_epf1_at(
@@ -692,8 +684,7 @@ mod tests {
         assert!(!callback_called);
         drop(registry);
         let mut reopened =
-            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
-                .expect("revocation remains committed after restart");
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
         assert!(matches!(
             reopened.with_admitted_epf1_at(
                 &genesis,
@@ -712,25 +703,24 @@ mod tests {
             ),
             Err(TrustPolicyRegistryErrorV1::Revoked)
         ));
+        Ok(())
     }
 
     #[test]
-    fn revoked_key_and_embedded_digest_distinction() {
-        let snapshot = fixture_snapshot();
-        let genesis = signed(snapshot.clone());
-        let profile = fixture_profile();
+    fn revoked_key_and_embedded_digest_distinction() -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let profile = fixture_profile()?;
         for revoke_key in [true, false] {
-            let directory = tempfile::tempdir().expect("temporary trust directory");
+            let directory = tempfile::tempdir()?;
             let path = directory.path().join("trust.db");
             DeploymentTrustPolicyRegistryV1::provision_explicit(
                 &path,
                 &release(&snapshot, &genesis),
                 &genesis,
-            )
-            .expect("genesis");
+            )?;
             let mut registry =
-                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
-                    .expect("open state");
+                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
             let mut revoked_key = snapshot.clone();
             revoked_key.epoch = 2;
             revoked_key.previous_snapshot_digest = Some(raw_digest(&genesis));
@@ -739,14 +729,12 @@ mod tests {
                     .revoked_key_ids
                     .push(snapshot.trust_roots[0].key_id.clone());
             } else {
-                let embedded = ExecutionProfileV1::from_canonical_cbor(&profile)
-                    .expect("canonical EPF1")
-                    .profile_digest;
+                let embedded = ExecutionProfileV1::from_canonical_cbor(&profile)?.profile_digest;
                 assert_ne!(embedded, raw_digest(&profile));
                 revoked_key.revoked_artifact_digests.push(embedded);
             }
             let result = registry.with_admitted_epf1_at(
-                &signed(revoked_key),
+                &signed(revoked_key)?,
                 request(&snapshot, &profile),
                 TEST_NOW,
                 |_| Ok(()),
@@ -754,30 +742,29 @@ mod tests {
             if revoke_key {
                 assert!(matches!(result, Err(TrustPolicyRegistryErrorV1::Revoked)));
             } else {
-                result.expect("embedded digest is not raw EPF1 revocation");
+                result?;
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn invalid_signature_expiry_root_and_state_reject() {
-        let snapshot = fixture_snapshot();
-        let genesis = signed(snapshot.clone());
-        let directory = tempfile::tempdir().expect("temporary trust directory");
+    fn invalid_signature_expiry_root_and_state_reject() -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let directory = tempfile::tempdir()?;
         let path = directory.path().join("trust.db");
         DeploymentTrustPolicyRegistryV1::provision_explicit(
             &path,
             &release(&snapshot, &genesis),
             &genesis,
-        )
-        .expect("genesis");
+        )?;
         let mut registry =
-            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
-                .expect("open state");
-        let profile = fixture_profile();
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        let profile = fixture_profile()?;
         let mut forged = snapshot.clone();
         forged.epoch = 2;
-        let forged_bytes = forged.to_canonical_cbor().expect("structural TPS1");
+        let forged_bytes = forged.to_canonical_cbor()?;
         assert!(matches!(
             registry.with_admitted_epf1_at(
                 &forged_bytes,
@@ -810,7 +797,7 @@ mod tests {
         discontinuous.previous_snapshot_digest = Some([9; 32]);
         assert!(matches!(
             registry.with_admitted_epf1_at(
-                &signed(discontinuous),
+                &signed(discontinuous)?,
                 request(&snapshot, &profile),
                 TEST_NOW,
                 |_| Ok(())
@@ -821,7 +808,7 @@ mod tests {
         same_epoch_changed.offline_valid_through = "2031-01-01T00:00:00Z".to_owned();
         assert!(matches!(
             registry.with_admitted_epf1_at(
-                &signed(same_epoch_changed),
+                &signed(same_epoch_changed)?,
                 request(&snapshot, &profile),
                 TEST_NOW,
                 |_| Ok(())
@@ -847,36 +834,33 @@ mod tests {
             DeploymentTrustPolicyRegistryV1::open_current(&path, foreign_release),
             Err(TrustPolicyRegistryErrorV1::CorruptState)
         ));
-        let connection = Connection::open(&path).expect("operator test connection");
-        connection
-            .execute(
-                "UPDATE deployment_trust_state SET full_digest = ?1 WHERE singleton = 1",
-                params![vec![0_u8; 32]],
-            )
-            .expect("corrupt state");
+        let connection = Connection::open(&path)?;
+        connection.execute(
+            "UPDATE deployment_trust_state SET full_digest = ?1 WHERE singleton = 1",
+            params![vec![0_u8; 32]],
+        )?;
         assert!(matches!(
             DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis)),
             Err(TrustPolicyRegistryErrorV1::CorruptState)
         ));
+        Ok(())
     }
 
     #[test]
-    fn denied_signed_successors_still_advance_policy() {
-        let snapshot = fixture_snapshot();
-        let genesis = signed(snapshot.clone());
-        let profile = fixture_profile();
+    fn denied_signed_successors_still_advance_policy() -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let profile = fixture_profile()?;
         for case in 0..3 {
-            let directory = tempfile::tempdir().expect("temporary trust directory");
+            let directory = tempfile::tempdir()?;
             let path = directory.path().join("trust.db");
             DeploymentTrustPolicyRegistryV1::provision_explicit(
                 &path,
                 &release(&snapshot, &genesis),
                 &genesis,
-            )
-            .expect("genesis");
+            )?;
             let mut registry =
-                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
-                    .expect("open state");
+                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
             let mut successor = snapshot.clone();
             successor.epoch = 2;
             successor.previous_snapshot_digest = Some(raw_digest(&genesis));
@@ -886,7 +870,7 @@ mod tests {
                         .minimum_versions
                         .iter_mut()
                         .find(|minimum| minimum.artifact_kind == "execution-profile")
-                        .expect("execution-profile minimum");
+                        .ok_or_else(|| std::io::Error::other("execution-profile minimum"))?;
                     minimum.semantic_version = "999.0.0".to_owned();
                     TrustPolicyRegistryErrorV1::UnsupportedVersion
                 }
@@ -901,17 +885,13 @@ mod tests {
                     TrustPolicyRegistryErrorV1::Expired
                 }
             };
-            assert_eq!(
-                registry
-                    .with_admitted_epf1_at(
-                        &signed(successor),
-                        request(&snapshot, &profile),
-                        TEST_NOW,
-                        |_| Ok(())
-                    )
-                    .expect_err("signed successor denies profile"),
-                expected
+            let result = registry.with_admitted_epf1_at(
+                &signed(successor)?,
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(()),
             );
+            assert_eq!(result.err(), Some(expected));
             assert!(matches!(
                 registry.with_admitted_epf1_at(
                     &genesis,
@@ -922,6 +902,7 @@ mod tests {
                 Err(TrustPolicyRegistryErrorV1::StaleSnapshot)
             ));
         }
+        Ok(())
     }
 
     #[test]
@@ -936,22 +917,20 @@ mod tests {
     }
 
     #[test]
-    fn removal_of_live_state_path_denies_new_admission() {
-        let snapshot = fixture_snapshot();
-        let genesis = signed(snapshot.clone());
-        let directory = tempfile::tempdir().expect("temporary trust directory");
+    fn removal_of_live_state_path_denies_new_admission() -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let directory = tempfile::tempdir()?;
         let path = directory.path().join("trust.db");
         DeploymentTrustPolicyRegistryV1::provision_explicit(
             &path,
             &release(&snapshot, &genesis),
             &genesis,
-        )
-        .expect("genesis");
+        )?;
         let mut registry =
-            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
-                .expect("open state");
-        std::fs::remove_file(&path).expect("remove temporary database path");
-        let profile = fixture_profile();
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        std::fs::remove_file(&path)?;
+        let profile = fixture_profile()?;
         assert!(matches!(
             registry.with_admitted_epf1_at(
                 &genesis,
@@ -961,5 +940,6 @@ mod tests {
             ),
             Err(TrustPolicyRegistryErrorV1::MissingState)
         ));
+        Ok(())
     }
 }
