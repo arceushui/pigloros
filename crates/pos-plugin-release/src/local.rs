@@ -897,9 +897,9 @@ impl ReleaseSourceV1 for LocalOciPublisherV1 {
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         self.verify_root()
-            .map_err(|error| map_publication_to_source(&error))?;
+            .map_err(LocalOciPublicationErrorV1::into_source)?;
         let lock = open_private_file(&self.root, LOCK_NAME)
-            .map_err(|error| map_publication_to_source(&error))?;
+            .map_err(LocalOciPublicationErrorV1::into_source)?;
         faulted_io!(fs::flock(&lock, FlockOperation::LockShared))
             .map_err(|_| ReleaseSourceErrorV1::LockUnavailable)?;
         let result = self
@@ -914,12 +914,12 @@ impl ReleaseSourceV1 for LocalOciPublisherV1 {
 impl LocalOciPublisherV1 {
     fn reader_recovery_floor(&self) -> Result<(), ReleaseSourceErrorV1> {
         let quarantine = open_directory(&self.root, QUARANTINE_NAME)
-            .map_err(|error| map_publication_to_source(&error))?;
+            .map_err(LocalOciPublicationErrorV1::into_source)?;
         if directory_names(&quarantine)
-            .map_err(|error| map_publication_to_source(&error))?
+            .map_err(LocalOciPublicationErrorV1::into_source)?
             .next()
             .transpose()
-            .map_err(|error| map_publication_to_source(&error))?
+            .map_err(LocalOciPublicationErrorV1::into_source)?
             .is_some()
         {
             Err(ReleaseSourceErrorV1::RecoveryRequired)
@@ -936,7 +936,7 @@ impl LocalOciPublisherV1 {
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let index = read_limited(
             open_private_file(&self.root, INDEX_NAME)
-                .map_err(|error| map_publication_to_source(&error))?,
+                .map_err(LocalOciPublicationErrorV1::into_source)?,
             64 * 1024,
         )?;
         let addresses = parse_root_index(&index)?;
@@ -945,9 +945,9 @@ impl LocalOciPublisherV1 {
             return Err(ReleaseSourceErrorV1::NotFound);
         }
         let releases = open_directory(&self.root, RELEASES_NAME)
-            .map_err(|error| map_publication_to_source(&error))?;
+            .map_err(LocalOciPublicationErrorV1::into_source)?;
         let release = open_directory(&releases, &address.digest()[7..])
-            .map_err(|error| map_publication_to_source(&error))?;
+            .map_err(LocalOciPublicationErrorV1::into_source)?;
         let requested = Self::read_release(&release, address)?;
         for indexed_address in addresses.iter().filter(|entry| *entry != address) {
             let other_release = open_directory(&releases, &indexed_address.digest()[7..])
@@ -975,8 +975,7 @@ impl LocalOciPublisherV1 {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
         let owner = read_limited(
-            open_private_file(release, "OWNER")
-                .map_err(|error| map_publication_to_source(&error))?,
+            open_private_file(release, "OWNER").map_err(LocalOciPublicationErrorV1::into_source)?,
             128,
         )?;
         let owner = std::str::from_utf8(&owner).map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
@@ -989,7 +988,7 @@ impl LocalOciPublisherV1 {
         }
         let layout = read_limited(
             open_private_file(release, "oci-layout")
-                .map_err(|error| map_publication_to_source(&error))?,
+                .map_err(LocalOciPublicationErrorV1::into_source)?,
             64,
         )?;
         if layout != b"{\"imageLayoutVersion\":\"1.0.0\"}\n" {
@@ -997,7 +996,7 @@ impl LocalOciPublisherV1 {
         }
         let index = read_limited(
             open_private_file(release, "index.json")
-                .map_err(|error| map_publication_to_source(&error))?,
+                .map_err(LocalOciPublicationErrorV1::into_source)?,
             512,
         )?;
         let expected_index = format!("{{\"manifests\":[{{\"digest\":\"{}\",\"mediaType\":\"{}\",\"size\":{}}}],\"schemaVersion\":2}}", address.digest(), address.media_type(), address.size());
@@ -1005,8 +1004,7 @@ impl LocalOciPublisherV1 {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
         let ready = read_limited(
-            open_private_file(release, "READY")
-                .map_err(|error| map_publication_to_source(&error))?,
+            open_private_file(release, "READY").map_err(LocalOciPublicationErrorV1::into_source)?,
             256,
         )?;
         let expected_ready = format!(
@@ -1025,17 +1023,17 @@ impl LocalOciPublisherV1 {
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let blobs =
-            open_directory(release, "blobs").map_err(|error| map_publication_to_source(&error))?;
+            open_directory(release, "blobs").map_err(LocalOciPublicationErrorV1::into_source)?;
         let blob_directories = bounded_directory_entries(&blobs, 1)
             .map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
         if !blob_directories.iter().map(String::as_str).eq(["sha256"]) {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
         let sha256 =
-            open_directory(&blobs, "sha256").map_err(|error| map_publication_to_source(&error))?;
+            open_directory(&blobs, "sha256").map_err(LocalOciPublicationErrorV1::into_source)?;
         let manifest = read_limited(
             open_private_file(&sha256, &address.digest()[7..])
-                .map_err(|error| map_publication_to_source(&error))?,
+                .map_err(LocalOciPublicationErrorV1::into_source)?,
             64 * 1024,
         )?;
         let manifest_value = crate::parse_jcs_object(&manifest)?;
@@ -1068,8 +1066,7 @@ impl LocalOciPublisherV1 {
                 .strip_prefix("sha256:")
                 .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
             let blob = read_limited(
-                open_private_file(&sha256, hex)
-                    .map_err(|error| map_publication_to_source(&error))?,
+                open_private_file(&sha256, hex).map_err(LocalOciPublicationErrorV1::into_source)?,
                 usize::try_from(size)
                     .unwrap_or(32 * 1024 * 1024)
                     .min(32 * 1024 * 1024),
@@ -1186,14 +1183,14 @@ fn read_limited(file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceErrorV
     }
 }
 
-const fn map_publication_to_source(error: &LocalOciPublicationErrorV1) -> ReleaseSourceErrorV1 {
-    match error {
-        LocalOciPublicationErrorV1::InvalidLayout => ReleaseSourceErrorV1::InvalidLayout,
-        LocalOciPublicationErrorV1::Sync | LocalOciPublicationErrorV1::Io => {
-            ReleaseSourceErrorV1::Io
+impl LocalOciPublicationErrorV1 {
+    fn into_source(self) -> ReleaseSourceErrorV1 {
+        match self {
+            Self::InvalidLayout => ReleaseSourceErrorV1::InvalidLayout,
+            Self::Sync | Self::Io => ReleaseSourceErrorV1::Io,
+            Self::LockUnavailable => ReleaseSourceErrorV1::LockUnavailable,
+            _ => ReleaseSourceErrorV1::RecoveryRequired,
         }
-        LocalOciPublicationErrorV1::LockUnavailable => ReleaseSourceErrorV1::LockUnavailable,
-        _ => ReleaseSourceErrorV1::RecoveryRequired,
     }
 }
 
