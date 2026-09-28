@@ -422,7 +422,11 @@ mod tests {
         live.fold_events(&committed);
         let expected: Vec<_> = bodies
             .iter()
-            .map(|body| live.state_for_reducer("world", body).test_ok().clone())
+            .map(|body| {
+                live.state_for_reducer(timeline, "world", body)
+                    .test_ok()
+                    .test_ok()
+            })
             .collect();
 
         let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
@@ -439,8 +443,14 @@ mod tests {
             &evaluation,
         )
         .test_ok();
-        assert!(before.state_for_reducer("world", &bodies[0]).is_none());
-        assert!(before.state_for_reducer("world", &bodies[1]).is_none());
+        assert!(before
+            .state_for_reducer(timeline, "world", &bodies[0])
+            .test_ok()
+            .is_none());
+        assert!(before
+            .state_for_reducer(timeline, "world", &bodies[1])
+            .test_ok()
+            .is_none());
         super::replay_at(
             &mut reads,
             timeline,
@@ -451,10 +461,15 @@ mod tests {
         )
         .test_ok();
         assert_eq!(
-            first.state_for_reducer("world", &bodies[0]),
-            Some(&expected[0])
+            first
+                .state_for_reducer(timeline, "world", &bodies[0])
+                .test_ok(),
+            Some(expected[0].clone())
         );
-        assert!(first.state_for_reducer("world", &bodies[1]).is_none());
+        assert!(first
+            .state_for_reducer(timeline, "world", &bodies[1])
+            .test_ok()
+            .is_none());
         super::replay(
             &mut reads,
             timeline,
@@ -464,7 +479,12 @@ mod tests {
         )
         .test_ok();
         for (body, state) in bodies.iter().zip(&expected) {
-            assert_eq!(complete.state_for_reducer("world", body), Some(state));
+            assert_eq!(
+                complete
+                    .state_for_reducer(timeline, "world", body)
+                    .test_ok(),
+                Some(state.clone())
+            );
         }
 
         let telemetry = EventDraft::new(
@@ -486,7 +506,12 @@ mod tests {
         )
         .test_ok();
         for (body, state) in bodies.iter().zip(&expected) {
-            assert_eq!(with_telemetry.state_for_reducer("world", body), Some(state));
+            assert_eq!(
+                with_telemetry
+                    .state_for_reducer(timeline, "world", body)
+                    .test_ok(),
+                Some(state.clone())
+            );
         }
     }
 
@@ -562,12 +587,19 @@ mod tests {
         .test_ok();
         for body in bodies {
             assert_eq!(
-                after_invalid.state_for_reducer("world", &body),
-                accepted.state_for_reducer("world", &body)
+                after_invalid
+                    .state_for_reducer(timeline, "world", &body)
+                    .test_ok(),
+                accepted
+                    .state_for_reducer(timeline, "world", &body)
+                    .test_ok()
             );
         }
         for entity in invalid_entities {
-            assert!(after_invalid.state_for_reducer("world", &entity).is_none());
+            assert!(after_invalid
+                .state_for_reducer(timeline, "world", &entity)
+                .test_ok()
+                .is_none());
         }
     }
 
@@ -659,10 +691,15 @@ mod tests {
         }
     }
 
+    fn test_projection_registry() -> ProjectionRegistry {
+        ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
     fn count_for(reg: &ProjectionRegistry, entity: &EntityId) -> u64 {
-        reg.state_for(entity)
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
+        reg.state_for(TimelineId::new(), entity)
+            .test_ok()
+            .and_then(|s| s.get("n").and_then(serde_json::Value::as_u64))
             .unwrap_or(0)
     }
 
@@ -673,7 +710,7 @@ mod tests {
     fn replay_empty_timeline_is_noop() {
         let mut store = open_test_store();
         let tl = store.create_timeline("empty").test_ok();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
 
         replay(store.as_ref(), tl.id(), &mut reg).test_ok();
@@ -693,7 +730,7 @@ mod tests {
         let drafts: Vec<EventDraft> = (0..5).map(|_| draft(entity)).collect();
         store.append(tl.id(), &drafts).test_ok();
 
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         replay(store.as_ref(), tl.id(), &mut reg).test_ok();
 
@@ -713,7 +750,7 @@ mod tests {
         // seq of the 3rd event (0-indexed = 2, but seqs are 1-based in MemoryStore)
         let third_seq = committed[2].seq;
 
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         replay_at(store.as_ref(), tl.id(), third_seq, &mut reg).test_ok();
 
@@ -724,7 +761,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_read_err_propagates() {
         let store = ReadFailStore;
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         let entity = EntityId::new();
         reg.apply_event(&make_event(entity, 1));
@@ -737,7 +774,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_at_read_err_propagates() {
         let store = ReadFailStore;
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         let err = replay_at(&store, TimelineId::new(), Seq::from_u64(1), &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
@@ -757,11 +794,11 @@ mod tests {
                 .collect();
 
             // We build a registry using the raw events directly (avoids store borrow issues).
-            let mut reg1 = ProjectionRegistry::new();
+            let mut reg1 = test_projection_registry();
             reg1.register("count", Box::new(CountReducer));
             reg1.fold_events(&events);
 
-            let mut reg2 = ProjectionRegistry::new();
+            let mut reg2 = test_projection_registry();
             reg2.register("count", Box::new(CountReducer));
             reg2.fold_events(&events);
 
@@ -775,7 +812,7 @@ mod tests {
             if !drafts.is_empty() {
                 store.append(tl.id(), &drafts).test_ok();
             }
-            let mut reg3 = ProjectionRegistry::new();
+            let mut reg3 = test_projection_registry();
             reg3.register("count", Box::new(CountReducer));
             replay(store.as_ref(), tl.id(), &mut reg3).test_ok();
             prop_assert_eq!(count_for(&reg3, &entity), event_count as u64);

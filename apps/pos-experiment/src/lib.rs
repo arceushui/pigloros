@@ -415,10 +415,14 @@ impl RunResult {
                 )
                 .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))
             })
-            .map(|()| {
+            .and_then(|()| {
                 self.projections
-                    .state_for_reducer(reducer, &subject)
-                    .cloned()
+                    .state_for_reducer(self.timeline_id, reducer, &subject)
+                    .map_err(|_| {
+                        ExperimentError::Runtime(
+                            pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                        )
+                    })
             })
     }
 
@@ -4395,11 +4399,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, 200), (2, 100)]
         );
-        let mut replayed = pos_state::ProjectionRegistry::new();
+        let mut replayed = pos_state::ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         replayed.register("interleaving", Box::new(CountReducer));
         replayed.fold_events(&events);
         drop(store);
-        assert!(replayed.state_for(&entity).is_some());
+        assert!(replayed.state_for(timeline, &entity).test_ok().is_some());
     }
 
     #[test]
@@ -6072,9 +6077,9 @@ mod tests {
         // state_for returns from the first reducer ("proj-plugin")
         let n = result
             .projections
-            .state_for(&entity)
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for(result.timeline_id, &entity)
+            .test_ok()
+            .and_then(|s| s.get("n").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(n, 3);
     }
@@ -8058,18 +8063,18 @@ mod integration_tests {
         // rule-agent is first registered reducer → state_for_reducer("rule-agent", ...)
         let decisions = result
             .projections
-            .state_for_reducer("rule-agent", &agent_entity)
-            .and_then(|s| s.get("decisions"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer(result.timeline_id, "rule-agent", &agent_entity)
+            .test_ok()
+            .and_then(|s| s.get("decisions").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(decisions, 5, "expected 5 decisions projected");
 
         // Verify obs state was projected (observation count should be 5)
         let obs_count = result
             .projections
-            .state_for_reducer("synthetic-obs", &obs_entity)
-            .and_then(|s| s.get("observations"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer(result.timeline_id, "synthetic-obs", &obs_entity)
+            .test_ok()
+            .and_then(|s| s.get("observations").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(obs_count, 5, "expected 5 observations projected");
     }

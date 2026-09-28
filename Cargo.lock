@@ -4304,7 +4304,6 @@ dependencies = [
  "getrandom 0.4.3",
  "pos-core",
  "pos-plugin-society",
- "pos-state",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

@@ -230,24 +230,46 @@ impl ProjectionRegistry {
         }
     }
 
-    /// Return the state for a given entity from the **first** registered reducer.
+    /// Return owned state for an entity from the **first** registered reducer
+    /// while the current Timeline fence is held.
     ///
     /// Returns `None` if no reducers have been registered or the entity is unknown.
     /// To query a specific reducer use [`Self::state_for_reducer`].
-    #[must_use]
-    pub fn state_for(&self, entity: &EntityId) -> Option<&State> {
-        self.slots
-            .first()
-            .and_then(|(_, slot)| slot.registry.get(entity))
+    /// # Errors
+    /// Returns a closed source error when the Timeline has no verified access.
+    pub fn state_for(
+        &self,
+        timeline: TimelineId,
+        entity: &EntityId,
+    ) -> Result<Option<State>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            Ok(registry
+                .slots
+                .first()
+                .and_then(|(_, slot)| slot.registry.get(entity))
+                .cloned())
+        })
     }
 
-    /// Return the state for a given entity from the reducer identified by `name`.
-    #[must_use]
-    pub fn state_for_reducer(&self, name: &str, entity: &EntityId) -> Option<&State> {
-        self.slots
-            .iter()
-            .find(|(n, _)| n == name)
-            .and_then(|(_, slot)| slot.registry.get(entity))
+    /// Return owned state for an entity from the named reducer while the
+    /// current Timeline fence is held.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline has no verified access.
+    pub fn state_for_reducer(
+        &self,
+        timeline: TimelineId,
+        name: &str,
+        entity: &EntityId,
+    ) -> Result<Option<State>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            Ok(registry
+                .slots
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, slot)| slot.registry.get(entity))
+                .cloned())
+        })
     }
 
     /// Materialize exactly one host-authorized participant observation.
@@ -475,21 +497,26 @@ impl ProjectionRegistry {
     ///
     /// Returns the first differing `(reducer_name, entity_id)` pair, or `None`
     /// when the states are identical.
-    #[must_use]
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline has no verified access.
     pub fn diff_against_snapshot(
         &self,
+        timeline: TimelineId,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
         all_entities: &[EntityId],
-    ) -> Option<(String, EntityId)> {
-        for (name, slot) in &self.slots {
-            let snap_reg = snapshot.get(name).cloned().unwrap_or_default();
-            for entity in all_entities {
-                if slot.registry.get_or_default(entity) != snap_reg.get_or_default(entity) {
-                    return Some((name.clone(), *entity));
+    ) -> Result<Option<(String, EntityId)>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            for (name, slot) in &registry.slots {
+                let snap_reg = snapshot.get(name).cloned().unwrap_or_default();
+                for entity in all_entities {
+                    if slot.registry.get_or_default(entity) != snap_reg.get_or_default(entity) {
+                        return Ok(Some((name.clone(), *entity)));
+                    }
                 }
             }
-        }
-        None
+            Ok(None)
+        })
     }
 }
 
@@ -866,6 +893,39 @@ mod tests {
     };
     use proptest::prelude::*;
 
+    fn open_projection_registry() -> ProjectionRegistry {
+        ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    trait ProjectionTestReads {
+        fn state_for_test(&self, entity: &EntityId) -> Option<State>;
+        fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State>;
+        fn diff_against_snapshot_test(
+            &self,
+            snapshot: &std::collections::HashMap<String, StateRegistry>,
+            all_entities: &[EntityId],
+        ) -> Option<(String, EntityId)>;
+    }
+
+    impl ProjectionTestReads for ProjectionRegistry {
+        fn state_for_test(&self, entity: &EntityId) -> Option<State> {
+            test_ok(self.state_for(TimelineId::new(), entity))
+        }
+
+        fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State> {
+            test_ok(self.state_for_reducer(TimelineId::new(), name, entity))
+        }
+
+        fn diff_against_snapshot_test(
+            &self,
+            snapshot: &std::collections::HashMap<String, StateRegistry>,
+            all_entities: &[EntityId],
+        ) -> Option<(String, EntityId)> {
+            test_ok(self.diff_against_snapshot(TimelineId::new(), snapshot, all_entities))
+        }
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
@@ -1136,7 +1196,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_applies_to_all_reducers() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("a", Box::new(EntityStateProjection));
         registry.register("b", Box::new(EntityStateProjection));
 
@@ -1144,14 +1204,12 @@ mod tests {
         registry.apply_event(&make_event(entity));
 
         let count_a = registry
-            .state_for_reducer("a", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("a", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         let count_b = registry
-            .state_for_reducer("b", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("b", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count_a, 1, "reducer 'a' should have seen 1 event");
         assert_eq!(count_b, 1, "reducer 'b' should have seen 1 event");
@@ -1160,7 +1218,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_retain_subject_filters_every_reducer() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("a", Box::new(EntityStateProjection));
         registry.register("b", Box::new(EntityStateProjection));
         let subject = EntityId::new();
@@ -1170,15 +1228,15 @@ mod tests {
         registry.retain_subject(&subject);
 
         for name in ["a", "b"] {
-            assert!(registry.state_for_reducer(name, &subject).is_some());
-            assert!(registry.state_for_reducer(name, &unrelated).is_none());
+            assert!(registry.state_for_reducer_test(name, &subject).is_some());
+            assert!(registry.state_for_reducer_test(name, &unrelated).is_none());
         }
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_fold_events() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("main", Box::new(EntityStateProjection));
 
         let entity = EntityId::new();
@@ -1186,9 +1244,8 @@ mod tests {
         registry.fold_events(&events);
 
         let count = registry
-            .state_for_reducer("main", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("main", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or_else(|| {
                 std::panic::resume_unwind(Box::new("event_count should be present"))
             });
@@ -1198,7 +1255,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn valid_consent_revocation_evicts_each_subject_projection_cache() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("a", Box::new(EntityStateProjection));
         registry.register("b", Box::new(EntityStateProjection));
         let subject = EntityId::new();
@@ -1218,15 +1275,15 @@ mod tests {
         });
         registry.apply_event(&event);
 
-        assert!(registry.state_for(&subject).is_none());
-        assert!(registry.state_for_reducer("b", &subject).is_none());
-        assert!(registry.state_for(&other).is_some());
+        assert!(registry.state_for_test(&subject).is_none());
+        assert!(registry.state_for_reducer_test("b", &subject).is_none());
+        assert!(registry.state_for_test(&other).is_some());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn malformed_consent_revocation_does_not_evict_projection_cache() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let subject = EntityId::new();
         registry.apply_event(&make_event(subject));
@@ -1234,13 +1291,13 @@ mod tests {
         let malformed = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
         registry.apply_event(&malformed);
 
-        assert!(registry.state_for(&subject).is_some());
+        assert!(registry.state_for_test(&subject).is_some());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducers_never_observe_reserved_consent_namespace_events() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         let consent_event = Event {
@@ -1259,13 +1316,13 @@ mod tests {
             payload_hash: Hash::from_bytes([0; 32]),
         };
         registry.apply_event(&consent_event);
-        assert!(registry.state_for(&entity).is_none());
+        assert!(registry.state_for_test(&entity).is_none());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_state_for_returns_first_reducers_view() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("first", Box::new(EntityStateProjection));
         registry.register("second", Box::new(EntityStateProjection));
 
@@ -1273,7 +1330,7 @@ mod tests {
         registry.apply_event(&make_event(entity));
 
         let state = registry
-            .state_for(&entity)
+            .state_for_test(&entity)
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("state should exist")));
         let count = state
             .get("event_count")
@@ -1285,15 +1342,47 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_state_for_returns_none_when_empty() {
-        let registry = ProjectionRegistry::new();
+        let registry = open_projection_registry();
         let entity = EntityId::new();
-        assert!(registry.state_for(&entity).is_none());
+        assert!(registry.state_for_test(&entity).is_none());
+    }
+
+    #[test]
+    fn public_projection_reads_close_after_timeline_freeze() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(&make_event(entity));
+        let snapshot = test_ok(registry.state_snapshot(timeline));
+        assert!(test_ok(registry.state_for(timeline, &entity)).is_some());
+        assert!(test_ok(registry.state_for_reducer(timeline, "events", &entity)).is_some());
+        assert!(test_ok(registry.diff_against_snapshot(timeline, &snapshot, &[entity])).is_none());
+
+        gate.freeze_timeline_for_test(timeline);
+        assert_eq!(
+            registry.state_for(timeline, &entity).map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            registry
+                .state_for_reducer(timeline, "events", &entity)
+                .map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            registry
+                .diff_against_snapshot(timeline, &snapshot, &[entity])
+                .map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_skips_unknown_reducers() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         registry.apply_event(&make_event(entity));
@@ -1303,9 +1392,8 @@ mod tests {
         registry.restore_from_snapshot(&snapshot);
 
         let count = registry
-            .state_for_reducer("registered", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("registered", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count, 0);
     }
@@ -1314,21 +1402,19 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
         let timeline = TimelineId::new();
-        let mut registry = ProjectionRegistry::new()
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let mut registry = open_projection_registry();
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         registry.apply_event(&make_event(entity));
         let snapshot = test_ok(registry.state_snapshot(timeline));
 
-        let mut restored = ProjectionRegistry::new();
+        let mut restored = open_projection_registry();
         restored.register("registered", Box::new(EntityStateProjection));
         restored.restore_from_snapshot(&snapshot);
 
         let count = restored
-            .state_for_reducer("registered", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("registered", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count, 1);
     }
@@ -1395,8 +1481,7 @@ mod tests {
 
         let count = state_reg
             .get(&entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or_else(|| {
                 std::panic::resume_unwind(Box::new("event_count should be present"))
             });
@@ -1417,13 +1502,11 @@ mod tests {
 
         let count_a = state_reg
             .get(&a)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         let count_b = state_reg
             .get(&b)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count_a, 2);
         assert_eq!(count_b, 1);
@@ -1525,23 +1608,21 @@ mod tests {
             let entity = EntityId::new();
             let events: Vec<Event> = (0..n_events).map(|_| make_event(entity)).collect();
 
-            let mut reg1 = ProjectionRegistry::new();
+            let mut reg1 = open_projection_registry();
             reg1.register("p", Box::new(EntityStateProjection));
             reg1.fold_events(&events);
 
-            let mut reg2 = ProjectionRegistry::new();
+            let mut reg2 = open_projection_registry();
             reg2.register("p", Box::new(EntityStateProjection));
             reg2.fold_events(&events);
 
             let count1 = reg1
-                .state_for_reducer("p", &entity)
-                .and_then(|s| s.get("event_count"))
-                .and_then(serde_json::Value::as_u64)
+                .state_for_reducer_test("p", &entity)
+                .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
                 .unwrap_or(0);
             let count2 = reg2
-                .state_for_reducer("p", &entity)
-                .and_then(|s| s.get("event_count"))
-                .and_then(serde_json::Value::as_u64)
+                .state_for_reducer_test("p", &entity)
+                .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
                 .unwrap_or(0);
 
             prop_assert_eq!(count1, count2);
@@ -1753,12 +1834,12 @@ mod wave3_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_snapshot_identical_returns_none() {
         let entity = EntityId::new();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
         reg.apply_event(&ev(entity));
 
         let snap = reg.snapshot_unfenced();
-        let diff = reg.diff_against_snapshot(&snap, &[entity]);
+        let diff = reg.diff_against_snapshot_test(&snap, &[entity]);
         assert!(diff.is_none());
     }
 
@@ -1766,14 +1847,14 @@ mod wave3_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_snapshot_diverged_returns_some() {
         let entity = EntityId::new();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
         reg.apply_event(&ev(entity));
 
         let snap = reg.snapshot_unfenced();
         // Apply another event — now reg diverges from the snapshot
         reg.apply_event(&ev(entity));
-        let diff = reg.diff_against_snapshot(&snap, &[entity]);
+        let diff = reg.diff_against_snapshot_test(&snap, &[entity]);
         assert!(diff.is_some());
         let (name, eid) =
             diff.unwrap_or_else(|| std::panic::resume_unwind(Box::new("diff should be present")));
@@ -1785,12 +1866,12 @@ mod wave3_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_empty_snapshot_returns_some_when_reg_has_state() {
         let entity = EntityId::new();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
         reg.apply_event(&ev(entity));
 
         let empty_snap = std::collections::HashMap::new();
-        let diff = reg.diff_against_snapshot(&empty_snap, &[entity]);
+        let diff = reg.diff_against_snapshot_test(&empty_snap, &[entity]);
         assert!(diff.is_some());
     }
 

@@ -674,11 +674,14 @@ fn evidence_with_closure_digest(
         (AGENT_ENTITY_KIND, topology.agent),
         (SOCIETY_NAME, topology.society),
     ] {
-        if let Some(state) = projections.state_for_reducer(name, &entity) {
+        if let Some(state) = projections
+            .state_for_reducer(context.timeline_id, name, &entity)
+            .map_err(RuntimeError::from)?
+        {
             projection_evidence.push(ProjectionEvidenceV1 {
                 reducer: name.to_owned(),
                 entity: entity.to_string(),
-                state: serde_json::to_value(state)?,
+                state: serde_json::to_value(&state)?,
             });
         }
     }
