@@ -1541,6 +1541,11 @@ mod tests {
             registry.state_for(source, &entity),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
+        registry.apply_event(source, &make_event(entity));
+        assert_eq!(
+            registry.state_for(unrelated, &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
         registry.clear_state();
         registry.apply_event(unrelated, &make_event(entity));
         assert!(test_ok(registry.state_for(unrelated, &entity)).is_some());
@@ -1613,6 +1618,10 @@ mod tests {
             restored.restore_from_snapshot(timeline, &snapshot, None),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
+        assert_eq!(
+            ProjectionRegistry::new().restore_from_snapshot(timeline, &snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 
     #[test]
@@ -1647,6 +1656,26 @@ mod tests {
             registry.refold_events(timeline, std::slice::from_ref(&event), None),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
+        assert_eq!(
+            ProjectionRegistry::new().refold_events(timeline, &[event], None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn committed_fork_rejects_a_different_projection_parent() {
+        let source = TimelineId::new();
+        let unrelated = TimelineId::new();
+        let child = TimelineId::new();
+        let entity = EntityId::new();
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(source, &make_event(entity));
+        assert_eq!(
+            registry.adopt_committed_fork(unrelated, child),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(test_ok(registry.state_for(source, &entity)).is_some());
     }
 
     #[test]

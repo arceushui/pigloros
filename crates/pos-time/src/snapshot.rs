@@ -705,6 +705,41 @@ mod extra_tests {
     use pos_store::{open_store, StoreConfig};
     use std::sync::Arc;
 
+    #[test]
+    fn snapshot_host_errors_preserve_stale_and_store_failures() {
+        assert!(matches!(
+            snapshot_host_error(pos_core::ErasureHostErrorV1::StaleGeneration),
+            SnapshotError::StaleGeneration
+        ));
+        assert!(matches!(
+            snapshot_host_error(pos_core::ErasureHostErrorV1::AdapterFailure),
+            SnapshotError::Store(CoreError::ArtifactUnavailable)
+        ));
+    }
+
+    #[test]
+    fn snapshot_verification_rejects_a_generation_mismatched_restore() {
+        let mut store = open_test_store();
+        let timeline = store.create_timeline("stale-restore").test_ok();
+        store
+            .append(timeline.id(), &[draft(EntityId::new())])
+            .test_ok();
+        let mut captured_registry = make_registry();
+        let captured = snapshot(store.as_ref(), timeline.id(), &mut captured_registry).test_ok();
+        let events = store.read(timeline.id(), SeqRange::all()).test_ok();
+        let mut restored_registry = make_registry();
+        assert!(matches!(
+            verify_snapshot_event_sets(
+                &captured,
+                &mut restored_registry,
+                &[],
+                &events,
+                Some(ErasureReferenceV1::from_digest([7; 32])),
+            ),
+            Err(SnapshotError::ArtifactUnavailable)
+        ));
+    }
+
     const SNAPSHOT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([41; 32]);
 
     fn snapshot_evaluation(state: ArtifactStateV1) -> ReplayClaimEvaluationV1 {

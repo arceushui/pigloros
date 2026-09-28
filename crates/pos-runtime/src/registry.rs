@@ -3047,6 +3047,85 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn restored_fork_rolls_back_a_child_missing_from_the_host_inventory() {
+        struct ForeignChildStore {
+            deleted: bool,
+            fail_rollback: bool,
+        }
+
+        impl pos_core::EventStore for ForeignChildStore {
+            fn create_timeline(&mut self, _: &str) -> Result<pos_core::Timeline, CoreError> {
+                Err(CoreError::ArtifactUnavailable)
+            }
+
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::ArtifactUnavailable)
+            }
+
+            fn read(
+                &self,
+                _: TimelineId,
+                _: pos_core::store::SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            fn fork(
+                &mut self,
+                parent: TimelineId,
+                at_seq: Seq,
+                name: &str,
+            ) -> Result<pos_core::Timeline, CoreError> {
+                Ok(pos_core::Timeline::new(
+                    pos_core::TimelineMeta::forked_from(parent, at_seq, name),
+                ))
+            }
+
+            fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<pos_core::Timeline>, CoreError> {
+                Ok(None)
+            }
+
+            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
+                self.deleted = true;
+                if self.fail_rollback {
+                    Err(CoreError::ArtifactUnavailable)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        for fail_rollback in [false, true] {
+            let mut host = crate::ErasureExecutionHostV1::open_verified_empty(
+                pos_store::StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+            let parent = host
+                .command_sender()
+                .test_ok()
+                .create_timeline("known-parent")
+                .test_ok();
+            let mut registry = PluginRegistry::new().with_erasure_gate(host.containment_gate());
+            registry
+                .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+                .test_ok();
+            let mut store = ForeignChildStore {
+                deleted: false,
+                fail_rollback,
+            };
+            assert!(registry
+                .fork_restored_timeline(&mut store, parent.id(), Seq::ZERO, "foreign-child")
+                .is_err());
+            assert!(store.deleted);
+        }
+    }
+
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
@@ -4602,6 +4681,7 @@ mod tests {
         assert!(reg
             .snapshot_for_subscriptions(timeline, &subscriptions)
             .is_err());
+        assert!(reg.refold_projection_events(timeline, &[], None).is_err());
     }
 
     struct AppendFailStore;

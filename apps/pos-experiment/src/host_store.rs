@@ -222,6 +222,124 @@ mod host_store_tests {
     }
 
     #[test]
+    fn host_generation_change_refolds_the_captured_prefix() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
+        let timeline = store.create_timeline("projection-source")?;
+        let events = store.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("projection.public"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )],
+        )?;
+        let mut registry =
+            pos_runtime::PluginRegistry::new().with_erasure_gate(store.containment_gate());
+        registry.fold_events(timeline.id(), &events);
+        assert!(registry.validate_projection_source(timeline.id()).is_ok());
+
+        store.create_timeline("inventory-successor")?;
+        assert!(registry.validate_projection_source(timeline.id()).is_err());
+        registry.fold_events(timeline.id(), &events);
+        assert!(registry.validate_projection_source(timeline.id()).is_err());
+
+        let shared: SharedEventStore = Arc::new(Mutex::new(Box::new(store)));
+        let captured = lock_store(&shared)
+            .and_then(|store| capture_pending_range(store.as_ref(), timeline.id(), Seq::ZERO))?;
+        let mut boundary = TickBoundaryCoordinator {
+            folded_through: Seq::ZERO,
+        };
+        assert_eq!(
+            fold_host_captured_range(&shared, &mut boundary, &mut registry, &captured)?,
+            FoldedEventCount(1)
+        );
+        assert_eq!(boundary.folded_through, captured.through);
+        assert!(registry.validate_projection_source(timeline.id()).is_ok());
+
+        assert!(refold_host_projection_prefix(
+            &shared,
+            &mut registry,
+            TimelineId::new(),
+            captured.through
+        )
+        .is_err());
+        registry = registry.without_erasure_gate();
+        assert!(
+            fold_host_captured_range(&shared, &mut boundary, &mut registry, &captured).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_refreshes_projection_source_after_inventory_change(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "generation-refresh".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        })
+        .start()?;
+        let timeline = session.timeline.id();
+        lock_store(&session.store)?.append(
+            timeline,
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("projection.public"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )],
+        )?;
+        assert!(matches!(
+            session.step_tick()?,
+            TickOutcome::Advanced {
+                folded_events: 1,
+                ..
+            }
+        ));
+        lock_store(&session.store)?.create_timeline("new-generation-before-tick")?;
+        let (folded, committed) = session.prepare_tick()?;
+        assert_eq!(folded, 0);
+        assert_eq!(committed.len(), 1);
+        assert!(session
+            .registry
+            .validate_projection_source(timeline)
+            .is_ok());
+
+        lock_store(&session.store)?.create_timeline("new-generation-before-result")?;
+        let result = session.run_to_completion()?;
+        assert_eq!(result.total_events, 1);
+        assert_eq!(result.timeline_id, timeline);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_projection_refresh_faults_the_session() -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Experiment::new(ExperimentConfig {
+            name: "failed-refresh".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        })
+        .start()?;
+        session.registry = std::mem::take(&mut session.registry).without_erasure_gate();
+        let captured = lock_store(&session.store).and_then(|store| {
+            capture_pending_range(store.as_ref(), session.timeline.id(), Seq::ZERO)
+        })?;
+        assert!(session.fold_captured_range_or_fault(&captured).is_err());
+        assert_eq!(session.health, SessionHealth::Faulted);
+
+        let mut retry = Experiment::new(ExperimentConfig {
+            name: "failed-tick-refresh".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        })
+        .start()?;
+        retry.registry = std::mem::take(&mut retry.registry).without_erasure_gate();
+        assert!(retry.prepare_tick().is_err());
+        assert_eq!(retry.health, SessionHealth::Faulted);
+        Ok(())
+    }
+
+    #[test]
     fn poisoned_host_and_host_errors_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
         drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(

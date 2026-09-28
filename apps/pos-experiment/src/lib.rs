@@ -1739,12 +1739,7 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        if let Err(error) =
-            fold_host_captured_range(&self.store, &mut self.boundary, &mut self.registry, &after)
-        {
-            self.health = SessionHealth::Faulted;
-            return Err(error);
-        }
+        self.fold_captured_range_or_fault(&after)?;
         self.total_events = self.boundary.folded_through.as_u64();
         Ok(u64::try_from(emitted.len()).unwrap_or(u64::MAX))
     }
@@ -1977,18 +1972,7 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        let after_count = match fold_host_captured_range(
-            &self.store,
-            &mut self.boundary,
-            &mut self.registry,
-            &after,
-        ) {
-            Ok(count) => count,
-            Err(error) => {
-                self.health = SessionHealth::Faulted;
-                return Err(error);
-            }
-        };
+        let after_count = self.fold_captured_range_or_fault(&after)?;
         folded_events = folded_events.saturating_add(after_count.0);
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events);
@@ -2066,18 +2050,7 @@ impl ExperimentSession {
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
             })?;
-        let folded_events = match fold_host_captured_range(
-            &self.store,
-            &mut self.boundary,
-            &mut self.registry,
-            &after,
-        ) {
-            Ok(count) => count,
-            Err(error) => {
-                self.health = SessionHealth::Faulted;
-                return Err(error);
-            }
-        };
+        let folded_events = self.fold_captured_range_or_fault(&after)?;
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events.0);
         self.ticks = self.ticks.saturating_add(1);
@@ -2091,6 +2064,24 @@ impl ExperimentSession {
             folded_events: folded_events.0,
             emitted_events,
         })
+    }
+
+    fn fold_captured_range_or_fault(
+        &mut self,
+        captured: &CapturedRange,
+    ) -> Result<FoldedEventCount, ExperimentError> {
+        match fold_host_captured_range(
+            &self.store,
+            &mut self.boundary,
+            &mut self.registry,
+            captured,
+        ) {
+            Ok(count) => Ok(count),
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                Err(error)
+            }
+        }
     }
 
     fn prepare_tick(&mut self) -> Result<(u64, Vec<pos_core::Event>), ExperimentError> {
