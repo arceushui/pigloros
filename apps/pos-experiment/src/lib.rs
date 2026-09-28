@@ -2855,6 +2855,12 @@ mod tests {
             .test_ok()
             .is_none());
         assert!(matches!(
+            result.projection_state_for_reducer("projection", EntityId::new(), &token, 0),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::Consent(pos_core::ConsentError::NoConsent)
+            ))
+        ));
+        assert!(matches!(
             result.branch("forbidden"),
             Err(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::Consent(pos_core::ConsentError::ForkNotPermitted)

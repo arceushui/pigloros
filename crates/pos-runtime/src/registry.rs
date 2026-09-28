@@ -2617,7 +2617,9 @@ impl PluginRegistry {
             &OperationContext::Public,
             due_subscriptions.iter(),
         )?;
-        let snapshot = self.snapshot_for_subscriptions(timeline, &due_subscriptions)?;
+        // Public cadence admits no projection subscriptions. The consent
+        // check above rejects them before any state is materialized.
+        let snapshot = ObservationSnapshot::default();
         for (id, entry) in &mut self.plugins {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
@@ -4426,10 +4428,18 @@ mod tests {
         reg.commit_step_at(Seq::ZERO, 0).test_ok();
 
         let drafts = reg
-            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
+        reg.commit_step_at(Seq::ZERO, 0).test_ok();
+
+        // The runtime fence remains open, while a missing projection fence
+        // must still stop the protected Driver input path.
+        reg.projections = std::mem::take(&mut reg.projections).without_erasure_gate();
+        assert!(reg
+            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .is_err());
     }
 
     #[test]
@@ -4534,6 +4544,12 @@ mod tests {
             Some(1)
         );
         assert_eq!(view.state_for(&missing), None);
+
+        // A split host binding must fail closed before exposing any state.
+        reg.projections = std::mem::take(&mut reg.projections).without_erasure_gate();
+        assert!(reg
+            .snapshot_for_subscriptions(timeline, &subscriptions)
+            .is_err());
     }
 
     struct AppendFailStore;

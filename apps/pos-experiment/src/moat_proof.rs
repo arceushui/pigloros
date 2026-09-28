@@ -678,10 +678,13 @@ fn evidence_with_closure_digest(
             .state_for_reducer(context.timeline_id, name, &entity)
             .map_err(RuntimeError::from)?
         {
+            let fields = serde_json::Value::Object(state.fields.into_iter().collect());
+            let state =
+                serde_json::Value::Object([("fields".to_owned(), fields)].into_iter().collect());
             projection_evidence.push(ProjectionEvidenceV1 {
                 reducer: name.to_owned(),
                 entity: entity.to_string(),
-                state: serde_json::to_value(&state)?,
+                state,
             });
         }
     }
@@ -2629,6 +2632,25 @@ mod tests {
             Err(MoatProofError::Runtime(RuntimeError::WorldInstallation(
                 WorldInstallationErrorV1::RetainedConfigMissing
             )))
+        ));
+        assert!(matches!(
+            evidence_with_closure_digest(
+                &EvidenceContext {
+                    input: &input,
+                    mode: ExecutionModeV1::Local,
+                    timeline_id: TimelineId::new(),
+                    fork_cut_seq: None,
+                    events: &[],
+                    factual_events: &[],
+                    projections: &projections,
+                    topology: &topology,
+                    plugin_versions: &versions,
+                    failure_probes: &[],
+                    host_closure: &host_closure,
+                },
+                [0; 32],
+            ),
+            Err(MoatProofError::Runtime(RuntimeError::Authority(_)))
         ));
 
         assert_eq!(serialized_digest(&BrokenSerialize), [0; 32]);
