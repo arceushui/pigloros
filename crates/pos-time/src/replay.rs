@@ -160,7 +160,7 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
@@ -609,7 +609,7 @@ mod tests {
         let mut reads = host.read_sender().test_ok();
         let events = super::replay(&mut reads, timeline, &mut registry, &closure).test_ok();
         assert_eq!(events.len(), 3);
-        assert_eq!(count_for(&registry, &entity), 3);
+        assert_eq!(count_for(&registry, timeline, &entity), 3);
 
         let mut bounded_registry = ProjectionRegistry::new().with_erasure_gate(gate);
         bounded_registry.register("count", Box::new(CountReducer));
@@ -621,7 +621,7 @@ mod tests {
             &closure,
         )
         .test_ok();
-        assert_eq!(count_for(&bounded_registry, &entity), 2);
+        assert_eq!(count_for(&bounded_registry, timeline, &entity), 2);
     }
 
     #[test]
@@ -672,7 +672,7 @@ mod tests {
         let events = super::replay(&mut reads, fork, &mut registry, &closure).test_ok();
         assert_eq!(events.len(), 3);
         assert_eq!(events[2].seq, Seq::from_u64(3));
-        assert_eq!(count_for(&registry, &entity), 3);
+        assert_eq!(count_for(&registry, fork, &entity), 3);
     }
 
     #[test]
@@ -733,7 +733,7 @@ mod tests {
             commands.append(timeline.id(), &[draft(entity)]).test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         *poison_target
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
@@ -883,6 +883,37 @@ mod tests {
 
     struct ChangeBoundsOnSecondVerification {
         calls: AtomicUsize,
+    }
+
+    struct PoisonGateOnSecondVerification {
+        calls: AtomicUsize,
+        gate: Arc<Mutex<Option<Arc<ErasureContainmentGateV1>>>>,
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for PoisonGateOnSecondVerification {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            if self.calls.fetch_add(1, Ordering::SeqCst) != 0
+                && let Some(gate) = self
+                    .gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+            {
+                gate.poison();
+            }
+            Ok(pos_runtime::world_replay::test_verified_world_replay(
+                closure,
+                requested_use,
+                inventory_generation,
+                pos_core::ErasureReplayClaimV1::Exact,
+            ))
+        }
     }
 
     struct OneEventWorldReplayVerifier;
