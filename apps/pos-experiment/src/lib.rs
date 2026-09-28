@@ -2162,7 +2162,7 @@ impl ExperimentSession {
             })?;
             committed_events.extend(before.events.iter().cloned());
             (
-                fold_captured_range(&mut self.boundary, &mut self.registry, &before),
+                fold_captured_range(&mut self.boundary, &mut self.registry, before),
                 committed_events,
             )
         } else {
