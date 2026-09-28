@@ -1,8 +1,8 @@
 //! Planned activation ownership, committed before creating attempt resources.
 //!
-//! The private PAI1 format is exactly a version tag, AttemptId and SIM1 digest.
+//! The private PAI1 format is exactly a version tag, `AttemptId` and SIM1 digest.
 //! The service name and directory component are injectively derived from the
-//! AttemptId. Unknown versions/stages fail closed. This local record does not
+//! `AttemptId`. Unknown versions/stages fail closed. This local record does not
 //! replace ADR-069 lifecycle evidence or authorize image activation.
 
 use std::fs::File;
@@ -34,7 +34,7 @@ impl PlannedAttemptIntent {
     /// Describe one planned attempt before any directory, mount or unit exists.
     ///
     /// # Errors
-    /// Rejects a zero AttemptId or zero SIM1 identity.
+    /// Rejects a zero `AttemptId` or zero SIM1 identity.
     pub fn new(
         attempt_id: [u8; 16],
         sim1_digest: [u8; 32],
@@ -51,7 +51,7 @@ impl PlannedAttemptIntent {
             })
     }
 
-    /// The authoritative AttemptId supplied by provider admission.
+    /// The authoritative `AttemptId` supplied by provider admission.
     #[must_use]
     pub const fn attempt_id(&self) -> [u8; 16] {
         self.attempt_id
@@ -63,7 +63,7 @@ impl PlannedAttemptIntent {
         self.sim1_digest
     }
 
-    /// Deterministic unit identity bound by this record's AttemptId.
+    /// Deterministic unit identity bound by this record's `AttemptId`.
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {
         &self.unit_name
@@ -134,13 +134,15 @@ impl SystemdAttemptRegistry {
     ///
     /// # Errors
     /// Rejects missing/unsafe directories, symlinks, writable ancestors, a
-    /// registry on a different filesystem, permissions other than 0700, another
+    /// mount crossing beneath `/run`, permissions other than 0700, another
     /// live owner, or any unreconciled record left by a previous owner.
     pub fn open() -> Result<Self, SystemdAttemptRegistryError> {
-        let mut parent = File::open("/")?;
+        let root = File::open("/")?;
+        validate_directory(&root, 0, false)?;
+        let mut parent = open_directory(&root, "run", ResolveFlags::empty())?;
         validate_directory(&parent, 0, false)?;
-        for component in ["run", "pigloros", "sandbox"] {
-            parent = open_directory(&parent, component)?;
+        for component in ["pigloros", "sandbox"] {
+            parent = open_directory(&parent, component, ResolveFlags::NO_XDEV)?;
             validate_directory(&parent, 0, component == "sandbox")?;
         }
         Self::from_runtime_directory(&parent, 0)
@@ -151,11 +153,8 @@ impl SystemdAttemptRegistry {
         owner: u32,
     ) -> Result<Self, SystemdAttemptRegistryError> {
         validate_directory(parent, owner, true)?;
-        let registry = open_directory(parent, REGISTRY_NAME)?;
+        let registry = open_directory(parent, REGISTRY_NAME, ResolveFlags::NO_XDEV)?;
         validate_directory(&registry, owner, true)?;
-        if parent.metadata()?.dev() != registry.metadata()?.dev() {
-            return Err(SystemdAttemptRegistryError::UnsafeRegistry);
-        }
         flock(&registry, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::from)?;
         require_empty(&registry)?;
         Ok(Self {
@@ -167,7 +166,7 @@ impl SystemdAttemptRegistry {
         })
     }
 
-    /// Commit planned ownership without replacing an existing AttemptId key.
+    /// Commit planned ownership without replacing an existing `AttemptId` key.
     ///
     /// The file is written and fsynced before `RENAME_NOREPLACE`; the registry
     /// parent is fsynced before a committed value is returned. No attempt
@@ -222,7 +221,7 @@ impl SystemdAttemptRegistry {
                 temporary.as_str(),
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
                 Mode::RUSR | Mode::WUSR,
-                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
             )
             .map_err(io::Error::from)?,
         );
@@ -288,13 +287,17 @@ fn verify_intent(
     })
 }
 
-fn open_directory(parent: &File, component: &str) -> Result<File, SystemdAttemptRegistryError> {
+fn open_directory(
+    parent: &File,
+    component: &str,
+    mount_rule: ResolveFlags,
+) -> Result<File, SystemdAttemptRegistryError> {
     openat2(
         parent,
         component,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | mount_rule,
     )
     .map(File::from)
     .map_err(io::Error::from)
@@ -341,7 +344,7 @@ fn read_record(
             unit.attempt_component(),
             OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
         )
         .map_err(io::Error::from)?,
     );
@@ -351,7 +354,6 @@ fn read_record(
         || metadata.nlink() != 1
         || metadata.mode() & 0o7777 != 0o600
         || metadata.len() != RECORD_SIZE as u64
-        || metadata.dev() != directory.file.metadata()?.dev()
     {
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
@@ -390,6 +392,77 @@ mod tests {
     }
 
     #[test]
+    fn fixed_public_registry_opens_only_valid_runtime_tree() -> TestResult {
+        if std::env::var_os("PIGLOROS_PRIVILEGED_COMPOSITION_TEST").is_none() {
+            let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/run-isolated-test.sh");
+            let output = std::process::Command::new(runner)
+                .arg(std::env::current_exe()?)
+                .arg("attempt_registry::tests::fixed_public_registry_opens_only_valid_runtime_tree")
+                .output()?;
+            assert!(
+                output.status.success(),
+                "isolated registry test failed: {:?}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+        assert_eq!(fs::metadata("/run")?.uid(), 0);
+        assert!(!std::path::Path::new("/run/pigloros").exists());
+        assert!(SystemdAttemptRegistry::open().is_err());
+        for component in [
+            "/run/pigloros",
+            "/run/pigloros/sandbox",
+            "/run/pigloros/sandbox/registry",
+        ] {
+            fs::create_dir(component)?;
+            fs::set_permissions(component, fs::Permissions::from_mode(0o700))?;
+        }
+        // The isolated runner mounts /run separately. Exercise the very same
+        // kernel traversal rule used below the public factory's held /run FD.
+        let root = File::open("/")?;
+        assert_ne!(root.metadata()?.dev(), fs::metadata("/run")?.dev());
+        assert!(open_directory(&root, "run", ResolveFlags::NO_XDEV).is_err());
+        for component in [
+            "/run",
+            "/run/pigloros",
+            "/run/pigloros/sandbox",
+            "/run/pigloros/sandbox/registry",
+        ] {
+            let original = fs::metadata(component)?.permissions();
+            fs::set_permissions(component, fs::Permissions::from_mode(0o777))?;
+            assert!(SystemdAttemptRegistry::open().is_err());
+            fs::set_permissions(component, original)?;
+        }
+        fs::rename(
+            "/run/pigloros/sandbox/registry",
+            "/run/pigloros/sandbox/held",
+        )?;
+        symlink("held", "/run/pigloros/sandbox/registry")?;
+        assert!(SystemdAttemptRegistry::open().is_err());
+        fs::remove_file("/run/pigloros/sandbox/registry")?;
+        fs::rename(
+            "/run/pigloros/sandbox/held",
+            "/run/pigloros/sandbox/registry",
+        )?;
+        let registry = SystemdAttemptRegistry::open()?;
+        let intent = PlannedAttemptIntent::new([1; 16], [2; 32])?;
+        let committed = registry.commit_planned(&intent)?;
+        committed.verify_record()?;
+        assert!(SystemdAttemptRegistry::open().is_err());
+        drop(registry);
+        committed.verify_record()?;
+        drop(committed);
+        assert!(matches!(
+            SystemdAttemptRegistry::open(),
+            Err(SystemdAttemptRegistryError::ReconciliationRequired)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn planned_identity_has_one_exact_closed_encoding() -> TestResult {
         assert!(PlannedAttemptIntent::new([0; 16], [2; 32]).is_err());
         assert!(PlannedAttemptIntent::new([1; 16], [0; 32]).is_err());
@@ -404,7 +477,13 @@ mod tests {
             intent.unit_name().attempt_component(),
             "abababababababababababababababab"
         );
-        assert_eq!(PlannedAttemptIntent::decode(&intent.encode())?, intent);
+        let expected = [
+            0x50, 0x41, 0x49, 0x31, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
+            0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        ];
+        assert_eq!(intent.encode(), expected);
+        assert_eq!(PlannedAttemptIntent::decode(&expected)?, intent);
         for index in [0, 3] {
             let mut bytes = intent.encode();
             bytes[index] ^= 1;
