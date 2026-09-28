@@ -115,10 +115,7 @@ impl RecipientTimelineExportV1 {
         let Value::Array(chunks) = &fields[7] else {
             return Err(RecipientExportErrorV1::InvalidEncoding);
         };
-        if chunks.len()
-            != usize::try_from(header.chunk_count)
-                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?
-        {
+        if chunks.len() != usize::try_from(header.chunk_count).unwrap_or(usize::MAX) {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
         let ciphertext_chunks = chunks.iter().map(bytes).collect::<Result<Vec<_>, _>>()?;
@@ -166,7 +163,7 @@ impl RecipientTimelineExportV1 {
         }
         let final_plain_len =
             usize::try_from((self.header.payload_length - 1) % CHUNK_BYTES_U64 + 1)
-                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+                .unwrap_or(usize::MAX);
         for (index, chunk) in self.ciphertext_chunks.iter().enumerate() {
             let plain_len = chunk
                 .len()
@@ -197,10 +194,9 @@ pub fn encrypt_timeline_export_v1(
     rng: &mut impl CryptoRng,
 ) -> Result<RecipientTimelineExportV1, RecipientExportErrorV1> {
     let payload = Zeroizing::new(encode_payload(export)?);
-    let payload_length =
-        u64::try_from(payload.len()).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
-    let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_BYTES))
-        .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+    // `encode_payload` caps these values; the sentinels fail header validation.
+    let payload_length = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+    let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_BYTES)).unwrap_or(u32::MAX);
     let header = RecipientExportHeaderV1 {
         export_id,
         timeline_id: export.timeline.id(),
@@ -232,9 +228,7 @@ pub fn encrypt_timeline_export_v1(
         let aad = chunk_aad(
             header_digest,
             u32::try_from(index).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
-            index + 1
-                == usize::try_from(chunk_count)
-                    .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
+            index + 1 == usize::try_from(chunk_count).unwrap_or(usize::MAX),
         );
         envelope.ciphertext_chunks.push(
             context
@@ -275,10 +269,7 @@ pub fn decrypt_timeline_export_v1(
         header_digest.as_bytes(),
     )
     .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?;
-    let mut plaintext = Zeroizing::new(Vec::with_capacity(
-        usize::try_from(envelope.header.payload_length)
-            .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
-    ));
+    let mut plaintext = Zeroizing::new(Vec::new());
     for (index, ciphertext) in envelope.ciphertext_chunks.iter().enumerate() {
         let aad = chunk_aad(
             header_digest,
@@ -442,8 +433,7 @@ fn validate_export(export: &TimelineExport) -> Result<(), RecipientExportErrorV1
         _ => return Err(RecipientExportErrorV1::SourceMismatch),
     }
     for (index, event) in export.events.iter().enumerate() {
-        if event.seq.as_u64()
-            != u64::try_from(index + 1).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?
+        if event.seq.as_u64() != u64::try_from(index + 1).unwrap_or(u64::MAX)
             || event.payload.len() > MAX_EVENT_PAYLOAD_BYTES
             || !(1..=MAX_EVENT_TYPE_BYTES).contains(&event.event_type.as_str().len())
             || event.signature.is_some() != event.signature_identity.is_some()
@@ -459,10 +449,7 @@ fn validate_export(export: &TimelineExport) -> Result<(), RecipientExportErrorV1
             return Err(RecipientExportErrorV1::IdentityMismatch);
         }
     }
-    if export.timeline.head.as_u64()
-        != u64::try_from(export.events.len())
-            .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?
-    {
+    if export.timeline.head.as_u64() != u64::try_from(export.events.len()).unwrap_or(u64::MAX) {
         return Err(RecipientExportErrorV1::SourceMismatch);
     }
     Ok(())
@@ -831,8 +818,10 @@ fn scan_cbor_item(
     match major {
         0 => Ok(()),
         2 | 3 => {
-            let length =
-                usize::try_from(length).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+            if length > u64::try_from(max_string_bytes).unwrap_or(u64::MAX) {
+                return Err(RecipientExportErrorV1::FieldOutOfBounds);
+            }
+            let length = usize::try_from(length).unwrap_or(usize::MAX);
             if length > max_string_bytes {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
@@ -846,8 +835,10 @@ fn scan_cbor_item(
             Ok(())
         }
         4 => {
-            let length =
-                usize::try_from(length).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+            if length > u64::try_from(max_array_items).unwrap_or(u64::MAX) {
+                return Err(RecipientExportErrorV1::FieldOutOfBounds);
+            }
+            let length = usize::try_from(length).unwrap_or(usize::MAX);
             if length > max_array_items || length > max_items.saturating_sub(*items) {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
