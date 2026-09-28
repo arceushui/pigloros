@@ -192,7 +192,7 @@ impl Plugin for SocietyPlugin {
 
 /// Installed read-only projection of Society Signals owned by another Plugin.
 ///
-/// This Plugin has a Reducer but no Driver, ActionApprover, or owned Event
+/// This Plugin has a Reducer but no Driver, `ActionApprover`, or owned Event
 /// types. Its empty output policy is still part of the admitted Plugin roster.
 pub struct SocietySignalProjectionPlugin {
     id: PluginId,
