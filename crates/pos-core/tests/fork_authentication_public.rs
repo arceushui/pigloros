@@ -195,6 +195,91 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn public_decoders_reject_reachable_nested_validation_errors(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fap = policy()?.to_canonical_cbor()?;
+    let invalid_binding = mutate(&fap, |value| {
+        let adapters = fields(&mut fields(value)?[2])?;
+        fields(&mut adapters[0])?[3] = Value::Array(vec![Value::Bytes(vec![1])]);
+        Ok(())
+    })?;
+    assert_eq!(
+        ForkAuthenticationPolicyV1::from_canonical_cbor(&invalid_binding),
+        Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
+    );
+    let invalid_version_shape = mutate(&fap, |value| {
+        fields(value)?[1] = Value::Text("one".to_owned());
+        Ok(())
+    })?;
+    assert_eq!(
+        ForkAuthenticationPolicyV1::from_canonical_cbor(&invalid_version_shape),
+        Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
+    );
+
+    let lar = registry()?.to_canonical_cbor()?;
+    for (field, replacement, expected) in [
+        (
+            2,
+            Value::Text(String::new()),
+            ForkAuthenticationCodecErrorV1::FieldOutOfBounds,
+        ),
+        (
+            2,
+            Value::Integer(0_u8.into()),
+            ForkAuthenticationCodecErrorV1::InvalidEncoding,
+        ),
+        (
+            3,
+            Value::Text("two".to_owned()),
+            ForkAuthenticationCodecErrorV1::InvalidEncoding,
+        ),
+    ] {
+        let bytes = mutate(&lar, |value| {
+            fields(value)?[field] = replacement;
+            Ok(())
+        })?;
+        assert_eq!(
+            LocalAccountRegistryV1::from_canonical_cbor(&bytes, 1000),
+            Err(expected)
+        );
+    }
+    let invalid_owner = mutate(&lar, |value| {
+        let rows = fields(&mut fields(value)?[4])?;
+        fields(&mut rows[0])?[2] = Value::Text(String::new());
+        Ok(())
+    })?;
+    assert_eq!(
+        LocalAccountRegistryV1::from_canonical_cbor(&invalid_owner, 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+
+    let apr = record()?.to_canonical_cbor()?;
+    assert_eq!(
+        AuthenticatedPrincipalRecordV1::from_canonical_cbor(&[0x80]),
+        Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
+    );
+    let invalid_apr_header = mutate(&apr, |value| {
+        fields(value)?[0] = Value::Bytes(b"APR1".to_vec());
+        Ok(())
+    })?;
+    assert_eq!(
+        AuthenticatedPrincipalRecordV1::from_canonical_cbor(&invalid_apr_header),
+        Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
+    );
+
+    let evidence = AuthenticatedPrincipalEvidenceV1::new(record()?, [9; 64])?;
+    let invalid_signature = mutate(&evidence.to_canonical_cbor()?, |value| {
+        fields(value)?[3] = Value::Bytes(vec![9]);
+        Ok(())
+    })?;
+    assert_eq!(
+        AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&invalid_signature),
+        Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
 fn fap1_public_decoder_rejects_every_nested_field_shape() -> Result<(), Box<dyn std::error::Error>>
 {
     let canonical = policy()?.to_canonical_cbor()?;
