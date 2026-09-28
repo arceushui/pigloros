@@ -803,7 +803,7 @@ mod tests {
                 .test_ok();
             timeline.id()
         };
-        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "same");
         let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         projected
             .register_installed_reducer(PluginId::new(), "same", Box::new(CountReducer))
