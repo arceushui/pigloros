@@ -873,7 +873,10 @@ mod tests {
         let mut host = crate::test_support::open_exact_host();
         let anchor = {
             let mut commands = host.command_sender().test_ok();
-            commands.create_timeline("snapshot-generation-anchor").test_ok().id()
+            commands
+                .create_timeline("snapshot-generation-anchor")
+                .test_ok()
+                .id()
         };
         let (_, generation) = host
             .read_sender()
