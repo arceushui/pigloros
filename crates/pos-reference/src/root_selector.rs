@@ -1375,9 +1375,8 @@ impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
         // Snapshot identity, including APT1/TRS1/RVS1 and their epochs, is
         // immutable within this Arc. Reserve entry only if it is still current.
         self.owner
-            .start_provider_entry(self.attempt_id, &self.admitted)?;
-        self.entry_proof = Some(proof);
-        Ok(())
+            .start_provider_entry(self.attempt_id, &self.admitted)
+            .map(|()| self.entry_proof = Some(proof))
     }
 
     fn entered(&mut self) {
