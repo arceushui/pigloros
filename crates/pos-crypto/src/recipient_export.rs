@@ -1039,6 +1039,84 @@ mod tests {
         Ok(result)
     }
 
+    fn rewrite_payload(
+        encoded: &[u8],
+        edit: impl FnOnce(&mut Vec<Value>),
+    ) -> Result<Vec<u8>, RecipientExportErrorV1> {
+        let mut value: Value =
+            ciborium::from_reader(encoded).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
+        let Value::Array(fields) = &mut value else {
+            return Err(RecipientExportErrorV1::InvalidEncoding);
+        };
+        edit(fields);
+        let mut result = Vec::new();
+        ciborium::into_writer(&value, &mut result)
+            .map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
+        Ok(result)
+    }
+
+    fn encrypt_payload(
+        payload: &[u8],
+        recipient: RecipientKeyDescriptorV1,
+        export_id: [u8; 16],
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<u8>, RecipientExportErrorV1> {
+        let payload_length =
+            u64::try_from(payload.len()).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+        let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_BYTES))
+            .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+        let header = RecipientExportHeaderV1 {
+            export_id,
+            timeline_id: TimelineId::from_ulid(id(3)),
+            local_head: Seq::from_u64(1),
+            parent_fork_hash: None,
+            recipient,
+            payload_length,
+            chunk_count,
+        };
+        validate_header(&header)?;
+        let header_digest = digest(HEADER_DOMAIN, &encode_header_bytes(&header));
+        let public_key = <X25519HkdfSha256 as Kem>::PublicKey::from_bytes(&recipient.public_key())
+            .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
+        let (enc, mut context) = setup_sender_with_rng::<
+            ChaCha20Poly1305,
+            HkdfSha256,
+            X25519HkdfSha256,
+        >(
+            &OpModeS::Base, &public_key, header_digest.as_bytes(), rng
+        )
+        .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
+        let ciphertext_chunks = payload
+            .chunks(CHUNK_BYTES)
+            .enumerate()
+            .map(|(index, plaintext)| {
+                context
+                    .seal(
+                        plaintext,
+                        &chunk_aad(
+                            header_digest,
+                            u32::try_from(index)
+                                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
+                            index + 1
+                                == usize::try_from(chunk_count)
+                                    .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
+                        ),
+                    )
+                    .map_err(|_| RecipientExportErrorV1::EncryptionFailed)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(RecipientTimelineExportV1 {
+            header,
+            enc: enc
+                .to_bytes()
+                .as_slice()
+                .try_into()
+                .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?,
+            ciphertext_chunks,
+        }
+        .encode())
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn round_trips_root_forks_and_empty_child() -> Result<(), RecipientExportErrorV1> {
@@ -1282,6 +1360,83 @@ mod tests {
         assert!(matches!(
             encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
             Err(RecipientExportErrorV1::IdentityMismatch)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_authenticated_malformed_tep1_at_public_decryption_boundary(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        let payload = encode_payload(&export(None, b"source".to_vec()))?;
+        let mut rng = StdRng::from_seed([12; 32]);
+        for index in 0..11 {
+            let malformed = rewrite_payload(&payload, |fields| fields[index] = Value::Null)?;
+            let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+            assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        }
+        for value in [Value::Integer(3_u64.into()), Value::Text("TEP1".to_owned())] {
+            let malformed = rewrite_payload(&payload, |fields| fields[3] = value)?;
+            let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+            assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        }
+        for index in 0..12 {
+            let malformed = rewrite_payload(&payload, |fields| {
+                if let Value::Array(events) = &mut fields[10] {
+                    if let Some(Value::Array(event)) = events.first_mut() {
+                        event[index] = Value::Null;
+                    }
+                }
+            })?;
+            let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+            assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        }
+        let malformed = rewrite_payload(&payload, |fields| {
+            fields[6] = Value::Bytes(id(2).to_bytes().to_vec());
+        })?;
+        let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+        assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_structurally_valid_hpke_tampering_at_public_decryption_boundary(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        let mut rng = StdRng::from_seed([13; 32]);
+        let encoded = encrypt_timeline_export_v1(
+            &export(None, b"source".to_vec()),
+            recipient,
+            [5; 16],
+            &mut rng,
+        )?
+        .encode();
+        for edit in [
+            |fields: &mut Vec<Value>| fields[6] = Value::Bytes(vec![0; 32]),
+            |fields: &mut Vec<Value>| {
+                if let Value::Array(header) = &mut fields[5] {
+                    header[2] = Value::Integer(2_u64.into());
+                }
+            },
+            |fields: &mut Vec<Value>| {
+                if let Value::Array(chunks) = &mut fields[7] {
+                    if let Some(Value::Bytes(chunk)) = chunks.first_mut() {
+                        chunk[0] ^= 1;
+                    }
+                }
+            },
+        ] {
+            let tampered = rewrite_envelope(&encoded, edit)?;
+            assert!(matches!(
+                decrypt_timeline_export_v1(&tampered, [5; 16], recipient, &private),
+                Err(RecipientExportErrorV1::AuthenticationFailed)
+            ));
+        }
+        assert!(matches!(
+            decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &[8; 32]),
+            Err(RecipientExportErrorV1::AuthenticationFailed)
         ));
         Ok(())
     }
