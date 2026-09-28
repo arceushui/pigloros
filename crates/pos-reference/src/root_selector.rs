@@ -2090,7 +2090,8 @@ mod tests {
 
         use super::*;
         use crate::selector::installation::tests::{
-            admitted_state_with_image, replace_image_file, root_selector_fixture_from_state,
+            admitted_state_with_image, remove_artifact, replace_image_file,
+            root_selector_fixture_from_state,
         };
 
         fn service(
@@ -2183,6 +2184,34 @@ mod tests {
                     )?;
                     assert!(service.transport.0.borrow().is_some());
                 }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_missing_held_image_files_before_provider_entry() -> TestResult {
+            let image = b"root-image";
+            let executable = b"adapter";
+            for (kind, bytes) in [
+                (InstallationObjectKind::ROOT_IMAGE, image.as_slice()),
+                (
+                    InstallationObjectKind::SUBJECT_EXECUTABLE,
+                    executable.as_slice(),
+                ),
+            ] {
+                let mut state = admitted_state_with_image(image, executable)?;
+                // SIC1 normally retains these files for the installation lifetime.
+                // Inject lost retention to exercise the service's fail-closed path.
+                remove_artifact(&mut state, kind, *blake3::hash(bytes).as_bytes());
+                let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+                let service = service(admitted)?;
+                assert_service_error(
+                    &service,
+                    &request,
+                    resolved.attempt(),
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                )?;
+                assert!(service.transport.0.borrow().is_some());
             }
             Ok(())
         }
