@@ -6299,6 +6299,7 @@ mod tests {
         );
         assert_eq!(final_page.next_from_seq, None);
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     #[tokio::test]
