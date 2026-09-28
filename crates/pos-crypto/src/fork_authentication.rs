@@ -302,8 +302,7 @@ fn canonical_array(
     }
     let mut encoded = Vec::new();
     let canonical = ciborium::into_writer(&Value::Array(values.clone()), &mut encoded)
-        .map(|()| encoded == bytes)
-        .unwrap_or_default();
+        .is_ok_and(|()| encoded == bytes);
     if !canonical {
         return Err(ForkAuthenticationSignatureErrorV1::InvalidRecord);
     }
