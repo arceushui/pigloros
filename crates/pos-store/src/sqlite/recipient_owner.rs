@@ -970,19 +970,11 @@ fn read_bound_private_key(
             .and_then(|mut file| {
                 file.metadata().map_err(storage_error).and_then(|metadata| {
                     validate_private_file(&metadata, expected).and_then(|()| {
-                        let mut material = Zeroizing::new(Vec::with_capacity(32));
-                        file.read_to_end(&mut material)
+                        let mut material = Zeroizing::new([0_u8; 32]);
+                        file.read_exact(&mut *material)
                             .map_err(storage_error)
                             .and_then(|_| {
-                                verify_bound_entry(owner, name, expected).and_then(|()| {
-                                    material.as_slice().try_into().map(Zeroizing::new).map_err(
-                                        |_| {
-                                            CoreError::Storage(
-                                                "recipient private key width is invalid".to_owned(),
-                                            )
-                                        },
-                                    )
-                                })
+                                verify_bound_entry(owner, name, expected).map(|()| material)
                             })
                     })
                 })
@@ -1013,17 +1005,10 @@ fn delete_bound_private_key(
                     .map_err(storage_error)
                     .and_then(|metadata| {
                         validate_private_file(&metadata, expected).and_then(|()| {
-                            let mut material = Zeroizing::new(Vec::with_capacity(32));
-                            file.read_to_end(&mut material)
+                            let mut material = Zeroizing::new([0_u8; 32]);
+                            file.read_exact(&mut *material)
                                 .map_err(storage_error)
-                                .and_then(|_| {
-                                    material.as_slice().try_into().map_err(|_| {
-                                        CoreError::Storage(
-                                            "recipient private key width is invalid".to_owned(),
-                                        )
-                                    })
-                                })
-                                .map(Zeroizing::new)
+                                .map(|_| material)
                                 .and_then(|material| {
                                     if pos_crypto::key_roles::key_material_digest(&material)
                                         != material_digest
