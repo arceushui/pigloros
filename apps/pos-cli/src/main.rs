@@ -56,8 +56,8 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn builtin_reference_runner_fails_closed_without_installed_profiles() {
-        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_err());
+    fn builtin_reference_runner_uses_test_support_profile() {
+        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
         assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 0).is_ok());
         assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 1).is_ok());
     }
@@ -90,7 +90,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn installed_synthetic_binding_rejects_without_profile_authority() {
+    fn installed_synthetic_binding_uses_test_support_profile() {
         use pos_plugin_synthetic_obs::SyntheticObsPlugin;
         let plugin = SyntheticObsPlugin::new();
         assert!(builtin_output_binding(
@@ -99,7 +99,7 @@ mod coverage_entrypoints {
             &1.0_f64.to_be_bytes(),
             "deterministic-local-v1",
         )
-        .is_err());
+        .is_ok());
     }
 }
 
@@ -1126,10 +1126,10 @@ mod tests {
     }
 
     #[test]
-    fn handle_experiment_run_rejects_uninstalled_profiles() {
+    fn handle_experiment_run_executes_with_test_support_profile() {
         let (_dir, path) = tmp_db();
         let a = args(&["run", &path, "--ticks", "3"]);
-        assert!(handle_experiment(&a).is_err());
+        assert!(handle_experiment(&a).is_ok());
     }
 
     #[test]
