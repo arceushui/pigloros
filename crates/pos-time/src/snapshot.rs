@@ -1109,6 +1109,7 @@ mod tests {
             timeline,
             at_seq: Seq::ZERO,
             registry: std::iter::once(("unknown".to_owned(), StateRegistry::new())).collect(),
+            inventory_generation: *closure.inventory_generation().as_bytes(),
         };
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
