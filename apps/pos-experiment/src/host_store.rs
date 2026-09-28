@@ -329,7 +329,7 @@ mod host_store_tests {
         )?;
         let mut registry =
             pos_runtime::PluginRegistry::new().with_erasure_gate(store.containment_gate());
-        registry.register(
+        registry.register_generated(
             &ProjectionProbe {
                 id: PluginId::new(),
             },
@@ -392,7 +392,7 @@ mod host_store_tests {
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
         });
-        experiment.register(
+        experiment.register_generated(
             &ProjectionProbe {
                 id: PluginId::new(),
             },
@@ -486,7 +486,7 @@ mod host_store_tests {
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
         });
-        experiment.register(
+        experiment.register_generated(
             &ProjectionProbe {
                 id: PluginId::new(),
             },

@@ -5744,7 +5744,7 @@ pub mod tests {
                 };
                 let mut registry = PluginRegistry::new();
                 registry
-                    .register(
+                    .register_generated(
                         &plugin,
                         Some(Box::new(CountReducer)),
                         Some(Box::new(make_driver())),
@@ -5754,7 +5754,7 @@ pub mod tests {
             }
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(make_driver())),
