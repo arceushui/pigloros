@@ -40,8 +40,7 @@ pub fn derive_recipient_keypair_v1(
 pub fn recipient_public_key_from_private_v1(
     private_key: &[u8; 32],
 ) -> Result<[u8; 32], RecipientKeyErrorV1> {
-    let private_key = <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(private_key)
-        .map_err(|_| RecipientKeyErrorV1::InvalidKeyWidth)?;
-    let public_key = X25519HkdfSha256::sk_to_pk(&private_key).to_bytes();
-    Ok(public_key.into())
+    <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(private_key)
+        .map(|private_key| X25519HkdfSha256::sk_to_pk(&private_key).to_bytes().into())
+        .map_err(|_| RecipientKeyErrorV1::InvalidKeyWidth)
 }
