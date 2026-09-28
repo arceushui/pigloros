@@ -47,6 +47,10 @@ jobs:
             --all-features --locked --no-run --message-format=json > /tmp/sim1-build.json
       - name: Measure adversarial near-limit proof inputs
         run: python3 scripts/measure_sim1_proof_heap.py /tmp/sim1-build.json sim1-heap-report
+      - name: Check all public admission cases on the measured build
+        run: |
+          cargo test -p pos-reference --test sandbox_admission_contract_public \
+            --all-features --locked -- --include-ignored
       - name: Retain heap traces and exact-source metadata
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
