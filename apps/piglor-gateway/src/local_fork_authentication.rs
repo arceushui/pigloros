@@ -379,6 +379,7 @@ fn finish_credential_read(
 ) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
     let mut bytes = Vec::with_capacity(size);
     reader
+        .take(u64::try_from(MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 + 1).unwrap_or(u64::MAX))
         .read_to_end(&mut bytes)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
     if bytes.len() != size {
@@ -855,6 +856,10 @@ mod tests {
 
         let mut short = &b"short"[..];
         expect_invalid(finish_credential_read(&mut short, 6));
+        let grown = vec![0; MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 + 100];
+        let mut grown = grown.as_slice();
+        expect_invalid(finish_credential_read(&mut grown, 1));
+        assert_eq!(grown.len(), 99);
         let mut failing = FailingReader;
         assert_eq!(
             finish_credential_read(&mut failing, 1),
