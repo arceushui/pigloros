@@ -84,6 +84,12 @@ struct InstalledPluginBundleV1<P> {
     registration: PluginRegistrationV1,
 }
 
+struct PendingRegistrationCallbacksV1<I> {
+    driver: Option<Box<dyn Driver>>,
+    approver: Option<Box<dyn ActionApprover>>,
+    approver_event_types: I,
+}
+
 #[derive(Clone, Copy)]
 enum CatalogueRegistrationModeV1 {
     InstalledGateway,
@@ -1071,12 +1077,6 @@ struct RegistrationOptions {
     output_admission: Option<OutputAdmissionV1>,
     manifest_slot: Option<String>,
     reducer_slot_by_plugin_id: bool,
-}
-
-struct RegistrationCallbacks<I> {
-    driver: Option<Box<dyn Driver>>,
-    approver: Option<Box<dyn ActionApprover>>,
-    approver_event_types: I,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -3136,7 +3136,7 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks {
+            PendingRegistrationCallbacksV1 {
                 driver,
                 approver,
                 approver_event_types,
@@ -3222,7 +3222,7 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks {
+            PendingRegistrationCallbacksV1 {
                 driver,
                 approver,
                 approver_event_types,
@@ -3328,7 +3328,7 @@ impl PluginRegistry {
                     &plugin,
                     binding,
                     reducer,
-                    RegistrationCallbacks {
+                    PendingRegistrationCallbacksV1 {
                         driver,
                         approver,
                         approver_event_types,
@@ -3414,7 +3414,7 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks {
+            PendingRegistrationCallbacksV1 {
                 driver,
                 approver,
                 approver_event_types,
@@ -3476,7 +3476,7 @@ impl PluginRegistry {
         plugin: &dyn Plugin,
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
-        callbacks: RegistrationCallbacks<I>,
+        callbacks: PendingRegistrationCallbacksV1<I>,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         // A prepared manifest batch admits only installed manifest-slot
@@ -3547,7 +3547,7 @@ impl PluginRegistry {
         )?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
-        let RegistrationCallbacks {
+        let PendingRegistrationCallbacksV1 {
             driver,
             approver,
             approver_event_types,
