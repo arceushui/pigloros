@@ -1049,7 +1049,7 @@ fn read_bound_private_key(
                         let mut material = Zeroizing::new([0_u8; 32]);
                         recipient_read_exact(&mut file, &mut *material)
                             .map_err(storage_error)
-                            .and_then(|_| {
+                            .and_then(|()| {
                                 verify_bound_entry(owner, name, expected).map(|()| material)
                             })
                     })
@@ -1084,7 +1084,7 @@ fn delete_bound_private_key(
                             let mut material = Zeroizing::new([0_u8; 32]);
                             recipient_read_exact(&mut file, &mut *material)
                                 .map_err(storage_error)
-                                .map(|_| material)
+                                .map(|()| material)
                                 .and_then(|material| {
                                     if pos_crypto::key_roles::key_material_digest(&material)
                                         != material_digest
