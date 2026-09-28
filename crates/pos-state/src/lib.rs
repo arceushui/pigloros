@@ -15,12 +15,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use pos_core::{
-    AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1,
-    AuthorizationRequestV1, CanonicalBytes, ConsentRevocationFoldListener,
-    ConsentRevokedV1, EntityId, ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1,
-    ErasureReferenceV1, Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1,
-    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
-    PersistedAuthorityV1, PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId,
+    AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
+    CanonicalBytes, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
+    Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
+    PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 
