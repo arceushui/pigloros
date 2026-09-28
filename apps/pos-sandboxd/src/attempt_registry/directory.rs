@@ -3,9 +3,9 @@
 use rustix::fs::mkdirat;
 
 use super::{
-    open_directory, publish_record, read_record_bytes, require_empty, validate_directory,
-    verify_intent, Arc, CommittedPlannedAttempt, File, MetadataExt, Mode, PlannedAttemptIntent,
-    RenameFlags, ResolveFlags, SystemdAttemptRegistryError,
+    open_directory, publish_record, read_record_bytes, registry_io, require_empty,
+    validate_directory, verify_intent, Arc, CommittedPlannedAttempt, File, MetadataExt, Mode,
+    PlannedAttemptIntent, RenameFlags, ResolveFlags, SystemdAttemptRegistryError,
 };
 
 const DIRECTORY_RECORD_SIZE: usize = 84;
@@ -18,7 +18,7 @@ struct DirectoryIdentity {
 
 impl DirectoryIdentity {
     fn read(file: &File) -> Result<Self, SystemdAttemptRegistryError> {
-        let metadata = file.metadata()?;
+        let metadata = registry_io(|| file.metadata())?;
         Ok(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -190,8 +190,8 @@ fn create_private_directory(
     component: &str,
     owner: u32,
 ) -> Result<File, SystemdAttemptRegistryError> {
-    mkdirat(parent, component, Mode::RWXU).map_err(std::io::Error::from)?;
-    parent.sync_all()?;
+    registry_io(|| mkdirat(parent, component, Mode::RWXU).map_err(std::io::Error::from))?;
+    registry_io(|| parent.sync_all())?;
     let directory = open_directory(parent, component, ResolveFlags::NO_XDEV)?;
     validate_directory(&directory, owner, true)?;
     require_empty(&directory)?;
@@ -201,6 +201,7 @@ fn create_private_directory(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use super::super::tests::with_io_fault;
     use super::*;
     use crate::SystemdAttemptRegistry;
     use std::fs;
@@ -221,6 +222,104 @@ mod tests {
 
     fn intent(id: u8) -> TestResult<PlannedAttemptIntent> {
         Ok(PlannedAttemptIntent::new([id; 16], [2; 32])?)
+    }
+
+    #[test]
+    fn prepare_io_boundary_failures_close_owner_and_preserve_recovery_state() -> TestResult {
+        let planned = intent(1)?;
+        let operation_count = {
+            let (_directory, registry) = fixture()?;
+            let committed = registry.commit_planned(&planned)?;
+            let (result, count) = with_io_fault(None, || committed.prepare_directory());
+            result?;
+            count
+        };
+        assert!(operation_count > 0);
+        let mut observed_extended = false;
+        for fail_at in 0..operation_count {
+            let (directory, registry) = fixture()?;
+            let committed = registry.commit_planned(&planned)?;
+            let (result, observed) = with_io_fault(Some(fail_at), || committed.prepare_directory());
+            assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
+            assert_eq!(observed, fail_at + 1);
+            assert!(matches!(
+                registry.commit_planned(&intent(2)?),
+                Err(SystemdAttemptRegistryError::ReconciliationRequired)
+            ));
+            let key = planned.unit_name().attempt_component();
+            let record_path = directory.path().join("registry").join(key);
+            let record = fs::read(&record_path)?;
+            let attempt = directory.path().join("attempts").join(key);
+            let root = attempt.join("root");
+            let existed = [attempt.exists(), root.exists()];
+            if record.len() == DIRECTORY_RECORD_SIZE {
+                observed_extended = true;
+                let mut expected = b"PAI2".to_vec();
+                expected.extend_from_slice(&[1; 16]);
+                expected.extend_from_slice(&[2; 32]);
+                for path in [&attempt, &root] {
+                    let metadata = fs::metadata(path)?;
+                    expected.extend_from_slice(&metadata.dev().to_le_bytes());
+                    expected.extend_from_slice(&metadata.ino().to_le_bytes());
+                }
+                assert_eq!(record, expected);
+            } else {
+                assert_eq!(record, planned.encode());
+            }
+            let records = fs::read_dir(directory.path().join("registry"))?.count();
+            assert!((1..=2).contains(&records));
+            drop(registry);
+            assert_eq!(fs::read(record_path)?, record);
+            assert_eq!([attempt.exists(), root.exists()], existed);
+            assert_eq!(
+                fs::read_dir(directory.path().join("registry"))?.count(),
+                records
+            );
+            let parent = File::open(directory.path())?;
+            assert!(matches!(
+                SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid()),
+                Err(SystemdAttemptRegistryError::ReconciliationRequired)
+            ));
+        }
+        assert!(observed_extended);
+        Ok(())
+    }
+
+    #[test]
+    fn directory_readback_io_boundary_failures_close_owner() -> TestResult {
+        let operation_count = {
+            let (_directory, registry) = fixture()?;
+            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let (result, count) = with_io_fault(None, || prepared.verify_directory());
+            result?;
+            count
+        };
+        assert!(operation_count > 0);
+        for fail_at in 0..operation_count {
+            let (directory, registry) = fixture()?;
+            let planned = intent(1)?;
+            let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+            let path = directory
+                .path()
+                .join("registry")
+                .join(planned.unit_name().attempt_component());
+            let before = fs::read(&path)?;
+            let (result, observed) = with_io_fault(Some(fail_at), || prepared.verify_directory());
+            assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
+            assert_eq!(observed, fail_at + 1);
+            assert!(matches!(
+                registry.commit_planned(&intent(2)?),
+                Err(SystemdAttemptRegistryError::ReconciliationRequired)
+            ));
+            assert_eq!(fs::read(path)?, before);
+            assert!(directory
+                .path()
+                .join("attempts")
+                .join(planned.unit_name().attempt_component())
+                .join("root")
+                .is_dir());
+        }
+        Ok(())
     }
 
     #[test]

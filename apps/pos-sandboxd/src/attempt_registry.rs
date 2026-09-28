@@ -166,7 +166,7 @@ impl SystemdAttemptRegistry {
         require_empty(&registry)?;
         Ok(Self {
             directory: Arc::new(RegistryDirectory {
-                runtime: parent.try_clone()?,
+                runtime: registry_io(|| parent.try_clone())?,
                 file: registry,
                 owner,
             }),
@@ -448,7 +448,10 @@ mod tests {
         }
     }
 
-    fn with_io_fault<T>(fail_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
+    pub(super) fn with_io_fault<T>(
+        fail_at: Option<usize>,
+        operation: impl FnOnce() -> T,
+    ) -> (T, usize) {
         let _restore = RestoreIoFault(IO_FAULT.with(|state| state.replace((0, fail_at))));
         let result = operation();
         (result, IO_FAULT.with(|state| state.get().0))
