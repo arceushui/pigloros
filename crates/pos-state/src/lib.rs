@@ -711,10 +711,9 @@ impl ProjectionRegistry {
 
     /// Restore accumulated state from a previously captured snapshot map.
     ///
-    /// Resets all accumulated state first (via [`Self::clear_state`]), then
-    /// loads the corresponding [`StateRegistry`] for each reducer name found in
-    /// `snapshot`. Reducer names present in `snapshot` but not registered are
-    /// ignored; registered reducers with no entry in `snapshot` remain empty.
+    /// Replaces each registered reducer's accumulated state with its matching
+    /// [`StateRegistry`] from `snapshot`, or an empty registry when absent.
+    /// Snapshot entries for unregistered reducers are ignored.
     ///
     /// This is the counterpart of [`Self::state_snapshot`] and is used by
     /// `pos-time` snapshot consistency verification to seed the incremental path.
