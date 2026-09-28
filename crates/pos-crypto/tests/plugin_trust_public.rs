@@ -4,7 +4,7 @@ use pos_crypto::plugin_trust::{
 
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/plugin_trust_vectors.rs"
+    "/tests/support/plugin_trust_vectors.rs"
 ));
 
 #[test]
