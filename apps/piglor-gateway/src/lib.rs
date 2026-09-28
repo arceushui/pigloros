@@ -54,11 +54,6 @@ use pos_plugin_world::{
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
 };
-#[cfg(test)]
-use pos_runtime::{
-    DomainImplementationKindV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
-    PluginRegistrationV1,
-};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -1106,32 +1101,6 @@ fn canonical_gateway_bodies(
     Ok(bodies)
 }
 
-#[cfg(test)]
-fn register_bound_gateway_world_action(
-    registry: &mut PluginRegistry,
-    descriptor: &GatewayActionPlugin,
-    world_plugin: WorldPlugin,
-    binding: pos_runtime::OutputPolicyBindingV1,
-    roles: Vec<String>,
-) -> Result<(), pos_runtime::RuntimeError> {
-    let closure = binding.with_installed_action_approver(
-        GatewayWorldActionApprover(world_plugin),
-        [Kind::new(EVENT_TYPE_ACTION)],
-    )?;
-    let pin = PluginPinV1::try_new(
-        DomainImplementationKindV1::Plugin,
-        PluginIsolationV1::OperatorTrustedNative,
-        closure.policy().digest(),
-        roles,
-    )?;
-    registry.register_installed_output(
-        descriptor,
-        closure,
-        PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
-        None,
-    )?;
-    Ok(())
-}
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn gateway_action_registry_builder_for_test(

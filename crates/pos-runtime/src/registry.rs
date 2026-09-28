@@ -52,13 +52,15 @@ fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+type CatalogueFactoryV1<C, P, A> = fn(&C) -> (P, Option<Box<dyn Reducer>>, A);
+
 /// One reviewed Gateway catalogue entry selected by the trusted composition root.
 ///
 /// Its functions receive the same frozen configuration. The factory cannot
 /// supply a policy, registration pin, or registry mutation capability.
 pub struct HostCatalogueEntryV1<C, P, A> {
     configuration_details: fn(&C) -> Vec<u8>,
-    build: fn(&C) -> (P, Option<Box<dyn Reducer>>, A),
+    build: CatalogueFactoryV1<C, P, A>,
 }
 
 impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
@@ -66,7 +68,7 @@ impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
     #[must_use]
     pub const fn gateway(
         configuration_details: fn(&C) -> Vec<u8>,
-        build: fn(&C) -> (P, Option<Box<dyn Reducer>>, A),
+        build: CatalogueFactoryV1<C, P, A>,
     ) -> Self {
         Self {
             configuration_details,
@@ -1069,12 +1071,6 @@ struct RegistrationOptions {
     output_admission: Option<OutputAdmissionV1>,
     manifest_slot: Option<String>,
     reducer_slot_by_plugin_id: bool,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-struct RegistrationCallbacks {
-    driver: Option<Box<dyn Driver>>,
-    approver: Option<Box<dyn ActionApprover>>,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -3134,8 +3130,11 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks { driver, approver },
-            approver_event_types,
+            InstalledCallbacksV1 {
+                driver,
+                approver,
+                approver_event_types: approver_event_types.into_iter().collect(),
+            },
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
@@ -3217,8 +3216,11 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks { driver, approver },
-            approver_event_types,
+            InstalledCallbacksV1 {
+                driver,
+                approver,
+                approver_event_types: approver_event_types.into_iter().collect(),
+            },
             RegistrationOptions {
                 registration: None,
                 output_admission: None,
@@ -3250,7 +3252,7 @@ impl PluginRegistry {
     {
         self.register_from_host_catalogue_entry_inner(
             entry,
-            frozen_configuration,
+            &frozen_configuration,
             CatalogueRegistrationModeV1::InstalledGateway,
         )
     }
@@ -3258,15 +3260,15 @@ impl PluginRegistry {
     fn register_from_host_catalogue_entry_inner<C, P, A>(
         &mut self,
         entry: &HostCatalogueEntryV1<C, P, A>,
-        frozen_configuration: C,
+        frozen_configuration: &C,
         mode: CatalogueRegistrationModeV1,
     ) -> Result<(), RuntimeError>
     where
         P: Plugin,
         A: ActionApprover + 'static,
     {
-        let configuration_details = (entry.configuration_details)(&frozen_configuration);
-        let (plugin, reducer, approver) = (entry.build)(&frozen_configuration);
+        let configuration_details = (entry.configuration_details)(frozen_configuration);
+        let (plugin, reducer, approver) = (entry.build)(frozen_configuration);
         let binding = OutputPolicyBindingV1::from_installed_source(
             &plugin,
             match mode {
@@ -3319,8 +3321,11 @@ impl PluginRegistry {
                     &plugin,
                     binding,
                     reducer,
-                    RegistrationCallbacks { driver, approver },
-                    approver_event_types,
+                    InstalledCallbacksV1 {
+                        driver,
+                        approver,
+                        approver_event_types,
+                    },
                     RegistrationOptions {
                         registration: None,
                         output_admission: None,
@@ -3393,17 +3398,12 @@ impl PluginRegistry {
             return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
         }
         self.validate_installed_registration_details(plugin, &binding, &registration)?;
-        let InstalledCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = binding.take_callbacks();
+        let callbacks = binding.take_callbacks();
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks { driver, approver },
-            approver_event_types,
+            callbacks,
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
@@ -3462,8 +3462,7 @@ impl PluginRegistry {
         plugin: &dyn Plugin,
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
-        callbacks: RegistrationCallbacks,
-        approver_event_types: impl IntoIterator<Item = Kind>,
+        callbacks: InstalledCallbacksV1,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         // A prepared manifest batch admits only installed manifest-slot
@@ -3534,8 +3533,11 @@ impl PluginRegistry {
         )?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
-        let RegistrationCallbacks { driver, approver } = callbacks;
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = callbacks;
         self.register_with_approver_slice(
             plugin,
             reducer,
@@ -5930,7 +5932,7 @@ mod tests {
         registry
             .register_from_host_catalogue_entry_inner(
                 &selected,
-                CatalogueFixtureConfiguration {
+                &CatalogueFixtureConfiguration {
                     plugin_id: PluginId::new(),
                     details: Vec::new(),
                 },
@@ -5995,7 +5997,7 @@ mod tests {
         registry
             .register_from_host_catalogue_entry_inner(
                 &selected,
-                CatalogueFixtureConfiguration {
+                &CatalogueFixtureConfiguration {
                     plugin_id: second_id,
                     details: Vec::new(),
                 },
@@ -6053,7 +6055,7 @@ mod tests {
         assert!(matches!(
             registry.register_from_host_catalogue_entry_inner(
                 &selected,
-                CatalogueFixtureConfiguration {
+                &CatalogueFixtureConfiguration {
                     plugin_id: PluginId::new(),
                     details: Vec::new(),
                 },
@@ -6089,7 +6091,7 @@ mod tests {
         first
             .register_from_host_catalogue_entry_inner(
                 &selected,
-                CatalogueFixtureConfiguration {
+                &CatalogueFixtureConfiguration {
                     plugin_id,
                     details: b"first".to_vec(),
                 },
@@ -6100,7 +6102,7 @@ mod tests {
         second
             .register_from_host_catalogue_entry_inner(
                 &selected,
-                CatalogueFixtureConfiguration {
+                &CatalogueFixtureConfiguration {
                     plugin_id,
                     details: b"second".to_vec(),
                 },
