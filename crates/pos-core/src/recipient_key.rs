@@ -105,7 +105,7 @@ impl RecipientKeyDescriptorV1 {
     pub fn decode(bytes: &[u8]) -> Result<Self, RecipientKeyDescriptorErrorV1> {
         let mut cursor = Rkp1Cursor::new(bytes);
         cursor.array_start()?;
-        cursor.exact_bytes(&MAGIC)?;
+        cursor.exact_magic()?;
         cursor.exact_u8(VERSION, RecipientKeyDescriptorErrorV1::UnsupportedVersion)?;
         let owner = cursor.owner()?;
         cursor.exact_u8(ROLE_CODE, RecipientKeyDescriptorErrorV1::InvalidRole)?;
@@ -226,12 +226,10 @@ impl<'a> Rkp1Cursor<'a> {
         self.exact_byte(0x87)
     }
 
-    fn exact_bytes(&mut self, expected: &[u8]) -> Result<(), RecipientKeyDescriptorErrorV1> {
-        let expected_length = u8::try_from(expected.len())
-            .map_err(|_| RecipientKeyDescriptorErrorV1::InvalidEncoding)?;
-        self.exact_byte(0x40 | expected_length)?;
-        self.take(expected.len()).and_then(|actual| {
-            (actual == expected)
+    fn exact_magic(&mut self) -> Result<(), RecipientKeyDescriptorErrorV1> {
+        self.exact_byte(0x44)?;
+        self.take(MAGIC.len()).and_then(|actual| {
+            (actual == MAGIC)
                 .then_some(())
                 .ok_or(RecipientKeyDescriptorErrorV1::InvalidEncoding)
         })
