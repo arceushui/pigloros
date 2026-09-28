@@ -11,8 +11,8 @@ use crate::{CanonicalBytes, Hash, OwnerIdV1, PrincipalRefV1};
 
 /// Maximum complete FAP1 encoding, including its outer CBOR array.
 pub const MAX_FORK_AUTH_POLICY_BYTES_V1: usize = 37_528;
-/// Maximum complete FACR1 encoding, including its outer CBOR array.
-pub const MAX_FORK_AUTH_CREDENTIAL_BYTES_V1: usize = 65_536;
+/// Maximum accepted LAR1 encoding reconstructed from a protected FACR1 credential.
+pub const MAX_LOCAL_ACCOUNT_REGISTRY_BYTES_V1: usize = 65_536;
 /// Maximum complete APR1 encoding.
 pub const MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1: usize = 381;
 /// Maximum complete FAE1 encoding.
@@ -253,7 +253,7 @@ impl LocalAccountRegistryV1 {
         bytes_in: &[u8],
         service_uid: u32,
     ) -> Result<Self, ForkAuthenticationCodecErrorV1> {
-        let value = decode(bytes_in, MAX_FORK_AUTH_CREDENTIAL_BYTES_V1)?;
+        let value = decode(bytes_in, MAX_LOCAL_ACCOUNT_REGISTRY_BYTES_V1)?;
         let fields = array(&value, 5)?;
         header(fields, "LAR1")?;
         let entries = nonempty_array(&fields[4], 64)?;
@@ -388,8 +388,9 @@ impl AuthenticatedPrincipalRecordV1 {
     /// Encode the exact APR1 content.
     ///
     /// # Errors
-    /// Returns a closed codec error if the Principal or CBOR value cannot encode.
+    /// Rejects invalid record fields or a Principal or CBOR value that cannot encode.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
+        self.validate()?;
         self.principal
             .encode()
             .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)

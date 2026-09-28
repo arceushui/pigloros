@@ -5,7 +5,7 @@ use pos_core::{
         ForkAuthenticationAdapterPolicyV1, ForkAuthenticationCodecErrorV1,
         ForkAuthenticationPolicyV1, LocalAccountBindingV1, LocalAccountRegistryV1,
         MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1, MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1,
-        MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, MAX_FORK_AUTH_POLICY_BYTES_V1,
+        MAX_FORK_AUTH_POLICY_BYTES_V1, MAX_LOCAL_ACCOUNT_REGISTRY_BYTES_V1,
     },
     Hash, OwnerIdV1, PrincipalRefV1,
 };
@@ -170,6 +170,10 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
             ..record()?
         },
         AuthenticatedPrincipalRecordV1 {
+            adapter_id: "a".repeat(129),
+            ..record()?
+        },
+        AuthenticatedPrincipalRecordV1 {
             assurance: 0,
             ..record()?
         },
@@ -186,6 +190,10 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
             ..record()?
         },
     ] {
+        assert_eq!(
+            invalid.to_canonical_cbor(),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
         assert_eq!(
             AuthenticatedPrincipalEvidenceV1::new(invalid, [9; 64]),
             Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
@@ -452,7 +460,7 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
     );
     assert_eq!(
         LocalAccountRegistryV1::from_canonical_cbor(
-            &vec![0; MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 + 1],
+            &vec![0; MAX_LOCAL_ACCOUNT_REGISTRY_BYTES_V1 + 1],
             1000,
         ),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
