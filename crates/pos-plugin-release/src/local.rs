@@ -56,6 +56,10 @@ enum PublicationFaultPointV1 {
     QuarantineRootSync,
     RecoveryCleanupSync,
     DirectoryRead,
+    OpenDirectory,
+    OpenPrivateFile,
+    ReadMetadata,
+    ReadBytes,
     NthSync(usize),
 }
 
@@ -1088,15 +1092,26 @@ fn parse_root_index(bytes: &[u8]) -> Result<Vec<BundleAddressV1>, ReleaseSourceE
 }
 
 fn read_limited(file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
-    let length = usize::try_from(file.metadata().map_err(|_| ReleaseSourceErrorV1::Io)?.len())
-        .map_err(|_| ReleaseSourceErrorV1::BoundsExceeded)?;
+    let length = usize::try_from(
+        faulted_io!(
+            fault_selected(PublicationFaultPointV1::ReadMetadata),
+            std::io::Error::other("injected local OCI metadata fault"),
+            file.metadata()
+        )
+        .map_err(|_| ReleaseSourceErrorV1::Io)?
+        .len(),
+    )
+    .map_err(|_| ReleaseSourceErrorV1::BoundsExceeded)?;
     if length > limit {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
     }
     let mut bytes = Vec::with_capacity(length);
-    file.take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ReleaseSourceErrorV1::Io)?;
+    faulted_io!(
+        fault_selected(PublicationFaultPointV1::ReadBytes),
+        std::io::Error::other("injected local OCI read fault"),
+        file.take(limit as u64 + 1).read_to_end(&mut bytes)
+    )
+    .map_err(|_| ReleaseSourceErrorV1::Io)?;
     if bytes.len() > limit {
         Err(ReleaseSourceErrorV1::BoundsExceeded)
     } else if bytes.len() == length {
@@ -1228,12 +1243,16 @@ fn create_private_file(
 }
 
 fn open_directory(root: &File, name: &str) -> Result<File, LocalOciPublicationErrorV1> {
-    let directory = fs::openat2(
-        root,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-        resolution(),
+    let directory = faulted_io!(
+        fault_selected(PublicationFaultPointV1::OpenDirectory),
+        rustix::io::Errno::IO,
+        fs::openat2(
+            root,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            resolution(),
+        )
     )
     .map(File::from)
     .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
@@ -1268,12 +1287,16 @@ fn validate_local_filesystem(root: &File) -> Result<(), LocalOciPublicationError
 }
 
 fn open_private_file(root: &File, name: &str) -> Result<File, LocalOciPublicationErrorV1> {
-    let file = fs::openat2(
-        root,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(),
-        resolution(),
+    let file = faulted_io!(
+        fault_selected(PublicationFaultPointV1::OpenPrivateFile),
+        rustix::io::Errno::IO,
+        fs::openat2(
+            root,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+            resolution(),
+        )
     )
     .map(File::from)
     .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
@@ -1570,6 +1593,39 @@ mod tests {
         PUBLICATION_FAULT.with(|fault| fault.set(None));
         assert_eq!(publisher.read_verified(&address)?, bundle);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn descriptor_relative_open_and_read_faults_fail_closed_at_reader_seam(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (point, expected) in [
+            (
+                PublicationFaultPointV1::OpenDirectory,
+                ReleaseSourceErrorV1::InvalidLayout,
+            ),
+            (
+                PublicationFaultPointV1::OpenPrivateFile,
+                ReleaseSourceErrorV1::InvalidLayout,
+            ),
+            (
+                PublicationFaultPointV1::ReadMetadata,
+                ReleaseSourceErrorV1::Io,
+            ),
+            (PublicationFaultPointV1::ReadBytes, ReleaseSourceErrorV1::Io),
+        ] {
+            let root = private_root("reader-fault")?;
+            let publisher = LocalOciPublisherV1::open(&root)?;
+            let bundle = bundle()?;
+            let address = bundle.address().clone();
+            publisher.publish(&bundle)?;
+            PUBLICATION_FAULT.with(|fault| fault.set(Some(point)));
+            assert_eq!(publisher.read_verified(&address), Err(expected));
+            PUBLICATION_FAULT.with(|fault| fault.set(None));
+            assert_eq!(publisher.read_verified(&address)?, bundle);
+            std::fs::remove_dir_all(root)?;
+        }
         Ok(())
     }
 
