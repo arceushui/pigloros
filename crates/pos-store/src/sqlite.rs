@@ -175,9 +175,10 @@ fn bounded_read_delay_for_test(phase: u8) {
 
 pub struct SqliteStore {
     conn: Connection,
-    /// Writable lock connection used only to serialize protected effects for
-    /// a read-only store connection. It never performs application writes.
-    erasure_effect_lock_connection: Option<Connection>,
+    /// Writable connection used to reserve the database writer for protected
+    /// effects and historical decryption on a read-only store handle. It never
+    /// performs application writes.
+    writer_reservation_connection: Option<Connection>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
@@ -1454,7 +1455,7 @@ impl SqliteStore {
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-        let erasure_effect_lock_connection = Self::open_erasure_effect_lock_connection(path, flags);
+        let writer_reservation_connection = Self::open_writer_reservation_connection(path, flags);
 
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
@@ -1466,7 +1467,7 @@ impl SqliteStore {
 
         let mut store = Self {
             conn,
-            erasure_effect_lock_connection,
+            writer_reservation_connection,
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
@@ -1491,7 +1492,7 @@ impl SqliteStore {
         Ok(store)
     }
 
-    fn open_erasure_effect_lock_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
+    fn open_writer_reservation_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
             Connection::open_with_flags(
                 path,
@@ -4761,7 +4762,7 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
         // A read-only store uses its writable lock connection so rotation and
         // destruction serialize with the held callback.
         let connection = self
-            .erasure_effect_lock_connection
+            .writer_reservation_connection
             .as_ref()
             .unwrap_or(&self.conn);
         identity
@@ -6078,7 +6079,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         &self,
     ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
         let interval_connection = self
-            .erasure_effect_lock_connection
+            .writer_reservation_connection
             .as_ref()
             .unwrap_or(&self.conn);
         if !interval_connection.is_autocommit() {
@@ -6126,7 +6127,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             return Ok(());
         }
         let interval_connection = self
-            .erasure_effect_lock_connection
+            .writer_reservation_connection
             .as_ref()
             .unwrap_or(&self.conn);
         let statement = match disposition {
@@ -12140,7 +12141,7 @@ mod tests {
         let path = database.path().to_str().test_ok();
         drop(open_store_at(path));
         let store = fixture_store(SqliteStore::open_read_only(path).test_ok());
-        assert!(store.erasure_effect_lock_connection.is_some());
+        assert!(store.writer_reservation_connection.is_some());
         let interval = store.begin_protected_effect_interval().test_ok();
         assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
         store
