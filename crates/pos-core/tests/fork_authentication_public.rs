@@ -251,8 +251,7 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
 }
 
 #[test]
-fn apr1_and_fae1_public_decoders_reject_record_and_evidence_field_shapes(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn apr1_public_decoder_rejects_record_field_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let record = record()?;
     let apr = record.to_canonical_cbor()?;
     let record_cases: Vec<(usize, Value, ForkAuthenticationCodecErrorV1)> = vec![
@@ -318,7 +317,12 @@ fn apr1_and_fae1_public_decoders_reject_record_and_evidence_field_shapes(
         ],),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
+}
 
+#[test]
+fn fae1_public_decoder_rejects_evidence_field_shapes() -> Result<(), Box<dyn std::error::Error>> {
+    let record = record()?;
     let evidence = AuthenticatedPrincipalEvidenceV1::new(record, [9; 64])?;
     let fae = evidence.to_canonical_cbor()?;
     let cases: Vec<(Vec<u8>, ForkAuthenticationCodecErrorV1)> = vec![
