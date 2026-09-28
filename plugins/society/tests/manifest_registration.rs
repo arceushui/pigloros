@@ -78,8 +78,8 @@ fn reject_generated_registration<P: Plugin>(
             Some(Box::new(SocietyReducer)),
             slot,
         ),
-        Err(RuntimeError::ManifestRegistration(
-            ManifestRegistrationErrorV1::UnverifiedRegistration
+        Err(RuntimeError::OutputAdmission(
+            OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
         ))
     ));
     assert!(registry.is_empty());

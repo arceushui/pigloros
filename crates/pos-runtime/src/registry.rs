@@ -3350,14 +3350,8 @@ impl PluginRegistry {
         if let Some(registration) = options.registration.as_ref() {
             self.validate_registration_roles(registration)?;
         }
-        let (output_policy, executable_budget, artifacts, source, owner_token) =
+        let (output_policy, executable_budget, artifacts, _source, owner_token) =
             binding.into_parts();
-        #[cfg(any(test, feature = "test-support"))]
-        if options.manifest_slot.is_some() && source == InstalledOutputPolicySourceV1::Generated {
-            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration.into());
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = source;
         let closure = OutputPolicyClosureV1::from_artifacts(
             &output_policy.to_canonical_cbor(),
             &executable_budget.to_canonical_cbor(),
