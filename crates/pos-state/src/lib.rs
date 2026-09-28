@@ -1514,7 +1514,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn failed_state_transaction_does_not_restore_revoked_subject_projection() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let subject = EntityId::new();
         let other = EntityId::new();
@@ -1545,7 +1545,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn outer_state_transaction_retains_nested_revocation_after_failure() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let subject = EntityId::new();
         registry.apply_event(test_timeline(), &make_event(subject));
