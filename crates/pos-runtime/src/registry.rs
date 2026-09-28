@@ -4604,21 +4604,24 @@ mod tests {
             .test_ok();
         let entity = EntityId::new();
         let timeline = TimelineId::new();
-        registry.projections.apply_event(timeline, &Event {
-            id: EventId::new(),
-            entity,
-            event_type: Kind::new("first.output"),
-            payload: CanonicalBytes::from_static(b"fixture"),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: None,
-            signature_identity: None,
-            origin: None,
-            payload_hash: Hash::from_bytes([0; 32]),
-        });
+        registry.projections.apply_event(
+            timeline,
+            &Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new("first.output"),
+                payload: CanonicalBytes::from_static(b"fixture"),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            },
+        );
         registry
             .register_pinned_generated(
                 &second,
