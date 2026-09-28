@@ -17,16 +17,16 @@ fn openssl_detached_fixture_matches_the_accepted_algorithm_profile(
     let outer = ContentInfo::from_der(PROOF)?;
     assert_eq!(outer.to_der()?, PROOF);
     assert_eq!(outer.content_type.to_string(), "1.2.840.113549.1.7.2");
-    let signed: SignedData = outer.content.decode_as()?;
-    assert_eq!(signed.version, CmsVersion::V1);
+    let cms_data: SignedData = outer.content.decode_as()?;
+    assert_eq!(cms_data.version, CmsVersion::V1);
     assert_eq!(
-        signed.encap_content_info.econtent_type.to_string(),
+        cms_data.encap_content_info.econtent_type.to_string(),
         "1.2.840.113549.1.7.1"
     );
-    assert!(signed.encap_content_info.econtent.is_none());
-    assert!(signed.crls.is_none());
-    assert_eq!(signed.digest_algorithms.len(), 1);
-    let digest = signed.digest_algorithms.get(0).ok_or("missing digest")?;
+    assert!(cms_data.encap_content_info.econtent.is_none());
+    assert!(cms_data.crls.is_none());
+    assert_eq!(cms_data.digest_algorithms.len(), 1);
+    let digest = cms_data.digest_algorithms.get(0).ok_or("missing digest")?;
     assert_eq!(digest.oid.to_string(), "2.16.840.1.101.3.4.2.1");
     assert_eq!(
         digest
@@ -39,14 +39,17 @@ fn openssl_detached_fixture_matches_the_accepted_algorithm_profile(
 
     let certificate = x509_cert::Certificate::from_der(CERTIFICATE)?;
     assert_eq!(certificate.to_der()?, CERTIFICATE);
-    let certificates = signed.certificates.as_ref().ok_or("missing certificates")?;
+    let certificates = cms_data
+        .certificates
+        .as_ref()
+        .ok_or("missing certificates")?;
     assert_eq!(certificates.0.len(), 1);
     assert_eq!(
         certificates.0.get(0),
         Some(&CertificateChoices::Certificate(certificate.clone()))
     );
-    assert_eq!(signed.signer_infos.0.len(), 1);
-    let signer = signed.signer_infos.0.get(0).ok_or("missing signer")?;
+    assert_eq!(cms_data.signer_infos.0.len(), 1);
+    let signer = cms_data.signer_infos.0.get(0).ok_or("missing signer")?;
     assert_eq!(signer.version, CmsVersion::V1);
     let SignerIdentifier::IssuerAndSerialNumber(sid) = &signer.sid else {
         return Err("fixture must use issuer and serial".into());
@@ -76,8 +79,8 @@ fn openssl_detached_fixture_matches_the_accepted_algorithm_profile(
 fn selected_webpki_and_ring_algorithms_verify_the_external_fixture(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outer = ContentInfo::from_der(PROOF)?;
-    let signed: SignedData = outer.content.decode_as()?;
-    let signer = signed.signer_infos.0.get(0).ok_or("missing signer")?;
+    let cms_data: SignedData = outer.content.decode_as()?;
+    let signer = cms_data.signer_infos.0.get(0).ok_or("missing signer")?;
     let certificate = x509_cert::Certificate::from_der(CERTIFICATE)?;
     let spki = &certificate.tbs_certificate.subject_public_key_info;
     assert_eq!(spki.algorithm, signer.signature_algorithm);
@@ -135,8 +138,8 @@ fn selected_webpki_and_ring_algorithms_verify_the_external_fixture(
 fn dependency_verifier_rejects_changed_content_signature_and_invalid_der(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outer = ContentInfo::from_der(PROOF)?;
-    let signed: SignedData = outer.content.decode_as()?;
-    let signer = signed.signer_infos.0.get(0).ok_or("missing signer")?;
+    let cms_data: SignedData = outer.content.decode_as()?;
+    let signer = cms_data.signer_infos.0.get(0).ok_or("missing signer")?;
     let certificate_der = CERTIFICATE.into();
     let verifier = webpki::EndEntityCert::try_from(&certificate_der)?;
     let mut changed_content = CONTENT.to_vec();
