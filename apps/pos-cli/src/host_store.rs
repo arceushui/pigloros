@@ -4,7 +4,6 @@
 /// authority never escape `ErasureExecutionHostV1`.
 struct HostedCliStore {
     host: std::sync::Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: std::sync::Arc<dyn pos_core::ErasureGate>,
 }
 
 impl HostedCliStore {
@@ -22,12 +21,8 @@ impl HostedCliStore {
             composition,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
-        .map(|host| {
-            let gate = host.containment_gate();
-            Self {
-                host: std::sync::Mutex::new(host),
-                gate,
-            }
+        .map(|host| Self {
+            host: std::sync::Mutex::new(host),
         })
     }
 
