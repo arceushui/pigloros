@@ -1023,6 +1023,22 @@ mod tests {
         Ok(())
     }
 
+    fn rewrite_envelope(
+        encoded: &[u8],
+        edit: impl FnOnce(&mut Vec<Value>),
+    ) -> Result<Vec<u8>, RecipientExportErrorV1> {
+        let mut value: Value =
+            ciborium::from_reader(encoded).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
+        let Value::Array(fields) = &mut value else {
+            return Err(RecipientExportErrorV1::InvalidEncoding);
+        };
+        edit(fields);
+        let mut result = Vec::new();
+        ciborium::into_writer(&value, &mut result)
+            .map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
+        Ok(result)
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn round_trips_root_forks_and_empty_child() -> Result<(), RecipientExportErrorV1> {
@@ -1168,6 +1184,71 @@ mod tests {
             RecipientTimelineExportV1::decode(&wrong_length.encode()),
             Err(RecipientExportErrorV1::FieldOutOfBounds)
         );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_malformed_public_envelope_fields() -> Result<(), RecipientExportErrorV1> {
+        let (recipient, _) = recipient()?;
+        let mut rng = StdRng::from_seed([11; 32]);
+        let encoded = encrypt_timeline_export_v1(
+            &export(None, b"source".to_vec()),
+            recipient,
+            [5; 16],
+            &mut rng,
+        )?
+        .encode();
+        for index in 0..8 {
+            let rewritten = rewrite_envelope(&encoded, |fields| fields[index] = Value::Null)?;
+            assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
+        }
+        for index in [0, 1, 2, 4, 5, 6, 7, 8, 9] {
+            let rewritten = rewrite_envelope(&encoded, |fields| {
+                let Value::Array(header) = &mut fields[5] else {
+                    unreachable!();
+                };
+                header[index] = Value::Null;
+            })?;
+            assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
+        }
+        for index in [0, 6, 8, 9] {
+            let rewritten = rewrite_envelope(&encoded, |fields| {
+                let Value::Array(header) = &mut fields[5] else {
+                    unreachable!();
+                };
+                header[index] = Value::Integer(0_u64.into());
+            })?;
+            assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
+        }
+        for malformed in [
+            vec![],
+            vec![0xc0, 0xf6],
+            vec![0xbf, 0xff],
+            vec![0xf9, 0, 0],
+            vec![0x99, 0, 8],
+            vec![0x9a, 0, 0, 0, 8],
+            vec![0x9b, 0, 0, 0, 0, 0, 0, 0, 8],
+        ] {
+            assert!(RecipientTimelineExportV1::decode(&malformed).is_err());
+        }
+        for chunks in [
+            vec![],
+            vec![Value::Bytes(vec![])],
+            vec![Value::Bytes(vec![0; 18])],
+        ] {
+            let rewritten = rewrite_envelope(&encoded, |fields| {
+                fields[7] = Value::Array(chunks);
+            })?;
+            assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
+        }
+        let rewritten = rewrite_envelope(&encoded, |fields| {
+            let Value::Array(header) = &mut fields[5] else {
+                unreachable!();
+            };
+            header[3] = Value::Bytes(vec![7; 31]);
+        })?;
+        assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
         Ok(())
     }
 
