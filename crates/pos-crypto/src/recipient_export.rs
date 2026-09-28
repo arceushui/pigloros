@@ -1715,6 +1715,33 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_wrong_event_origin_and_overflowing_fork_origin_before_encryption(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, _) = recipient()?;
+        let mut rng = StdRng::from_seed([23; 32]);
+        let mut source = export(None, b"source".to_vec());
+        source.events[0].origin = Some(EventOriginV1 {
+            origin_timeline_id: source.timeline.id(),
+            origin_logical_seq: Seq::from_u64(2),
+        });
+        assert_eq!(
+            encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::SourceMismatch)
+        );
+
+        let mut source = export(None, b"source".to_vec());
+        source.timeline.meta.fork_point =
+            Some((TimelineId::from_ulid(id(2)), Seq::from_u64(u64::MAX)));
+        source.parent_fork_hash = Some(Hash::from_bytes([7; 32]));
+        assert_eq!(
+            encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::FieldOutOfBounds)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_authenticated_signed_event_and_source_substitution(
     ) -> Result<(), RecipientExportErrorV1> {
         let (recipient, private) = recipient()?;
@@ -1801,6 +1828,15 @@ mod tests {
             decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::NonCanonical)
         ));
+
+        for source in [export(Some(0), b"fork".to_vec()), export(None, Vec::new())] {
+            let payload = encode_payload(&source)?;
+            let encoded = encrypt_payload(&payload, recipient, [5; 16], &mut rng)?;
+            assert!(matches!(
+                decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private),
+                Err(RecipientExportErrorV1::SourceMismatch)
+            ));
+        }
 
         let mut fork = export(Some(0), b"source".to_vec());
         fork.parent_fork_hash = None;
