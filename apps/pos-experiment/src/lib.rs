@@ -430,11 +430,9 @@ impl RunResult {
                                 .and_then(|()| {
                                     self.projections
                                         .state_for_reducer(self.timeline_id, reducer, &subject)
-                                        .map_err(|_| {
-                                            ExperimentError::Runtime(
-                                                pos_runtime::RuntimeError::ErasureOperationUnavailable,
-                                            )
-                                        })
+                                        .or(Err(ExperimentError::Runtime(
+                                            pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                                        )))
                                 });
                         };
                         erasure_gate
