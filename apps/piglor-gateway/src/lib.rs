@@ -25,7 +25,7 @@ pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 #[cfg(test)]
 use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
 #[cfg(test)]
-use pos_core::ErasureGate;
+use pos_core::ErasureContainmentGateV1;
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -36,8 +36,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1,
-    ErasureReferenceV1, Plugin, ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
+    Plugin, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -805,7 +805,7 @@ fn gateway_action_registry_builder_for_test(
 fn gateway_action_registry_with_authority_and_erasure_gate_checked(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-    gate: Arc<ErasureContainmentGateV1>,
+    gate: Arc<dyn ErasureGate>,
 ) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
     let mut registry = gateway_action_registry_builder(bodies, authority)?;
     registry.bind_erasure_gate(gate);
@@ -814,7 +814,7 @@ fn gateway_action_registry_with_authority_and_erasure_gate_checked(
 
 fn gateway_empty_action_registry(
     authority: ConsentAuthority,
-    gate: Arc<ErasureContainmentGateV1>,
+    gate: Arc<dyn ErasureGate>,
 ) -> Arc<PluginRegistry> {
     Arc::new(
         PluginRegistry::new()
