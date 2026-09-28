@@ -833,6 +833,10 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         "publish authority topology",
         authority.set_timeline(timeline.id()),
     )?;
+    test_stage(
+        "publish unaffected authority topology",
+        authority.set_timeline_unaffected(unaffected.id()),
+    )?;
     let request = test_stage("construct erasure request", persistence_request())?;
     let request_reference = request.reference();
     let request_provenance = request.provenance();
