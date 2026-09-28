@@ -1229,6 +1229,10 @@ mod tests {
         RECIPIENT_FILE_OWNER_MISMATCH.with(|mismatch| mismatch.set(enabled));
     }
 
+    fn set_begin_failure(enabled: bool) {
+        super::super::FAIL_BEGIN_IMMEDIATE.with(|failure| failure.set(enabled));
+    }
+
     fn replace_directory_after_open(directory: PathBuf, replacement: PathBuf) {
         RECIPIENT_OPEN_REPLACEMENT.with(|fault| fault.replace(Some((directory, replacement))));
     }
@@ -1434,6 +1438,78 @@ mod tests {
         assert!(registry
             .pending_destruction_requests()
             .any(|request| request.identity == descriptor.identity()));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_begin_failures_leave_each_lifecycle_step_closed() -> Result<(), CoreError>
+    {
+        {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            set_begin_failure(true);
+            assert!(store.enroll_recipient_key(&owner).is_err());
+            set_begin_failure(false);
+            assert!(store.load_key_registry()?.is_none());
+        }
+
+        {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            let descriptor = store.enroll_recipient_key(&owner)?;
+            set_begin_failure(true);
+            assert!(store.recover_recipient_keys(&owner).is_err());
+            set_begin_failure(false);
+            assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
+        }
+
+        {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            let descriptor = store.enroll_recipient_key(&owner)?;
+            set_begin_failure(true);
+            assert!(store
+                .destroy_recipient_key(
+                    &owner,
+                    descriptor.identity().epoch,
+                    pos_core::Hash::from_bytes([53; 32]),
+                )
+                .is_err());
+            set_begin_failure(false);
+            let registry = store
+                .load_key_registry()?
+                .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+            assert!(registry.tombstone(descriptor.identity()).is_none());
+            assert!(registry
+                .key_record(descriptor.identity())
+                .and_then(|record| record.private_material_digest)
+                .is_some());
+        }
+
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        let digest = registry
+            .key_record(descriptor.identity())
+            .and_then(|record| record.private_material_digest)
+            .ok_or_else(|| CoreError::Storage("recipient material is absent".to_owned()))?;
+        let request = KeyDestructionRequestV1::new(
+            descriptor.identity(),
+            digest,
+            pos_core::Hash::from_bytes([54; 32]),
+        );
+        store.begin_key_registry_destruction(request)?;
+        set_begin_failure(true);
+        assert!(store
+            .finish_recipient_key_destruction(&owner, request)
+            .is_err());
+        set_begin_failure(false);
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        assert!(registry.tombstone(descriptor.identity()).is_none());
+        assert!(registry
+            .pending_destruction_requests()
+            .any(|pending| pending == request));
         Ok(())
     }
 

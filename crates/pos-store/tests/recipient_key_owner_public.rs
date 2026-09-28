@@ -744,6 +744,7 @@ fn recipient_owner_public_contract_fails_closed_for_malformed_file_identity_widt
 fn recipient_owner_public_contract_rejects_file_and_symlink_owner_paths(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
+    assert!(RecipientKeyOwnerV1::open(temporary.path().join("missing"), EntityId::new()).is_err());
     let file = temporary.path().join("file");
     std::fs::write(&file, b"not a directory")?;
     assert!(RecipientKeyOwnerV1::open(&file, EntityId::new()).is_err());
@@ -751,6 +752,40 @@ fn recipient_owner_public_contract_rejects_file_and_symlink_owner_paths(
     let link = temporary.path().join("link");
     std::os::unix::fs::symlink(&directory, &link)?;
     assert!(RecipientKeyOwnerV1::open(&link, EntityId::new()).is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_non_blob_inventory_and_claim_rows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for column in [
+        "descriptor",
+        "material_digest",
+        "private_path",
+        "file_device",
+        "file_inode",
+        "file_uid",
+    ] {
+        let (temporary, store, owner, _) = enrolled_owner()?;
+        let private = only_private_file(&temporary.path().join("recipient-private"))?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+        connection.execute(
+            &format!("UPDATE recipient_key_inventory_v1 SET {column} = ?1"),
+            [rusqlite::types::Value::Integer(1)],
+        )?;
+        assert!(store.recover_recipient_keys(&owner).is_err(), "{column}");
+        assert!(private.exists(), "{column}");
+    }
+
+    let (temporary, store, owner, _) = enrolled_owner()?;
+    let private = only_private_file(&temporary.path().join("recipient-private"))?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "UPDATE recipient_custody_directory_claims_v1 SET grantee_id = ?1",
+        [rusqlite::types::Value::Integer(1)],
+    )?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(private.exists());
     Ok(())
 }
 
