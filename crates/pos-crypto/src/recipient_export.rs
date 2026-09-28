@@ -1753,17 +1753,17 @@ mod tests {
     fn rejects_malformed_envelopes_and_signed_identity_scalars_through_decryption(
     ) -> Result<(), RecipientExportErrorV1> {
         let (recipient, private) = recipient()?;
-        assert_eq!(
+        assert!(matches!(
             decrypt_timeline_export_v1(&[0], [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::InvalidEncoding)
-        );
+        ));
 
         let mut rng = StdRng::from_seed([21; 32]);
         let invalid_cbor = encrypt_payload(&[0x18], recipient, [5; 16], &mut rng)?;
-        assert_eq!(
+        assert!(matches!(
             decrypt_timeline_export_v1(&invalid_cbor, [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::InvalidEncoding)
-        );
+        ));
 
         let mut item_limited = vec![0x98, 34];
         item_limited.extend_from_slice(&[0; 33]);
@@ -1786,10 +1786,10 @@ mod tests {
             replace_identity_field(fields, 2, Value::Bool(true));
         })?;
         let encrypted = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
-        assert_eq!(
+        assert!(matches!(
             decrypt_timeline_export_v1(&encrypted, [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::InvalidEncoding)
-        );
+        ));
         Ok(())
     }
 
