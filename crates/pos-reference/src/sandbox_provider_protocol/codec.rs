@@ -74,7 +74,7 @@ pub(super) fn record_digest(
     digest_with_domain(&domain, unsigned)
 }
 
-fn digest_with_domain(
+pub(super) fn digest_with_domain(
     domain: &[u8],
     unsigned: &Value,
 ) -> Result<[u8; 32], SandboxProviderProtocolError> {
