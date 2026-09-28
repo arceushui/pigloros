@@ -80,6 +80,11 @@ signing command above. Their private keys were discarded:
   Both CAs have critical BasicConstraints and keyCertSign KU, with path lengths
   1 and 0. The signer has critical CA:FALSE, digitalSignature KU and codeSigning
   EKU. Signing adds the intermediate and root PEM certificates with `-certfile`.
+  OpenSSL 3.0.13's `smime` encoder retains the chain insertion order, so finalize
+  the DER certificate set with
+  `openssl cms -cmsout -inform DER -in chain-unsorted.der -outform DER -out chain-proof.der`.
+  This changes only certificate-set ordering; certificate and signature bytes
+  remain unchanged. The verifier rejects the unsorted input.
   At the test time the root is expired, while leaf and intermediate are valid:
   this exercises ADR-087's explicit root-time policy.
 - `optional-usage-proof.der`: self-signed serial 20, subject
@@ -88,7 +93,7 @@ signing command above. Their private keys were discarded:
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `chain-proof.der` | 2826 | `e41957401b886f1db78039fc70d6cbb2f4d1a7927fdf291df7b5e56afca858ca` |
+| `chain-proof.der` | 2826 | `3bca9d38d46ee28016af9c56d509f7b57f5af74fee267f640ebf47ca52d15367` |
 | `chain-signer.der` | 820 | `cfeaea01e4fc1038d8fa122ad715ba98226401dd2b5ef9149626b6bc10f488fe` |
 | `optional-usage-proof.der` | 1201 | `6c36c7edd53d4df1f977aa59f945d8649ae55466ca29776bc0f8747020a55e39` |
 | `optional-usage-signer.der` | 795 | `28766a02f3f9ea2d4b21e8835e1807a4ceb920f321c0da4b867582c178905535` |

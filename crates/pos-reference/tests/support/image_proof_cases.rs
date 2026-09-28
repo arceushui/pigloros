@@ -80,13 +80,13 @@ mod image_proof_cases {
 
     #[test]
     fn public_proof_verification_accepts_pinned_signer_and_complete_chain() -> TestResult {
-        for (proof, certificate) in [
-            (PROOF, CERTIFICATE),
-            (CHAIN, CHAIN_SIGNER),
-            (OPTIONAL, OPTIONAL_SIGNER),
+        for (name, proof, certificate) in [
+            ("self-signed", PROOF, CERTIFICATE),
+            ("complete chain", CHAIN, CHAIN_SIGNER),
+            ("optional usage", OPTIONAL, OPTIONAL_SIGNER),
         ] {
             let fixture = fixture(proof, certificate)?;
-            let verified = verify(&fixture, NOW)??;
+            let verified = verify(&fixture, NOW)?.map_err(|error| format!("{name}: {error}"))?;
             assert_eq!(format!("{verified:?}"), "VerifiedSandboxImageProof { .. }");
             assert_eq!(verified, verify(&fixture, NOW)??);
             assert_ne!(verified, verify(&fixture, NOW + 1)??);
