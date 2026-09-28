@@ -116,7 +116,7 @@ impl RecipientKeyDescriptorV1 {
         cursor.exact_u16(KEM_CODE, RecipientKeyDescriptorErrorV1::InvalidKem)?;
         let public_key = cursor.public_key()?;
         if cursor.is_finished() {
-            Self::from_parts(owner, epoch, public_key)
+            Ok(Self::from_parts(owner, epoch, public_key))
         } else {
             Err(RecipientKeyDescriptorErrorV1::InvalidEncoding)
         }
@@ -168,22 +168,15 @@ impl RecipientKeyDescriptorV1 {
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
-    fn from_parts(
-        owner_id: OwnerIdV1,
-        epoch: u64,
-        public_key: [u8; 32],
-    ) -> Result<Self, RecipientKeyDescriptorErrorV1> {
-        if !is_recipient_owner(&owner_id) {
-            return Err(RecipientKeyDescriptorErrorV1::InvalidOwner);
-        }
-        Ok(Self {
+    fn from_parts(owner_id: OwnerIdV1, epoch: u64, public_key: [u8; 32]) -> Self {
+        Self {
             identity: KeyIdentityV1::from_parts(
                 owner_id,
                 KeyRoleV1::ExportRecipientEncryption,
                 epoch,
             ),
             public_key,
-        })
+        }
     }
 }
 
@@ -447,6 +440,12 @@ mod coverage_tests {
         assert_eq!(
             RecipientKeyDescriptorV1::decode(&zero_epoch),
             Err(RecipientKeyDescriptorErrorV1::InvalidEpoch)
+        );
+        let mut non_unsigned_epoch = valid.clone();
+        non_unsigned_epoch[52] = 0x1c;
+        assert_eq!(
+            RecipientKeyDescriptorV1::decode(&non_unsigned_epoch),
+            Err(RecipientKeyDescriptorErrorV1::InvalidEncoding)
         );
         let mut invalid_owner = valid.clone();
         invalid_owner[10] = b'G';
