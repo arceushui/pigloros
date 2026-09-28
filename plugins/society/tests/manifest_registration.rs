@@ -202,13 +202,15 @@ fn same_name_plugin_ids_need_both_preassigned_slots() -> Result<(), Box<dyn Erro
     register(&mut registry, second)?;
     let admitted = registry.admit_complete_manifest_registration()?;
     assert_eq!(admitted.catalog(), &batch);
-    assert!(registry.is_admitted_composition_current(&admitted));
+    assert!(registry.is_admitted_composition_current_for_generation(&admitted, 1));
 
     let mut next = batch.as_input().clone();
     next.configuration_generation = 2;
     let renewed =
         registry.revalidate_manifest_registration(ManifestAdmissionCatalogV1::new(next)?)?;
-    assert!(registry.is_admitted_composition_current(&renewed));
+    assert!(registry.is_admitted_composition_current_for_generation(&renewed, 2));
+    assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 2));
+    assert!(!registry.is_admitted_composition_current_for_generation(&renewed, 1));
     assert_eq!(renewed.catalog().as_input().configuration_generation, 2);
     Ok(())
 }
@@ -267,7 +269,7 @@ fn zero_output_reducer_is_in_complete_batch_but_not_wcs1_producers() -> Result<(
         .rows
         .iter()
         .any(|row| row.plugin_id == projection_id));
-    assert!(registry.is_admitted_composition_current(&admitted));
+    assert!(registry.is_admitted_composition_current_for_generation(&admitted, 1));
     Ok(())
 }
 
@@ -327,7 +329,7 @@ fn malformed_or_changed_batches_fail_without_partial_admission() -> Result<(), B
         registry.revalidate_manifest_registration(ManifestAdmissionCatalogV1::new(changed)?),
         Err(ManifestRegistrationErrorV1::IncompleteBatch)
     ));
-    assert!(registry.is_admitted_composition_current(&admitted));
+    assert!(registry.is_admitted_composition_current_for_generation(&admitted, 1));
     Ok(())
 }
 
@@ -465,7 +467,7 @@ fn preparation_and_capability_invalidation_are_fail_closed() -> Result<(), Box<d
     ));
     register(&mut registry, fixture)?;
     let admitted = registry.admit_complete_manifest_registration()?;
-    assert!(registry.is_admitted_composition_current(&admitted));
+    assert!(registry.is_admitted_composition_current_for_generation(&admitted, 1));
 
     let mut other_owner = batch.as_input().clone();
     other_owner.owner_id = [0x42; 32];
@@ -473,9 +475,9 @@ fn preparation_and_capability_invalidation_are_fail_closed() -> Result<(), Box<d
         registry.revalidate_manifest_registration(ManifestAdmissionCatalogV1::new(other_owner)?),
         Err(ManifestRegistrationErrorV1::IncompleteBatch)
     ));
-    assert!(!PluginRegistry::new().is_admitted_composition_current(&admitted));
+    assert!(!PluginRegistry::new().is_admitted_composition_current_for_generation(&admitted, 1));
     registry.register_driver(Box::new(MutationProbe));
-    assert!(!registry.is_admitted_composition_current(&admitted));
+    assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 1));
     assert!(matches!(
         registry.admit_complete_manifest_registration(),
         Err(ManifestRegistrationErrorV1::BatchState)

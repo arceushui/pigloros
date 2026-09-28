@@ -1204,11 +1204,21 @@ impl PluginRegistry {
         })
     }
 
-    /// Whether the capability still belongs to this unmodified registry.
+    /// Whether the capability belongs to this unmodified registry and the
+    /// owner-authenticated configuration generation.
+    ///
+    /// The caller must obtain `owner_configuration_generation` from the
+    /// actual owner transaction; this registry does not authenticate it.
     #[must_use]
-    pub fn is_admitted_composition_current(&self, admitted: &AdmittedCompositionV1) -> bool {
+    pub fn is_admitted_composition_current_for_generation(
+        &self,
+        admitted: &AdmittedCompositionV1,
+        owner_configuration_generation: u64,
+    ) -> bool {
         Arc::ptr_eq(&self.manifest_identity, &admitted.registry_identity)
             && self.registration_revision == admitted.registration_revision
+            && admitted.catalog.as_input().configuration_generation
+                == owner_configuration_generation
             && self.manifest_batch.as_ref().is_some_and(|batch| {
                 batch.as_input().owner_id == admitted.catalog.as_input().owner_id
                     && batch.as_input().rows == admitted.catalog.as_input().rows
