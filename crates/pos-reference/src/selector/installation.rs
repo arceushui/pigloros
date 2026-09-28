@@ -9,7 +9,7 @@ mod cases;
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path};
 
@@ -740,6 +740,25 @@ impl Read for PositionalReader<'_> {
             read
         })
     }
+}
+
+impl Seek for PositionalReader<'_> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let offset = match position {
+            SeekFrom::Start(offset) => Ok(offset),
+            SeekFrom::Current(delta) => seek_offset(self.offset, delta),
+            SeekFrom::End(delta) => self
+                .file
+                .metadata()
+                .and_then(|metadata| seek_offset(metadata.len(), delta)),
+        };
+        offset.inspect(|offset| self.offset = *offset)
+    }
+}
+
+fn seek_offset(base: u64, delta: i64) -> std::io::Result<u64> {
+    base.checked_add_signed(delta)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
 }
 
 fn read_exact_file(
@@ -2233,6 +2252,35 @@ pub mod tests {
     }
 
     #[test]
+    fn positional_seek_keeps_its_own_offset_and_rejects_invalid_positions() -> TestResult {
+        let artifact = held_artifact(0, [9; 32], b"abcdef")?;
+        let mut shared = artifact.file();
+        shared.seek(SeekFrom::Start(2))?;
+        let mut reader = PositionalReader::new(artifact.file());
+        let mut bytes = [0; 2];
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"ab");
+        assert_eq!(reader.seek(SeekFrom::End(-2))?, 4);
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"ef");
+        assert_eq!(reader.seek(SeekFrom::Current(-3))?, 3);
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"de");
+        assert!(reader.seek(SeekFrom::End(-7)).is_err());
+        assert_eq!(reader.stream_position()?, 5);
+        assert!(reader.seek(SeekFrom::Current(-6)).is_err());
+        assert_eq!(reader.stream_position()?, 5);
+        assert_eq!(reader.seek(SeekFrom::Start(u64::MAX))?, u64::MAX);
+        assert!(reader.seek(SeekFrom::Current(1)).is_err());
+        assert_eq!(reader.stream_position()?, u64::MAX);
+        assert_eq!(reader.seek(SeekFrom::Start(0))?, 0);
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"ab");
+        assert_eq!(shared.stream_position()?, 2);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_mutable_or_linked_installed_state() -> TestResult {
         let temporary = tempfile::tempdir()?;
         write_state(temporary.path())?;
@@ -2454,12 +2502,50 @@ pub mod tests {
     fn retained_sic1_descriptors_reconstruct_the_evr1_selected_case() -> TestResult {
         let corpus = crate::selector_test_support::corpus()?;
         let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        let mut archive = bootstrap
+            .installed()
+            .artifact(InstallationObjectKind(14), request.fixture_bundle_digest)?
+            .file();
+        archive.seek(SeekFrom::Start(17))?;
         let resolved = bootstrap.resolve_installed_case(&request, 0)?;
         assert_eq!(resolved.bundle_digest(), request.fixture_bundle_digest);
         assert_eq!(resolved.profile_digest(), request.profile_digest);
         assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
         assert_eq!(resolved.attempt().case_id, "case-0");
         assert_eq!(resolved.attempt().mode, 0);
+        assert_eq!(archive.stream_position()?, 17);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_case_reconstruction_keeps_the_retained_archive_cursor() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        let expected = bootstrap.resolve_installed_case(&request, 0)?;
+        let mut archive = bootstrap
+            .installed()
+            .artifact(InstallationObjectKind(14), request.fixture_bundle_digest)?
+            .file();
+        archive.seek(SeekFrom::Start(23))?;
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| -> TestResult {
+            let readers: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| -> Result<(), SelectorBoundaryError> {
+                        barrier.wait();
+                        for _ in 0..2 {
+                            assert_eq!(bootstrap.resolve_installed_case(&request, 0)?, expected);
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            for reader in readers {
+                reader.join().map_err(|_| "case reader panicked")??;
+            }
+            Ok(())
+        })?;
+        assert_eq!(archive.stream_position()?, 23);
         Ok(())
     }
 

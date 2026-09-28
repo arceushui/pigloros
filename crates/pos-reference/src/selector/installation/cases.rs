@@ -1,11 +1,8 @@
 //! Descriptor-held CFB1/TPS1 case reconstruction for root-selector composition.
 
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
-
 use super::{
-    authority::AuthenticatedSelectorBootstrap, InstallationObjectKind, ResolvedInstalledCase,
-    MANIFEST_LIMIT,
+    authority::AuthenticatedSelectorBootstrap, InstallationObjectKind, PositionalReader,
+    ResolvedInstalledCase, MANIFEST_LIMIT,
 };
 use crate::evaluator::{case_attempt, selector_bounded_hard_caps};
 use crate::evaluator_protocol::EvaluationRequest;
@@ -18,10 +15,6 @@ const TPS1_OBJECT: InstallationObjectKind = InstallationObjectKind(15);
 
 fn artifact_invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
-}
-
-fn io_error<T>(_: T) -> SelectorBoundaryError {
-    SelectorBoundaryError::Io
 }
 
 impl AuthenticatedSelectorBootstrap {
@@ -97,7 +90,7 @@ impl AuthenticatedSelectorBootstrap {
     fn retained_case_descriptors(
         &self,
         request: &EvaluationRequest,
-    ) -> Result<(File, Vec<u8>), SelectorBoundaryError> {
+    ) -> Result<(PositionalReader<'_>, Vec<u8>), SelectorBoundaryError> {
         let installed = self.installed();
         installed
             .artifact(CFB1_OBJECT, request.fixture_bundle_digest)
@@ -111,19 +104,7 @@ impl AuthenticatedSelectorBootstrap {
                     .read_control(MANIFEST_LIMIT)
                     .map(|policy_bytes| (bundle, policy_bytes))
             })
-            .and_then(|(bundle, policy_bytes)| {
-                bundle
-                    .file()
-                    .try_clone()
-                    .map_err(io_error)
-                    .map(|archive| (archive, policy_bytes))
-            })
-            .and_then(|(mut archive, policy_bytes)| {
-                archive
-                    .seek(SeekFrom::Start(0))
-                    .map_err(io_error)
-                    .map(|_| (archive, policy_bytes))
-            })
+            .map(|(bundle, policy_bytes)| (PositionalReader::new(bundle.file()), policy_bytes))
     }
 }
 
@@ -135,6 +116,5 @@ mod tests {
     #[test]
     fn error_mappers_preserve_the_closed_failure_class() {
         assert_eq!(artifact_invalid(()), SelectorBoundaryError::ArtifactInvalid);
-        assert_eq!(io_error(()), SelectorBoundaryError::Io);
     }
 }
