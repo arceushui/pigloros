@@ -5542,9 +5542,7 @@ mod tests {
         assert_eq!(admitted.catalog(), &catalog);
         assert!(registry.is_admitted_composition_current_for_generation(&admitted, 1));
         assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 2));
-        assert!(
-            !PluginRegistry::new().is_admitted_composition_current_for_generation(&admitted, 1)
-        );
+        assert!(!PluginRegistry::new().is_admitted_composition_current_for_generation(&admitted, 1));
 
         let mut changed_owner = catalog.as_input().clone();
         changed_owner.owner_id = [0x42; 32];
@@ -5696,14 +5694,7 @@ mod tests {
             Err(ManifestRegistrationErrorV1::SlotMismatch)
         ));
 
-        for field in [
-            "name",
-            "version",
-            "id",
-            "implementation",
-            "eop1",
-            "closure",
-        ] {
+        for field in ["name", "version", "id", "implementation", "eop1", "closure"] {
             let mut row = original.clone();
             match field {
                 "name" => row.plugin_name.push('x'),
