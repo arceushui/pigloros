@@ -813,7 +813,7 @@ fn fold_captured_range(
     registry: &mut PluginRegistry,
     captured: &CapturedRange,
 ) -> FoldedEventCount {
-    registry.fold_events(&captured.events);
+    registry.fold_events(captured.timeline.id(), &captured.events);
     boundary.folded_through = captured.through;
     FoldedEventCount(u64::try_from(captured.events.len()).unwrap_or(u64::MAX))
 }
@@ -993,8 +993,12 @@ fn timeline_ancestry(
     Ok(reversed)
 }
 
-fn hydrate_projections(registry: &mut PluginRegistry, events: &[pos_core::Event]) {
-    registry.fold_events(events);
+fn hydrate_projections(
+    registry: &mut PluginRegistry,
+    timeline: TimelineId,
+    events: &[pos_core::Event],
+) {
+    registry.fold_events(timeline, events);
 }
 
 fn restore_inherited_eval_events(
@@ -1363,7 +1367,7 @@ impl Experiment {
         validate_captured_range(pos_core::clock::Seq::ZERO, folded_through, &events)?;
         let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
-        hydrate_projections(&mut self.registry, &events);
+        hydrate_projections(&mut self.registry, timeline_id, &events);
         let revoked_subjects = recovered_revoked_subjects(&events);
         let consent_revoked = events.iter().any(|event| {
             event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
@@ -2056,7 +2060,7 @@ impl ExperimentSession {
         let Some(token) = self.operation_token.as_ref() else {
             reject_protected_events(events)?;
             registry.restore_driver_state(ancestry, events)?;
-            hydrate_projections(registry, events);
+            hydrate_projections(registry, self.timeline.id(), events);
             return Ok(());
         };
         let gate = self
@@ -2068,7 +2072,7 @@ impl ExperimentSession {
             if let Err(error) = registry.restore_driver_state(ancestry, events) {
                 hydration_error = Some(error);
             } else {
-                hydrate_projections(registry, events);
+                hydrate_projections(registry, self.timeline.id(), events);
             }
         };
         gate.with_token_fence(
@@ -2577,7 +2581,7 @@ impl BacktestRunner {
             &mut eval_registry,
             erasure_gate,
         )?;
-        hydrate_projections(&mut eval_registry, &inherited);
+        hydrate_projections(&mut eval_registry, eval_tl_id, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
             store,
@@ -2825,21 +2829,24 @@ mod tests {
         result
             .projections
             .register("projection", Box::new(CountReducer));
-        result.projections.apply_event(&Event {
-            id: pos_core::EventId::new(),
-            entity: subject_id,
-            event_type: Kind::new("projection.event"),
-            payload: pos_core::CanonicalBytes::from_static(b"projection"),
-            wall_time: pos_core::clock::WallTime::from_micros(0),
-            seq: pos_core::clock::Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: pos_core::event::SchemaVersion::V1,
-            signature: None,
-            signature_identity: None,
-            origin: None,
-            payload_hash: pos_core::crypto::Hash::zero(),
-        });
+        result.projections.apply_event(
+            timeline_id,
+            &Event {
+                id: pos_core::EventId::new(),
+                entity: subject_id,
+                event_type: Kind::new("projection.event"),
+                payload: pos_core::CanonicalBytes::from_static(b"projection"),
+                wall_time: pos_core::clock::WallTime::from_micros(0),
+                seq: pos_core::clock::Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: pos_core::event::SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash: pos_core::crypto::Hash::zero(),
+            },
+        );
         let projected = result
             .projection_state_for_reducer("projection", subject_id, &token, 0)
             .test_ok()
@@ -4442,7 +4449,7 @@ mod tests {
         let mut replayed = pos_state::ProjectionRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         replayed.register("interleaving", Box::new(CountReducer));
-        replayed.fold_events(&events);
+        replayed.fold_events(timeline, &events);
         drop(store);
         assert!(replayed.state_for(timeline, &entity).test_ok().is_some());
     }

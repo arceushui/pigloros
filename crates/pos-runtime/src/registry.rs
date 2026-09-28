@@ -174,7 +174,7 @@ mod coverage_paths {
         marker.event_type = Kind::new(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE);
         marker.seq = Seq::from_u64(4);
         let events = vec![event, location, cell, marker];
-        registry.fold_events(&events);
+        registry.fold_events(timeline, &events);
         assert!(registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(4))],
@@ -558,7 +558,7 @@ mod coverage_entrypoints {
             event(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, 2),
         ];
 
-        registry.fold_events(&events);
+        registry.fold_events(timeline, &events);
         assert!(registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
@@ -1181,13 +1181,13 @@ impl PluginRegistry {
     }
 
     /// Fold a host-captured Event range into the registered reducers.
-    pub fn fold_events(&mut self, events: &[Event]) {
+    pub fn fold_events(&mut self, timeline: TimelineId, events: &[Event]) {
         let visible_events: Vec<Event> = events
             .iter()
             .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
             .cloned()
             .collect();
-        self.projections.fold_events(&visible_events);
+        self.projections.fold_events(timeline, &visible_events);
     }
 
     /// Consume the registry after authorizing its final projection snapshot.
@@ -2086,6 +2086,11 @@ impl PluginRegistry {
             });
         }
         let child = store.fork(parent, at_seq, name)?;
+        if let Err(error) = self.projections.adopt_committed_fork(parent, child.id()) {
+            self.restored_binding = None;
+            store.delete_timeline(child.id())?;
+            return Err(RuntimeError::Authority(error));
+        }
         let handoff = CommittedForkHandoff::new(parent, child.id());
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
@@ -3709,7 +3714,7 @@ mod tests {
             origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
-        reg.projections.apply_event(&event);
+        reg.projections.apply_event(timeline, &event);
         let state = reg
             .projections
             .state_for(timeline, &event.entity)
@@ -3718,7 +3723,7 @@ mod tests {
         assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
         let mut protected = event;
         protected.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
-        reg.projections.apply_event(&protected);
+        reg.projections.apply_event(timeline, &protected);
         assert_eq!(
             reg.projections
                 .state_for(timeline, &protected.entity)
@@ -3789,11 +3794,11 @@ mod tests {
         };
         bound
             .projections
-            .apply_event(&projection_event(subject, Seq::from_u64(1)));
+            .apply_event(timeline, &projection_event(subject, Seq::from_u64(1)));
         let unrelated = EntityId::new();
         bound
             .projections
-            .apply_event(&projection_event(unrelated, Seq::from_u64(2)));
+            .apply_event(timeline, &projection_event(unrelated, Seq::from_u64(2)));
         let state = bound
             .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "projection", subject)
             .test_ok()
@@ -4415,7 +4420,7 @@ mod tests {
 
         let mut reg = gated_registry();
         reg.projections.register("counter", Box::new(CountReducer));
-        reg.projections.apply_event(&event);
+        reg.projections.apply_event(timeline.id(), &event);
         let authority = ConsentAuthority::new();
         let grant = ConsentGrantedV1 {
             subject_id: observed_entity,
@@ -4543,7 +4548,7 @@ mod tests {
             origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
-        reg.projections.apply_event(&event);
+        reg.projections.apply_event(timeline, &event);
 
         let observed = ProjectionKey::new(observed_entity);
         let missing = ProjectionKey::new(missing_entity);

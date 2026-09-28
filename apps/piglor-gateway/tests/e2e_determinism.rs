@@ -910,7 +910,7 @@ fn assert_replay(
         "sequence order must deliberately conflict with wall-clock order"
     );
     let mut first_replay = replay_registry();
-    first_replay.fold_events(&stored);
+    first_replay.fold_events(scenario.timeline, &stored);
     let replayed_states = first_replay.state_snapshot(scenario.timeline).test_ok()?;
     for (reducer, entity, live_state) in live_states {
         let replayed_state = replayed_states
@@ -931,7 +931,7 @@ fn assert_replay(
     let second_events = second_store
         .read(scenario.timeline, SeqRange::all())
         .test_ok()?;
-    second_replay.fold_events(&second_events);
+    second_replay.fold_events(scenario.timeline, &second_events);
     assert_eq!(
         snapshot_json(&second_replay, scenario.timeline)?,
         snapshot_json(&first_replay, scenario.timeline)?

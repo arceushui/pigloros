@@ -86,7 +86,7 @@ fn replay_range(
                     )
                     .map_err(crate::host_error_to_core)
             })
-            .inspect(|events| registry.fold_events(events));
+            .inspect(|events| registry.fold_events(timeline, events));
     };
     sender
         .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
@@ -203,7 +203,7 @@ mod tests {
             )
             .map_err(|_| CoreError::ArtifactUnavailable)
             .and_then(|()| store.read(timeline, SeqRange::all()))
-            .inspect(|events| registry.fold_events(events))
+            .inspect(|events| registry.fold_events(timeline, events))
     }
 
     fn open_test_store() -> Box<dyn EventStore> {
@@ -227,7 +227,7 @@ mod tests {
             )
             .map_err(|_| CoreError::ArtifactUnavailable)
             .and_then(|()| store.read(timeline, SeqRange::bounded(Seq::ZERO, at_seq)))
-            .map(|events| registry.fold_events(&events))
+            .map(|events| registry.fold_events(timeline, &events))
     }
 
     #[test]
@@ -434,8 +434,8 @@ mod tests {
         );
 
         let mut live = world_registry(gate.clone());
-        live.apply_event(&action);
-        live.fold_events(&committed);
+        live.apply_event(timeline, &action);
+        live.fold_events(timeline, &committed);
         let expected: Vec<_> = bodies
             .iter()
             .map(|body| {
@@ -765,7 +765,7 @@ mod tests {
         reg.register("count", Box::new(CountReducer));
         let entity = EntityId::new();
         let timeline = TimelineId::new();
-        reg.apply_event(&make_event(entity, 1));
+        reg.apply_event(timeline, &make_event(entity, 1));
         let err = replay(&store, timeline, &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
         assert_eq!(count_for(&reg, timeline, &entity), 1);
@@ -797,11 +797,11 @@ mod tests {
             // We build a registry using the raw events directly (avoids store borrow issues).
             let mut reg1 = test_projection_registry();
             reg1.register("count", Box::new(CountReducer));
-            reg1.fold_events(&events);
+            reg1.fold_events(tl.id(), &events);
 
             let mut reg2 = test_projection_registry();
             reg2.register("count", Box::new(CountReducer));
-            reg2.fold_events(&events);
+            reg2.fold_events(tl.id(), &events);
 
             let c1 = count_for(&reg1, tl.id(), &entity);
             let c2 = count_for(&reg2, tl.id(), &entity);

@@ -179,7 +179,7 @@ fn snapshot_from_events(
     events: &[pos_core::Event],
 ) -> Result<Snapshot, CoreError> {
     let at_seq = events.last().map_or(Seq::ZERO, |event| event.seq);
-    registry.fold_events(events);
+    registry.fold_events(timeline, events);
     registry
         .state_snapshot(timeline)
         .map(|snapshot| Snapshot {
@@ -202,13 +202,13 @@ fn verify_snapshot_event_sets(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    registry.restore_from_snapshot(&snap.registry);
-    registry.fold_events(tail_events);
+    registry.restore_from_snapshot(snap.timeline, &snap.registry);
+    registry.fold_events(snap.timeline, tail_events);
     let incremental_state = registry
         .state_snapshot(snap.timeline)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
     registry.clear_state();
-    registry.fold_events(all_events);
+    registry.fold_events(snap.timeline, all_events);
     let full_state = registry
         .state_snapshot(snap.timeline)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;

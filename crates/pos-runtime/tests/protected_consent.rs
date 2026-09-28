@@ -1485,12 +1485,15 @@ fn public_registry_gate_projection_and_control_marker_seams_are_distinguishable(
         None,
     ));
 
-    registry.fold_events(&[
-        projection_event(subject, "projection.public", 1),
-        projection_event(subject, "projection.public", 2),
-        projection_event(unrelated, "projection.public", 3),
-        projection_event(subject, pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, 4),
-    ]);
+    registry.fold_events(
+        timeline,
+        &[
+            projection_event(subject, "projection.public", 1),
+            projection_event(subject, "projection.public", 2),
+            projection_event(unrelated, "projection.public", 3),
+            projection_event(subject, pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, 4),
+        ],
+    );
     let projections = test_ok(registry.into_authorized_projections(
         timeline,
         Seq::from_u64(4),
@@ -1517,11 +1520,14 @@ fn authorized_projection_snapshot_retain_subject_is_explicit() {
     let mut projections = pos_state::ProjectionRegistry::new()
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     projections.register("projection-public-seam", Box::new(CountingReducer));
-    projections.fold_events(&[
-        projection_event(subject, "projection.public", 1),
-        projection_event(subject, "projection.public", 2),
-        projection_event(unrelated, "projection.public", 3),
-    ]);
+    projections.fold_events(
+        timeline,
+        &[
+            projection_event(subject, "projection.public", 1),
+            projection_event(subject, "projection.public", 2),
+            projection_event(unrelated, "projection.public", 3),
+        ],
+    );
     projections.retain_subject(&subject);
     assert_eq!(
         test_ok(projections.state_for_reducer(timeline, "projection-public-seam", &subject))
