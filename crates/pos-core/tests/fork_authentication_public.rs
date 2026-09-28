@@ -79,6 +79,7 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
         policy
     );
     assert_eq!(policy.adapter("local"), Some(&adapter()));
+    assert_eq!(policy.adapter("other"), None);
     assert_eq!(policy.adapters(), [adapter()]);
     assert_ne!(policy.digest()?, Hash::zero());
     assert_ne!(principal_digest_v1(&principal(1)?)?, Hash::zero());
@@ -97,6 +98,8 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
         registry.lookup_principal(&principal(1)?),
         Some(OwnerIdV1::from_static("alice"))
     );
+    assert_eq!(registry.lookup_uid(2000), None);
+    assert_eq!(registry.lookup_principal(&principal(2)?), None);
     assert_eq!(registry.adapter_id(), "local");
     assert_eq!(registry.assurance(), 2);
     assert_eq!(registry.bindings().len(), 1);
@@ -108,12 +111,13 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
         AuthenticatedPrincipalRecordV1::from_canonical_cbor(&record_bytes)?,
         record
     );
-    let evidence = AuthenticatedPrincipalEvidenceV1::new(record, [9; 64])?;
+    let evidence = AuthenticatedPrincipalEvidenceV1::new(record.clone(), [9; 64])?;
     let evidence_bytes = evidence.to_canonical_cbor()?;
     assert_eq!(
         AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&evidence_bytes)?,
         evidence
     );
+    assert_eq!(evidence.record(), &record);
     assert_eq!(evidence.signature(), &[9; 64]);
     assert_ne!(evidence.digest()?, Hash::zero());
     Ok(())
@@ -131,18 +135,29 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
     no_bindings.registry_bindings.clear();
     let mut zero_binding = adapter();
     zero_binding.registry_bindings = vec![Hash::zero()];
+    let mut duplicate_binding = adapter();
+    duplicate_binding.registry_bindings = vec![Hash::from_bytes([1; 32]); 2];
     for invalid in [
         empty_adapter_id,
         zero_key,
         zero_assurance,
         no_bindings,
         zero_binding,
+        duplicate_binding,
     ] {
         assert_eq!(
             ForkAuthenticationPolicyV1::new(vec![invalid]),
             Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
         );
     }
+    assert_eq!(
+        ForkAuthenticationPolicyV1::new(vec![adapter(), adapter()]),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        ForkAuthenticationPolicyV1::new(Vec::new()),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
 
     for uid in [0, 65_534, 1000, u32::MAX] {
         assert_eq!(
@@ -161,6 +176,34 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
     }
     assert_eq!(
         LocalAccountRegistryV1::new("local".to_owned(), 0, vec![], 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    let first = LocalAccountBindingV1 {
+        uid: 1001,
+        principal: principal(1)?,
+        owner: OwnerIdV1::from_static("alice"),
+    };
+    let duplicate_principal = LocalAccountBindingV1 {
+        uid: 1002,
+        principal: first.principal.clone(),
+        owner: OwnerIdV1::from_static("alice"),
+    };
+    assert_eq!(
+        LocalAccountRegistryV1::new(
+            "local".to_owned(),
+            2,
+            vec![first.clone(), duplicate_principal],
+            1000,
+        ),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    let second = LocalAccountBindingV1 {
+        uid: 1002,
+        principal: principal(2)?,
+        owner: OwnerIdV1::from_static("alice"),
+    };
+    assert_eq!(
+        LocalAccountRegistryV1::new("local".to_owned(), 2, vec![second, first], 1000),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
     );
 
@@ -206,6 +249,18 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
 fn public_decoders_reject_reachable_nested_validation_errors(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fap = policy()?.to_canonical_cbor()?;
+    let mut noncanonical_fap = fap.clone();
+    noncanonical_fap.splice(6..7, [0x18, 0x01]);
+    assert_eq!(
+        ForkAuthenticationPolicyV1::from_canonical_cbor(&noncanonical_fap),
+        Err(ForkAuthenticationCodecErrorV1::NonCanonical)
+    );
+    let mut trailing_fap = fap.clone();
+    trailing_fap.push(0);
+    assert_eq!(
+        ForkAuthenticationPolicyV1::from_canonical_cbor(&trailing_fap),
+        Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
+    );
     let invalid_binding = mutate(&fap, |value| {
         let adapters = fields(&mut fields(value)?[2])?;
         fields(&mut adapters[0])?[3] = Value::Array(vec![Value::Bytes(vec![1])]);
