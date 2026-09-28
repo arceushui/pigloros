@@ -1171,3 +1171,49 @@ fn recipient_owner_public_contract_keeps_active_material_when_begin_cannot_persi
         .is_some());
     Ok(())
 }
+
+#[test]
+fn recipient_owner_public_contract_rejects_malformed_custody_table_before_each_transition(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute_batch(
+        "DROP TABLE recipient_key_inventory_v1;
+         CREATE TABLE recipient_key_inventory_v1 (marker INTEGER NOT NULL);",
+    )?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store
+        .destroy_recipient_key(
+            &owner,
+            descriptor.identity().epoch,
+            Hash::from_bytes([102; 32]),
+        )
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_nontext_directory_claim_before_mutation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "UPDATE recipient_custody_directory_claims_v1 SET grantee_id = ?1",
+        [vec![0_u8]],
+    )?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store
+        .destroy_recipient_key(
+            &owner,
+            descriptor.identity().epoch,
+            Hash::from_bytes([103; 32]),
+        )
+        .is_err());
+    assert!(path.exists());
+    Ok(())
+}
