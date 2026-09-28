@@ -62,6 +62,8 @@ pub use timeline_range::{
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "sqlite")]
+pub mod trust_policy_registry;
 
 // Re-export the port, its append-deduplication surface, and Wave 6 export/import helpers so
 // hosts need one crate.

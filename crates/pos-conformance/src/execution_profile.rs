@@ -85,6 +85,13 @@ pub struct ExecutionProfileV1 {
 }
 
 impl ExecutionProfileV1 {
+    /// Whether this validated profile meets one TPS1 minimum execution-profile version.
+    #[must_use]
+    pub fn meets_minimum_version_v1(&self, minimum: &str) -> bool {
+        valid_semantic_version(minimum)
+            && semantic_version_precedence(&self.semantic_version, minimum) != Ordering::Less
+    }
+
     /// Validate the closed EPF1 contract, its encoded-size limit, and its digest.
     ///
     /// # Errors
@@ -131,6 +138,21 @@ impl ExecutionProfileV1 {
         let unsigned =
             encode_value(&encode_profile_fields(self)).unwrap_or_else(|_| std::process::abort());
         domain_digest(b"PiglorOS.ExecutionProfile.v1", &unsigned)
+    }
+}
+
+#[cfg(test)]
+mod minimum_version_tests {
+    use super::ExecutionProfileV1;
+
+    #[test]
+    fn exact_execution_profile_minimum_uses_semantic_precedence() {
+        let bytes = crate::draft_execution_profile_bytes_v1("deterministic-local-v1")
+            .expect("draft profile fixture");
+        let profile = ExecutionProfileV1::from_canonical_cbor(&bytes).expect("canonical EPF1");
+        assert!(profile.meets_minimum_version_v1("1.0.0"));
+        assert!(!profile.meets_minimum_version_v1("999.0.0"));
+        assert!(!profile.meets_minimum_version_v1("invalid"));
     }
 }
 

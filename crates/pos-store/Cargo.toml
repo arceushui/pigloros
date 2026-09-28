@@ -12,6 +12,8 @@ default = ["sqlite"]
 sqlite = ["dep:rusqlite"]
 
 [dependencies]
+blake3 = { workspace = true }
+pos-conformance = { path = "../pos-conformance" }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 ciborium = { workspace = true }
@@ -23,6 +25,7 @@ rand = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 tempfile = "3"
 
