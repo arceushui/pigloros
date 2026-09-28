@@ -17,8 +17,8 @@ use pos_core::{
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
     store::{EventReadBounds, EventStore, SeqRange},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureHostErrorV1,
-    ErasureProtectedOperationV1, Event, ReproManifest, Seq, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureGate,
+    ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ReproManifest, Seq, Timeline,
 };
 use pos_core::{ErasureContainmentGateV1, ErasureGate};
 use pos_runtime::PluginRegistry;
