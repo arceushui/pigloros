@@ -3973,6 +3973,58 @@ mod tests {
         )
     }
 
+    struct PrefixDriver {
+        entity: EntityId,
+        observed: Arc<Mutex<Vec<(Vec<u64>, u64)>>>,
+        event_types: Vec<Kind>,
+        projections: Vec<ProjectionKey>,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for PrefixDriver {
+        fn name(&self) -> &'static str {
+            "prefix-driver"
+        }
+
+        fn event_subscriptions(&self) -> &[Kind] {
+            &self.event_types
+        }
+
+        fn subscriptions(&self) -> &[ProjectionKey] {
+            &self.projections
+        }
+
+        fn requires_verified_event_prefix(&self) -> bool {
+            true
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            let seqs = observations
+                .verified_prefix_events()
+                .ok_or(RuntimeError::InvalidRecoveryEvidence {
+                    reason: "missing verified Event prefix",
+                })?
+                .iter()
+                .map(|event| event.seq.as_u64())
+                .collect();
+            let count = observations
+                .state_for(&self.projections[0])
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            self.observed.lock().test_ok().push((seqs, count));
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("refresh.event"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )]))
+        }
+    }
+
     struct RecordingDriver {
         subscriptions: Vec<ProjectionKey>,
         seen_counts: Arc<Mutex<Vec<u64>>>,
@@ -5481,6 +5533,67 @@ mod tests {
         let result = session.run_to_completion().test_ok();
         assert_eq!(result.ticks, 2);
         assert_eq!(result.total_events, 3);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parent_driver_observes_refreshed_prefix_after_fork() {
+        let entity = EntityId::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let plugin = make_plugin_with_reducer("refresh", &["refresh.event"]);
+        let plugin_id = plugin.id;
+        let make_driver = {
+            let observed = Arc::clone(&observed);
+            move || PrefixDriver {
+                entity,
+                observed: Arc::clone(&observed),
+                event_types: vec![Kind::new("refresh.event")],
+                projections: vec![ProjectionKey::new(entity)],
+            }
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "refresh-after-fork".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory({
+            let make_driver = make_driver.clone();
+            move || {
+                let plugin = TestPlugin {
+                    id: plugin_id,
+                    name: "refresh",
+                    event_types: vec![Kind::new("refresh.event")],
+                    has_driver: true,
+                    has_reducer: true,
+                };
+                let mut registry = PluginRegistry::new();
+                registry
+                    .register(
+                        &plugin,
+                        Some(Box::new(CountReducer)),
+                        Some(Box::new(make_driver())),
+                    )
+                    .test_ok();
+                Ok(registry)
+            }
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(make_driver())),
+            )
+            .test_ok();
+
+        let mut parent = experiment.start().test_ok();
+        assert!(parent.step().test_ok());
+        let child = parent.fork("refresh-child").test_ok();
+        assert_eq!(
+            child.timeline().meta.fork_point.map(|(_, seq)| seq),
+            Some(Seq::from_u64(1))
+        );
+        assert!(parent.step().test_ok());
+        assert_eq!(&*observed.lock().test_ok(), &[(vec![], 0), (vec![1], 1)]);
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
