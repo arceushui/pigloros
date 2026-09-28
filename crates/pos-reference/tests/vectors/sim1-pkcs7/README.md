@@ -104,16 +104,25 @@ mountable image or systemd/kernel acceptance evidence.
 ## Hosted allocation evidence
 
 The `sim1-proof-risk` workflow builds the public admission test executable and
-runs four adversarial cases in separate
-[Massif](https://valgrind.org/docs/manual/ms-manual.html) processes: an excessive
-digest set, an oversized certificate, forbidden attributes, and eight certificates
-of exactly 64 KiB each. The first three cases assert a DER proof larger than
-1 MiB minus 4 KiB and at most 1 MiB, exercising rejection before eager decoding.
-The fourth asserts a proof larger than 512 KiB and at most 516 KiB; it passes
-the inclusive certificate size/count limits, exercises eager CMS decoding, and
-is rejected by path validation. All cases use
-`AdmittedSandboxProvider::verify_image_proof`. Mutated certificate signatures
-are not valid; these fixtures measure rejection paths, not new trusted chains.
+runs seven adversarial cases in separate
+[Massif](https://valgrind.org/docs/manual/ms-manual.html) processes. All cases use
+`AdmittedSandboxProvider::verify_image_proof`.
+
+| Input | Asserted proof size | Exercised boundary |
+| --- | --- | --- |
+| Excessive digest set | > 1020 KiB, <= 1024 KiB | Rejection before eager SET decoding |
+| Oversized certificate | > 1020 KiB, <= 1024 KiB | Per-certificate bound before decoding |
+| Forbidden attributes | > 1020 KiB, <= 1024 KiB | Rejection before attribute decoding |
+| Oversized issuer SID | > 1020 KiB, <= 1024 KiB | SID cannot exceed its matching certificate |
+| Reverse-ordered issuer RDN | > 60 KiB, <= 64 KiB | Canonical order checked before eager sorting |
+| Canonical issuer RDN | > 60 KiB, <= 64 KiB | Large allowed nested SET decoded before signer rejection |
+| Eight exactly-64-KiB certificates | > 512 KiB, <= 516 KiB | Inclusive size/count limits, eager CMS decoding, path rejection |
+
+Mutated certificate signatures are not valid; these fixtures measure rejection
+paths, not new trusted chains. The SID size bound follows from the certificate
+bound: a matching issuer/serial or SKI identity is contained within the selected
+certificate's DER. Canonical RDN order is checked with borrowed elements before
+the library can normalize an unauthorized issuer's SET.
 
 The artifact retains the raw heap traces, readable allocation trees, exact
 source and checkout commits, executable hash, compiler/profiler versions and

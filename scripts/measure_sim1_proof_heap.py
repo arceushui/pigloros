@@ -24,11 +24,29 @@ class ProofCase:
     upper_bound: int = 1024 * 1024
 
 
-PREFIX = "image_proof_cases::envelope_cases::public_proof_verification_"
+MODULE = "image_proof_cases::envelope_cases::"
+PREFIX = MODULE + "public_proof_verification_"
+IDENTITY_PREFIX = MODULE + "identity_cases::public_proof_verification_"
 CASES = {
     "digest-set": ProofCase(PREFIX + "bounds_near_limit_digest_set_before_decoding"),
     "certificate": ProofCase(PREFIX + "bounds_near_limit_certificate_before_decoding"),
     "attributes": ProofCase(PREFIX + "rejects_near_limit_attributes_before_decoding"),
+    "near-limit-issuer": ProofCase(
+        IDENTITY_PREFIX
+        + "bounds_near_limit_issuer_before_decoding",
+    ),
+    "reversed-issuer": ProofCase(
+        IDENTITY_PREFIX
+        + "rejects_reverse_ordered_bounded_issuer",
+        lower_bound=64 * 1024 - 4096,
+        upper_bound=64 * 1024,
+    ),
+    "canonical-issuer": ProofCase(
+        IDENTITY_PREFIX
+        + "decodes_canonical_bounded_issuer",
+        lower_bound=64 * 1024 - 4096,
+        upper_bound=64 * 1024,
+    ),
     "maximum-certificate-set": ProofCase(
         PREFIX + "decodes_eight_maximum_size_certificates",
         lower_bound=8 * 64 * 1024,
