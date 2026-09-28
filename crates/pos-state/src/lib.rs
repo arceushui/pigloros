@@ -904,11 +904,8 @@ mod tests {
 
     struct CacheFixture {
         decision: AuthorizationDecisionV1,
-        registry: AuthorityRegistrySnapshotV1,
         request: AuthorizationRequestV1,
         authority: PersistedAuthorityV1,
-        parent_grant_id: Hash,
-        consent_reference: Hash,
     }
 
     fn active_decision(authority_timeline: TimelineId) -> CacheFixture {
@@ -1127,11 +1124,8 @@ mod tests {
         test_ok(state.issue_grant(test_ok(host.authorize_grant(&child)), child));
         CacheFixture {
             decision,
-            registry,
             request,
             authority: test_ok(state.resolve(grant_id)),
-            parent_grant_id,
-            consent_reference,
         }
     }
 

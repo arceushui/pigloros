@@ -24,7 +24,7 @@
 //! ```
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-mod authorization_cache;
+pub(crate) mod authorization_cache;
 pub mod composition;
 pub mod driver;
 pub mod erasure_host;
