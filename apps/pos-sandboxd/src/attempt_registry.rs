@@ -435,14 +435,25 @@ mod tests {
             .args(["--exact", name, "--test-threads=1"])
             .env(CHILD, name)
             .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success(),
-            "isolated lock test {name} failed: {:?}\n{}\n{}",
+            output.status.success()
+                && stdout.lines().any(|line| {
+                    line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")
+                }),
+            "isolated lock test {name} did not pass exactly once: {:?}\n{stdout}\n{}",
             output.status,
-            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         Ok(false)
+    }
+
+    #[test]
+    fn isolated_lock_test_rejects_an_unmatched_filter() {
+        let result = std::panic::catch_unwind(|| {
+            in_lock_test_process("attempt_registry::tests::no_such_lock_test")
+        });
+        assert!(result.is_err());
     }
 
     fn fixture() -> TestResult<(tempfile::TempDir, File, u32)> {
