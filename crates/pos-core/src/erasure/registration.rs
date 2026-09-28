@@ -4,7 +4,7 @@ use super::{
     ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1,
     ErasureArtifactClassV1,
 };
-use crate::canonical_cbor_head::encode_head;
+use crate::encode_head;
 use crate::{AdapterAdmissionV1, AdapterTranscriptV1, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1};
 use std::collections::BTreeSet;
 
