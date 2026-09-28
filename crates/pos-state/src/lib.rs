@@ -159,10 +159,7 @@ impl ProjectionRegistry {
             .ok_or(AuthorityErrorV1::SourceUnavailable)?;
         let mut result = Err(AuthorityErrorV1::SourceUnavailable);
         let mut run = || {
-            result = self
-                .source_generation_is_current(gate.as_ref())
-                .then(|| effect(self))
-                .unwrap_or(Err(AuthorityErrorV1::SourceUnavailable));
+            result = self.apply_if_current_generation(gate.as_ref(), &mut effect);
         };
         gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut run)
             .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
@@ -175,6 +172,18 @@ impl ProjectionRegistry {
 
     fn source_generation_is_current(&self, gate: &dyn ErasureGate) -> bool {
         self.source_timeline.is_none() || self.source_generation == gate.inventory_generation().ok()
+    }
+
+    fn apply_if_current_generation<T>(
+        &self,
+        gate: &dyn ErasureGate,
+        effect: &mut impl FnMut(&Self) -> Result<T, AuthorityErrorV1>,
+    ) -> Result<T, AuthorityErrorV1> {
+        if self.source_generation_is_current(gate) {
+            effect(self)
+        } else {
+            Err(AuthorityErrorV1::SourceUnavailable)
+        }
     }
 
     /// Verify that accumulated state still belongs to this Timeline and the
