@@ -732,10 +732,10 @@ fn validate_owned_staging(
     let directory = open_directory(releases, name)?;
     let owner = read_limited(open_private_file(&directory, "OWNER")?, 128)
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-    if owner != format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes() {
-        Err(LocalOciPublicationErrorV1::RecoveryRequired)
-    } else {
+    if owner == format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes() {
         Ok(())
+    } else {
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
     }
 }
 
