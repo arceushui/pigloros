@@ -197,6 +197,7 @@ impl SystemdAttemptRegistry {
                 self.write_planned(intent, sequence)
             });
         state.failed = result.is_err();
+        drop(state);
         result.map(|()| CommittedPlannedAttempt {
             directory: Arc::clone(&self.directory),
             state: Arc::clone(&self.state),
