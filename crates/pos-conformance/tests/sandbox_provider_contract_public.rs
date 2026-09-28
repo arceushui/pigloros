@@ -237,6 +237,14 @@ fn network_plan_digest_uses_normative_domain() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn network_plan_sealing_rejects_invalid_unsigned_fields() -> TestResult {
+    let mut plan = network_plan(0)?;
+    plan.exchange_id = [0; 16];
+    assert_eq!(plan.seal(), Err(SandboxContractErrorV1::FieldOutOfBounds));
+    Ok(())
+}
+
 fn execute_request() -> Result<SandboxExecuteRequestV1, SandboxContractErrorV1> {
     let input = b"canonical EAI1 stream".to_vec();
     Ok(SandboxExecuteRequestV1 {
@@ -1751,6 +1759,12 @@ fn independent_payload_stream_rejects_sequence_and_digest_failures() -> TestResu
 
 #[test]
 fn payload_stream_rejects_each_invalid_identity_and_descriptor() -> TestResult {
+    let oversized_bytes = vec![0; usize::try_from(MAX_SANDBOX_PAYLOAD_BYTES_V1 + 1)?];
+    assert_eq!(
+        PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Input, &oversized_bytes),
+        Err(SandboxContractErrorV1::FieldOutOfBounds)
+    );
+    drop(oversized_bytes);
     let descriptor = PayloadDescriptorV1::from_bytes(PayloadDirectionV1::Input, b"payload")?;
     for (parent, request, attempt) in [
         ([0; 32], [1; 16], [2; 16]),
