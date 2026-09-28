@@ -836,13 +836,13 @@ fn scan_cbor_item(
             if length > max_string_bytes {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
-            let end = position
-                .checked_add(length)
-                .ok_or(RecipientExportErrorV1::FieldOutOfBounds)?;
-            if end > bytes.len() {
+            let remaining = bytes
+                .get(*position..)
+                .ok_or(RecipientExportErrorV1::InvalidEncoding)?;
+            if length > remaining.len() {
                 return Err(RecipientExportErrorV1::InvalidEncoding);
             }
-            *position = end;
+            *position += length;
             Ok(())
         }
         4 => {
@@ -874,33 +874,41 @@ fn scan_argument(
     position: &mut usize,
     additional: u8,
 ) -> Result<u64, RecipientExportErrorV1> {
+    #[derive(Clone, Copy)]
+    enum Width {
+        One,
+        Two,
+        Four,
+        Eight,
+    }
     let width = match additional {
         0..=23 => return Ok(u64::from(additional)),
-        24 => 1,
-        25 => 2,
-        26 => 4,
-        27 => 8,
+        24 => Width::One,
+        25 => Width::Two,
+        26 => Width::Four,
+        27 => Width::Eight,
         _ => return Err(RecipientExportErrorV1::InvalidEncoding),
     };
-    let end = position
-        .checked_add(width)
-        .ok_or(RecipientExportErrorV1::FieldOutOfBounds)?;
+    let length = match width {
+        Width::One => 1,
+        Width::Two => 2,
+        Width::Four => 4,
+        Width::Eight => 8,
+    };
     let slice = bytes
-        .get(*position..end)
+        .get(*position..)
+        .and_then(|remaining| remaining.get(..length))
         .ok_or(RecipientExportErrorV1::InvalidEncoding)?;
-    *position = end;
+    *position += length;
     match width {
-        1 => Ok(u64::from(slice[0])),
-        2 => Ok(u64::from(u16::from_be_bytes([slice[0], slice[1]]))),
-        4 => Ok(u64::from(u32::from_be_bytes([
+        Width::One => Ok(u64::from(slice[0])),
+        Width::Two => Ok(u64::from(u16::from_be_bytes([slice[0], slice[1]]))),
+        Width::Four => Ok(u64::from(u32::from_be_bytes([
             slice[0], slice[1], slice[2], slice[3],
         ]))),
-        8 => Ok(u64::from_be_bytes(
-            slice
-                .try_into()
-                .map_err(|_| RecipientExportErrorV1::InvalidEncoding)?,
-        )),
-        _ => Err(RecipientExportErrorV1::InvalidEncoding),
+        Width::Eight => Ok(u64::from_be_bytes([
+            slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+        ])),
     }
 }
 
