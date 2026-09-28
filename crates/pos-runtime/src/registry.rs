@@ -3140,7 +3140,9 @@ mod tests {
             } else {
                 assert!(matches!(
                     result,
-                    Err(RuntimeError::Authority(AuthorityErrorV1::SourceUnavailable))
+                    Err(RuntimeError::Authority(
+                        pos_core::AuthorityErrorV1::SourceUnavailable
+                    ))
                 ));
                 assert!(store.child.is_none());
             }
