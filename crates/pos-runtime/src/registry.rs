@@ -75,10 +75,10 @@ impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
     }
 }
 
-struct InstalledPluginBundleV1<P, A> {
+struct InstalledPluginBundleV1<P> {
     plugin: P,
-    approver: A,
-    configuration_details: Vec<u8>,
+    binding: OutputPolicyBindingV1,
+    registration: PluginRegistrationV1,
 }
 
 #[derive(Clone, Copy)]
@@ -3260,13 +3260,8 @@ impl PluginRegistry {
     {
         let configuration_details = (entry.configuration_details)(&frozen_configuration);
         let (plugin, approver) = (entry.build)(&frozen_configuration);
-        let bundle = InstalledPluginBundleV1 {
-            plugin,
-            approver,
-            configuration_details,
-        };
         let binding = OutputPolicyBindingV1::from_installed_source(
-            &bundle.plugin,
+            &plugin,
             match mode {
                 CatalogueRegistrationModeV1::InstalledGateway => InstalledOutputPolicySourceV1::Gateway,
                 #[cfg(test)]
@@ -3274,11 +3269,11 @@ impl PluginRegistry {
                     InstalledOutputPolicySourceV1::Generated
                 }
             },
-            &bundle.configuration_details,
+            &configuration_details,
             "deterministic-local-v1",
         )?;
         let mut binding = binding.with_installed_action_approver(
-            bundle.approver,
+            approver,
             [Kind::new(crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1)],
         )?;
         match mode {
@@ -3287,12 +3282,17 @@ impl PluginRegistry {
                     DomainImplementationKindV1::Plugin,
                     PluginIsolationV1::OperatorTrustedNative,
                     binding.policy().digest(),
-                    vec![crate::reviewed_policy::installed_plugin_role_v1(&bundle.plugin)],
+                    vec![crate::reviewed_policy::installed_plugin_role_v1(&plugin)],
                 )?;
+                let bundle = InstalledPluginBundleV1 {
+                    plugin,
+                    binding,
+                    registration: PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                };
                 self.register_installed_output(
                     &bundle.plugin,
-                    binding,
-                    PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                    bundle.binding,
+                    bundle.registration,
                     None,
                 )
             }
@@ -3304,7 +3304,7 @@ impl PluginRegistry {
                     approver_event_types,
                 } = binding.take_callbacks();
                 self.register_with_verified_output_policy_inner(
-                    &bundle.plugin,
+                    &plugin,
                     binding,
                     None,
                     driver,
