@@ -149,16 +149,8 @@ impl RecipientTimelineExportV1 {
     }
 
     fn validate_shape(&self) -> Result<(), RecipientExportErrorV1> {
-        if self.header.export_id == [0; 16]
-            || self.header.recipient.identity().role != KeyRoleV1::ExportRecipientEncryption
-            || self.header.recipient.identity().epoch == 0
-            || !(1..=MAX_CHUNKS).contains(&self.ciphertext_chunks.len())
-            || usize::try_from(self.header.chunk_count).ok() != Some(self.ciphertext_chunks.len())
-            || self.header.payload_length == 0
-            || self.header.payload_length > MAX_PAYLOAD_BYTES_U64
-        {
-            return Err(RecipientExportErrorV1::FieldOutOfBounds);
-        }
+        // `decode_header` and the preceding chunk-count check establish these
+        // bounds before this structural validation runs.
         let final_plain_len =
             usize::try_from((self.header.payload_length - 1) % CHUNK_BYTES_U64 + 1)
                 .unwrap_or(usize::MAX);
@@ -229,12 +221,8 @@ pub fn encrypt_timeline_export_v1(
         )
         .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
     envelope.enc.copy_from_slice(enc.to_bytes().as_slice());
-    for (index, plaintext) in payload.chunks(CHUNK_BYTES).enumerate() {
-        let aad = chunk_aad(
-            header_digest,
-            u32::try_from(index).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
-            index + 1 == usize::try_from(chunk_count).unwrap_or(usize::MAX),
-        );
+    for (index, plaintext) in (0..chunk_count).zip(payload.chunks(CHUNK_BYTES)) {
+        let aad = chunk_aad(header_digest, index, index + 1 == chunk_count);
         envelope.ciphertext_chunks.push(
             context
                 .seal(plaintext, &aad)
@@ -275,11 +263,11 @@ pub fn decrypt_timeline_export_v1(
     )
     .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?;
     let mut plaintext = Zeroizing::new(Vec::new());
-    for (index, ciphertext) in envelope.ciphertext_chunks.iter().enumerate() {
+    for (index, ciphertext) in (0..envelope.header.chunk_count).zip(&envelope.ciphertext_chunks) {
         let aad = chunk_aad(
             header_digest,
-            u32::try_from(index).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
-            index + 1 == envelope.ciphertext_chunks.len(),
+            index,
+            index + 1 == envelope.header.chunk_count,
         );
         let chunk = Zeroizing::new(
             context
@@ -826,13 +814,8 @@ fn scan_cbor_item(
             if length > u64::try_from(max_string_bytes).unwrap_or(u64::MAX) {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
-            let length = usize::try_from(length).unwrap_or(usize::MAX);
-            if length > max_string_bytes {
-                return Err(RecipientExportErrorV1::FieldOutOfBounds);
-            }
-            let remaining = bytes
-                .get(*position..)
-                .ok_or(RecipientExportErrorV1::InvalidEncoding)?;
+            let length = usize::try_from(length).unwrap_or(max_string_bytes);
+            let remaining = &bytes[*position..];
             if length > remaining.len() {
                 return Err(RecipientExportErrorV1::InvalidEncoding);
             }
@@ -1762,6 +1745,51 @@ mod tests {
                 Err(RecipientExportErrorV1::InvalidEncoding)
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_malformed_envelopes_and_signed_identity_scalars_through_decryption(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        assert_eq!(
+            decrypt_timeline_export_v1(&[0], [5; 16], recipient, &private),
+            Err(RecipientExportErrorV1::InvalidEncoding)
+        );
+
+        let mut rng = StdRng::from_seed([21; 32]);
+        let invalid_cbor = encrypt_payload(&[0x18], recipient, [5; 16], &mut rng)?;
+        assert_eq!(
+            decrypt_timeline_export_v1(&invalid_cbor, [5; 16], recipient, &private),
+            Err(RecipientExportErrorV1::InvalidEncoding)
+        );
+
+        let mut item_limited = vec![0x98, 34];
+        item_limited.extend_from_slice(&[0; 33]);
+        item_limited.extend_from_slice(&[0x9a, 0, 0, 0x40, 0]);
+        assert_eq!(
+            RecipientTimelineExportV1::decode(&item_limited),
+            Err(RecipientExportErrorV1::FieldOutOfBounds)
+        );
+
+        let mut source = export(None, b"source".to_vec());
+        source.events[0].signature = Some(Signature::from_bytes([1; 64]));
+        source.events[0].signature_identity = Some(KeyIdentityV1::from_parts(
+            pos_core::OwnerIdV1::new("source")
+                .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?,
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
+        let payload = encode_payload(&source)?;
+        let malformed = rewrite_payload(&payload, |fields| {
+            replace_identity_field(fields, 2, Value::Bool(true));
+        })?;
+        let encrypted = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+        assert_eq!(
+            decrypt_timeline_export_v1(&encrypted, [5; 16], recipient, &private),
+            Err(RecipientExportErrorV1::InvalidEncoding)
+        );
         Ok(())
     }
 }
