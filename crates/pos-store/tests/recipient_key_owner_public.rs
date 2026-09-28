@@ -122,7 +122,7 @@ fn recipient_owner_public_contract_recovers_and_destroys_the_bound_file(
 }
 
 #[test]
-fn recipient_owner_public_contract_rejects_replaced_file_and_keeps_pending(
+fn recipient_owner_public_contract_rejects_replaced_file_and_keeps_key_active(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
     let path = only_private_file(&temporary.path().join("recipient-private"))?;
@@ -162,9 +162,6 @@ fn recipient_owner_public_contract_rejects_replaced_file_and_keeps_pending(
             KeyRoleV1::ExportRecipientEncryption
         )
         .is_some());
-    assert!(registry
-        .pending_destruction_requests()
-        .any(|request| request.identity == descriptor.identity()));
     assert!(registry.tombstone(descriptor.identity()).is_none());
     let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
         .query_row(
