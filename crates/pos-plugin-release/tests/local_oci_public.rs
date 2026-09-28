@@ -1128,10 +1128,10 @@ fn reader_rejects_incomplete_shapes_and_non_utf8_owner() -> Result<(), Box<dyn s
             .join(&bundle.address().digest()[7..]);
         match mutation {
             Mutation::RenameOwner => {
-                fs::rename(release.join("OWNER"), release.join("unrecognized"))?
+                fs::rename(release.join("OWNER"), release.join("unrecognized"))?;
             }
             Mutation::RenameDigestDirectory => {
-                fs::rename(release.join("blobs/sha256"), release.join("blobs/other"))?
+                fs::rename(release.join("blobs/sha256"), release.join("blobs/other"))?;
             }
             Mutation::NonUtf8Owner => fs::write(release.join("OWNER"), [0xff])?,
             Mutation::RemoveReady => fs::remove_file(release.join("READY"))?,
