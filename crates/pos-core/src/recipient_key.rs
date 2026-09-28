@@ -168,7 +168,7 @@ impl RecipientKeyDescriptorV1 {
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
-    fn from_parts(owner_id: OwnerIdV1, epoch: u64, public_key: [u8; 32]) -> Self {
+    const fn from_parts(owner_id: OwnerIdV1, epoch: u64, public_key: [u8; 32]) -> Self {
         Self {
             identity: KeyIdentityV1::from_parts(
                 owner_id,
