@@ -1052,14 +1052,15 @@ fn quarantine_unregistered_owned_staged_material(
     while let Some(entry) = directory.read() {
         let entry = entry.map_err(storage_error)?;
         let name = entry.file_name();
-        let Some(epoch) = staged_recipient_epoch(name) else {
+        let path = Path::new(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        let Some(epoch) = staged_recipient_epoch(path.as_os_str()) else {
             continue;
         };
-        let material = read_unregistered_staged_private_key(owner, name)?;
+        let material = read_unregistered_staged_private_key(owner, path)?;
         let public_key = pos_crypto::recipient_key::recipient_public_key_from_private_v1(&material);
         let descriptor = RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
             .map_err(storage_error)?;
-        if bound_name(&recipient_private_path(&owner.directory, descriptor))? != Path::new(name) {
+        if bound_name(&recipient_private_path(&owner.directory, descriptor))? != path {
             continue;
         }
         quarantine_staged_entry(owner, name)?;
@@ -1114,10 +1115,8 @@ fn read_unregistered_staged_private_key(
 
 fn quarantine_staged_entry(
     owner: &RecipientKeyOwnerV1,
-    name: &std::ffi::OsStr,
+    name: &std::ffi::CStr,
 ) -> Result<(), CoreError> {
-    use std::os::unix::ffi::OsStrExt;
-
     let bytes = name.to_bytes();
     let mut quarantine = Vec::with_capacity(bytes.len() + 8);
     quarantine.extend_from_slice(b".");
