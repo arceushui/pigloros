@@ -7229,12 +7229,38 @@ mod coverage_paths {
     }
 
     #[test]
-    fn fork_batch_allows_child_scope_used_only_by_an_unaffected_request(
-    ) -> Result<(), ErasureErrorV1> {
+    fn fork_batch_rejects_child_at_timeline_ceiling() -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery_with_limits(
+            Vec::new(),
+            vec![parent],
+            ErasureRecoveryLimitsV1::new(1, 1, 1)?,
+        )?;
+        let input = ErasureForkAdmissionInputV1 {
+            operation: reference(89),
+            expected_inventory_generation: inventory.generation(),
+            child_scope: reference(90),
+            child: crate::TimelineMeta {
+                id: TimelineId::new(),
+                mode: crate::TimelineMode::Historical,
+                name: None,
+                owner: None,
+                fork_point: Some((parent, crate::Seq::ZERO)),
+            },
+        };
+        assert_eq!(
+            inventory.prepare_fork_batch(input, Vec::new()),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
+    }
+
+    fn inventory_with_unaffected_extension(
+        parent: TimelineId,
+        child_scope: ErasureReferenceV1,
+    ) -> Result<(ErasureVerifiedInventoryV1, ErasureVerifiedStateV1), ErasureErrorV1> {
         let unaffected_parent = TimelineId::new();
         let existing_child = TimelineId::new();
-        let child_scope = reference(97);
         let affected = inventory_state_with_timelines(
             reference(91),
             reference(92),
@@ -7242,10 +7268,6 @@ mod coverage_paths {
             ErasureLifecycleV1::AccessFrozen,
             vec![parent],
         )?;
-        let affected_scope_commitment = affected
-            .scope()
-            .map(ErasureScopeCommitmentV1::reference)
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         let mut unaffected = inventory_state_with_timelines(
             reference(94),
             reference(95),
@@ -7295,6 +7317,19 @@ mod coverage_paths {
             vec![parent, unaffected_parent, existing_child],
             4,
         )?;
+        Ok((inventory, affected))
+    }
+
+    #[test]
+    fn fork_batch_allows_child_scope_used_only_by_an_unaffected_request(
+    ) -> Result<(), ErasureErrorV1> {
+        let parent = TimelineId::new();
+        let child_scope = reference(97);
+        let (inventory, affected) = inventory_with_unaffected_extension(parent, child_scope)?;
+        let affected_scope_commitment = affected
+            .scope()
+            .map(ErasureScopeCommitmentV1::reference)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         let child = TimelineId::new();
         let input = ErasureForkAdmissionInputV1 {
             operation: reference(99),
