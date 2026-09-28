@@ -826,7 +826,7 @@ mod tests {
         );
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
-            fs::Permissions::from_mode(0o644),
+            fs::Permissions::from_mode(0o620),
         ));
         expect_invalid(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
         test_ok(fs::set_permissions(
