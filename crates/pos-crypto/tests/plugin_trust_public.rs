@@ -29,7 +29,15 @@ fn public_verifier_distinguishes_unknown_root_key_from_invalid_signature(
     let prv1 = hex_bytes(PRV1_HEX)?;
     let baseline_anchor =
         TrustedPluginRootAnchorV1::new("trust.example", *blake3::hash(&ptr1).as_bytes())?;
-    assert!(verify_plugin_trust_v1(&baseline_anchor, &[&ptr1], &[&prv1], 0, 10).is_ok());
+    let evidence = verify_plugin_trust_v1(&baseline_anchor, &[&ptr1], &[&prv1], 0, 10)?;
+    assert_eq!(
+        evidence.verified_root_history().collect::<Vec<_>>(),
+        vec![(42, *blake3::hash(&ptr1).as_bytes())]
+    );
+    assert_eq!(
+        evidence.verified_revocation_history().collect::<Vec<_>>(),
+        vec![(7, *blake3::hash(&prv1).as_bytes())]
+    );
     let signature_start = ptr1.len() - 64;
     let signer_id_start = signature_start - 34;
     assert_eq!(&ptr1[signer_id_start - 2..signer_id_start], &[0x58, 0x20]);
