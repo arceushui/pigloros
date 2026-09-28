@@ -5696,7 +5696,14 @@ mod tests {
             Err(ManifestRegistrationErrorV1::SlotMismatch)
         ));
 
-        for field in ["name", "version", "id", "implementation", "eop1", "closure"] {
+        for field in [
+            "name",
+            "version",
+            "id",
+            "implementation",
+            "eop1",
+            "closure",
+        ] {
             let mut row = original.clone();
             match field {
                 "name" => row.plugin_name.push('x'),
