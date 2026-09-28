@@ -7232,6 +7232,7 @@ mod coverage_paths {
     fn fork_batch_allows_child_scope_used_only_by_an_unaffected_request(
     ) -> Result<(), ErasureErrorV1> {
         let parent = TimelineId::new();
+        let unaffected_parent = TimelineId::new();
         let existing_child = TimelineId::new();
         let child_scope = reference(97);
         let affected = inventory_state_with_timelines(
@@ -7245,11 +7246,12 @@ mod coverage_paths {
             .scope()
             .map(ErasureScopeCommitmentV1::reference)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let mut unaffected = inventory_state(
+        let mut unaffected = inventory_state_with_timelines(
             reference(94),
             reference(95),
             reference(96),
             ErasureLifecycleV1::AccessFrozen,
+            vec![unaffected_parent],
         )?;
         let unaffected_scope = unaffected
             .scope()
@@ -7275,19 +7277,22 @@ mod coverage_paths {
                     ErasureVerifiedTopologyProofV1::from_verified_recovery(
                         affected.manifest_digest(),
                         vec![(parent, reference(93))],
-                        vec![existing_child],
+                        vec![unaffected_parent, existing_child],
                     ),
                 ),
                 (
                     unaffected,
                     ErasureVerifiedTopologyProofV1::from_verified_recovery(
                         reference(95),
-                        vec![(existing_child, child_scope)],
+                        vec![
+                            (unaffected_parent, reference(96)),
+                            (existing_child, child_scope),
+                        ],
                         vec![parent],
                     ),
                 ),
             ],
-            vec![parent, existing_child],
+            vec![parent, unaffected_parent, existing_child],
             4,
         )?;
         let child = TimelineId::new();

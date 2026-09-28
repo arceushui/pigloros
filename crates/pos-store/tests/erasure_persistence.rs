@@ -1290,13 +1290,16 @@ where
     Ok(coordinator)
 }
 
-fn assert_fork_scope_collision_with_unaffected_request_is_rejected<S>(
+fn assert_fork_scope_collision_with_unaffected_request_is_admitted<S>(
     mut store: S,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    S: EventStore + ErasurePersistencePortV1 + ErasureInventoryPersistencePortV1,
+    S: EventStore
+        + ErasurePersistencePortV1
+        + ErasureInventoryPersistencePortV1
+        + ErasureForkPersistencePortV1,
 {
-    let _gate = bind_test_gate(&mut store)?;
+    let gate = bind_test_gate(&mut store)?;
     let parent = store.create_timeline("fork-collision-parent")?.id();
     store.append(
         parent,
@@ -1354,9 +1357,36 @@ where
         &input,
     )?;
 
+    let batch = inventory.prepare_fork_batch(input, vec![admission])?;
+    assert_eq!(batch.admissions().len(), 1);
+    let requirements = batch
+        .successor_inventory()
+        .fork_retry_scope_requirements(parent, child, child_scope)?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(requirements.len(), 1);
     assert_eq!(
-        inventory.prepare_fork_batch(input, vec![admission]),
-        Err(ErasureErrorV1::PolicyConflict)
+        requirements[0].requirement().request(),
+        affected_request.reference()
+    );
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::Applied
+    );
+    assert_eq!(
+        shared
+            .borrow()
+            .scope_index_count(affected_request.reference())?,
+        1
+    );
+    assert_eq!(
+        shared
+            .borrow()
+            .scope_index_count(unaffected_request.reference())?,
+        0
+    );
+    assert_eq!(
+        commit_fork_admission(&shared, &gate, &batch)?,
+        pos_core::ErasureCasOutcomeV1::ExactRetry
     );
     Ok(())
 }
@@ -1765,9 +1795,9 @@ fn memory_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn memory_rejects_child_scope_already_in_an_unaffected_request(
+fn memory_admits_child_scope_already_in_an_unaffected_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_fork_scope_collision_with_unaffected_request_is_rejected(MemoryStore::new())
+    assert_fork_scope_collision_with_unaffected_request_is_admitted(MemoryStore::new())
 }
 
 #[test]
@@ -2077,9 +2107,9 @@ fn sqlite_rejects_a_repeated_fork_child_scope() -> Result<(), Box<dyn std::error
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_rejects_child_scope_already_in_an_unaffected_request(
+fn sqlite_admits_child_scope_already_in_an_unaffected_request(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_fork_scope_collision_with_unaffected_request_is_rejected(SqliteStore::open_in_memory()?)
+    assert_fork_scope_collision_with_unaffected_request_is_admitted(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
