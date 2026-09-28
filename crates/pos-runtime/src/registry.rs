@@ -58,7 +58,7 @@ fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 /// supply a policy, registration pin, or registry mutation capability.
 pub struct HostCatalogueEntryV1<C, P, A> {
     configuration_details: fn(&C) -> Vec<u8>,
-    build: fn(&C) -> (P, A),
+    build: fn(&C) -> (P, Option<Box<dyn Reducer>>, A),
 }
 
 impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
@@ -66,7 +66,7 @@ impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
     #[must_use]
     pub const fn gateway(
         configuration_details: fn(&C) -> Vec<u8>,
-        build: fn(&C) -> (P, A),
+        build: fn(&C) -> (P, Option<Box<dyn Reducer>>, A),
     ) -> Self {
         Self {
             configuration_details,
@@ -77,6 +77,7 @@ impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
 
 struct InstalledPluginBundleV1<P> {
     plugin: P,
+    reducer: Option<Box<dyn Reducer>>,
     binding: OutputPolicyBindingV1,
     registration: PluginRegistrationV1,
 }
@@ -3259,7 +3260,7 @@ impl PluginRegistry {
         A: ActionApprover + 'static,
     {
         let configuration_details = (entry.configuration_details)(&frozen_configuration);
-        let (plugin, approver) = (entry.build)(&frozen_configuration);
+        let (plugin, reducer, approver) = (entry.build)(&frozen_configuration);
         let binding = OutputPolicyBindingV1::from_installed_source(
             &plugin,
             match mode {
@@ -3288,6 +3289,7 @@ impl PluginRegistry {
                 )?;
                 let bundle = InstalledPluginBundleV1 {
                     plugin,
+                    reducer,
                     binding,
                     registration: PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
                 };
@@ -3295,7 +3297,7 @@ impl PluginRegistry {
                     &bundle.plugin,
                     bundle.binding,
                     bundle.registration,
-                    None,
+                    bundle.reducer,
                 )
             }
             #[cfg(test)]
@@ -3308,7 +3310,7 @@ impl PluginRegistry {
                 self.register_with_verified_output_policy_inner(
                     &plugin,
                     binding,
-                    None,
+                    reducer,
                     driver,
                     approver,
                     approver_event_types,
@@ -5794,7 +5796,7 @@ mod tests {
 
     fn build_catalogue_fixture(
         configuration: &CatalogueFixtureConfiguration,
-    ) -> (TestPlugin, MockActionApprover) {
+    ) -> (TestPlugin, Option<Box<dyn Reducer>>, MockActionApprover) {
         (
             TestPlugin {
                 id: configuration.plugin_id,
@@ -5804,8 +5806,17 @@ mod tests {
                     ..Capability::default()
                 },
             },
+            None,
             MockActionApprover,
         )
+    }
+
+    fn build_catalogue_reducer_fixture(
+        configuration: &CatalogueFixtureConfiguration,
+    ) -> (TestPlugin, Option<Box<dyn Reducer>>, MockActionApprover) {
+        let (mut plugin, _, approver) = build_catalogue_fixture(configuration);
+        plugin.cap.has_reducer = true;
+        (plugin, Some(Box::new(CountReducer)), approver)
     }
 
     #[test]
@@ -5837,6 +5848,27 @@ mod tests {
             registry.submit_action(TimelineId::new(), &proposal),
             Err(ActionSubmissionError::ErasureOperationUnavailable)
         ));
+    }
+
+    #[test]
+    fn catalogue_fixture_wires_the_selected_reducer_without_a_production_pin() {
+        let selected = HostCatalogueEntryV1::gateway(
+            catalogue_fixture_details,
+            build_catalogue_reducer_fixture,
+        );
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        registry
+            .register_from_host_catalogue_entry_inner(
+                &selected,
+                CatalogueFixtureConfiguration {
+                    plugin_id: PluginId::new(),
+                    details: Vec::new(),
+                },
+                CatalogueRegistrationModeV1::NonproductionFixture,
+            )
+            .test_ok();
+        assert_eq!(registry.projections.reducer_names(), vec!["catalogue-fixture"]);
+        assert!(registry.composition().plugins[0].pin.is_none());
     }
 
     #[test]

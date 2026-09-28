@@ -341,7 +341,11 @@ mod coverage_tests {
 
         fn counted_factory(
             configuration: &super::FrozenGatewayActionConfiguration,
-        ) -> (GatewayActionPlugin, super::GatewayWorldActionApprover) {
+        ) -> (
+            GatewayActionPlugin,
+            Option<Box<dyn pos_core::Reducer>>,
+            super::GatewayWorldActionApprover,
+        ) {
             FACTORY_CALLS.fetch_add(1, Ordering::SeqCst);
             super::build_gateway_action_product(configuration)
         }
@@ -991,11 +995,16 @@ fn frozen_gateway_details(configuration: &FrozenGatewayActionConfiguration) -> V
 #[cfg(test)]
 fn build_gateway_action_product(
     configuration: &FrozenGatewayActionConfiguration,
-) -> (GatewayActionPlugin, GatewayWorldActionApprover) {
+) -> (
+    GatewayActionPlugin,
+    Option<Box<dyn pos_core::Reducer>>,
+    GatewayWorldActionApprover,
+) {
     (
         GatewayActionPlugin {
             id: PluginId::new(),
         },
+        None,
         GatewayWorldActionApprover(WorldPlugin::new().with_bodies(configuration.bodies.clone())),
     )
 }
