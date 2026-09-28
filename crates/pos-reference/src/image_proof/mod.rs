@@ -90,20 +90,15 @@ fn validate_profile(cms_data: &SignedData) -> Result<&SignerInfo, SandboxImagePr
     if cms_data.encap_content_info.econtent_type != DATA
         || cms_data.encap_content_info.econtent.is_some()
         || cms_data.crls.is_some()
-        || cms_data.digest_algorithms.len() != 1
-        || cms_data.signer_infos.0.len() != 1
     {
         return Err(SandboxImageProofError::UnsupportedProfile);
     }
-    let digest = cms_data
-        .digest_algorithms
-        .get(0)
-        .ok_or(SandboxImageProofError::UnsupportedProfile)?;
-    let signer = cms_data
-        .signer_infos
-        .0
-        .get(0)
-        .ok_or(SandboxImageProofError::UnsupportedProfile)?;
+    let [digest] = cms_data.digest_algorithms.as_slice() else {
+        return Err(SandboxImageProofError::UnsupportedProfile);
+    };
+    let [signer] = cms_data.signer_infos.0.as_slice() else {
+        return Err(SandboxImageProofError::UnsupportedProfile);
+    };
     let version = match signer.sid {
         SignerIdentifier::IssuerAndSerialNumber(_) => CmsVersion::V1,
         SignerIdentifier::SubjectKeyIdentifier(_) => CmsVersion::V3,

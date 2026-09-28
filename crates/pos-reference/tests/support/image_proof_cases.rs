@@ -1,4 +1,6 @@
 mod image_proof_cases {
+    include!("image_proof_certificate_cases.rs");
+
     use super::*;
     use cms::{
         cert::CertificateChoices,
@@ -177,45 +179,41 @@ mod image_proof_cases {
                 }
                 ProfileDefect::NoSigner => {
                     cms_data.signer_infos = vec![].try_into()?;
+                    return Ok(());
                 }
                 ProfileDefect::ExtraSigner => {
                     let original = signer.clone();
                     signer.version = CmsVersion::V3;
                     cms_data.signer_infos = vec![original, signer].try_into()?;
+                    return Ok(());
                 }
                 ProfileDefect::DataVersion => {
                     cms_data.version = CmsVersion::V3;
                 }
-                _ => {
-                    match defect {
-                        ProfileDefect::SignerVersion => {
-                            signer.version = CmsVersion::V3;
-                        }
-                        ProfileDefect::SignedAttributes => {
-                            signer.signed_attrs = Some(Default::default());
-                        }
-                        ProfileDefect::UnsignedAttributes => {
-                            signer.unsigned_attrs = Some(Default::default());
-                        }
-                        ProfileDefect::DigestAlgorithm => {
-                            digest.oid = other;
-                            cms_data.digest_algorithms = vec![digest].try_into()?;
-                        }
-                        ProfileDefect::SignerDigest => {
-                            signer.digest_alg.oid = other;
-                        }
-                        ProfileDefect::SignatureAlgorithm => {
-                            signer.signature_algorithm.oid = other;
-                        }
-                        ProfileDefect::Parameters => {
-                            signer.signature_algorithm.parameters =
-                                Some(der::Any::encode_from(&1_u8)?);
-                        }
-                        _ => return Err("not a signer defect".into()),
-                    }
-                    cms_data.signer_infos = vec![signer].try_into()?;
+                ProfileDefect::SignerVersion => {
+                    signer.version = CmsVersion::V3;
+                }
+                ProfileDefect::SignedAttributes => {
+                    signer.signed_attrs = Some(Default::default());
+                }
+                ProfileDefect::UnsignedAttributes => {
+                    signer.unsigned_attrs = Some(Default::default());
+                }
+                ProfileDefect::DigestAlgorithm => {
+                    digest.oid = other;
+                    cms_data.digest_algorithms = vec![digest].try_into()?;
+                }
+                ProfileDefect::SignerDigest => {
+                    signer.digest_alg.oid = other;
+                }
+                ProfileDefect::SignatureAlgorithm => {
+                    signer.signature_algorithm.oid = other;
+                }
+                ProfileDefect::Parameters => {
+                    signer.signature_algorithm.parameters = Some(der::Any::encode_from(&1_u8)?);
                 }
             }
+            cms_data.signer_infos = vec![signer].try_into()?;
             Ok(())
         })
     }
