@@ -1932,6 +1932,7 @@ impl Gateway {
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<GenerationBoundEventPage, GatewayError> {
+        const MAX_FILTER_SCAN_EVENTS: usize = 1_000;
         if limit == 0 || limit > MAX_EVENTS_PER_POLL {
             return Err(GatewayError::InvalidPageLimit {
                 maximum: MAX_EVENTS_PER_POLL,
@@ -1940,7 +1941,6 @@ impl Gateway {
         let id = parse_timeline_id(timeline_id)?;
         // A cursor is derived only from visible Events. Scan in bounded chunks
         // so protected Events cannot hide later public Events in the same page.
-        const MAX_FILTER_SCAN_EVENTS: usize = 1_000;
         let mut next_seq = from_seq.max(1);
         let mut scanned = 0usize;
         let mut visible = Vec::with_capacity(limit + 1);
