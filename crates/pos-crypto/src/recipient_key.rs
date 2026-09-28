@@ -26,14 +26,8 @@ pub fn derive_recipient_keypair_v1(
     let (private_key, public_key) = X25519HkdfSha256::derive_keypair(ikm);
     let private_key = private_key.to_bytes();
     let public_key = public_key.to_bytes();
-    let private_key = private_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| RecipientKeyErrorV1::InvalidKeyWidth)?;
-    let public_key = public_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| RecipientKeyErrorV1::InvalidKeyWidth)?;
+    let private_key = private_key.into();
+    let public_key = public_key.into();
     Ok((private_key, public_key))
 }
 
@@ -49,8 +43,5 @@ pub fn recipient_public_key_from_private_v1(
     let private_key = <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(private_key)
         .map_err(|_| RecipientKeyErrorV1::InvalidKeyWidth)?;
     let public_key = X25519HkdfSha256::sk_to_pk(&private_key).to_bytes();
-    public_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| RecipientKeyErrorV1::InvalidKeyWidth)
+    Ok(public_key.into())
 }
