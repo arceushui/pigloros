@@ -81,6 +81,13 @@ struct InstalledPluginBundleV1<P, A> {
     configuration_details: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+enum CatalogueRegistrationModeV1 {
+    InstalledGateway,
+    #[cfg(test)]
+    NonproductionFixture,
+}
+
 fn replay_policy_identity_digest(
     entry: &PluginEntry,
     admission: &OutputAdmissionV1,
@@ -3234,6 +3241,23 @@ impl PluginRegistry {
         P: Plugin,
         A: ActionApprover + 'static,
     {
+        self.register_from_host_catalogue_entry_inner(
+            entry,
+            frozen_configuration,
+            CatalogueRegistrationModeV1::InstalledGateway,
+        )
+    }
+
+    fn register_from_host_catalogue_entry_inner<C, P, A>(
+        &mut self,
+        entry: &HostCatalogueEntryV1<C, P, A>,
+        frozen_configuration: C,
+        mode: CatalogueRegistrationModeV1,
+    ) -> Result<(), RuntimeError>
+    where
+        P: Plugin,
+        A: ActionApprover + 'static,
+    {
         let configuration_details = (entry.configuration_details)(&frozen_configuration);
         let (plugin, approver) = (entry.build)(&frozen_configuration);
         let bundle = InstalledPluginBundleV1 {
@@ -3243,26 +3267,53 @@ impl PluginRegistry {
         };
         let binding = OutputPolicyBindingV1::from_installed_source(
             &bundle.plugin,
-            InstalledOutputPolicySourceV1::Gateway,
+            match mode {
+                CatalogueRegistrationModeV1::InstalledGateway => InstalledOutputPolicySourceV1::Gateway,
+                #[cfg(test)]
+                CatalogueRegistrationModeV1::NonproductionFixture => {
+                    InstalledOutputPolicySourceV1::Generated
+                }
+            },
             &bundle.configuration_details,
             "deterministic-local-v1",
         )?;
-        let binding = binding.with_installed_action_approver(
+        let mut binding = binding.with_installed_action_approver(
             bundle.approver,
             [Kind::new(crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1)],
         )?;
-        let pin = crate::PluginPinV1::try_new(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
-            binding.policy().digest(),
-            vec![crate::reviewed_policy::installed_plugin_role_v1(&bundle.plugin)],
-        )?;
-        self.register_installed_output(
-            &bundle.plugin,
-            binding,
-            PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
-            None,
-        )
+        match mode {
+            CatalogueRegistrationModeV1::InstalledGateway => {
+                let pin = crate::PluginPinV1::try_new(
+                    DomainImplementationKindV1::Plugin,
+                    PluginIsolationV1::OperatorTrustedNative,
+                    binding.policy().digest(),
+                    vec![crate::reviewed_policy::installed_plugin_role_v1(&bundle.plugin)],
+                )?;
+                self.register_installed_output(
+                    &bundle.plugin,
+                    binding,
+                    PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                    None,
+                )
+            }
+            #[cfg(test)]
+            CatalogueRegistrationModeV1::NonproductionFixture => {
+                let InstalledCallbacksV1 {
+                    driver,
+                    approver,
+                    approver_event_types,
+                } = binding.take_callbacks();
+                self.register_with_verified_output_policy_inner(
+                    &bundle.plugin,
+                    binding,
+                    None,
+                    driver,
+                    approver,
+                    approver_event_types,
+                    None,
+                )
+            }
+        }
     }
 
     /// Register one installed Plugin with its verified callbacks and exact
@@ -5728,6 +5779,45 @@ mod tests {
                 has_reducer,
             },
         }
+    }
+
+    fn catalogue_fixture_details(_: &()) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn build_catalogue_fixture(_: &()) -> (TestPlugin, MockActionApprover) {
+        (
+            plugin_with_caps("catalogue-fixture", &["world.action.v1"], false, false),
+            MockActionApprover,
+        )
+    }
+
+    #[test]
+    fn catalogue_fixture_registers_without_installed_pin_or_append_gate() {
+        let selected = HostCatalogueEntryV1::gateway(
+            catalogue_fixture_details,
+            build_catalogue_fixture,
+        );
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        registry
+            .register_from_host_catalogue_entry_inner(
+                &selected,
+                (),
+                CatalogueRegistrationModeV1::NonproductionFixture,
+            )
+            .test_ok();
+        assert_eq!(registry.composition().plugins.len(), 1);
+        assert!(registry.composition().plugins[0].pin.is_none());
+        let proposal = ProposedAction::new(
+            Kind::new("world.action.v1"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"fixture"),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert!(matches!(
+            registry.submit_action(TimelineId::new(), &proposal),
+            Err(ActionSubmissionError::ErasureOperationUnavailable)
+        ));
     }
 
     struct CountReducer;
