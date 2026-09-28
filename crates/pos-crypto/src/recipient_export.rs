@@ -1502,7 +1502,8 @@ mod tests {
                 Err(RecipientExportErrorV1::InvalidEncoding)
             );
         }
-        for encoded in [vec![0x5a, 0, 1, 0, 1], vec![0x9a, 0, 0, 0x40, 1]] {
+        // 65,553 string bytes and 16,385 array items exceed their preflight caps.
+        for encoded in [vec![0x5a, 0, 1, 0, 17], vec![0x9a, 0, 0, 0x40, 1]] {
             assert_eq!(
                 RecipientTimelineExportV1::decode(&encoded),
                 Err(RecipientExportErrorV1::FieldOutOfBounds)
