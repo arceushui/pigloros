@@ -140,11 +140,10 @@ impl ForkAuthenticationPolicyV1 {
                 .map(ForkAuthenticationAdapterPolicyV1::from_value)
                 .collect::<Result<_, _>>()?,
         )?;
-        let canonical_policy = policy
+        policy
             .to_canonical_cbor()
-            .expect("validated FAP1 always encodes into a Vec");
-        canonical(bytes_in, &canonical_policy)?;
-        Ok(policy)
+            .and_then(|encoded| canonical(bytes_in, &encoded))
+            .map(|()| policy)
     }
 
     /// Encode the exact FAP1 array.
@@ -152,7 +151,7 @@ impl ForkAuthenticationPolicyV1 {
     /// # Errors
     /// Returns a closed codec error if serialization fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
-        Ok(encode(&Value::Array(vec![
+        encode(&Value::Array(vec![
             text("FAP1"),
             uint(1_u8),
             Value::Array(
@@ -161,7 +160,7 @@ impl ForkAuthenticationPolicyV1 {
                     .map(ForkAuthenticationAdapterPolicyV1::value)
                     .collect(),
             ),
-        ])))
+        ]))
     }
 
     /// Complete FAP1 byte commitment pinned by FAH1.
@@ -169,12 +168,8 @@ impl ForkAuthenticationPolicyV1 {
     /// # Errors
     /// Returns a closed codec error if serialization fails.
     pub fn digest(&self) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
-        Ok(digest(
-            POLICY_DOMAIN,
-            &self
-                .to_canonical_cbor()
-                .expect("validated FAP1 always encodes into a Vec"),
-        ))
+        self.to_canonical_cbor()
+            .map(|encoded| digest(POLICY_DOMAIN, &encoded))
     }
 
     #[must_use]
@@ -231,20 +226,23 @@ impl LocalAccountRegistryV1 {
         if !bindings.windows(2).all(|pair| pair[0].uid < pair[1].uid) {
             return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
         }
-        let mut seen_principals = Vec::with_capacity(bindings.len());
-        for binding in &bindings {
-            let current_digest = principal_digest_v1(&binding.principal)
-                .expect("validated PrincipalRefV1 always encodes");
-            if seen_principals.contains(&current_digest) {
-                return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
-            }
-            seen_principals.push(current_digest);
-        }
-        Ok(Self {
-            adapter_id,
-            assurance,
-            bindings,
-        })
+        bindings
+            .iter()
+            .try_fold(Vec::with_capacity(bindings.len()), |mut seen, binding| {
+                principal_digest_v1(&binding.principal).and_then(|current_digest| {
+                    if seen.contains(&current_digest) {
+                        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+                    } else {
+                        seen.push(current_digest);
+                        Ok(seen)
+                    }
+                })
+            })
+            .map(|_| Self {
+                adapter_id,
+                assurance,
+                bindings,
+            })
     }
 
     /// Decode exact LAR1 bytes under the local service UID policy.
@@ -263,12 +261,15 @@ impl LocalAccountRegistryV1 {
             .iter()
             .map(|entry| {
                 let fields = array(entry, 3)?;
-                Ok(LocalAccountBindingV1 {
-                    uid: number::<u32>(&fields[0])?,
-                    principal: principal(&fields[1])?,
-                    owner: OwnerIdV1::new(string(&fields[2])?)
-                        .expect("bounded nonempty owner text always validates"),
-                })
+                let uid = number::<u32>(&fields[0])?;
+                let principal = principal(&fields[1])?;
+                OwnerIdV1::new(string(&fields[2])?)
+                    .map_err(|_| ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+                    .map(|owner| LocalAccountBindingV1 {
+                        uid,
+                        principal,
+                        owner,
+                    })
             })
             .collect::<Result<_, ForkAuthenticationCodecErrorV1>>()?;
         let registry = Self::new(
@@ -277,11 +278,10 @@ impl LocalAccountRegistryV1 {
             bindings,
             service_uid,
         )?;
-        let canonical_registry = registry
+        registry
             .to_canonical_cbor()
-            .expect("validated LAR1 always encodes into a Vec");
-        canonical(bytes_in, &canonical_registry)?;
-        Ok(registry)
+            .and_then(|encoded| canonical(bytes_in, &encoded))
+            .map(|()| registry)
     }
 
     /// Encode the exact LAR1 registry.
@@ -289,19 +289,19 @@ impl LocalAccountRegistryV1 {
     /// # Errors
     /// Returns a closed codec error if a Principal or CBOR value cannot encode.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
-        Ok(encode(&Value::Array(vec![
-            text("LAR1"),
-            uint(1_u8),
-            text(&self.adapter_id),
-            uint(self.assurance),
-            Value::Array(
-                self.bindings
-                    .iter()
-                    .map(binding_value)
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("validated PrincipalRefV1 always encodes"),
-            ),
-        ])))
+        self.bindings
+            .iter()
+            .map(binding_value)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|bindings| {
+                encode(&Value::Array(vec![
+                    text("LAR1"),
+                    uint(1_u8),
+                    text(&self.adapter_id),
+                    uint(self.assurance),
+                    Value::Array(bindings),
+                ]))
+            })
     }
 
     /// Commit the exact LAR1 bytes.
@@ -309,12 +309,8 @@ impl LocalAccountRegistryV1 {
     /// # Errors
     /// Returns a closed codec error if serialization fails.
     pub fn digest(&self) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
-        Ok(digest(
-            REGISTRY_DOMAIN,
-            &self
-                .to_canonical_cbor()
-                .expect("validated LAR1 always encodes into a Vec"),
-        ))
+        self.to_canonical_cbor()
+            .map(|encoded| digest(REGISTRY_DOMAIN, &encoded))
     }
 
     #[must_use]
@@ -347,15 +343,17 @@ impl LocalAccountRegistryV1 {
 }
 
 fn binding_value(binding: &LocalAccountBindingV1) -> Result<Value, ForkAuthenticationCodecErrorV1> {
-    let principal = binding
+    binding
         .principal
         .encode()
-        .expect("validated PrincipalRefV1 always encodes");
-    Ok(Value::Array(vec![
-        uint(binding.uid),
-        bytes(principal.as_slice()),
-        text(binding.owner.as_str()),
-    ]))
+        .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)
+        .map(|principal| {
+            Value::Array(vec![
+                uint(binding.uid),
+                bytes(principal.as_slice()),
+                text(binding.owner.as_str()),
+            ])
+        })
 }
 
 /// Exact unsigned APR1 content before adapter signing.
@@ -392,21 +390,22 @@ impl AuthenticatedPrincipalRecordV1 {
     /// # Errors
     /// Returns a closed codec error if the Principal or CBOR value cannot encode.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
-        let principal = self
-            .principal
+        self.principal
             .encode()
-            .expect("validated PrincipalRefV1 always encodes");
-        Ok(encode(&Value::Array(vec![
-            text("APR1"),
-            uint(1_u8),
-            bytes(principal.as_slice()),
-            text(&self.adapter_id),
-            uint(self.assurance),
-            uint(self.issued_at),
-            uint(self.expires_at),
-            bytes(self.registry_binding.as_bytes()),
-            bytes(&self.operation_nonce),
-        ])))
+            .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)
+            .and_then(|principal| {
+                encode(&Value::Array(vec![
+                    text("APR1"),
+                    uint(1_u8),
+                    bytes(principal.as_slice()),
+                    text(&self.adapter_id),
+                    uint(self.assurance),
+                    uint(self.issued_at),
+                    uint(self.expires_at),
+                    bytes(self.registry_binding.as_bytes()),
+                    bytes(&self.operation_nonce),
+                ]))
+            })
     }
 
     /// Decode exact canonical APR1.
@@ -427,11 +426,10 @@ impl AuthenticatedPrincipalRecordV1 {
             operation_nonce: fixed(&fields[8])?,
         };
         result.validate()?;
-        let canonical_record = result
+        result
             .to_canonical_cbor()
-            .expect("validated APR1 always encodes into a Vec");
-        canonical(bytes_in, &canonical_record)?;
-        Ok(result)
+            .and_then(|encoded| canonical(bytes_in, &encoded))
+            .map(|()| result)
     }
 }
 
@@ -470,17 +468,14 @@ impl AuthenticatedPrincipalEvidenceV1 {
     /// # Errors
     /// Returns a closed codec error if a nested value cannot encode.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
-        Ok(encode(&Value::Array(vec![
-            text("FAE1"),
-            uint(1_u8),
-            bytes(
-                &self
-                    .record
-                    .to_canonical_cbor()
-                    .expect("validated APR1 always encodes into a Vec"),
-            ),
-            bytes(&self.signature),
-        ])))
+        self.record.to_canonical_cbor().and_then(|record| {
+            encode(&Value::Array(vec![
+                text("FAE1"),
+                uint(1_u8),
+                bytes(&record),
+                bytes(&self.signature),
+            ]))
+        })
     }
 
     /// Decode exact canonical FAE1 and its canonical APR1.
@@ -495,13 +490,12 @@ impl AuthenticatedPrincipalEvidenceV1 {
             &fields[2],
             MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1,
         )?)?;
-        let result = Self::new(record, fixed(&fields[3])?)
-            .expect("decoded and validated APR1 always constructs FAE1");
-        let canonical_evidence = result
-            .to_canonical_cbor()
-            .expect("validated FAE1 always encodes into a Vec");
-        canonical(bytes_in, &canonical_evidence)?;
-        Ok(result)
+        Self::new(record, fixed(&fields[3])?).and_then(|result| {
+            result
+                .to_canonical_cbor()
+                .and_then(|encoded| canonical(bytes_in, &encoded))
+                .map(|()| result)
+        })
     }
 
     /// Commit the complete evidence bytes.
@@ -509,12 +503,8 @@ impl AuthenticatedPrincipalEvidenceV1 {
     /// # Errors
     /// Returns a closed codec error if serialization fails.
     pub fn digest(&self) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
-        Ok(digest(
-            EVIDENCE_DOMAIN,
-            &self
-                .to_canonical_cbor()
-                .expect("validated FAE1 always encodes into a Vec"),
-        ))
+        self.to_canonical_cbor()
+            .map(|encoded| digest(EVIDENCE_DOMAIN, &encoded))
     }
 }
 
@@ -534,13 +524,10 @@ fn principal(value: &Value) -> Result<PrincipalRefV1, ForkAuthenticationCodecErr
 pub fn principal_digest_v1(
     principal: &PrincipalRefV1,
 ) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
-    Ok(digest(
-        PRINCIPAL_DOMAIN,
-        principal
-            .encode()
-            .expect("validated PrincipalRefV1 always encodes")
-            .as_slice(),
-    ))
+    principal
+        .encode()
+        .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)
+        .map(|encoded| digest(PRINCIPAL_DOMAIN, encoded.as_slice()))
 }
 
 fn digest(domain: &[u8], content: &[u8]) -> Hash {
@@ -568,14 +555,16 @@ fn decode(bytes_in: &[u8], maximum: usize) -> Result<Value, ForkAuthenticationCo
     if cursor.position() != bytes_in.len() as u64 {
         return Err(ForkAuthenticationCodecErrorV1::InvalidEncoding);
     }
-    canonical(bytes_in, &encode(&value))?;
-    Ok(value)
+    encode(&value)
+        .and_then(|encoded| canonical(bytes_in, &encoded))
+        .map(|()| value)
 }
 
-fn encode(value: &Value) -> Vec<u8> {
+fn encode(value: &Value) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
     let mut result = Vec::new();
-    ciborium::into_writer(value, &mut result).expect("writing CBOR into a Vec cannot fail");
-    result
+    ciborium::into_writer(value, &mut result)
+        .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)
+        .map(|()| result)
 }
 
 fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkAuthenticationCodecErrorV1> {
