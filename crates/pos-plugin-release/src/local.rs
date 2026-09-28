@@ -256,7 +256,7 @@ pub struct LocalOciPublisherV1 {
 
 struct RecoveryInventory {
     staging: Vec<String>,
-    unindexed: Vec<String>,
+    unindexed: Vec<BundleAddressV1>,
 }
 
 impl LocalOciPublisherV1 {
@@ -377,19 +377,8 @@ impl LocalOciPublisherV1 {
             .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let indexed =
             parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        let next_index = self.next_index_candidate()?;
         let inventory = self.recovery_inventory(&releases, &indexed)?;
-        let removed_staging = self.recover_staging(&releases, &indexed, &inventory.staging)?;
-        faulted_sync!(
-            None,
-            &releases,
-            LocalOciPublicationErrorV1::RecoveryRequired
-        )?;
-        let removed_next_index = self.recover_next_index()?;
-        faulted_sync!(
-            None,
-            &self.root,
-            LocalOciPublicationErrorV1::RecoveryRequired
-        )?;
         for address in &indexed {
             let name = &address.digest()[7..];
             let valid = open_directory(&releases, name).and_then(|directory| {
@@ -401,39 +390,20 @@ impl LocalOciPublisherV1 {
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
             }
         }
+        let removed_staging = self.recover_staging(&releases, &inventory.staging)?;
+        faulted_sync!(
+            None,
+            &releases,
+            LocalOciPublicationErrorV1::RecoveryRequired
+        )?;
+        let removed_next_index = self.recover_next_index(next_index.as_deref())?;
+        faulted_sync!(
+            None,
+            &self.root,
+            LocalOciPublicationErrorV1::RecoveryRequired
+        )?;
         let mut committed = Vec::new();
-        if let Some(name) = inventory.unindexed.first() {
-            let recovered = (|| {
-                let final_directory = open_directory(&releases, name)?;
-                let ready = read_limited(open_private_file(&final_directory, "READY")?, 256)
-                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-                let ready = std::str::from_utf8(&ready)
-                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-                let mut lines = ready.lines();
-                if lines.next() != Some("pigloros-local-oci-ready-v1") {
-                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-                }
-                let digest = lines
-                    .next()
-                    .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?;
-                let size = lines
-                    .next()
-                    .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?
-                    .parse::<u64>()
-                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-                if lines.next().is_some() || digest != format!("sha256:{name}") {
-                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-                }
-                let address = BundleAddressV1::new(digest.to_owned(), size)
-                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-                Self::read_release(&final_directory, &address)
-                    .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-                Ok(address)
-            })();
-            let Ok(address) = recovered else {
-                self.quarantine_entry(&releases, name, "final")?;
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            };
+        for address in inventory.unindexed {
             self.publish_index(&address)
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             committed.push(address);
@@ -450,32 +420,38 @@ impl LocalOciPublisherV1 {
         releases: &File,
         indexed: &[BundleAddressV1],
     ) -> Result<RecoveryInventory, LocalOciPublicationErrorV1> {
-        let (staging, finals): (Vec<_>, Vec<_>) = bounded_directory_entries(releases, 258)?
-            .into_iter()
-            .partition(|name| name.starts_with('.'));
-        let unindexed = finals
-            .iter()
-            .filter(|name| {
-                !indexed
-                    .iter()
-                    .any(|address| &address.digest()[7..] == name.as_str())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        // Establish all capacity preconditions before deleting or adopting
-        // any candidate, including a valid owned staging directory.
+        // The raw inventory ceiling precedes all mutation. Below that bound,
+        // unsafe entries must be quarantined rather than counted as candidates.
+        let entries = bounded_directory_entries(releases, 258)?;
+        let mut staging = Vec::new();
+        let mut unindexed = Vec::new();
+        for name in entries {
+            if name.starts_with('.') {
+                if validate_owned_staging(releases, &name, indexed).is_err() {
+                    self.quarantine_entry(releases, &name, "staging")?;
+                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+                }
+                staging.push(name);
+            } else {
+                if !lowercase_hex(&name, 64) {
+                    self.quarantine_entry(releases, &name, "final")?;
+                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+                }
+                if indexed.iter().any(|address| address.digest()[7..] == name) {
+                    continue;
+                }
+                let Ok(address) = read_ready_release(releases, &name) else {
+                    self.quarantine_entry(releases, &name, "final")?;
+                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+                };
+                unindexed.push(address);
+            }
+        }
         if staging.len() > 1
-            || finals.len() > 256
             || unindexed.len() > 1
             || (!unindexed.is_empty() && indexed.len() >= 256)
         {
             return Err(LocalOciPublicationErrorV1::BoundsExceeded);
-        }
-        for name in finals {
-            if !lowercase_hex(&name, 64) {
-                self.quarantine_entry(releases, &name, "final")?;
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
         }
         Ok(RecoveryInventory { staging, unindexed })
     }
@@ -483,33 +459,9 @@ impl LocalOciPublisherV1 {
     fn recover_staging(
         &self,
         releases: &File,
-        indexed: &[BundleAddressV1],
         staging: &[String],
     ) -> Result<u8, LocalOciPublicationErrorV1> {
         if let Some(name) = staging.first() {
-            let Some((digest, nonce)) = staging_name_parts(name) else {
-                self.quarantine_entry(releases, name, "staging")?;
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            };
-            if indexed
-                .iter()
-                .any(|address| &address.digest()[7..] == digest)
-            {
-                self.quarantine_entry(releases, name, "staging")?;
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
-            let owner = open_directory(releases, name)
-                .and_then(|dir| open_private_file(&dir, "OWNER"))
-                .and_then(|file| {
-                    read_limited(file, 128)
-                        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
-                });
-            if owner.ok().as_deref()
-                != Some(format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes())
-            {
-                self.quarantine_entry(releases, name, "staging")?;
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
             if remove_owned_staging(releases, name).is_err() {
                 self.quarantine_entry(releases, name, "staging")?;
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
@@ -523,7 +475,7 @@ impl LocalOciPublisherV1 {
         }
     }
 
-    fn recover_next_index(&self) -> Result<bool, LocalOciPublicationErrorV1> {
+    fn next_index_candidate(&self) -> Result<Option<String>, LocalOciPublicationErrorV1> {
         let root_entries = bounded_directory_entries(&self.root, 5)
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         if root_entries.iter().any(|name| {
@@ -539,7 +491,11 @@ impl LocalOciPublisherV1 {
         if next.len() > 1 {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
-        if let Some(name) = next.first() {
+        Ok(next.into_iter().next())
+    }
+
+    fn recover_next_index(&self, name: Option<&str>) -> Result<bool, LocalOciPublicationErrorV1> {
+        if let Some(name) = name {
             let valid_name = name
                 .strip_prefix(".published.")
                 .and_then(|suffix| suffix.strip_suffix(".next"))
@@ -760,6 +716,60 @@ impl LocalOciPublisherV1 {
     }
 }
 
+fn validate_owned_staging(
+    releases: &File,
+    name: &str,
+    indexed: &[BundleAddressV1],
+) -> Result<(), LocalOciPublicationErrorV1> {
+    let (digest, nonce) =
+        staging_name_parts(name).ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?;
+    if indexed
+        .iter()
+        .any(|address| &address.digest()[7..] == digest)
+    {
+        return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+    }
+    let directory = open_directory(releases, name)?;
+    let owner = read_limited(open_private_file(&directory, "OWNER")?, 128)
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    if owner != format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes() {
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    } else {
+        Ok(())
+    }
+}
+
+fn read_ready_release(
+    releases: &File,
+    name: &str,
+) -> Result<BundleAddressV1, LocalOciPublicationErrorV1> {
+    let directory = open_directory(releases, name)?;
+    let ready = read_limited(open_private_file(&directory, "READY")?, 256)
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    let ready =
+        std::str::from_utf8(&ready).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    let mut lines = ready.lines();
+    if lines.next() != Some("pigloros-local-oci-ready-v1") {
+        return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+    }
+    let digest = lines
+        .next()
+        .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?;
+    let size = lines
+        .next()
+        .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?
+        .parse::<u64>()
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    if lines.next().is_some() || digest != format!("sha256:{name}") {
+        return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+    }
+    let address = BundleAddressV1::new(digest.to_owned(), size)
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    LocalOciPublisherV1::read_release(&directory, &address)
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+    Ok(address)
+}
+
 fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPublicationErrorV1> {
     let staging = open_directory(releases, name)?;
     let mut entries = bounded_directory_entries(&staging, 5)?;
@@ -845,9 +855,8 @@ fn directory_names(
     )
     .map_err(|_| LocalOciPublicationErrorV1::Io)?;
     Ok(entries.filter_map(|entry| {
-        let entry = match faulted_io!(entry) {
-            Ok(entry) => entry,
-            Err(_) => return Some(Err(LocalOciPublicationErrorV1::Io)),
+        let Ok(entry) = faulted_io!(entry) else {
+            return Some(Err(LocalOciPublicationErrorV1::Io));
         };
         let name = entry.file_name();
         if name.to_bytes() == b"." || name.to_bytes() == b".." {
@@ -2070,7 +2079,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         recovery_rejects_shape(
             "recovery-multiple-staging",
-            LocalOciPublicationErrorV1::BoundsExceeded,
+            LocalOciPublicationErrorV1::RecoveryRequired,
             |root| {
                 std::fs::create_dir(root.join("releases").join(".first"))?;
                 std::fs::create_dir(root.join("releases").join(".second"))
@@ -2078,7 +2087,7 @@ mod tests {
         )?;
         recovery_rejects_shape(
             "recovery-multiple-final",
-            LocalOciPublicationErrorV1::BoundsExceeded,
+            LocalOciPublicationErrorV1::RecoveryRequired,
             |root| {
                 std::fs::create_dir(root.join("releases").join("a".repeat(64)))?;
                 std::fs::create_dir(root.join("releases").join("b".repeat(64)))

@@ -709,7 +709,7 @@ fn root_discovery_index_rejects_noncanonical_and_malformed_entries(
 }
 
 #[test]
-fn recovery_enforces_bounded_inventory_before_adopting_any_final(
+fn recovery_distinguishes_unsafe_entries_from_capacity_candidates(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = PrivateRoot::new()?;
     let publisher = LocalOciPublisherV1::open(&root.0)?;
@@ -718,7 +718,7 @@ fn recovery_enforces_bounded_inventory_before_adopting_any_final(
     }
     assert_eq!(
         publisher.recover_all(),
-        Err(LocalOciPublicationErrorV1::BoundsExceeded)
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
     );
 
     let root = PrivateRoot::new()?;
@@ -727,7 +727,7 @@ fn recovery_enforces_bounded_inventory_before_adopting_any_final(
     create_private_dir(&root.0.join("releases").join(".second"))?;
     assert_eq!(
         publisher.recover_all(),
-        Err(LocalOciPublicationErrorV1::BoundsExceeded)
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
     );
 
     let root = PrivateRoot::new()?;
@@ -754,7 +754,7 @@ fn recovery_enforces_bounded_inventory_before_adopting_any_final(
 #[test]
 fn oversized_inventory_preserves_owned_staging_and_root_index(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for final_count in [257_u16, 258] {
+    for final_count in [258_u16, 259] {
         let root = PrivateRoot::new()?;
         let publisher = LocalOciPublisherV1::open(&root.0)?;
         let nonce = "0123456789abcdef0123456789abcdef";
@@ -783,6 +783,48 @@ fn oversized_inventory_preserves_owned_staging_and_root_index(
         assert_eq!(fs::read(root.0.join("published.json"))?, index_before);
         assert_eq!(fs::read_dir(root.0.join("quarantine"))?.count(), 0);
     }
+    Ok(())
+}
+
+#[test]
+fn multiple_valid_candidates_are_retained_at_capacity_failure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    for byte in [0_u8, 1] {
+        let nonce = format!("{byte:032x}");
+        let staging = root
+            .0
+            .join("releases")
+            .join(format!(".{byte:064x}.staging.{nonce}"));
+        create_private_dir(&staging)?;
+        write_private_file(
+            &staging.join("OWNER"),
+            format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes(),
+        )?;
+    }
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::BoundsExceeded)
+    );
+    assert_eq!(fs::read_dir(root.0.join("releases"))?.count(), 2);
+    assert_eq!(fs::read_dir(root.0.join("quarantine"))?.count(), 0);
+
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let first = bundle_with_component(b"first valid candidate")?;
+    let second = bundle_with_component(b"second valid candidate")?;
+    publisher.publish(&first)?;
+    publisher.publish(&second)?;
+    let empty_index = br#"{"addresses":[],"version":1}"#;
+    fs::write(root.0.join("published.json"), empty_index)?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::BoundsExceeded)
+    );
+    assert_eq!(fs::read(root.0.join("published.json"))?, empty_index);
+    assert_eq!(fs::read_dir(root.0.join("releases"))?.count(), 2);
+    assert_eq!(fs::read_dir(root.0.join("quarantine"))?.count(), 0);
     Ok(())
 }
 
