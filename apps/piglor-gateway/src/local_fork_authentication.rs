@@ -180,7 +180,7 @@ impl PrincipalOwnerResolverV1 {
         let registry_binding = self
             .registry
             .digest()
-            .expect("validated local registry serializes canonically");
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
         if record.adapter_id != self.registry.adapter_id()
             || record.assurance != self.registry.assurance()
             || record.registry_binding != registry_binding
@@ -248,21 +248,20 @@ fn parse_credentials(
     // `from_seed` zeroizes its by-value seed copy. These guards retain the
     // extracted credential bytes across every fallible validation step.
     let adapter_signer = ForkAuthenticationAdapterSigningKeyV1::from_seed(*adapter_seed)
-        .expect("FACR1 parser rejects all-zero adapter seeds");
+        .map_err(signature_invalid)?;
     let adapter = policy
         .adapter(registry.adapter_id())
         .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
     let registry_binding = registry
         .digest()
-        .expect("validated local registry serializes canonically");
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
     if adapter.verifying_key != adapter_signer.public_key()
         || registry.assurance() < adapter.minimum_assurance
         || !adapter.registry_bindings.contains(&registry_binding)
     {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let host_signer = ForkHostSigningKeyV1::from_seed(*host_seed)
-        .expect("FAHK1 parser rejects all-zero host seeds");
+    let host_signer = ForkHostSigningKeyV1::from_seed(*host_seed).map_err(signature_invalid)?;
     ensure_distinct_signing_keys(adapter_signer.public_key(), host_signer.public_key())?;
     Ok(LocalForkAuthenticationCredentialsV1 {
         resolver: PrincipalOwnerResolverV1::new(policy, registry),
@@ -326,8 +325,8 @@ fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthen
     let principal_bytes = bounded_bytes(&fields[1], 256)?;
     let principal = PrincipalRefV1::decode(&CanonicalBytes::from_vec(principal_bytes.to_vec()))
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    let owner =
-        OwnerIdV1::new(bounded_text(&fields[2])?).expect("bounded owner text satisfies OwnerIdV1");
+    let owner = OwnerIdV1::new(bounded_text(&fields[2])?)
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
     Ok(LocalAccountBindingV1 {
         uid,
         principal,
@@ -608,11 +607,9 @@ fn operation_nonce_with(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::{
+        ffi::OsString,
         fs,
-        os::{
-            unix::{ffi::OsStringExt as _, fs::PermissionsExt as _, net::UnixStream},
-            OsString,
-        },
+        os::unix::{ffi::OsStringExt as _, fs::PermissionsExt as _, net::UnixStream},
     };
 
     #[cfg(target_os = "linux")]
