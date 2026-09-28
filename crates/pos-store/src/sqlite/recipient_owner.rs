@@ -359,7 +359,7 @@ impl RecipientKeyOwnerV1 {
                     "recipient key directory is not private".to_owned(),
                 ));
             }
-            let directory_file = recipient_openat2(
+            recipient_openat2(
                 rustix::fs::CWD,
                 &directory,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
@@ -367,36 +367,46 @@ impl RecipientKeyOwnerV1 {
                 ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
             )
             .map(File::from)
-            .map_err(storage_error)?;
-            let retained_metadata = directory_file.metadata().map_err(storage_error)?;
-            if retained_metadata.uid() != metadata.uid()
-                || retained_metadata.ino() != metadata.ino()
-                || retained_metadata.dev() != metadata.dev()
-            {
-                return Err(CoreError::Storage(
-                    "recipient key directory changed while opening".to_owned(),
-                ));
-            }
-            let current_metadata = std::fs::symlink_metadata(&directory).map_err(storage_error)?;
-            if !current_metadata.is_dir()
-                || current_metadata.file_type().is_symlink()
-                || current_metadata.mode() & 0o777 != 0o700
-                || current_metadata.uid() != retained_metadata.uid()
-                || current_metadata.ino() != retained_metadata.ino()
-                || current_metadata.dev() != retained_metadata.dev()
-            {
-                return Err(CoreError::Storage(
-                    "recipient key directory changed while opening".to_owned(),
-                ));
-            }
-            Ok(Self {
-                directory,
-                directory_file,
-                grantee_id,
-                directory_uid: metadata.uid(),
-                directory_identity: RecipientPrivateDirectoryIdentityV1::from_metadata(
-                    &retained_metadata,
-                ),
+            .map_err(storage_error)
+            .and_then(|directory_file| {
+                directory_file
+                    .metadata()
+                    .map_err(storage_error)
+                    .and_then(|retained_metadata| {
+                        if retained_metadata.uid() != metadata.uid()
+                            || retained_metadata.ino() != metadata.ino()
+                            || retained_metadata.dev() != metadata.dev()
+                        {
+                            return Err(CoreError::Storage(
+                                "recipient key directory changed while opening".to_owned(),
+                            ));
+                        }
+                        std::fs::symlink_metadata(&directory)
+                            .map_err(storage_error)
+                            .and_then(|current_metadata| {
+                                if !current_metadata.is_dir()
+                                    || current_metadata.file_type().is_symlink()
+                                    || current_metadata.mode() & 0o777 != 0o700
+                                    || current_metadata.uid() != retained_metadata.uid()
+                                    || current_metadata.ino() != retained_metadata.ino()
+                                    || current_metadata.dev() != retained_metadata.dev()
+                                {
+                                    return Err(CoreError::Storage(
+                                        "recipient key directory changed while opening".to_owned(),
+                                    ));
+                                }
+                                Ok(Self {
+                                    directory,
+                                    directory_file,
+                                    grantee_id,
+                                    directory_uid: metadata.uid(),
+                                    directory_identity:
+                                        RecipientPrivateDirectoryIdentityV1::from_metadata(
+                                            &retained_metadata,
+                                        ),
+                                })
+                            })
+                    })
             })
         }
     }
@@ -479,29 +489,47 @@ impl SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(storage_error)?;
-        let result = (|| {
-            validate_owner_directory(owner)?;
-            ensure_recipient_custody_tables(&self.conn)?;
-            claim_recipient_custody_directory(&self.conn, owner)?;
-            let owner_id =
-                recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
-            let registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("recipient registry is unavailable".to_owned())
-            })?;
-            let mut statement = self.conn.prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
-                .map_err(storage_error)?;
-            let rows = statement
-                .query_map(
-                    rusqlite::params![owner_id.as_str()],
-                    recipient_inventory_from_row,
-                )
-                .map_err(storage_error)?;
-            let inventories = rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-            let descriptors =
-                validate_recipient_key_inventory(owner, &owner_id, &registry, &inventories)?;
-            quarantine_unregistered_staged_material(owner, &inventories)?;
-            Ok(descriptors)
-        })();
+        let result = validate_owner_directory(owner)
+            .and_then(|()| ensure_recipient_custody_tables(&self.conn))
+            .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
+            .and_then(|()| recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error))
+            .and_then(|owner_id| {
+                self.load_key_registry()
+                    .and_then(|registry| {
+                        registry.ok_or_else(|| {
+                            CoreError::Storage("recipient registry is unavailable".to_owned())
+                        })
+                    })
+                    .and_then(|registry| {
+                        self.conn
+                            .prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
+                            .map_err(storage_error)
+                            .and_then(|mut statement| {
+                                statement
+                                    .query_map(
+                                        rusqlite::params![owner_id.as_str()],
+                                        recipient_inventory_from_row,
+                                    )
+                                    .map_err(storage_error)
+                                    .and_then(|rows| {
+                                        rows.collect::<Result<Vec<_>, _>>()
+                                            .map_err(storage_error)
+                                    })
+                            })
+                            .and_then(|inventories| {
+                                validate_recipient_key_inventory(
+                                    owner,
+                                    &owner_id,
+                                    &registry,
+                                    &inventories,
+                                )
+                                .and_then(|descriptors| {
+                                    quarantine_unregistered_staged_material(owner, &inventories)
+                                        .map(|()| descriptors)
+                                })
+                            })
+                    })
+            });
         finish_immediate_transaction(&self.conn, result)
     }
 
@@ -519,33 +547,50 @@ impl SqliteStore {
         epoch: u64,
         authorization_digest: pos_core::Hash,
     ) -> Result<(), CoreError> {
-        let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
-        let identity =
-            KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(storage_error)?;
-        let begun = (|| {
-            ensure_recipient_custody_tables(&self.conn)?;
-            claim_recipient_custody_directory(&self.conn, owner)?;
-            let mut registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("recipient registry is unavailable".to_owned())
-            })?;
-            let record = registry.key_record(identity).ok_or_else(|| {
-                CoreError::Storage("recipient identity is unavailable".to_owned())
-            })?;
-            let digest = record.private_material_digest.ok_or_else(|| {
-                CoreError::Storage("recipient identity is already destroyed".to_owned())
-            })?;
-            let request = KeyDestructionRequestV1::new(identity, digest, authorization_digest);
-            let outcome = registry
-                .begin_key_destruction(request)
-                .map_err(storage_error)?;
-            if matches!(outcome, pos_core::KeyDestructionBeginOutcomeV1::Started) {
-                self.save_key_registry_in_transaction(&registry)?;
-            }
-            Ok((request, outcome))
-        })();
+        let begun = recipient_owner_id_from_grantee(owner.grantee_id)
+            .map_err(storage_error)
+            .and_then(|owner_id| {
+                let identity = KeyIdentityV1::from_parts(
+                    owner_id,
+                    KeyRoleV1::ExportRecipientEncryption,
+                    epoch,
+                );
+                self.conn
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(storage_error)
+                    .and_then(|()| ensure_recipient_custody_tables(&self.conn))
+                    .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
+                    .and_then(|()| self.load_key_registry())
+                    .and_then(|registry| {
+                        registry.ok_or_else(|| {
+                            CoreError::Storage("recipient registry is unavailable".to_owned())
+                        })
+                    })
+                    .and_then(|mut registry| {
+                        let record = registry.key_record(identity).ok_or_else(|| {
+                            CoreError::Storage("recipient identity is unavailable".to_owned())
+                        })?;
+                        let digest = record.private_material_digest.ok_or_else(|| {
+                            CoreError::Storage("recipient identity is already destroyed".to_owned())
+                        })?;
+                        let request =
+                            KeyDestructionRequestV1::new(identity, digest, authorization_digest);
+                        registry
+                            .begin_key_destruction(request)
+                            .map_err(storage_error)
+                            .and_then(|outcome| {
+                                if matches!(
+                                    outcome,
+                                    pos_core::KeyDestructionBeginOutcomeV1::Started
+                                ) {
+                                    self.save_key_registry_in_transaction(&registry)
+                                        .map(|()| (request, outcome))
+                                } else {
+                                    Ok((request, outcome))
+                                }
+                            })
+                    })
+            });
         let (request, _) = finish_immediate_transaction(&self.conn, begun)?;
         self.finish_recipient_key_destruction(owner, request)
     }
@@ -561,56 +606,67 @@ impl SqliteStore {
         owner: &RecipientKeyOwnerV1,
         request: KeyDestructionRequestV1,
     ) -> Result<(), CoreError> {
-        self.conn
+        let result = self
+            .conn
             .execute_batch(begin_immediate_sql())
-            .map_err(storage_error)?;
-        let result = (|| {
-            ensure_recipient_custody_tables(&self.conn)?;
-            claim_recipient_custody_directory(&self.conn, owner)?;
-            let mut registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("recipient registry is unavailable".to_owned())
-            })?;
-            if registry.tombstone(request.identity).is_some() {
-                return Ok(());
-            }
-            if !registry
-                .pending_destruction_requests()
-                .any(|pending| pending == request)
-            {
-                return Err(CoreError::Storage(
-                    "recipient destruction request is no longer pending".to_owned(),
-                ));
-            }
-            let (path, bound_file, inventory_digest) =
-                self.recipient_inventory_path(owner, request.identity)?;
-            if inventory_digest != request.expected_material_digest {
-                return Err(CoreError::Storage(
-                    "recipient inventory material differs from pending destruction".to_owned(),
-                ));
-            }
-            delete_bound_private_key(owner, &path, bound_file, inventory_digest)?;
-            let receipt = pos_core::deletion_receipt(&request);
-            record_recipient_destruction_receipt(&self.conn, request, &path, bound_file, receipt)?;
-            registry
-                .complete_key_destruction(request, receipt)
-                .map_err(storage_error)?;
-            let removed = self
-                .conn
-                .execute(
+            .map_err(storage_error)
+            .and_then(|()| ensure_recipient_custody_tables(&self.conn))
+            .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
+            .and_then(|()| self.load_key_registry())
+            .and_then(|registry| {
+                registry.ok_or_else(|| {
+                    CoreError::Storage("recipient registry is unavailable".to_owned())
+                })
+            })
+            .and_then(|mut registry| {
+                if registry.tombstone(request.identity).is_some() {
+                    return Ok(());
+                }
+                if !registry
+                    .pending_destruction_requests()
+                    .any(|pending| pending == request)
+                {
+                    return Err(CoreError::Storage(
+                        "recipient destruction request is no longer pending".to_owned(),
+                    ));
+                }
+                let (path, bound_file, inventory_digest) =
+                    self.recipient_inventory_path(owner, request.identity)?;
+                if inventory_digest != request.expected_material_digest {
+                    return Err(CoreError::Storage(
+                        "recipient inventory material differs from pending destruction".to_owned(),
+                    ));
+                }
+                delete_bound_private_key(owner, &path, bound_file, inventory_digest)?;
+                let receipt = pos_core::deletion_receipt(&request);
+                record_recipient_destruction_receipt(
+                    &self.conn, request, &path, bound_file, receipt,
+                )?;
+                registry
+                    .complete_key_destruction(request, receipt)
+                    .map_err(storage_error)
+                    .and_then(|()| {
+                        i64::try_from(request.identity.epoch)
+                            .map_err(storage_error)
+                            .and_then(|epoch| {
+                                self.conn.execute(
                     "DELETE FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
                     rusqlite::params![
                         request.identity.owner_id.as_str(),
-                        i64::try_from(request.identity.epoch).map_err(storage_error)?
+                        epoch
                     ],
-                )
-                .map_err(storage_error)?;
-            if removed != 1 {
-                return Err(CoreError::Storage(
-                    "recipient key inventory changed during destruction".to_owned(),
-                ));
-            }
-            self.save_key_registry_in_transaction(&registry)
-        })();
+                ).map_err(storage_error)
+                            })
+                    })
+                    .and_then(|removed| {
+                        if removed != 1 {
+                            return Err(CoreError::Storage(
+                                "recipient key inventory changed during destruction".to_owned(),
+                            ));
+                        }
+                        self.save_key_registry_in_transaction(&registry)
+                    })
+            });
         finish_immediate_transaction(&self.conn, result)
     }
 
@@ -621,40 +677,57 @@ impl SqliteStore {
     ) -> Result<(PathBuf, RecipientPrivateFileIdentityV1, pos_core::Hash), CoreError> {
         use std::os::unix::ffi::OsStringExt;
 
-        let inventory = self
-            .conn
-            .query_row(
+        i64::try_from(identity.epoch)
+            .map_err(storage_error)
+            .and_then(|epoch| {
+                self.conn.query_row(
                 "SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
                 rusqlite::params![
                     identity.owner_id.as_str(),
-                    i64::try_from(identity.epoch)
-                        .map_err(storage_error)?
+                    epoch
                 ],
                 recipient_inventory_from_row,
             )
-            .map_err(storage_error)?;
-        let descriptor =
-            RecipientKeyDescriptorV1::decode(&inventory.descriptor).map_err(storage_error)?;
-        if descriptor.identity() != identity || !descriptor.is_for_grantee(owner.grantee_id) {
-            return Err(CoreError::Storage(
-                "recipient key inventory identity is invalid".to_owned(),
-            ));
-        }
-        // The writer-reserved directory claim validates the descriptor-derived
-        // filename before this identity-specific inventory lookup.
-        let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
-        let material_digest = inventory
-            .material_digest
-            .as_slice()
-            .try_into()
-            .map_err(|_| {
-                CoreError::Storage("recipient key inventory material digest is invalid".to_owned())
-            })?;
-        Ok((
-            path,
-            RecipientPrivateFileIdentityV1::from_inventory(&inventory)?,
-            pos_core::Hash::from_bytes(material_digest),
-        ))
+                .map_err(storage_error)
+            })
+            .and_then(|inventory| {
+                RecipientKeyDescriptorV1::decode(&inventory.descriptor)
+                    .map_err(storage_error)
+                    .and_then(|descriptor| {
+                        if descriptor.identity() != identity
+                            || !descriptor.is_for_grantee(owner.grantee_id)
+                        {
+                            return Err(CoreError::Storage(
+                                "recipient key inventory identity is invalid".to_owned(),
+                            ));
+                        }
+                        // The writer-reserved directory claim validates the descriptor-derived
+                        // filename before this identity-specific inventory lookup.
+                        let path = PathBuf::from(std::ffi::OsString::from_vec(
+                            inventory.private_path.clone(),
+                        ));
+                        inventory
+                            .material_digest
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| {
+                                CoreError::Storage(
+                                    "recipient key inventory material digest is invalid".to_owned(),
+                                )
+                            })
+                            .and_then(|material_digest| {
+                                RecipientPrivateFileIdentityV1::from_inventory(&inventory).map(
+                                    |file_identity| {
+                                        (
+                                            path,
+                                            file_identity,
+                                            pos_core::Hash::from_bytes(material_digest),
+                                        )
+                                    },
+                                )
+                            })
+                    })
+            })
     }
 }
 
@@ -834,58 +907,68 @@ fn validate_directory_inventory_grantees(
 ) -> Result<(), CoreError> {
     use std::os::unix::ffi::OsStringExt;
 
-    let mut statement = connection
+    connection
         .prepare(
             "SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid
              FROM recipient_key_inventory_v1",
         )
-        .map_err(storage_error)?;
-    let rows = statement
-        .query_map([], recipient_inventory_from_row)
-        .map_err(storage_error)?;
-    let inventories = rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-    for inventory in inventories {
-        let descriptor =
-            RecipientKeyDescriptorV1::decode(&inventory.descriptor).map_err(storage_error)?;
-        let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
-        if !is_expected_recipient_private_path(&path, descriptor)? {
-            return Err(CoreError::Storage(
-                "recipient key inventory path does not match descriptor".to_owned(),
-            ));
-        }
-        let file_identity = RecipientPrivateFileIdentityV1::from_inventory(&inventory)?;
-        let name = bound_name(&path)?;
-        let is_path_alias_here = path.parent().is_some_and(|parent| {
-            std::fs::symlink_metadata(parent).is_ok_and(|metadata| {
-                metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && RecipientPrivateDirectoryIdentityV1::from_metadata(&metadata)
-                        == owner.directory_identity
-            })
-        });
-        let entry = recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW);
-        let is_bound_here = match entry {
-            Ok(metadata) => {
-                let matches_inventory = metadata.st_dev.to_be_bytes() == file_identity.device
-                    && metadata.st_ino.to_be_bytes() == file_identity.inode
-                    && metadata.st_uid.to_be_bytes() == file_identity.uid;
-                if is_path_alias_here && !matches_inventory {
+        .map_err(storage_error)
+        .and_then(|mut statement| {
+            statement
+                .query_map([], recipient_inventory_from_row)
+                .map_err(storage_error)
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>().map_err(storage_error))
+        })
+        .and_then(|inventories| {
+            for inventory in inventories {
+                let descriptor = RecipientKeyDescriptorV1::decode(&inventory.descriptor)
+                    .map_err(storage_error)?;
+                let path =
+                    PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
+                if !is_expected_recipient_private_path(&path, descriptor)? {
                     return Err(CoreError::Storage(
-                        "recipient directory conflicts with registered inventory".to_owned(),
+                        "recipient key inventory path does not match descriptor".to_owned(),
                     ));
                 }
-                matches_inventory
+                let file_identity = RecipientPrivateFileIdentityV1::from_inventory(&inventory)?;
+                let name = bound_name(&path)?;
+                let is_path_alias_here = path.parent().is_some_and(|parent| {
+                    std::fs::symlink_metadata(parent).is_ok_and(|metadata| {
+                        metadata.is_dir()
+                            && !metadata.file_type().is_symlink()
+                            && RecipientPrivateDirectoryIdentityV1::from_metadata(&metadata)
+                                == owner.directory_identity
+                    })
+                });
+                let entry =
+                    recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW);
+                let is_bound_here = match entry {
+                    Ok(metadata) => {
+                        let matches_inventory = metadata.st_dev.to_be_bytes()
+                            == file_identity.device
+                            && metadata.st_ino.to_be_bytes() == file_identity.inode
+                            && metadata.st_uid.to_be_bytes() == file_identity.uid;
+                        if is_path_alias_here && !matches_inventory {
+                            return Err(CoreError::Storage(
+                                "recipient directory conflicts with registered inventory"
+                                    .to_owned(),
+                            ));
+                        }
+                        matches_inventory
+                    }
+                    Err(rustix::io::Errno::NOENT) => false,
+                    Err(error) => return Err(CoreError::Storage(error.to_string())),
+                };
+                if (is_bound_here || is_path_alias_here)
+                    && !descriptor.is_for_grantee(owner.grantee_id)
+                {
+                    return Err(CoreError::Storage(
+                        "recipient directory inventory belongs to another grantee".to_owned(),
+                    ));
+                }
             }
-            Err(rustix::io::Errno::NOENT) => false,
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-        };
-        if (is_bound_here || is_path_alias_here) && !descriptor.is_for_grantee(owner.grantee_id) {
-            return Err(CoreError::Storage(
-                "recipient directory inventory belongs to another grantee".to_owned(),
-            ));
-        }
-    }
-    Ok(())
+            Ok(())
+        })
 }
 
 fn record_recipient_destruction_receipt(
@@ -964,17 +1047,23 @@ fn quarantine_unregistered_staged_material(
 fn validate_owner_directory(owner: &RecipientKeyOwnerV1) -> Result<(), CoreError> {
     use std::os::unix::fs::MetadataExt;
 
-    let metadata = owner.directory_file.metadata().map_err(storage_error)?;
-    if !metadata.is_dir()
-        || metadata.mode() & 0o777 != 0o700
-        || metadata.uid() != owner.directory_uid
-        || RecipientPrivateDirectoryIdentityV1::from_metadata(&metadata) != owner.directory_identity
-    {
-        return Err(CoreError::Storage(
-            "recipient key directory is no longer private and owner-bound".to_owned(),
-        ));
-    }
-    Ok(())
+    owner
+        .directory_file
+        .metadata()
+        .map_err(storage_error)
+        .and_then(|metadata| {
+            if !metadata.is_dir()
+                || metadata.mode() & 0o777 != 0o700
+                || metadata.uid() != owner.directory_uid
+                || RecipientPrivateDirectoryIdentityV1::from_metadata(&metadata)
+                    != owner.directory_identity
+            {
+                return Err(CoreError::Storage(
+                    "recipient key directory is no longer private and owner-bound".to_owned(),
+                ));
+            }
+            Ok(())
+        })
 }
 
 fn bound_name(path: &Path) -> Result<&Path, CoreError> {
@@ -1010,21 +1099,23 @@ fn verify_bound_entry(
     name: &Path,
     expected: RecipientPrivateFileIdentityV1,
 ) -> Result<(), CoreError> {
-    let metadata = recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(storage_error)?;
-    if (metadata.st_mode & libc::S_IFMT) != libc::S_IFREG
-        || metadata.st_nlink != 1
-        || metadata.st_mode & 0o777 != 0o600
-        || metadata.st_size != 32
-        || metadata.st_dev.to_be_bytes() != expected.device
-        || metadata.st_ino.to_be_bytes() != expected.inode
-        || metadata.st_uid.to_be_bytes() != expected.uid
-    {
-        return Err(CoreError::Storage(
-            "recipient private file is not the bound private single-link file".to_owned(),
-        ));
-    }
-    Ok(())
+    recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(storage_error)
+        .and_then(|metadata| {
+            if (metadata.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || metadata.st_nlink != 1
+                || metadata.st_mode & 0o777 != 0o600
+                || metadata.st_size != 32
+                || metadata.st_dev.to_be_bytes() != expected.device
+                || metadata.st_ino.to_be_bytes() != expected.inode
+                || metadata.st_uid.to_be_bytes() != expected.uid
+            {
+                return Err(CoreError::Storage(
+                    "recipient private file is not the bound private single-link file".to_owned(),
+                ));
+            }
+            Ok(())
+        })
 }
 
 fn read_bound_private_key(
