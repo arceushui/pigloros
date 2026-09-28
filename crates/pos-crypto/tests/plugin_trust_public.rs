@@ -2,18 +2,16 @@ use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginTrustErrorV1, TrustedPluginRootAnchorV1,
 };
 
-mod plugin_trust_vectors {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/support/plugin_trust_vectors.rs"
-    ));
-}
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/support/plugin_trust_vectors.rs"
+));
 
 #[test]
 fn public_verifier_distinguishes_unknown_root_key_from_invalid_signature(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ptr1 = plugin_trust_vectors::hex_bytes(plugin_trust_vectors::PTR1_HEX)?;
-    let prv1 = plugin_trust_vectors::hex_bytes(plugin_trust_vectors::PRV1_HEX)?;
+    let ptr1 = hex_bytes(PTR1_HEX)?;
+    let prv1 = hex_bytes(PRV1_HEX)?;
     let baseline_anchor =
         TrustedPluginRootAnchorV1::new("trust.example", *blake3::hash(&ptr1).as_bytes())?;
     let evidence = verify_plugin_trust_v1(&baseline_anchor, &[&ptr1], &[&prv1], 0, 10)?;
