@@ -596,7 +596,11 @@ impl ProjectionRegistry {
         operation: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E> {
         let mut before = self.snapshot_unfenced();
-        let before_source = (self.source_timeline, self.source_generation, self.mixed_sources);
+        let before_source = (
+            self.source_timeline,
+            self.source_generation,
+            self.mixed_sources,
+        );
         let revocation_checkpoint = self.transaction_revocations.len();
         let outermost = self.state_transaction_depth == 0;
         self.state_transaction_depth += 1;
@@ -615,7 +619,11 @@ impl ProjectionRegistry {
                 for (name, slot) in &mut self.slots {
                     slot.registry = before.remove(name).unwrap_or_default();
                 }
-                (self.source_timeline, self.source_generation, self.mixed_sources) = before_source;
+                (
+                    self.source_timeline,
+                    self.source_generation,
+                    self.mixed_sources,
+                ) = before_source;
                 for subject in revoked_subjects {
                     self.forget_subject(&subject);
                 }

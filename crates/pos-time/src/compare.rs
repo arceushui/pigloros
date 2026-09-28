@@ -515,8 +515,18 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
-        assert_eq!(registry_a.state_for_reducer(a.id(), "count", &entity).test_ok(), None);
-        assert_eq!(registry_b.state_for_reducer(b.id(), "count", &entity).test_ok(), None);
+        assert_eq!(
+            registry_a
+                .state_for_reducer(a.id(), "count", &entity)
+                .test_ok(),
+            None
+        );
+        assert_eq!(
+            registry_b
+                .state_for_reducer(b.id(), "count", &entity)
+                .test_ok(),
+            None
+        );
     }
 
     #[test]
@@ -744,8 +754,18 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
-        assert_eq!(registry_a.state_for_reducer(fork_a, "count", &entity).test_ok(), None);
-        assert_eq!(registry_b.state_for_reducer(fork_b, "count", &entity).test_ok(), None);
+        assert_eq!(
+            registry_a
+                .state_for_reducer(fork_a, "count", &entity)
+                .test_ok(),
+            None
+        );
+        assert_eq!(
+            registry_b
+                .state_for_reducer(fork_b, "count", &entity)
+                .test_ok(),
+            None
+        );
     }
 
     #[test]
@@ -795,8 +815,18 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
-        assert_eq!(registry_a.state_for_reducer(fork_a, "count", &entity).test_ok(), None);
-        assert_eq!(registry_b.state_for_reducer(fork_b, "count", &entity).test_ok(), None);
+        assert_eq!(
+            registry_a
+                .state_for_reducer(fork_a, "count", &entity)
+                .test_ok(),
+            None
+        );
+        assert_eq!(
+            registry_b
+                .state_for_reducer(fork_b, "count", &entity)
+                .test_ok(),
+            None
+        );
         assert_eq!(verifier.calls.load(Ordering::SeqCst), 4);
     }
 

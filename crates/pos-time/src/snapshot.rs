@@ -964,7 +964,12 @@ mod tests {
             super::verify_snapshot_consistency(&mut reads, &snap, &mut verified, &closure),
             Err(SnapshotError::ArtifactUnavailable)
         ));
-        assert_eq!(verified.state_for_reducer(timeline, "count", &entity).test_ok(), None);
+        assert_eq!(
+            verified
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
+            None
+        );
     }
 
     #[test]
@@ -998,7 +1003,9 @@ mod tests {
                 CoreError::ErasureContainmentUnavailable
             ))
         ));
-        assert!(projected.state_for_reducer(timeline, "count", &entity).is_err());
+        assert!(projected
+            .state_for_reducer(timeline, "count", &entity)
+            .is_err());
     }
 
     #[test]
@@ -1028,7 +1035,12 @@ mod tests {
                 CoreError::ErasureContainmentUnavailable
             ))
         ));
-        assert_eq!(verified.state_for_reducer(timeline, "count", &entity).test_ok(), None);
+        assert_eq!(
+            verified
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
+            None
+        );
     }
 
     #[test]

@@ -704,7 +704,9 @@ mod tests {
             Err(CoreError::ArtifactUnavailable)
         ));
         assert_eq!(
-            registry.state_for_reducer(timeline, "count", &entity).test_ok(),
+            registry
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
             None
         );
     }
@@ -795,7 +797,9 @@ mod tests {
             "expected an over-bound Replay to fail closed, got {replay_result:?}"
         );
         assert_eq!(
-            registry.state_for_reducer(timeline, "count", &entity).test_ok(),
+            registry
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
             None
         );
     }
@@ -824,7 +828,9 @@ mod tests {
         );
         assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
         assert_eq!(
-            registry.state_for_reducer(timeline, "count", &entity).test_ok(),
+            registry
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
             None
         );
     }
