@@ -1,17 +1,21 @@
-#![cfg(feature = "sqlite")]
+use std::cell::Cell;
 
-use std::{cell::Cell, sync::mpsc, time::Duration};
+#[cfg(feature = "sqlite")]
+use std::{sync::mpsc, time::Duration};
 
 use pos_core::{
     deletion_receipt, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1,
 };
-use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
+use pos_store::memory::MemoryStore;
+#[cfg(feature = "sqlite")]
+use pos_store::sqlite::SqliteStore;
 
 const fn digest(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
+#[cfg(feature = "sqlite")]
 fn wait_for_worker(started_rx: &mpsc::Receiver<()>, release_tx: &mpsc::Sender<()>, worker: &str) {
     let started = started_rx.recv_timeout(Duration::from_secs(5));
     if started.is_err() {
@@ -114,14 +118,16 @@ fn memory_historical_decryption_holds_one_registry_owner() -> Result<(), Box<dyn
     exercise_adapter(MemoryStore::new())
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_historical_decryption_uses_persisted_registry() -> Result<(), Box<dyn std::error::Error>>
 {
     exercise_adapter(SqliteStore::open_in_memory()?)
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_historical_decryption_holds_writer_reservation_before_registry_mutations(
+fn sqlite_historical_decryption_holds_writer_reservation_through_callback(
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Clone, Copy)]
     enum CompetingMutation {
@@ -208,6 +214,7 @@ fn sqlite_historical_decryption_holds_writer_reservation_before_registry_mutatio
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_read_only_historical_decryption_uses_the_registry_writer_lock(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -246,6 +253,7 @@ fn sqlite_read_only_historical_decryption_uses_the_registry_writer_lock(
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_historical_decryption_releases_writer_lock_after_callback_panic(
 ) -> Result<(), Box<dyn std::error::Error>> {
