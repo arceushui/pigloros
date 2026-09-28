@@ -360,6 +360,13 @@ fn credential_names(directory: &Path) -> Result<(), LocalForkAuthenticationError
         })
         .collect::<Result<Vec<_>, _>>()?;
     names.sort_unstable();
+    if names.len() < 2
+        && names
+            .iter()
+            .all(|name| name == AUTH_CREDENTIAL_NAME || name == HOST_CREDENTIAL_NAME)
+    {
+        return Err(LocalForkAuthenticationErrorV1::CredentialUnavailable);
+    }
     match names.as_slice() {
         [auth, host] if auth == AUTH_CREDENTIAL_NAME && host == HOST_CREDENTIAL_NAME => Ok(()),
         _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
@@ -1018,6 +1025,11 @@ mod tests {
         let directory = test_ok(tempfile::tempdir());
         expect_unavailable(credential_names(directory.path()));
         expect_unavailable(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
+
+        let auth_path = directory.path().join(AUTH_CREDENTIAL_NAME);
+        test_ok(fs::write(&auth_path, []));
+        expect_unavailable(credential_names(directory.path()));
+        test_ok(fs::remove_file(auth_path));
 
         test_ok(fs::write(
             directory.path().join(OsString::from_vec(vec![0xff])),
