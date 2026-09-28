@@ -1106,7 +1106,6 @@ fn write_private_key(
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
