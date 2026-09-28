@@ -21,7 +21,11 @@ impl OperatorReleaseTrustV1 {
     /// Construct release inputs; the trusted Gateway host must pin these to
     /// its independently approved release, not accept them from a caller.
     #[must_use]
-    pub fn new(policy_id: String, operator_public_key: [u8; 32], genesis_digest: [u8; 32]) -> Self {
+    pub const fn new(
+        policy_id: String,
+        operator_public_key: [u8; 32],
+        genesis_digest: [u8; 32],
+    ) -> Self {
         Self {
             policy_id,
             operator_public_key,
@@ -31,6 +35,7 @@ impl OperatorReleaseTrustV1 {
 }
 
 /// Host-owned request for one exact canonical EPF1 artifact.
+#[derive(Clone, Copy)]
 pub struct GatewayEpf1TrustRequestV1<'a> {
     pub exact_epf1: &'a [u8],
     pub signing_key_id: &'a str,
@@ -108,7 +113,7 @@ struct StoredSnapshot {
     genesis_digest: [u8; 32],
 }
 
-/// One private SQLite WAL state store owned by the Gateway host.
+/// One private `SQLite` WAL state store owned by the Gateway host.
 ///
 /// A whole-store rollback while the host is stopped is outside the protection
 /// of this first deployment. The trusted host must own this single registry
@@ -301,7 +306,7 @@ fn authenticate(
     Ok(snapshot)
 }
 
-fn require_global_position(
+const fn require_global_position(
     snapshot: &TrustPolicySnapshotV1,
 ) -> Result<(), TrustPolicyRegistryErrorV1> {
     if snapshot.effective_timeline_position == 0 {
