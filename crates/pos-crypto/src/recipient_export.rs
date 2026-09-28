@@ -115,7 +115,10 @@ impl RecipientTimelineExportV1 {
         let Value::Array(chunks) = &fields[7] else {
             return Err(RecipientExportErrorV1::InvalidEncoding);
         };
-        if chunks.len() != usize::from(header.chunk_count) {
+        if chunks.len()
+            != usize::try_from(header.chunk_count)
+                .expect("u32 recipient export chunk count fits usize")
+        {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
         let ciphertext_chunks = chunks.iter().map(bytes).collect::<Result<Vec<_>, _>>()?;
@@ -161,7 +164,8 @@ impl RecipientTimelineExportV1 {
         {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
-        let expected_count = usize::from(self.header.chunk_count);
+        let expected_count = usize::try_from(self.header.chunk_count)
+            .expect("u32 recipient export chunk count fits usize");
         if expected_count != self.ciphertext_chunks.len() {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
@@ -233,7 +237,9 @@ pub fn encrypt_timeline_export_v1(
         let aad = chunk_aad(
             header_digest,
             u32::try_from(index).expect("validated recipient export has at most MAX_CHUNKS chunks"),
-            index + 1 == usize::from(chunk_count),
+            index + 1
+                == usize::try_from(chunk_count)
+                    .expect("u32 recipient export chunk count fits usize"),
         );
         envelope.ciphertext_chunks.push(
             context
