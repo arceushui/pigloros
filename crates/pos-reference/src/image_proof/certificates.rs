@@ -29,10 +29,8 @@ pub(super) fn decode(signed: &SignedData) -> Result<Vec<ProofCertificate<'_>>, E
         .certificates
         .as_ref()
         .ok_or(Error::UnauthorizedSigner)?;
-    if certificates.0.len() > 8 {
-        return Err(Error::ResourceLimit);
-    }
-    // DER's SetOfVec decoder rejects duplicate certificate encodings.
+    // The borrowed envelope check already bounded and ordered this set and
+    // every certificate's encoded size before the allocating CMS decode.
     certificates
         .0
         .iter()
@@ -41,9 +39,6 @@ pub(super) fn decode(signed: &SignedData) -> Result<Vec<ProofCertificate<'_>>, E
                 return Err(Error::UnsupportedProfile);
             };
             let der = parsed.to_der()?;
-            if der.len() > 64 * 1024 {
-                return Err(Error::ResourceLimit);
-            }
             validate_certificate_syntax(parsed)?;
             Ok(ProofCertificate { parsed, der })
         })
@@ -66,10 +61,8 @@ pub(super) fn select_signer(
                 .get::<SubjectKeyIdentifier>()?
                 .is_some_and(|(_, key)| key == *sid),
         };
-        if matches {
-            if selected.replace(index).is_some() {
-                return Err(Error::UnauthorizedSigner);
-            }
+        if matches && selected.replace(index).is_some() {
+            return Err(Error::UnauthorizedSigner);
         }
     }
     let selected = selected.ok_or(Error::UnauthorizedSigner)?;

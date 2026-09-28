@@ -1,5 +1,6 @@
 mod image_proof_cases {
     include!("image_proof_certificate_cases.rs");
+    include!("image_proof_envelope_cases.rs");
 
     use super::*;
     use cms::{

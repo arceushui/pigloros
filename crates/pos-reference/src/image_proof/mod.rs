@@ -1,6 +1,7 @@
 //! Independent verification of the closed ADR-087 SIM1 CMS profile.
 
 mod certificates;
+mod envelope;
 
 use cms::{
     content_info::{CmsVersion, ContentInfo},
@@ -52,7 +53,7 @@ impl From<der::Error> for SandboxImageProofError {
     }
 }
 
-pub(crate) fn verify(
+pub(super) fn verify(
     image: &AdmittedSandboxImage,
     admission_time: u64,
 ) -> Result<(), SandboxImageProofError> {
@@ -66,6 +67,8 @@ pub(crate) fn verify(
     if outer.content_type != SIGNED_DATA {
         return Err(SandboxImageProofError::UnsupportedProfile);
     }
+    // Bound eager CMS collections before their allocating/sorting decoders.
+    envelope::validate(&outer.content)?;
     let cms_data: SignedData = outer.content.decode_as()?;
     if cms_data.to_der()? != outer.content.to_der()? {
         return Err(SandboxImageProofError::Malformed);
@@ -89,7 +92,6 @@ pub(crate) fn verify(
 fn validate_profile(cms_data: &SignedData) -> Result<&SignerInfo, SandboxImageProofError> {
     if cms_data.encap_content_info.econtent_type != DATA
         || cms_data.encap_content_info.econtent.is_some()
-        || cms_data.crls.is_some()
     {
         return Err(SandboxImageProofError::UnsupportedProfile);
     }
@@ -107,8 +109,6 @@ fn validate_profile(cms_data: &SignedData) -> Result<&SignerInfo, SandboxImagePr
     // SignedData version directly from its sole SignerInfo's SID form.
     if cms_data.version != version
         || signer.version != version
-        || signer.signed_attrs.is_some()
-        || signer.unsigned_attrs.is_some()
         || !algorithm(digest, SHA256)
         || !algorithm(&signer.digest_alg, SHA256)
         || !algorithm(&signer.signature_algorithm, RSA)
