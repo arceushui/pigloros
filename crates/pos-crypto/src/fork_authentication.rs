@@ -409,9 +409,9 @@ mod tests {
         0x51, 0x1a,
     ];
 
-    fn encode(value: Value) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&value, &mut bytes)?;
+        ciborium::into_writer(value, &mut bytes)?;
         Ok(bytes)
     }
 
@@ -543,7 +543,7 @@ mod tests {
         let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)?;
         assert_ne!(host.public_key(), adapter.public_key());
 
-        let fai1 = encode(Value::Array(vec![
+        let fai1 = encode(&Value::Array(vec![
             Value::Text("FAI1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
@@ -562,18 +562,18 @@ mod tests {
         )
         .is_err());
 
-        let fao1 = encode(Value::Array(vec![
+        let open_bytes = encode(&Value::Array(vec![
             Value::Text("FAO1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
             bytes(2, 32),
             bytes(3, 32),
         ]))?;
-        assert_eq!(fao1.len(), FAO1_BYTES);
-        let open = host.sign_open(&fao1)?;
-        verify_host_signature(host.public_key(), OPEN_DOMAIN, &fao1, &open)?;
+        assert_eq!(open_bytes.len(), FAO1_BYTES);
+        let open = host.sign_open(&open_bytes)?;
+        verify_host_signature(host.public_key(), OPEN_DOMAIN, &open_bytes, &open)?;
 
-        let poc1 = encode(Value::Array(vec![
+        let poc1 = encode(&Value::Array(vec![
             Value::Text("POC1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
@@ -586,11 +586,11 @@ mod tests {
         let evidence = verified_evidence()?;
         let command = host.sign_command(&poc1, &evidence)?;
         let evidence_bytes = evidence.evidence().to_canonical_cbor()?;
-        let mut command_input = poc1.clone();
+        let mut command_input = poc1;
         command_input.extend_from_slice(&evidence_bytes);
         verify_host_signature(host.public_key(), COMMAND_DOMAIN, &command_input, &command)?;
 
-        let fcc1 = encode(Value::Array(vec![
+        let fcc1 = encode(&Value::Array(vec![
             Value::Text("FCC1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
@@ -607,7 +607,7 @@ mod tests {
             Value::Text("child".to_owned()),
         ]))?;
         let fcc_signature = host.sign_command(&fcc1, &evidence)?;
-        let mut fcc_input = fcc1.clone();
+        let mut fcc_input = fcc1;
         fcc_input.extend_from_slice(&evidence_bytes);
         verify_host_signature(
             host.public_key(),
@@ -616,7 +616,7 @@ mod tests {
             &fcc_signature,
         )?;
 
-        let frc1 = encode(Value::Array(vec![
+        let recovery_bytes = encode(&Value::Array(vec![
             Value::Text("FRC1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
@@ -624,9 +624,14 @@ mod tests {
             Value::Integer(1.into()),
             bytes(3, 32),
         ]))?;
-        assert_eq!(frc1.len(), FRC1_BYTES);
-        let recovery = host.sign_recovery(&frc1)?;
-        verify_host_signature(host.public_key(), RECOVERY_DOMAIN, &frc1, &recovery)?;
+        assert_eq!(recovery_bytes.len(), FRC1_BYTES);
+        let recovery = host.sign_recovery(&recovery_bytes)?;
+        verify_host_signature(
+            host.public_key(),
+            RECOVERY_DOMAIN,
+            &recovery_bytes,
+            &recovery,
+        )?;
         Ok(())
     }
 
@@ -635,7 +640,7 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
         let evidence = verified_evidence()?;
-        let fcc1 = encode(Value::Array(vec![
+        let fcc1 = encode(&Value::Array(vec![
             Value::Text("FCC1".to_owned()),
             Value::Integer(1.into()),
             bytes(0xff, 32),
@@ -679,7 +684,7 @@ mod tests {
             Err(ForkAuthenticationSignatureErrorV1::InvalidSeed)
         ));
         let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
-        let wrong = encode(Value::Array(vec![
+        let wrong = encode(&Value::Array(vec![
             Value::Text("FAO1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
@@ -690,7 +695,7 @@ mod tests {
             host.sign_initialize(&wrong),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
         );
-        let foreign_host = encode(Value::Array(vec![
+        let foreign_host = encode(&Value::Array(vec![
             Value::Text("FAI1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
@@ -702,7 +707,7 @@ mod tests {
             host.sign_initialize(&foreign_host),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
         );
-        let malformed_fcc1 = encode(Value::Array(vec![
+        let malformed_fcc1 = encode(&Value::Array(vec![
             Value::Text("FCC1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
