@@ -39,6 +39,51 @@ mod envelope_cases {
     }
 
     #[test]
+    fn public_proof_verification_bounds_near_limit_certificate_before_decoding() -> TestResult {
+        let proof = edit_field(PROOF, 3, |certificates| {
+            let oversized = der::Any::new(Tag::Sequence, vec![0; 1024 * 1024 - 4096])?;
+            *certificates = der::Any::new(certificates.tag(), oversized.to_der()?)?;
+            Ok(())
+        })?;
+        assert!(proof.len() > 1024 * 1024 - 4096);
+        assert!(proof.len() <= 1024 * 1024);
+        assert_eq!(
+            verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::ResourceLimit)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_proof_verification_rejects_near_limit_attributes_before_decoding() -> TestResult {
+        let proof = edit_field(PROOF, 4, |signers| {
+            let signer: der::Any = der::Any::from_der(signers.value())?;
+            // An unknown trailing unsigned-attributes body must be rejected
+            // without eagerly allocating or sorting its contents.
+            let attributes = der::Any::new(
+                Tag::ContextSpecific {
+                    constructed: true,
+                    number: der::TagNumber::N1,
+                },
+                vec![0; 1024 * 1024 - 4096],
+            )?;
+            let encoded = der::Any::new(
+                Tag::Sequence,
+                [signer.value(), attributes.to_der()?.as_slice()].concat(),
+            )?;
+            *signers = der::Any::new(Tag::Set, encoded.to_der()?)?;
+            Ok(())
+        })?;
+        assert!(proof.len() > 1024 * 1024 - 4096);
+        assert!(proof.len() <= 1024 * 1024);
+        assert_eq!(
+            verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::UnsupportedProfile)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn public_proof_verification_rejects_unordered_and_duplicate_certificate_der() -> TestResult {
         let reversed = edit_field(CHAIN, 3, |certificates| {
             let mut reader = der::SliceReader::new(certificates.value())?;

@@ -95,3 +95,23 @@ signing command above. Their private keys were discarded:
 
 These fixtures exercise proof verification only. They still do not supply a
 mountable image or systemd/kernel acceptance evidence.
+
+## Hosted allocation evidence
+
+The `sim1-proof-risk` workflow builds the public admission test executable and
+runs three adversarial cases in separate
+[Massif](https://valgrind.org/docs/manual/ms-manual.html) processes: an excessive
+digest set, an oversized certificate, and forbidden attributes. Each case
+asserts that its DER proof is larger than 1 MiB minus 4 KiB and at most 1 MiB,
+then checks rejection through `AdmittedSandboxProvider::verify_image_proof`.
+
+The artifact retains the raw heap traces, readable allocation trees, exact
+source and checkout commits, executable hash, compiler/profiler versions and
+machine-readable peak measurements. The collector requires exactly one passing
+test per process and a nonempty peak snapshot; a missing or filtered-out test
+cannot produce successful evidence.
+
+Measurements include fixture construction and the test harness. They exclude
+stack and RSS, and do not establish a production memory ceiling or replace
+systemd/kernel conformance. Inspect the allocation trees and independent review
+alongside the recorded peak before accepting the resource-risk evidence.
