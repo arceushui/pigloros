@@ -201,7 +201,7 @@ fn create_private_directory(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::super::tests::with_io_fault;
+    use super::super::tests::{in_lock_test_process, with_io_fault};
     use super::*;
     use crate::SystemdAttemptRegistry;
     use std::fs;
@@ -226,6 +226,9 @@ mod tests {
 
     #[test]
     fn prepare_io_boundary_failures_close_owner_and_preserve_recovery_state() -> TestResult {
+        if !in_lock_test_process("attempt_registry::directory::tests::prepare_io_boundary_failures_close_owner_and_preserve_recovery_state")? {
+            return Ok(());
+        }
         let planned = intent(1)?;
         let operation_count = {
             let (_directory, registry) = fixture()?;
@@ -276,10 +279,15 @@ mod tests {
                 records
             );
             let parent = File::open(directory.path())?;
-            assert!(matches!(
-                SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid()),
-                Err(SystemdAttemptRegistryError::ReconciliationRequired)
-            ));
+            let reopened =
+                SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid());
+            assert!(
+                matches!(
+                    reopened,
+                    Err(SystemdAttemptRegistryError::ReconciliationRequired)
+                ),
+                "reopen after injected prepare I/O failure {fail_at}: {reopened:?}"
+            );
         }
         assert!(observed_extended);
         Ok(())
