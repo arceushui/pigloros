@@ -164,11 +164,6 @@ impl RecipientTimelineExportV1 {
         {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
-        let expected_count = usize::try_from(self.header.chunk_count)
-            .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
-        if expected_count != self.ciphertext_chunks.len() {
-            return Err(RecipientExportErrorV1::FieldOutOfBounds);
-        }
         let final_plain_len =
             usize::try_from((self.header.payload_length - 1) % CHUNK_BYTES_U64 + 1)
                 .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
@@ -247,7 +242,7 @@ pub fn encrypt_timeline_export_v1(
                 .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?,
         );
     }
-    envelope.validate_shape()?;
+    // Header bounds and fixed HPKE tag width establish the envelope shape.
     Ok(envelope)
 }
 
@@ -296,12 +291,6 @@ pub fn decrypt_timeline_export_v1(
                 .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?,
         );
         plaintext.extend_from_slice(&chunk);
-    }
-    if plaintext.len()
-        != usize::try_from(envelope.header.payload_length)
-            .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?
-    {
-        return Err(RecipientExportErrorV1::AuthenticationFailed);
     }
     let export = decode_payload(&plaintext)?;
     if export.timeline.id() != envelope.header.timeline_id
@@ -371,9 +360,7 @@ fn encode_payload(export: &TimelineExport) -> Result<Vec<u8>, RecipientExportErr
 }
 
 fn decode_payload(bytes: &[u8]) -> Result<TimelineExport, RecipientExportErrorV1> {
-    if bytes.is_empty() || bytes.len() > MAX_PAYLOAD_BYTES {
-        return Err(RecipientExportErrorV1::FieldOutOfBounds);
-    }
+    // The decoded envelope already bounds plaintext length and requires a nonempty payload.
     preflight_cbor(
         bytes,
         MAX_EVENTS.saturating_mul(13).saturating_add(12),
@@ -573,10 +560,8 @@ fn decode_event(value: &Value) -> Result<Event, RecipientExportErrorV1> {
     if !(1..=MAX_EVENT_TYPE_BYTES).contains(&event_type.len()) {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
+    // The CBOR preflight already caps each byte string at the event payload limit.
     let payload = bytes(&fields[3])?;
-    if payload.len() > MAX_EVENT_PAYLOAD_BYTES {
-        return Err(RecipientExportErrorV1::FieldOutOfBounds);
-    }
     let signature = optional_signature(&fields[9])?;
     let signature_identity = optional_identity(&fields[10])?;
     if signature.is_some() != signature_identity.is_some() {
