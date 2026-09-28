@@ -48,6 +48,9 @@ jobs:
         working-directory: fuzz
         run: |
           set -euo pipefail
+          cargo metadata --format-version 1 >/dev/null
+          git diff -- Cargo.lock
+          exit 1
           cargo deny --manifest-path Cargo.toml --config deny.toml --locked check
           cargo shear --deny-warnings --locked .
           cargo +nightly-2026-07-01 check --locked --bins
