@@ -616,6 +616,36 @@ fn recipient_owner_public_contract_rejects_a_missing_live_inventory_identity(
 }
 
 #[test]
+fn recipient_owner_public_contract_fails_closed_without_registry_or_entry_path(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let store = SqliteStore::open(
+        temporary
+            .path()
+            .join("recipient.sqlite")
+            .to_str()
+            .ok_or("database path is not UTF-8")?,
+    )?;
+    let owner = RecipientKeyOwnerV1::open(directory, EntityId::new())?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+
+    for path in [b"/".as_slice(), b"a/b", b"foreign.key"] {
+        let (temporary, store, owner, _) = enrolled_owner()?;
+        let private = only_private_file(&temporary.path().join("recipient-private"))?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+        connection.execute(
+            "UPDATE recipient_key_inventory_v1 SET private_path = ?1",
+            [path],
+        )?;
+
+        assert!(store.recover_recipient_keys(&owner).is_err());
+        assert!(private.exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_keeps_missing_and_pending_material_unavailable(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (temporary, store, owner, _) = enrolled_owner()?;
