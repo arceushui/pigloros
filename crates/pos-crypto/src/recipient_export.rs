@@ -1652,4 +1652,59 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_public_header_and_authenticated_payload_disagreements(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        let source = export(None, b"source".to_vec());
+        let mut rng = StdRng::from_seed([19; 32]);
+        let encoded = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?.encode();
+
+        let header_edits: [fn(&mut Vec<Value>); 4] = [
+            |fields| {
+                if let Value::Array(header) = &mut fields[5] {
+                    header.truncate(9);
+                }
+            },
+            |fields| {
+                if let Value::Array(header) = &mut fields[5] {
+                    header[4] = Value::Text(String::new());
+                }
+            },
+            |fields| {
+                if let Value::Array(header) = &mut fields[5] {
+                    header[5] = Value::Integer(1_u64.into());
+                }
+            },
+            |fields| {
+                if let Value::Array(header) = &mut fields[5] {
+                    header[9] = Value::Integer(u64::MAX.into());
+                }
+            },
+        ];
+        for edit in header_edits {
+            let malformed = rewrite_envelope(&encoded, edit)?;
+            assert!(RecipientTimelineExportV1::decode(&malformed).is_err());
+        }
+
+        let payload = encode_payload(&source)?;
+        let mut noncanonical = Vec::with_capacity(payload.len() + 1);
+        noncanonical.extend_from_slice(&[0x98, 11]);
+        noncanonical.extend_from_slice(&payload[1..]);
+        let encoded = encrypt_payload(&noncanonical, recipient, [5; 16], &mut rng)?;
+        assert_eq!(
+            decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private),
+            Err(RecipientExportErrorV1::NonCanonical)
+        );
+
+        let mut fork = export(Some(0), b"source".to_vec());
+        fork.parent_fork_hash = None;
+        assert_eq!(
+            encrypt_timeline_export_v1(&fork, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::SourceMismatch)
+        );
+        Ok(())
+    }
 }
