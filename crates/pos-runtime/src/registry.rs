@@ -3263,7 +3263,9 @@ impl PluginRegistry {
         let binding = OutputPolicyBindingV1::from_installed_source(
             &plugin,
             match mode {
-                CatalogueRegistrationModeV1::InstalledGateway => InstalledOutputPolicySourceV1::Gateway,
+                CatalogueRegistrationModeV1::InstalledGateway => {
+                    InstalledOutputPolicySourceV1::Gateway
+                }
                 #[cfg(test)]
                 CatalogueRegistrationModeV1::NonproductionFixture => {
                     InstalledOutputPolicySourceV1::Generated
