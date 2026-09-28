@@ -5203,11 +5203,12 @@ mod tests {
             fence_error,
             GatewayError::ConsentRevocationFenceMismatch
         ));
-        let page_error = gateway
+        let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 2)
             .await
-            .test_err();
-        assert!(matches!(page_error, GatewayError::ResourceUnavailable));
+            .test_ok();
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_from_seq, None);
         drop(gateway);
     }
 
@@ -5309,7 +5310,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn public_gateway_read_rejects_geographic_events_from_an_adapter() {
+    async fn public_gateway_read_filters_geographic_events_from_an_adapter() {
         for event_type in [
             pos_core::GEOGRAPHIC_EVENT_TYPE,
             pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
@@ -5317,21 +5318,23 @@ mod tests {
             let gateway = Gateway::new(Box::new(ScriptedStore {
                 mode: ScriptMode::GeographicRead(event_type),
             }));
-            let error = gateway
+            let page = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
                 .await
-                .test_err();
-            assert!(matches!(error, GatewayError::ResourceUnavailable));
+                .test_ok();
+            assert!(page.events.is_empty());
+            assert_eq!(page.next_from_seq, None);
             drop(gateway);
         }
         let gateway = Gateway::new(Box::new(ScriptedStore {
             mode: ScriptMode::ConsentRead(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
         }));
-        let error = gateway
+        let page = gateway
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
             .await
-            .test_err();
-        assert!(matches!(error, GatewayError::ResourceUnavailable));
+            .test_ok();
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_from_seq, None);
         drop(gateway);
     }
 
@@ -7202,12 +7205,11 @@ mod coverage_entrypoints {
                 },
             )
             .await?;
-        assert!(matches!(
-            gateway
-                .read_events_page(&timeline.id().to_string(), 0, 8)
-                .await,
-            Err(GatewayError::ResourceUnavailable)
-        ));
+        let visible = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 8)
+            .await?;
+        assert_eq!(visible.events.len(), 2);
+        assert_eq!(visible.next_from_seq, None);
         gateway
             .purge_expired_ingress_identities(NonZeroUsize::MIN)
             .await?;
