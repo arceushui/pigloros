@@ -898,21 +898,24 @@ mod tests {
             inventory_generation: pos_core::ErasureReferenceV1,
         ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
         {
-            if self.calls.fetch_add(1, Ordering::SeqCst) != 0
-                && let Some(gate) = self
-                    .gate
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-            {
-                gate.poison();
-            }
-            Ok(pos_runtime::world_replay::test_verified_world_replay(
+            let verified = pos_runtime::world_replay::test_verified_world_replay(
                 closure,
                 requested_use,
                 inventory_generation,
                 pos_core::ErasureReplayClaimV1::Exact,
-            ))
+            );
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(verified);
+            }
+            if let Some(gate) = self
+                .gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                gate.poison();
+            }
+            Ok(verified)
         }
     }
 
