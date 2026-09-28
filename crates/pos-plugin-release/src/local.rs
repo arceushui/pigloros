@@ -1838,16 +1838,16 @@ mod tests {
                 )?;
             }
             QuarantineIoScenario::InvalidFinalName => {
-                std::fs::create_dir(root.join("releases/invalid-final"))?
+                std::fs::create_dir(root.join("releases/invalid-final"))?;
             }
             QuarantineIoScenario::IncompleteFinal => {
-                std::fs::create_dir(root.join("releases").join("a".repeat(64)))?
+                std::fs::create_dir(root.join("releases").join("a".repeat(64)))?;
             }
             QuarantineIoScenario::InvalidNextIndexName => {
-                std::fs::write(root.join(".published.invalid.next"), b"invalid")?
+                std::fs::write(root.join(".published.invalid.next"), b"invalid")?;
             }
             QuarantineIoScenario::NextIndexDirectory => {
-                std::fs::create_dir(root.join(format!(".published.{}.next", "a".repeat(32))))?
+                std::fs::create_dir(root.join(format!(".published.{}.next", "a".repeat(32))))?;
             }
             QuarantineIoScenario::UnrecognizedStagingMember => {
                 assert!(publish_with_fault(
