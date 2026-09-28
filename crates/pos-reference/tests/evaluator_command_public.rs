@@ -6,6 +6,8 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
+use std::io;
 use std::io::{Cursor, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -39,6 +41,11 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 #[cfg(target_os = "linux")]
 const FIFO_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(target_os = "linux")]
+fn executable_test_io<T>(stage: &'static str, result: io::Result<T>) -> io::Result<T> {
+    result.map_err(|error| io::Error::new(error.kind(), format!("{stage}: {error}")))
+}
 
 #[cfg(target_os = "linux")]
 fn open_fifo_writer_after_child_ready(
@@ -541,39 +548,55 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     let directory = tempfile::tempdir()?;
     let base = complete_command(directory.path())?;
     let request_path = directory.path().join("request.cbor");
-    let request = fs::read(&request_path)?;
-    fs::remove_file(&request_path)?;
-    assert!(Command::new("mkfifo")
-        .arg(&request_path)
-        .status()?
-        .success());
+    let request = executable_test_io("read request", fs::read(&request_path))?;
+    executable_test_io("remove request", fs::remove_file(&request_path))?;
+    assert!(executable_test_io(
+        "create request FIFO",
+        Command::new("mkfifo").arg(&request_path).status(),
+    )?
+    .success());
 
     let loaded_executable = directory.path().join("loaded-evaluator");
     let executable = directory.path().join("running-evaluator");
     let replacement = directory.path().join("replacement-evaluator");
-    fs::copy(
-        env!("CARGO_BIN_EXE_pos-reference-evaluator"),
-        &loaded_executable,
+    executable_test_io(
+        "stage loaded executable",
+        fs::copy(
+            env!("CARGO_BIN_EXE_pos-reference-evaluator"),
+            &loaded_executable,
+        ),
     )?;
-    symlink(&loaded_executable, &executable)?;
-    fs::write(&replacement, b"replacement path contents")?;
+    executable_test_io(
+        "create launcher symlink",
+        symlink(&loaded_executable, &executable),
+    )?;
+    executable_test_io(
+        "stage replacement bytes",
+        fs::write(&replacement, b"replacement path contents"),
+    )?;
     let mut command = Command::new(&executable);
     command
         .args(base.get_args())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
+    let mut child = executable_test_io("spawn loaded executable", command.spawn())?;
 
     // Opening the FIFO synchronizes with the evaluator after exec and before
     // the launcher path is replaced. The launcher is a symlink, so replacing
     // it does not touch the live executable inode.
     let mut request_writer = open_fifo_writer_after_child_ready(&request_path, &mut child)?;
-    fs::rename(&replacement, &executable)?;
-    assert_eq!(fs::read(&executable)?, b"replacement path contents");
-    request_writer.write_all(&request)?;
+    executable_test_io(
+        "replace launcher pathname",
+        fs::rename(&replacement, &executable),
+    )?;
+    assert_eq!(
+        executable_test_io("read replacement pathname", fs::read(&executable))?,
+        b"replacement path contents"
+    );
+    executable_test_io("release request FIFO", request_writer.write_all(&request))?;
     drop(request_writer);
 
-    let output = child.wait_with_output()?;
+    let output = executable_test_io("wait for loaded executable", child.wait_with_output())?;
     assert!(
         output.status.success(),
         "evaluator stderr: {}",
