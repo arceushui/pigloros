@@ -95,8 +95,10 @@ fn recipient_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
 }
 
 #[cfg(not(test))]
-fn recipient_random_bytes(bytes: &mut [u8]) -> Result<(), impl std::fmt::Display> {
-    SysRng.try_fill_bytes(bytes)
+fn recipient_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
+    SysRng
+        .try_fill_bytes(bytes)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 #[cfg(test)]
