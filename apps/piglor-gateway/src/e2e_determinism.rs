@@ -1130,7 +1130,7 @@ async fn assert_recovered_http_events(
         .test_ok()?;
     let address = listener.local_addr().test_ok()?;
     let state = AppState {
-        gateway: Gateway::new_with_erasure_host_and_authorization(
+        gateway: Gateway::new_with_erasure_host_and_authorization_fixture(
             ErasureExecutionHostV1::open_verified_empty(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
