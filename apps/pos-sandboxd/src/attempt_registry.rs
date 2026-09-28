@@ -367,6 +367,7 @@ fn read_record(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
