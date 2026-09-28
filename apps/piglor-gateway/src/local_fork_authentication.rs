@@ -484,7 +484,7 @@ fn operation_nonce() -> Result<[u8; 32], LocalForkAuthenticationErrorV1> {
         let mut nonce = [0; 32];
         let mut remaining = nonce.as_mut_slice();
         while !remaining.is_empty() {
-            let read = getrandom(remaining, GetRandomFlags::empty())
+            let read = getrandom(&mut *remaining, GetRandomFlags::empty())
                 .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
             if read == 0 {
                 return Err(LocalForkAuthenticationErrorV1::CredentialUnavailable);
