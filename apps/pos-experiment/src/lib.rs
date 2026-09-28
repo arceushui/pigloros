@@ -2807,6 +2807,7 @@ mod tests {
             },
         );
         let gate: Arc<dyn ConsentGate> = Arc::new(authority);
+        let erasure_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut result = RunResult {
             timeline_id,
             ticks: 0,
@@ -2817,7 +2818,8 @@ mod tests {
                 pos_core::crypto::Hash::zero(),
                 pos_core::clock::WallTime::from_micros(0),
             ),
-            projections: pos_state::ProjectionRegistry::new(),
+            projections: pos_state::ProjectionRegistry::new()
+                .with_erasure_gate(Arc::clone(&erasure_gate)),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token.clone()),
             store_config: Some(store_config),
@@ -2856,6 +2858,13 @@ mod tests {
             result.branch("forbidden"),
             Err(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::Consent(pos_core::ConsentError::ForkNotPermitted)
+            ))
+        ));
+        erasure_gate.freeze_timeline_for_test(timeline_id);
+        assert!(matches!(
+            result.projection_state_for_reducer("projection", subject_id, &token, 0),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::ErasureOperationUnavailable
             ))
         ));
         assert!(matches!(
