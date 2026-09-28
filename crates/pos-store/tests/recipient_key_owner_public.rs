@@ -1024,6 +1024,38 @@ fn recipient_owner_public_contract_rejects_foreign_bound_directory_inventory_and
 }
 
 #[test]
+fn recipient_owner_public_contract_quarantines_owned_staged_material_without_registry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let database = temporary.path().join("recipient.sqlite");
+    let mut store = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    let owner = RecipientKeyOwnerV1::open(directory.clone(), EntityId::new())?;
+    let connection = rusqlite::Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_initial_recipient_registry_write
+         BEFORE INSERT ON key_registry
+         BEGIN SELECT RAISE(ABORT, 'injected registry write failure'); END;",
+    )?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    assert!(store.load_key_registry()?.is_none());
+    connection.execute_batch("DROP TRIGGER reject_initial_recipient_registry_write;")?;
+
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    let names = std::fs::read_dir(&directory)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(!names
+        .iter()
+        .any(|name| name.as_encoded_bytes().ends_with(b".key")));
+    assert!(names
+        .iter()
+        .any(|name| name.as_encoded_bytes().ends_with(b".key.orphan")));
+    Ok(())
+}
+
+#[test]
 fn recipient_owner_public_contract_rejects_destruction_when_no_registry_exists(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;

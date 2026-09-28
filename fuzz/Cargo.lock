@@ -977,6 +977,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "x25519-dalek",
  "zeroize",
 ]
 
