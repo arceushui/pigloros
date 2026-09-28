@@ -1071,7 +1071,7 @@ mod tests {
     use super::*;
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/plugin_trust_vectors.rs"
+        "/tests/support/plugin_trust_vectors.rs"
     ));
     use ciborium::value::Value;
     use ed25519_dalek::{Signer, SigningKey};
