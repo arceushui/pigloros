@@ -85,7 +85,7 @@ pub fn verify_authenticated_principal_evidence_v1(
         .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)?;
     let record_bytes = record
         .to_canonical_cbor()
-        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
+        .expect("validated APR1 always encodes into a Vec");
     verify_signature(
         &verifying_key,
         ADAPTER_DOMAIN,
@@ -140,7 +140,7 @@ impl ForkAuthenticationAdapterSigningKeyV1 {
             .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
         let record_bytes = record
             .to_canonical_cbor()
-            .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
+            .expect("validated APR1 always encodes into a Vec");
         let signature = sign_preimage(&self.signing_key, ADAPTER_DOMAIN, &record_bytes);
         AuthenticatedPrincipalEvidenceV1::new(record, *signature.as_bytes())
             .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)
@@ -223,7 +223,7 @@ impl ForkHostSigningKeyV1 {
         let evidence_bytes = evidence
             .evidence()
             .to_canonical_cbor()
-            .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
+            .expect("verified FAE1 always encodes into a Vec");
         let mut preimage =
             Vec::with_capacity(COMMAND_DOMAIN.len() + command.len() + evidence_bytes.len());
         preimage.extend_from_slice(COMMAND_DOMAIN);
@@ -280,10 +280,7 @@ fn canonical_array(
     let mut cursor = Cursor::new(bytes);
     let value: Value = ciborium::from_reader(&mut cursor)
         .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
-    if cursor.position()
-        != u64::try_from(bytes.len())
-            .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?
-    {
+    if cursor.position() != bytes.len() as u64 {
         return Err(ForkAuthenticationSignatureErrorV1::InvalidRecord);
     }
     let Value::Array(values) = value else {
@@ -297,7 +294,7 @@ fn canonical_array(
     }
     let mut encoded = Vec::new();
     ciborium::into_writer(&Value::Array(values.clone()), &mut encoded)
-        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
+        .expect("writing CBOR into a Vec cannot fail");
     if encoded != bytes {
         return Err(ForkAuthenticationSignatureErrorV1::InvalidRecord);
     }
