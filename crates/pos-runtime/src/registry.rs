@@ -5886,6 +5886,27 @@ mod tests {
             build_catalogue_missing_reducer_fixture,
         );
         let mut registry = PluginRegistry::new().without_erasure_gate();
+        let existing = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
+        registry
+            .register_generated(&existing, Some(Box::new(CountReducer)), None)
+            .test_ok();
+        let entity = EntityId::new();
+        registry.projections.apply_event(&Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("first.output"),
+            payload: CanonicalBytes::from_static(b"existing"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        });
+        let schemas_before = registry.schemas.len();
         assert!(matches!(
             registry.register_from_host_catalogue_entry_inner(
                 &selected,
@@ -5897,11 +5918,20 @@ mod tests {
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
-        assert!(registry.is_empty());
-        assert!(registry.projections.reducer_names().is_empty());
-        assert!(registry.schemas.is_empty());
+        assert_eq!(registry.len(), 1);
+        assert!(registry.contains(&existing.id()));
+        assert_eq!(registry.projections.reducer_names(), vec!["catalogue-fixture"]);
+        assert_eq!(
+            registry
+                .projections
+                .state_for_reducer("catalogue-fixture", &entity)
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(registry.schemas.len(), schemas_before);
         assert!(registry.approver_map.is_empty());
-        assert!(registry.output_policy_digests().next().is_none());
+        assert_eq!(registry.output_policy_digests().count(), 1);
     }
 
     #[test]
