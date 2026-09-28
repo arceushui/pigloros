@@ -13,7 +13,6 @@ sqlite = ["dep:rusqlite", "dep:pos-conformance", "dep:blake3"]
 
 [dependencies]
 blake3 = { workspace = true, optional = true }
-pos-conformance = { path = "../pos-conformance", optional = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 ciborium = { workspace = true }
@@ -23,6 +22,9 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pos-conformance = { path = "../pos-conformance", optional = true }
 
 [dev-dependencies]
 blake3 = { workspace = true }
