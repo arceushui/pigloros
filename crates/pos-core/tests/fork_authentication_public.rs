@@ -582,3 +582,25 @@ fn fae1_public_decoder_rejects_evidence_field_shapes() -> Result<(), Box<dyn std
     );
     Ok(())
 }
+
+#[test]
+fn public_constructors_and_decoders_reject_post_parse_policy_invariants(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        LocalAccountRegistryV1::new(String::new(), 2, registry()?.bindings().to_vec(), 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+
+    let canonical = policy()?.to_canonical_cbor()?;
+    let duplicate_adapter = mutate(&canonical, |value| {
+        let adapters = fields(&mut fields(value)?[2])?;
+        let duplicate = adapters[0].clone();
+        adapters.push(duplicate);
+        Ok(())
+    })?;
+    assert_eq!(
+        ForkAuthenticationPolicyV1::from_canonical_cbor(&duplicate_adapter),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
