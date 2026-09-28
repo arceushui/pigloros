@@ -265,6 +265,19 @@ impl RecipientKeyOwnerV1 {
                     "recipient key directory changed while opening".to_owned(),
                 ));
             }
+            let current_metadata = std::fs::symlink_metadata(&directory)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if !current_metadata.is_dir()
+                || current_metadata.file_type().is_symlink()
+                || current_metadata.mode() & 0o777 != 0o700
+                || current_metadata.uid() != retained_metadata.uid()
+                || current_metadata.ino() != retained_metadata.ino()
+                || current_metadata.dev() != retained_metadata.dev()
+            {
+                return Err(CoreError::Storage(
+                    "recipient key directory changed while opening".to_owned(),
+                ));
+            }
             Ok(Self {
                 directory,
                 directory_file,
