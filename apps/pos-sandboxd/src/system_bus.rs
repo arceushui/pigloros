@@ -26,6 +26,9 @@ const UNIT_PREFIX: &str = "pigloros-attempt-";
 const UNIT_SUFFIX: &str = ".service";
 const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 
+mod inventory;
+pub use inventory::SystemdAttemptUnitObservation;
+
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransientServiceUnitName(String);
@@ -256,6 +259,12 @@ pub enum SystemdTransientUnitTransportError {
     /// systemd rejected or failed the typed whole-unit `KillUnit` call.
     #[error("systemd rejected the transient-unit force-kill request")]
     KillCall(#[source] zbus::Error),
+    /// The manager rejected or failed the typed attempt-namespace listing.
+    #[error("failed to observe the systemd attempt unit namespace")]
+    InventoryCall(#[source] zbus::Error),
+    /// A listed unit had a noncanonical, duplicate or contradictory identity.
+    #[error("systemd attempt unit inventory has an invalid identity")]
+    InventoryIdentityMismatch,
     /// The manager's job-completion signal could not be subscribed to.
     #[error("failed to subscribe to systemd transient-unit job completion")]
     JobSignalSubscribe(#[source] zbus::Error),
@@ -271,8 +280,8 @@ pub enum SystemdTransientUnitTransportError {
     /// The matching job did not complete successfully.
     #[error(transparent)]
     JobFailed(#[from] SystemdJobFailure),
-    /// The completed transient unit could not be resolved to an object path.
-    #[error("failed to resolve the completed systemd transient unit")]
+    /// The named transient unit could not be resolved to an object path.
+    #[error("failed to resolve the systemd transient unit")]
     UnitLookup(#[source] zbus::Error),
     /// The generated typed service proxy could not be constructed.
     #[error("failed to construct the typed systemd service proxy")]
