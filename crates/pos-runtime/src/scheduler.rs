@@ -48,8 +48,8 @@ mod tests {
             OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
             OutputPolicyV1,
         },
-        ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
-        ErasureContainmentGateV1, PluginCpuReservationV1, WorkloadProfileV1,
+        ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+        FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     };
     use pos_store::{open_store, StoreConfig};
     use std::sync::Arc;
