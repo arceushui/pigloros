@@ -645,7 +645,7 @@ impl SqliteStore {
                 registry
                     .complete_key_destruction(request, receipt)
                     .map_err(storage_error)
-                    .and_then(|()| {
+                    .and_then(|_| {
                         i64::try_from(request.identity.epoch)
                             .map_err(storage_error)
                             .and_then(|epoch| {
