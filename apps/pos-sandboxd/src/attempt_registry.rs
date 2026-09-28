@@ -632,7 +632,7 @@ mod tests {
         assert!(registry.commit_planned(&intent).is_err());
         assert!(std::panic::catch_unwind(|| {
             let _guard = registry.state.lock();
-            panic!("poisoned registry fixture");
+            std::panic::resume_unwind(Box::new(()));
         })
         .is_err());
         assert!(registry.commit_planned(&intent).is_err());
