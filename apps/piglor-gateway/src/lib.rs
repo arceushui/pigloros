@@ -333,6 +333,39 @@ mod coverage_tests {
         ));
     }
 
+    #[test]
+    fn selected_gateway_catalogue_invokes_factory_once_before_closed_epf1() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static FACTORY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn counted_factory(
+            configuration: &super::FrozenGatewayActionConfiguration,
+        ) -> (GatewayActionPlugin, super::GatewayWorldActionApprover) {
+            FACTORY_CALLS.fetch_add(1, Ordering::SeqCst);
+            super::build_gateway_action_product(configuration)
+        }
+
+        FACTORY_CALLS.store(0, Ordering::SeqCst);
+        let selected = pos_runtime::HostCatalogueEntryV1::gateway(
+            super::frozen_gateway_details,
+            counted_factory,
+        );
+        let frozen = super::FrozenGatewayActionConfiguration {
+            bodies: Vec::new(),
+            details: Vec::new(),
+        };
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        assert!(matches!(
+            registry.register_from_host_catalogue_entry(&selected, frozen),
+            Err(RuntimeError::OutputAdmission(
+                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            ))
+        ));
+        assert_eq!(FACTORY_CALLS.load(Ordering::SeqCst), 1);
+        assert!(registry.composition().plugins.is_empty());
+    }
+
     #[repr(transparent)]
     struct WrappedGatewayActionPlugin(GatewayActionPlugin);
 
