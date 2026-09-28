@@ -109,7 +109,16 @@ impl LocalForkAuthenticationCredentialsV1 {
         &self,
         peer: AuthenticatedUnixPeerV1,
     ) -> Result<ProducedLocalAuthenticationEvidenceV1, LocalForkAuthenticationErrorV1> {
-        let issued_at = production_wall_time()?;
+        self.produce_with(peer, production_wall_time, operation_nonce)
+    }
+
+    fn produce_with(
+        &self,
+        peer: AuthenticatedUnixPeerV1,
+        wall_time: impl FnOnce() -> Result<u64, LocalForkAuthenticationErrorV1>,
+        nonce: impl FnOnce() -> Result<[u8; 32], LocalForkAuthenticationErrorV1>,
+    ) -> Result<ProducedLocalAuthenticationEvidenceV1, LocalForkAuthenticationErrorV1> {
+        let issued_at = wall_time()?;
         let expires_at = issued_at
             .checked_add(AUTHENTICATION_LIFETIME_MICROS)
             .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
@@ -125,7 +134,7 @@ impl LocalForkAuthenticationCredentialsV1 {
             issued_at,
             expires_at,
             registry_binding,
-            operation_nonce: operation_nonce()?,
+            operation_nonce: nonce()?,
         };
         self.adapter_signer
             .sign_authenticated_principal(record)
@@ -171,7 +180,7 @@ impl PrincipalOwnerResolverV1 {
         let registry_binding = self
             .registry
             .digest()
-            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+            .expect("validated local registry serializes canonically");
         if record.adapter_id != self.registry.adapter_id()
             || record.assurance != self.registry.assurance()
             || record.registry_binding != registry_binding
@@ -239,20 +248,21 @@ fn parse_credentials(
     // `from_seed` zeroizes its by-value seed copy. These guards retain the
     // extracted credential bytes across every fallible validation step.
     let adapter_signer = ForkAuthenticationAdapterSigningKeyV1::from_seed(*adapter_seed)
-        .map_err(signature_invalid)?;
+        .expect("FACR1 parser rejects all-zero adapter seeds");
     let adapter = policy
         .adapter(registry.adapter_id())
         .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
     let registry_binding = registry
         .digest()
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+        .expect("validated local registry serializes canonically");
     if adapter.verifying_key != adapter_signer.public_key()
         || registry.assurance() < adapter.minimum_assurance
         || !adapter.registry_bindings.contains(&registry_binding)
     {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let host_signer = ForkHostSigningKeyV1::from_seed(*host_seed).map_err(signature_invalid)?;
+    let host_signer = ForkHostSigningKeyV1::from_seed(*host_seed)
+        .expect("FAHK1 parser rejects all-zero host seeds");
     ensure_distinct_signing_keys(adapter_signer.public_key(), host_signer.public_key())?;
     Ok(LocalForkAuthenticationCredentialsV1 {
         resolver: PrincipalOwnerResolverV1::new(policy, registry),
@@ -316,8 +326,8 @@ fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthen
     let principal_bytes = bounded_bytes(&fields[1], 256)?;
     let principal = PrincipalRefV1::decode(&CanonicalBytes::from_vec(principal_bytes.to_vec()))
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    let owner = OwnerIdV1::new(bounded_text(&fields[2])?)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let owner =
+        OwnerIdV1::new(bounded_text(&fields[2])?).expect("bounded owner text satisfies OwnerIdV1");
     Ok(LocalAccountBindingV1 {
         uid,
         principal,
@@ -599,7 +609,10 @@ fn operation_nonce_with(
 mod tests {
     use std::{
         fs,
-        os::unix::{fs::PermissionsExt as _, net::UnixStream},
+        os::{
+            unix::{ffi::OsStringExt as _, fs::PermissionsExt as _, net::UnixStream},
+            OsString,
+        },
     };
 
     #[cfg(target_os = "linux")]
@@ -839,6 +852,25 @@ mod tests {
         );
         expect_invalid(credentials.resolve(ProducedLocalAuthenticationEvidenceV1(evidence)));
 
+        let unknown_principal = AuthenticatedPrincipalRecordV1 {
+            principal: test_ok(PrincipalRefV1::try_new([8; 16], "unix.test")),
+            adapter_id: "local-unix".to_owned(),
+            assurance: 2,
+            issued_at: 1,
+            expires_at: 2,
+            registry_binding,
+            operation_nonce: [1; 32],
+        };
+        let evidence = test_ok(
+            credentials
+                .adapter_signer
+                .sign_authenticated_principal(unknown_principal),
+        );
+        assert!(matches!(
+            credentials.resolve(ProducedLocalAuthenticationEvidenceV1(evidence)),
+            Err(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
+        ));
+
         let registry_mismatch = AuthenticatedPrincipalRecordV1 {
             principal: binding(uid).principal,
             adapter_id: "local-unix".to_owned(),
@@ -859,6 +891,39 @@ mod tests {
     #[test]
     fn equal_derived_signing_keys_fail_closed() {
         expect_invalid(ensure_distinct_signing_keys([1; 32], [1; 32]));
+    }
+
+    #[test]
+    fn producer_fails_closed_for_clock_overflow_and_entropy_faults() {
+        let uid = current_uid().max(1);
+        let (auth, host) = credential_bytes(uid, [8; 32]);
+        let directory = credentials_directory(&auth, &host);
+        let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid.saturating_add(1),
+        ));
+
+        expect_unavailable(credentials.produce_with(
+            AuthenticatedUnixPeerV1 {
+                principal: binding(uid).principal,
+            },
+            || Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
+            operation_nonce,
+        ));
+        expect_invalid(credentials.produce_with(
+            AuthenticatedUnixPeerV1 {
+                principal: binding(uid).principal,
+            },
+            || Ok(u64::MAX),
+            operation_nonce,
+        ));
+        expect_unavailable(credentials.produce_with(
+            AuthenticatedUnixPeerV1 {
+                principal: binding(uid).principal,
+            },
+            || Ok(1),
+            || Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
+        ));
     }
 
     #[test]
@@ -949,6 +1014,19 @@ mod tests {
             directory.path(),
             uid,
         ));
+    }
+
+    #[test]
+    fn credential_directory_and_file_name_faults_fail_closed() {
+        let directory = test_ok(tempfile::tempdir());
+        expect_unavailable(credential_names(directory.path()));
+        expect_unavailable(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
+
+        test_ok(fs::write(
+            directory.path().join(OsString::from_vec(vec![0xff])),
+            [],
+        ));
+        expect_invalid(credential_names(directory.path()));
     }
 
     #[test]
@@ -1112,6 +1190,24 @@ mod tests {
             Value::Text("owner".to_owned()),
         ])]);
         expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
+
+        let mut fields = test_ok(facr1_fields(&auth));
+        fields[6] = Value::Array(vec![Value::Array(vec![
+            Value::Text("not-principal-bytes".to_owned()),
+            Value::Text("not-a-principal".to_owned()),
+            Value::Text("owner".to_owned()),
+        ])]);
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
+
+        let mut fields = test_ok(facr1_fields(&auth));
+        fields[6] = Value::Array(vec![Value::Array(vec![
+            Value::Integer(uid.into()),
+            Value::Bytes(vec![1]),
+            Value::Text("owner".to_owned()),
+        ])]);
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
+
+        expect_load_invalid(&[0xff], &host, service_uid);
 
         let tagged_auth = encode(&Value::Tag(0, Box::new(Value::Bytes(vec![1]))));
         expect_load_invalid(&tagged_auth, &host, service_uid);
