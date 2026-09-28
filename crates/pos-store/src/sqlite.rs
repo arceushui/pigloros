@@ -6172,6 +6172,34 @@ fn sqlite_operation_commitment_from_admission(
         .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)
 }
 
+fn sqlite_insert_admitted_local_fork(
+    tx: &rusqlite::Transaction<'_>,
+    request: &CreateForkAdmittedRequestV1,
+) -> Result<ForkAdmissionReceiptV1, ForkAdmissionErrorV1> {
+    let (child, admission, binding) = prepare_admitted_local_fork(tx, request)?;
+    let operation_commitment = pos_core::fork_admission_operation_commitment_from_records_v1(
+        &admission,
+        &binding,
+        request.child_name(),
+    )
+    .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+    if operation_commitment != request.operation_commitment() {
+        return Err(ForkAdmissionErrorV1::CorruptAuthority);
+    }
+    let head = admission.input().parent_logical_head;
+    let chain = admission.input().parent_chain_head_hash;
+    tx.execute("INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head) VALUES (?1, ?2, 'historical', ?3, ?4, 0, ?5)",
+        params![child.id().to_string(), request.child_name(), request.parent_timeline_id().to_string(), i64::try_from(head).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?, chain.as_bytes().as_slice()])
+        .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
+    tx.execute("INSERT INTO fork_admissions (operation_id, operation_commitment, child_id, far1_cbor) VALUES (?1, ?2, ?3, ?4)",
+        params![request.operation_id().as_bytes().as_slice(), operation_commitment.as_bytes().as_slice(), child.id().to_string(), admission.to_canonical_cbor()])
+        .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
+    Ok(ForkAdmissionReceiptV1 {
+        child_id: child.id(),
+        admission_digest: admission.digest(),
+    })
+}
+
 impl ForkAdmissionAuthorityPortV1 for SqliteStore {
     fn bind_fork_admission_host(
         &mut self,
@@ -6358,38 +6386,10 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                         admission_digest: trusted.digest(),
                     });
                 }
-                let (child, admission, binding) = prepare_admitted_local_fork(&tx, request)?;
-                let operation_commitment =
-                    pos_core::fork_admission_operation_commitment_from_records_v1(
-                        &admission,
-                        &binding,
-                        request.child_name(),
-                    )
-                    .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
-                if operation_commitment != request.operation_commitment() {
-                    return Err(ForkAdmissionErrorV1::CorruptAuthority);
-                }
-                let head = admission.input().parent_logical_head;
-                let chain = admission.input().parent_chain_head_hash;
-                let result = (|| {
-                    tx.execute("INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head) VALUES (?1, ?2, 'historical', ?3, ?4, 0, ?5)",
-                params![child.id().to_string(), request.child_name(), request.parent_timeline_id().to_string(), i64::try_from(head).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?, chain.as_bytes().as_slice()])
-                .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
-                    tx.execute("INSERT INTO fork_admissions (operation_id, operation_commitment, child_id, far1_cbor) VALUES (?1, ?2, ?3, ?4)",
-                params![request.operation_id().as_bytes().as_slice(), operation_commitment.as_bytes().as_slice(), child.id().to_string(), admission.to_canonical_cbor()])
-                .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
-                    Ok(ForkAdmissionReceiptV1 {
-                        child_id: child.id(),
-                        admission_digest: admission.digest(),
-                    })
-                })();
-                match result {
-                    Ok(receipt) => tx
-                        .commit()
-                        .map(|()| receipt)
-                        .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate),
-                    Err(error) => Err(error),
-                }
+                let receipt = sqlite_insert_admitted_local_fork(&tx, request)?;
+                tx.commit()
+                    .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)?;
+                Ok(receipt)
             })();
         };
         gate.with_fence(
