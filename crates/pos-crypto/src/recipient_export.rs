@@ -170,14 +170,16 @@ impl RecipientTimelineExportV1 {
         if expected_count != self.ciphertext_chunks.len() {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
+        let final_plain_len =
+            usize::try_from((self.header.payload_length - 1) % CHUNK_BYTES_U64 + 1)
+                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
         for (index, chunk) in self.ciphertext_chunks.iter().enumerate() {
             let plain_len = chunk
                 .len()
                 .checked_sub(TAG_BYTES)
                 .ok_or(RecipientExportErrorV1::FieldOutOfBounds)?;
             let is_final = index + 1 == self.ciphertext_chunks.len();
-            if (!is_final && plain_len != CHUNK_BYTES)
-                || (is_final && !(1..=CHUNK_BYTES).contains(&plain_len))
+            if (!is_final && plain_len != CHUNK_BYTES) || (is_final && plain_len != final_plain_len)
             {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
@@ -1162,6 +1164,12 @@ mod tests {
         assert_eq!(
             RecipientTimelineExportV1::decode(&noncanonical),
             Err(RecipientExportErrorV1::NonCanonical)
+        );
+        let mut wrong_length = RecipientTimelineExportV1::decode(&encoded)?;
+        wrong_length.ciphertext_chunks[0].push(0);
+        assert_eq!(
+            RecipientTimelineExportV1::decode(&wrong_length.encode()),
+            Err(RecipientExportErrorV1::FieldOutOfBounds)
         );
         Ok(())
     }
