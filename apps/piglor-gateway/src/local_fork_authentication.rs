@@ -12,6 +12,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::{Cursor, Read},
+    ops::{Deref, DerefMut},
     os::{
         fd::AsFd,
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
@@ -278,7 +279,7 @@ fn parse_facr1(
     LocalForkAuthenticationErrorV1,
 > {
     let mut fields = canonical_array(bytes, MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, "FACR1", 7)?;
-    let seed = take_fixed_nonzero(&mut fields[2], 32)?;
+    let seed = take_fixed_nonzero(&mut fields[2])?;
     let policy_bytes = bounded_bytes(&fields[3], 37_528)?;
     let policy = ForkAuthenticationPolicyV1::from_canonical_cbor(policy_bytes)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
@@ -299,7 +300,7 @@ fn parse_fahk1(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, LocalForkAuthenticat
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     let mut fields = canonical_array(bytes, FAHK1_BYTES, "FAHK1", 3)?;
-    take_fixed_nonzero(&mut fields[2], 32)
+    take_fixed_nonzero(&mut fields[2])
 }
 
 fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthenticationErrorV1> {
@@ -398,7 +399,7 @@ fn canonical_array(
     maximum: usize,
     marker: &str,
     expected_fields: usize,
-) -> Result<Vec<Value>, LocalForkAuthenticationErrorV1> {
+) -> Result<SensitiveValues, LocalForkAuthenticationErrorV1> {
     if bytes.len() > maximum {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
@@ -439,10 +440,36 @@ fn canonical_array(
         zeroize_value(&mut value);
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let Value::Array(fields) = value else {
-        unreachable!("validated CBOR array must remain an array");
+    let fields = match value {
+        Value::Array(fields) => fields,
+        mut value => {
+            zeroize_value(&mut value);
+            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+        }
     };
-    Ok(fields)
+    Ok(SensitiveValues(fields))
+}
+
+struct SensitiveValues(Vec<Value>);
+
+impl Deref for SensitiveValues {
+    type Target = [Value];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for SensitiveValues {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for SensitiveValues {
+    fn drop(&mut self) {
+        self.0.iter_mut().for_each(zeroize_value);
+    }
 }
 
 fn zeroize_value(value: &mut Value) {
@@ -458,9 +485,9 @@ fn zeroize_value(value: &mut Value) {
     }
 }
 
-fn array(value: &Value, length: usize) -> Result<Vec<Value>, LocalForkAuthenticationErrorV1> {
+fn array(value: &Value, length: usize) -> Result<&[Value], LocalForkAuthenticationErrorV1> {
     match value {
-        Value::Array(values) if values.len() == length => Ok(values.clone()),
+        Value::Array(values) if values.len() == length => Ok(values),
         _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
     }
 }
@@ -468,21 +495,20 @@ fn array(value: &Value, length: usize) -> Result<Vec<Value>, LocalForkAuthentica
 fn nonempty_array(
     value: &Value,
     maximum: usize,
-) -> Result<Vec<Value>, LocalForkAuthenticationErrorV1> {
+) -> Result<&[Value], LocalForkAuthenticationErrorV1> {
     match value {
-        Value::Array(values) if (1..=maximum).contains(&values.len()) => Ok(values.clone()),
+        Value::Array(values) if (1..=maximum).contains(&values.len()) => Ok(values),
         _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
     }
 }
 
 fn take_fixed_nonzero(
     value: &mut Value,
-    length: usize,
 ) -> Result<Zeroizing<[u8; 32]>, LocalForkAuthenticationErrorV1> {
     let Value::Bytes(bytes) = value else {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     };
-    let is_valid = bytes.len() == length && bytes.iter().any(|byte| *byte != 0);
+    let is_valid = bytes.len() == 32 && bytes.iter().any(|byte| *byte != 0);
     if !is_valid {
         bytes.zeroize();
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
@@ -682,6 +708,13 @@ mod tests {
         );
     }
 
+    fn expect_unavailable<T>(result: Result<T, LocalForkAuthenticationErrorV1>) {
+        assert_eq!(
+            result.err(),
+            Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        );
+    }
+
     fn expect_load_invalid(auth: &[u8], host: &[u8], service_uid: u32) {
         let directory = credentials_directory(auth, host);
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
@@ -800,40 +833,39 @@ mod tests {
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
 
-        assert_eq!(
-            validate_credential_directory(Path::new("relative")),
-            Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-        assert_eq!(
-            validate_credential_directory(Path::new("/tmp/pigloros-missing-credential-directory")),
-            Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-        expect_invalid(validate_credential_directory(
+        expect_unavailable(LocalForkAuthenticationCredentialsV1::load(
+            Path::new("relative"),
+            uid,
+        ));
+        expect_unavailable(LocalForkAuthenticationCredentialsV1::load(
+            Path::new("/tmp/pigloros-missing-credential-directory"),
+            uid,
+        ));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path().join(AUTH_CREDENTIAL_NAME).as_path(),
+            uid,
         ));
         test_ok(fs::set_permissions(
             directory.path(),
             fs::Permissions::from_mode(0o722),
         ));
-        expect_invalid(validate_credential_directory(directory.path()));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
+        ));
         test_ok(fs::set_permissions(
             directory.path(),
             fs::Permissions::from_mode(0o700),
         ));
 
-        assert_eq!(
-            credential_names(Path::new("/tmp/pigloros-missing-credential-directory")),
-            Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-        assert_eq!(
-            read_credential(directory.path(), "missing"),
-            Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
             fs::Permissions::from_mode(0o620),
         ));
-        expect_invalid(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
+        ));
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
             fs::Permissions::from_mode(0o600),
@@ -846,7 +878,10 @@ mod tests {
             directory.path().join(AUTH_CREDENTIAL_NAME),
             fs::Permissions::from_mode(0o400),
         ));
-        expect_invalid(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
+        ));
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub mod authorization;
 pub mod executor;
 mod http;
 pub mod ledger_config;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[cfg_attr(
     not(test),
     expect(
