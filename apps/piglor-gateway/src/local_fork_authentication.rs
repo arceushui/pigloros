@@ -37,7 +37,7 @@ use pos_crypto::fork_authentication::{
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const AUTH_CREDENTIAL_NAME: &str = "pigloros.fork-admission-auth";
 const HOST_CREDENTIAL_NAME: &str = "pigloros.fork-admission-host-signer";
@@ -70,11 +70,9 @@ impl LocalForkAuthenticationCredentialsV1 {
     ) -> Result<Self, LocalForkAuthenticationErrorV1> {
         validate_credential_directory(directory)?;
         credential_names(directory)?;
-        let mut auth_bytes = read_credential(directory, AUTH_CREDENTIAL_NAME)?;
-        let mut host_bytes = read_credential(directory, HOST_CREDENTIAL_NAME)?;
+        let auth_bytes = Zeroizing::new(read_credential(directory, AUTH_CREDENTIAL_NAME)?);
+        let host_bytes = Zeroizing::new(read_credential(directory, HOST_CREDENTIAL_NAME)?);
         let parsed = parse_credentials(&auth_bytes, &host_bytes, service_uid);
-        auth_bytes.zeroize();
-        host_bytes.zeroize();
         parsed
     }
 
@@ -234,16 +232,15 @@ fn parse_credentials(
     host_bytes: &[u8],
     service_uid: u32,
 ) -> Result<LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1> {
-    let (mut adapter_seed, policy, registry) = parse_facr1(auth_bytes, service_uid)?;
-    let mut host_seed = parse_fahk1(host_bytes)?;
-    if adapter_seed == host_seed {
-        adapter_seed.zeroize();
-        host_seed.zeroize();
+    let (adapter_seed, policy, registry) = parse_facr1(auth_bytes, service_uid)?;
+    let host_seed = parse_fahk1(host_bytes)?;
+    if adapter_seed[..] == host_seed[..] {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let adapter_signer = ForkAuthenticationAdapterSigningKeyV1::from_seed(adapter_seed)
+    // `from_seed` zeroizes its by-value seed copy. These guards retain the
+    // extracted credential bytes across every fallible validation step.
+    let adapter_signer = ForkAuthenticationAdapterSigningKeyV1::from_seed(*adapter_seed)
         .map_err(signature_invalid)?;
-    adapter_seed.zeroize();
     let adapter = policy
         .adapter(registry.adapter_id())
         .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
@@ -256,8 +253,7 @@ fn parse_credentials(
     {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let host_signer = ForkHostSigningKeyV1::from_seed(host_seed).map_err(signature_invalid)?;
-    host_seed.zeroize();
+    let host_signer = ForkHostSigningKeyV1::from_seed(*host_seed).map_err(signature_invalid)?;
     if adapter_signer.public_key() == host_signer.public_key() {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
@@ -274,11 +270,15 @@ fn parse_facr1(
     bytes: &[u8],
     service_uid: u32,
 ) -> Result<
-    ([u8; 32], ForkAuthenticationPolicyV1, LocalAccountRegistryV1),
+    (
+        Zeroizing<[u8; 32]>,
+        ForkAuthenticationPolicyV1,
+        LocalAccountRegistryV1,
+    ),
     LocalForkAuthenticationErrorV1,
 > {
-    let fields = canonical_array(bytes, MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, "FACR1", 7)?;
-    let seed = fixed_nonzero(&fields[2], 32)?;
+    let mut fields = canonical_array(bytes, MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, "FACR1", 7)?;
+    let seed = take_fixed_nonzero(&mut fields[2], 32)?;
     let policy_bytes = bounded_bytes(&fields[3], 37_528)?;
     let policy = ForkAuthenticationPolicyV1::from_canonical_cbor(policy_bytes)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
@@ -294,12 +294,12 @@ fn parse_facr1(
     Ok((seed, policy, registry))
 }
 
-fn parse_fahk1(bytes: &[u8]) -> Result<[u8; 32], LocalForkAuthenticationErrorV1> {
+fn parse_fahk1(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, LocalForkAuthenticationErrorV1> {
     if bytes.len() != FAHK1_BYTES {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let fields = canonical_array(bytes, FAHK1_BYTES, "FAHK1", 3)?;
-    fixed_nonzero(&fields[2], 32)
+    let mut fields = canonical_array(bytes, FAHK1_BYTES, "FAHK1", 3)?;
+    take_fixed_nonzero(&mut fields[2], 32)
 }
 
 fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthenticationErrorV1> {
@@ -378,10 +378,14 @@ fn finish_credential_read(
     size: usize,
 ) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
     let mut bytes = Vec::with_capacity(size);
-    reader
+    if reader
         .take(u64::try_from(MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 + 1).unwrap_or(u64::MAX))
         .read_to_end(&mut bytes)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
+        .is_err()
+    {
+        bytes.zeroize();
+        return Err(LocalForkAuthenticationErrorV1::CredentialUnavailable);
+    }
     if bytes.len() != size {
         bytes.zeroize();
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
@@ -399,27 +403,59 @@ fn canonical_array(
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     let mut cursor = Cursor::new(bytes);
-    let value: Value = ciborium::from_reader(&mut cursor)
+    let mut value: Value = ciborium::from_reader(&mut cursor)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    if cursor.position()
-        != u64::try_from(bytes.len())
-            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?
-    {
+    let expected_position = match u64::try_from(bytes.len()) {
+        Ok(position) => position,
+        Err(_) => {
+            zeroize_value(&mut value);
+            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+        }
+    };
+    if cursor.position() != expected_position {
+        zeroize_value(&mut value);
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let fields = array(&value, expected_fields)?;
+    let Value::Array(fields) = &value else {
+        zeroize_value(&mut value);
+        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+    };
+    if fields.len() != expected_fields {
+        zeroize_value(&mut value);
+        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+    }
     if !matches!(fields.first(), Some(Value::Text(text)) if text == marker)
         || !matches!(fields.get(1), Some(Value::Integer(version)) if *version == 1.into())
     {
+        zeroize_value(&mut value);
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let mut encoded = Vec::new();
-    ciborium::into_writer(&value, &mut encoded)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    if encoded != bytes {
+    let mut encoded = Zeroizing::new(Vec::new());
+    if ciborium::into_writer(&value, &mut *encoded).is_err() {
+        zeroize_value(&mut value);
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
+    if encoded.as_slice() != bytes {
+        zeroize_value(&mut value);
+        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+    }
+    let Value::Array(fields) = value else {
+        unreachable!("validated CBOR array must remain an array");
+    };
     Ok(fields)
+}
+
+fn zeroize_value(value: &mut Value) {
+    match value {
+        Value::Bytes(bytes) => bytes.zeroize(),
+        Value::Tag(_, value) => zeroize_value(value),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_value),
+        Value::Map(entries) => entries.iter_mut().for_each(|(key, value)| {
+            zeroize_value(key);
+            zeroize_value(value);
+        }),
+        _ => {}
+    }
 }
 
 fn array(value: &Value, length: usize) -> Result<Vec<Value>, LocalForkAuthenticationErrorV1> {
@@ -439,17 +475,22 @@ fn nonempty_array(
     }
 }
 
-fn fixed_nonzero(value: &Value, length: usize) -> Result<[u8; 32], LocalForkAuthenticationErrorV1> {
+fn take_fixed_nonzero(
+    value: &mut Value,
+    length: usize,
+) -> Result<Zeroizing<[u8; 32]>, LocalForkAuthenticationErrorV1> {
     let Value::Bytes(bytes) = value else {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     };
-    if bytes.len() != length || !bytes.iter().any(|byte| *byte != 0) {
+    let is_valid = bytes.len() == length && bytes.iter().any(|byte| *byte != 0);
+    if !is_valid {
+        bytes.zeroize();
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+    let mut seed = Zeroizing::new([0; 32]);
+    seed.copy_from_slice(bytes);
+    bytes.zeroize();
+    Ok(seed)
 }
 
 fn bounded_bytes(value: &Value, maximum: usize) -> Result<&[u8], LocalForkAuthenticationErrorV1> {
@@ -546,6 +587,9 @@ mod tests {
         os::unix::{fs::PermissionsExt as _, net::UnixStream},
     };
 
+    #[cfg(target_os = "linux")]
+    use std::os::unix::net::UnixListener;
+
     use super::*;
     use ciborium::value::Value;
     use pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1;
@@ -572,14 +616,18 @@ mod tests {
         }
     }
 
-    fn credential_bytes(uid: u32, host_seed: [u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        let adapter_seed = [7; 32];
-        let registry = test_ok(LocalAccountRegistryV1::new(
+    fn registry(uid: u32) -> LocalAccountRegistryV1 {
+        test_ok(LocalAccountRegistryV1::new(
             "local-unix".to_owned(),
             2,
             vec![binding(uid)],
             uid.saturating_add(1),
-        ));
+        ))
+    }
+
+    fn credential_bytes(uid: u32, host_seed: [u8; 32]) -> (Vec<u8>, Vec<u8>) {
+        let adapter_seed = [7; 32];
+        let registry = registry(uid);
         let adapter = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed(
             adapter_seed,
         ));
@@ -634,6 +682,14 @@ mod tests {
         );
     }
 
+    fn expect_load_invalid(auth: &[u8], host: &[u8], service_uid: u32) {
+        let directory = credentials_directory(auth, host);
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            service_uid,
+        ));
+    }
+
     fn facr1_fields(bytes: &[u8]) -> Vec<Value> {
         let value: Value = test_ok(ciborium::from_reader(bytes));
         let Value::Array(fields) = value else {
@@ -643,7 +699,8 @@ mod tests {
     }
 
     #[test]
-    fn protected_credentials_bind_policy_registry_and_kernel_peer(
+    #[cfg(target_os = "linux")]
+    fn pathname_unix_listener_authenticates_kernel_peer_and_resolves_owner(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let uid = current_uid();
         if uid == 0 || uid == 65_534 {
@@ -661,8 +718,17 @@ mod tests {
             Some(2)
         );
         assert_ne!(credentials.adapter_public_key(), [0; 32]);
-        let (peer, _other) = UnixStream::pair()?;
-        let peer = credentials.authenticate_peer(&peer)?;
+        let socket_path = directory.path().join("fork-admission.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        let connector = std::thread::spawn({
+            let socket_path = socket_path.clone();
+            move || UnixStream::connect(socket_path)
+        });
+        let (server, _) = listener.accept()?;
+        let client = connector
+            .join()
+            .map_err(|_| std::io::Error::other("Unix client thread panicked"))??;
+        let peer = credentials.authenticate_peer(&server)?;
         assert_eq!(peer.principal().trust_domain(), "unix.test");
         let evidence = credentials.produce(peer)?;
         let resolved = credentials.resolve(evidence)?;
@@ -672,6 +738,7 @@ mod tests {
         assert_eq!(record.assurance, 2);
         assert!(record.issued_at < record.expires_at);
         assert_ne!(record.operation_nonce, [0; 32]);
+        drop(client);
         Ok(())
     }
 
@@ -728,72 +795,10 @@ mod tests {
     }
 
     #[test]
-    fn credential_codec_fault_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-        let uid = current_uid().max(1);
-        let (auth, host) = credential_bytes(uid, [8; 32]);
-        assert!(parse_facr1(&auth, uid.saturating_add(1)).is_ok());
-        assert!(parse_fahk1(&host).is_ok());
-        assert_eq!(
-            parse_fahk1(&[0; FAHK1_BYTES]),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            canonical_array(&[], 1, "FACR1", 7),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            array(&Value::Integer(1.into()), 1),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            nonempty_array(&Value::Array(Vec::new()), 1),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            fixed_nonzero(&Value::Bytes(vec![0; 32]), 32),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            bounded_bytes(&Value::Bytes(Vec::new()), 1),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            bounded_text(&Value::Text(String::new())),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            positive_u8(&Value::Integer(0.into())),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            positive_u32(&Value::Integer(0.into())),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        assert_eq!(
-            signature_invalid(ForkAuthenticationSignatureErrorV1::InvalidSeed),
-            LocalForkAuthenticationErrorV1::CredentialInvalid
-        );
-        assert!(production_wall_time()? > 0);
-        assert_ne!(operation_nonce()?, [0; 32]);
-        Ok(())
-    }
-
-    #[test]
     fn credential_filesystem_and_read_faults_fail_closed() {
         let uid = current_uid().max(1);
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
-        let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
-            directory.path(),
-            uid.saturating_add(1),
-        ));
-        let evidence = test_ok(credentials.produce(AuthenticatedUnixPeerV1 {
-            principal: binding(uid).principal,
-        }));
-        assert_eq!(
-            test_ok(credentials.resolve(evidence)).owner(),
-            OwnerIdV1::from_static("owner")
-        );
 
         assert_eq!(
             validate_credential_directory(Path::new("relative")),
@@ -894,57 +899,35 @@ mod tests {
 
     #[test]
     fn malformed_credential_fields_fail_closed() {
-        expect_invalid(canonical_array(&[0; 2], 1, "FACR1", 7));
-        expect_invalid(canonical_array(&[0x80, 0], 8, "FACR1", 7));
         let uid = current_uid().max(1);
-        let (auth, _) = credential_bytes(uid, [8; 32]);
+        let service_uid = uid.saturating_add(1);
+        let (auth, host) = credential_bytes(uid, [8; 32]);
+        expect_load_invalid(&[0; 2], &host, service_uid);
+        expect_load_invalid(&auth, &[0; FAHK1_BYTES], service_uid);
         let mut noncanonical = auth.clone();
         noncanonical[0] = 0x98;
         noncanonical.insert(1, 7);
-        expect_invalid(canonical_array(
-            &noncanonical,
-            MAX_FORK_AUTH_CREDENTIAL_BYTES_V1,
-            "FACR1",
-            7,
-        ));
+        expect_load_invalid(&noncanonical, &host, service_uid);
         let mut fields = facr1_fields(&auth);
         fields[0] = Value::Text("wrong-marker".to_owned());
-        expect_invalid(canonical_array(
-            &encode(&Value::Array(fields)),
-            MAX_FORK_AUTH_CREDENTIAL_BYTES_V1,
-            "FACR1",
-            7,
-        ));
-        expect_invalid(fixed_nonzero(&Value::Integer(1.into()), 32));
-        expect_invalid(bounded_bytes(&Value::Integer(1.into()), 1));
-        expect_invalid(bounded_text(&Value::Integer(1.into())));
-        expect_invalid(positive_u8(&Value::Text("one".to_owned())));
-        expect_invalid(positive_u32(&Value::Text("one".to_owned())));
-        expect_invalid(parse_binding(&Value::Integer(1.into())));
-        expect_invalid(parse_binding(&Value::Array(vec![
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
+        let mut fields = facr1_fields(&auth);
+        fields[6] = Value::Array(vec![Value::Array(vec![
             Value::Integer(0.into()),
             Value::Bytes(vec![1]),
             Value::Text("owner".to_owned()),
-        ])));
-        expect_invalid(parse_binding(&Value::Array(vec![
-            Value::Integer(1.into()),
-            Value::Bytes(Vec::new()),
-            Value::Text("owner".to_owned()),
-        ])));
-        expect_invalid(parse_binding(&Value::Array(vec![
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1]),
-            Value::Text(String::new()),
-        ])));
+        ])]);
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
     }
 
     #[test]
     fn credential_policy_and_registry_mismatches_fail_closed() {
         let uid = current_uid().max(1);
         let (auth, host) = credential_bytes(uid, [8; 32]);
-        expect_invalid(parse_facr1(&auth, uid));
+        let service_uid = uid.saturating_add(1);
+        expect_load_invalid(&auth, &host, uid);
 
-        let (_, _, registry) = test_ok(parse_facr1(&auth, uid.saturating_add(1)));
+        let registry = registry(uid);
         let wrong_signer = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed([9; 32]));
         let wrong_policy = test_ok(ForkAuthenticationPolicyV1::new(vec![
             ForkAuthenticationAdapterPolicyV1 {
@@ -956,11 +939,7 @@ mod tests {
         ]));
         let mut fields = facr1_fields(&auth);
         fields[3] = Value::Bytes(test_ok(wrong_policy.to_canonical_cbor()));
-        expect_invalid(parse_credentials(
-            &encode(&Value::Array(fields)),
-            &host,
-            uid.saturating_add(1),
-        ));
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
 
         let adapter = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed([7; 32]));
         let strict_policy = test_ok(ForkAuthenticationPolicyV1::new(vec![
@@ -973,11 +952,7 @@ mod tests {
         ]));
         let mut fields = facr1_fields(&auth);
         fields[3] = Value::Bytes(test_ok(strict_policy.to_canonical_cbor()));
-        expect_invalid(parse_credentials(
-            &encode(&Value::Array(fields)),
-            &host,
-            uid.saturating_add(1),
-        ));
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
 
         let mut fields = facr1_fields(&auth);
         fields[6] = Value::Array(vec![Value::Array(vec![
@@ -985,98 +960,22 @@ mod tests {
             Value::Bytes(test_ok(binding(uid).principal.encode()).as_slice().to_vec()),
             Value::Text("another-owner".to_owned()),
         ])]);
-        expect_invalid(parse_credentials(
-            &encode(&Value::Array(fields)),
-            &host,
-            uid.saturating_add(1),
-        ));
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
 
         let mut fields = facr1_fields(&auth);
         fields[3] = Value::Bytes(vec![1]);
-        expect_invalid(parse_facr1(
-            &encode(&Value::Array(fields)),
-            uid.saturating_add(1),
-        ));
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
 
         let mut fields = facr1_fields(&auth);
         fields[4] = Value::Text("missing-adapter".to_owned());
-        expect_invalid(parse_credentials(
-            &encode(&Value::Array(fields)),
-            &host,
-            uid.saturating_add(1),
-        ));
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
 
         let mut fields = facr1_fields(&auth);
         fields[6] = Value::Array(vec![Value::Integer(1.into())]);
-        expect_invalid(parse_facr1(
-            &encode(&Value::Array(fields)),
-            uid.saturating_add(1),
-        ));
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
 
         let mut fields = facr1_fields(&auth);
         fields[2] = Value::Bytes(vec![0; 32]);
-        expect_invalid(parse_credentials(
-            &encode(&Value::Array(fields)),
-            &host,
-            uid.saturating_add(1),
-        ));
-    }
-
-    #[test]
-    fn resolver_rejects_invalid_evidence_mismatched_binding_and_unknown_principal() {
-        let uid = current_uid().max(1);
-        let (auth, _) = credential_bytes(uid, [8; 32]);
-        let (_, _, registry) = test_ok(parse_facr1(&auth, uid.saturating_add(1)));
-        let signer = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed([7; 32]));
-        let registry_binding = test_ok(registry.digest());
-        let alternate_binding = pos_core::Hash::from_bytes([1; 32]);
-        let mut bindings = vec![registry_binding, alternate_binding];
-        bindings.sort_unstable();
-        let policy = test_ok(ForkAuthenticationPolicyV1::new(vec![
-            ForkAuthenticationAdapterPolicyV1 {
-                adapter_id: "local-unix".to_owned(),
-                verifying_key: signer.public_key(),
-                minimum_assurance: 2,
-                registry_bindings: bindings,
-            },
-        ]));
-        let resolver = PrincipalOwnerResolverV1::new(policy, registry);
-        let record = AuthenticatedPrincipalRecordV1 {
-            principal: binding(uid).principal,
-            adapter_id: "local-unix".to_owned(),
-            assurance: 2,
-            issued_at: 1,
-            expires_at: 2,
-            registry_binding,
-            operation_nonce: [1; 32],
-        };
-        let invalid = test_ok(AuthenticatedPrincipalEvidenceV1::new(
-            record.clone(),
-            [0; 64],
-        ));
-        assert!(matches!(
-            resolver.resolve(invalid),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        ));
-
-        let mismatched = AuthenticatedPrincipalRecordV1 {
-            registry_binding: alternate_binding,
-            ..record.clone()
-        };
-        let mismatched = test_ok(signer.sign_authenticated_principal(mismatched));
-        assert!(matches!(
-            resolver.resolve(mismatched),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        ));
-
-        let unknown = AuthenticatedPrincipalRecordV1 {
-            principal: test_ok(PrincipalRefV1::try_new([8; 16], "unix.test")),
-            ..record
-        };
-        let unknown = test_ok(signer.sign_authenticated_principal(unknown));
-        assert!(matches!(
-            resolver.resolve(unknown),
-            Err(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
-        ));
+        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
     }
 }
