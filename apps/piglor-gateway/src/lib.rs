@@ -315,8 +315,11 @@ mod coverage_tests {
 
     #[test]
     fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
-        let registry =
-            super::gateway_fixture_action_registry_builder(std::iter::empty(), None).test_ok();
+        let registry = super::gateway_test_fixtures::action_registry_builder(
+            std::iter::empty(),
+            None,
+        )
+        .test_ok();
         assert!(registry.composition().plugins[0].pin.is_none());
         assert!(matches!(
             super::gateway_action_registry_builder(std::iter::empty(), None),
@@ -920,36 +923,68 @@ fn gateway_action_registry_builder(
 // Unit-test behavior fixtures have no installed profile, session pin, or
 // production registration authority. They never enter the release builder.
 #[cfg(test)]
-fn gateway_fixture_action_registry_builder(
-    bodies: impl IntoIterator<Item = EntityId>,
-    authority: Option<ConsentAuthority>,
-) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    let bodies = canonical_gateway_bodies(bodies)?;
-    let descriptor = GatewayActionPlugin {
-        id: PluginId::new(),
-    };
-    let configuration_details = gateway_configuration_details(&bodies);
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
-        &descriptor,
-        pos_runtime::InstalledOutputPolicySourceV1::Generated,
-        &configuration_details,
-        "deterministic-local-v1",
-    )?;
-    let mut registry = PluginRegistry::new().without_erasure_gate();
-    registry.register_with_verified_output_policy_and_approver(
-        &descriptor,
-        binding,
-        None,
-        None,
-        Some(Box::new(GatewayWorldActionApprover(
-            WorldPlugin::new().with_bodies(bodies),
-        ))),
-        [Kind::new(EVENT_TYPE_ACTION)],
-    )?;
-    if let Some(authority) = authority {
-        registry = registry.with_consent_authority(authority);
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod gateway_test_fixtures {
+    use super::*;
+
+    pub(super) fn action_registry_builder(
+        bodies: impl IntoIterator<Item = EntityId>,
+        authority: Option<ConsentAuthority>,
+    ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+        let bodies = canonical_gateway_bodies(bodies)?;
+        let descriptor = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        let configuration_details = gateway_configuration_details(&bodies);
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &descriptor,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &configuration_details,
+            "deterministic-local-v1",
+        )?;
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        registry.register_with_verified_output_policy_and_approver(
+            &descriptor,
+            binding,
+            None,
+            None,
+            Some(Box::new(GatewayWorldActionApprover(
+                WorldPlugin::new().with_bodies(bodies),
+            ))),
+            [Kind::new(EVENT_TYPE_ACTION)],
+        )?;
+        if let Some(authority) = authority {
+            registry = registry.with_consent_authority(authority);
+        }
+        Ok(registry)
     }
-    Ok(registry)
+
+    pub(super) fn gateway_with_erasure_host_and_authorization(
+        host: ErasureExecutionHostV1,
+        bodies: impl IntoIterator<Item = EntityId>,
+        authorization: GatewayAuthorization,
+    ) -> Result<Gateway, GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let store = executor::StoreExecutor::new_with_erasure_host(
+            host,
+            consent_authority.append_permit(),
+        )?;
+        let action_registry =
+            action_registry_builder(bodies, Some(consent_authority.clone())).map(|mut registry| {
+                registry.bind_erasure_gate(gate);
+                Arc::new(registry)
+            });
+        Gateway::from_host_components(
+            store,
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            action_registry,
+            consent_authority,
+            Some(Arc::new(authorization)),
+        )
+    }
 }
 
 fn prepared_gateway_action_registry(
@@ -1023,7 +1058,7 @@ fn gateway_action_registry_builder_for_test(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> PluginRegistry {
-    gateway_fixture_action_registry_builder(bodies, authority).unwrap_or_else(|error| {
+    gateway_test_fixtures::action_registry_builder(bodies, authority).unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!(
             "gateway action registration must remain valid in test fixtures: {error:?}"
         )))
@@ -1638,7 +1673,7 @@ impl Gateway {
             broadcast::channel(EVENT_BUS_CAPACITY).0,
             GatewayLimits::LOCAL_DEFAULT,
             false,
-            gateway_fixture_action_registry_builder(
+            gateway_test_fixtures::action_registry_builder(
                 std::iter::empty(),
                 Some(consent_authority.clone()),
             )
@@ -1715,38 +1750,6 @@ impl Gateway {
                 Some(consent_authority.clone()),
                 gate,
             ),
-            consent_authority,
-            Some(Arc::new(authorization)),
-        )
-    }
-
-    // Exercises host command sequencing in unit tests only. The generated
-    // policy is never an installed Gateway profile or a production pin.
-    #[cfg(test)]
-    fn new_with_erasure_host_and_authorization_fixture(
-        host: ErasureExecutionHostV1,
-        bodies: impl IntoIterator<Item = EntityId>,
-        authorization: GatewayAuthorization,
-    ) -> Result<Self, GatewayError> {
-        let gate = host.containment_gate();
-        let consent_authority = ConsentAuthority::new();
-        let store = executor::StoreExecutor::new_with_erasure_host(
-            host,
-            consent_authority.append_permit(),
-        )?;
-        let action_registry =
-            gateway_fixture_action_registry_builder(bodies, Some(consent_authority.clone())).map(
-                |mut registry| {
-                    registry.bind_erasure_gate(gate);
-                    Arc::new(registry)
-                },
-            );
-        Self::from_host_components(
-            store,
-            broadcast::channel(EVENT_BUS_CAPACITY).0,
-            GatewayLimits::LOCAL_DEFAULT,
-            false,
-            action_registry,
             consent_authority,
             Some(Arc::new(authorization)),
         )
@@ -4226,9 +4229,12 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway =
-            Gateway::new_with_erasure_host_and_authorization_fixture(host, [body], authorization)
-                .test_ok();
+        let gateway = super::gateway_test_fixtures::gateway_with_erasure_host_and_authorization(
+            host,
+            [body],
+            authorization,
+        )
+        .test_ok();
         let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
@@ -4349,9 +4355,12 @@ mod tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
-        let gateway =
-            Gateway::new_with_erasure_host_and_authorization_fixture(host, [body], authorization)
-                .test_ok();
+        let gateway = super::gateway_test_fixtures::gateway_with_erasure_host_and_authorization(
+            host,
+            [body],
+            authorization,
+        )
+        .test_ok();
         let timeline = gateway
             .create_timeline("host-authority-commit-recheck")
             .await

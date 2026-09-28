@@ -2795,6 +2795,13 @@ mod tests {
             .run()
             .is_err());
         assert!(run_local_and_air_gapped(input()).is_err());
+        let topology = ProofTopology::new(input()).test_ok();
+        assert!(build_registry_for_admission(
+            &topology,
+            "deterministic-local-v1",
+            ProofAdmission::Installed,
+        )
+        .is_err());
     }
 
     #[test]

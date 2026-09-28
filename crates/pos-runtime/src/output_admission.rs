@@ -812,12 +812,15 @@ impl OutputPolicyBindingV1 {
         self.verifies_erased_owner_instance(plugin)
     }
 
-    pub(crate) const fn has_installed_profile_provenance(&self) -> bool {
+    pub(crate) fn has_installed_profile_provenance(&self) -> bool {
         #[cfg(any(test, feature = "test-support"))]
-        if matches!(self.source, InstalledOutputPolicySourceV1::Generated) {
-            return false;
+        {
+            self.source != InstalledOutputPolicySourceV1::Generated
         }
-        true
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            true
+        }
     }
 
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
