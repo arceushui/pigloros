@@ -164,6 +164,9 @@ static NEXT_FORK_EVENT_AUTHORITY_HOST_ID: AtomicU64 = AtomicU64::new(1);
 
 impl ForkEventAuthorityHostV1 {
     /// Construct trusted immutable classifier configuration.
+    ///
+    /// # Errors
+    /// Returns an error when the registrar or route table is out of bounds or ambiguous.
     pub fn new(
         registrar_identifier: String,
         mut routes: Vec<ForkExternalInputRouteV1>,
@@ -188,6 +191,9 @@ impl ForkEventAuthorityHostV1 {
     }
 
     /// Permit registration using only a locally admitted Fork record.
+    ///
+    /// # Errors
+    /// Returns an error when the operation ID or derived source custody is invalid.
     pub fn permit_registration(
         &self,
         operation_id: Hash,
@@ -211,7 +217,7 @@ impl ForkEventAuthorityHostV1 {
 
     /// Permit a host-internal append after the caller has resolved admitted authority.
     #[must_use]
-    pub fn permit_host_internal(
+    pub const fn permit_host_internal(
         &self,
         child_timeline_id: TimelineId,
         fork_admission_digest: Hash,
@@ -225,6 +231,9 @@ impl ForkEventAuthorityHostV1 {
     }
 
     /// Permit one configured external route for the exact admitted Fork.
+    ///
+    /// # Errors
+    /// Returns an error when the adapter identity or source route is invalid or unregistered.
     pub fn permit_external_input(
         &self,
         child_timeline_id: TimelineId,
@@ -255,26 +264,46 @@ impl ForkEventAuthorityHostV1 {
 
 /// Durable classifier registration, classified append, operation recovery, and suffix-read port.
 pub trait ForkEventProvenanceAuthorityPortV1 {
+    /// Bind the one trusted host authority.
+    ///
+    /// # Errors
+    /// Returns an error when a different host is already bound.
     fn bind_fork_event_authority_host(
         &mut self,
         binding: ForkEventAuthorityBindingV1,
     ) -> Result<(), ForkEventAuthorityErrorV1>;
+    /// Persist one immutable classifier registration.
+    ///
+    /// # Errors
+    /// Returns an error when the request is untrusted, conflicting, corrupt, or indeterminate.
     fn register_classifier(
         &mut self,
         request: &ForkClassifierRegistrationRequestV1,
     ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1>;
+    /// Atomically append a classified Event and its provenance sidecars.
+    ///
+    /// # Errors
+    /// Returns an error when authority, classification, persistence, or recovery checks fail.
     fn append_classified(
         &mut self,
         permit: &ForkAppendSourcePermitV1,
         operation_id: Hash,
         draft: EventDraft,
     ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1>;
+    /// Recover one committed classified append by its stable operation ID.
+    ///
+    /// # Errors
+    /// Returns an error when the stored operation is conflicting or corrupt.
     fn recover_classified_append(
         &self,
         permit: &ForkAppendSourcePermitV1,
         operation_id: Hash,
         draft: &EventDraft,
     ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1>;
+    /// Read the classified provenance suffix for one admitted Fork.
+    ///
+    /// # Errors
+    /// Returns an error when the durable sidecars are incomplete or corrupt.
     fn read_fork_event_suffix(
         &self,
         child_timeline_id: TimelineId,
@@ -407,6 +436,9 @@ pub struct ForkClassifierSourceV1(ForkClassifierSourceInputV1);
 
 impl ForkClassifierSourceV1 {
     /// Construct complete immutable source custody.
+    ///
+    /// # Errors
+    /// Returns an error when the descriptor, registrar, or routes are invalid.
     pub fn new(mut input: ForkClassifierSourceInputV1) -> Result<Self, ForkEventProvenanceErrorV1> {
         validate_classifier_fields(
             input.room_revision_descriptor_hash,
@@ -440,6 +472,9 @@ impl ForkClassifierSourceV1 {
     }
 
     /// Decode exact canonical source-custody bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, or out of bounds.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1)?;
         wire.array(5)?;
@@ -476,6 +511,9 @@ pub struct ForkClassifierTableV1(ForkClassifierTableInputV1);
 
 impl ForkClassifierTableV1 {
     /// Construct one immutable classifier table.
+    ///
+    /// # Errors
+    /// Returns an error when mandatory provenance fields or routes are invalid.
     pub fn new(mut input: ForkClassifierTableInputV1) -> Result<Self, ForkEventProvenanceErrorV1> {
         if input.fork_admission_digest == Hash::zero()
             || input.source_configuration_revision_digest == Hash::zero()
@@ -517,6 +555,9 @@ impl ForkClassifierTableV1 {
     }
 
     /// Decode exact canonical table bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, or out of bounds.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1)?;
         wire.array(8)?;
@@ -558,6 +599,9 @@ pub struct ForkClassifierRegistrationV1(ForkClassifierRegistrationInputV1);
 
 impl ForkClassifierRegistrationV1 {
     /// Construct one registration record.
+    ///
+    /// # Errors
+    /// Returns an error when mandatory registration fields are absent.
     pub fn new(
         input: ForkClassifierRegistrationInputV1,
     ) -> Result<Self, ForkEventProvenanceErrorV1> {
@@ -597,6 +641,9 @@ impl ForkClassifierRegistrationV1 {
     }
 
     /// Decode exact canonical registration evidence bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, or out of bounds.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1)?;
         wire.array(7)?;
@@ -633,7 +680,7 @@ pub enum ForkAppendSourceIdentityV1 {
 }
 
 impl ForkAppendSourceIdentityV1 {
-    fn validate(&self) -> Result<(), ForkEventProvenanceErrorV1> {
+    const fn validate(&self) -> Result<(), ForkEventProvenanceErrorV1> {
         match self {
             Self::HostInternal => Ok(()),
             Self::ExternalInput {
@@ -664,6 +711,9 @@ pub struct ForkEventAppendRequestV1 {
 
 impl ForkEventAppendRequestV1 {
     /// Validate and construct an exact append request preimage.
+    ///
+    /// # Errors
+    /// Returns an error when required request fields or source identity are invalid.
     pub fn new(input: Self) -> Result<Self, ForkEventProvenanceErrorV1> {
         if input.operation_id == Hash::zero()
             || input.event_type.is_empty()
@@ -702,6 +752,9 @@ impl ForkEventAppendRequestV1 {
     }
 
     /// Decode exact canonical append-request preimage bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, or out of bounds.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_APPEND_PAYLOAD_BYTES_V1 + 784)?;
         wire.array(12)?;
@@ -756,6 +809,9 @@ pub struct ForkAppendOperationV1(ForkAppendOperationInputV1);
 
 impl ForkAppendOperationV1 {
     /// Construct one committed append-operation record.
+    ///
+    /// # Errors
+    /// Returns an error when mandatory operation fields or source identity are invalid.
     pub fn new(input: ForkAppendOperationInputV1) -> Result<Self, ForkEventProvenanceErrorV1> {
         if input.operation_id == Hash::zero()
             || input.logical_seq == 0
@@ -806,6 +862,9 @@ impl ForkAppendOperationV1 {
     }
 
     /// Decode exact canonical append-operation evidence bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, or out of bounds.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
         let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1)?;
         wire.array(14)?;
@@ -1165,7 +1224,7 @@ fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkEventProvenanceEr
 fn validate_classifier_fields(
     descriptor_hash: Hash,
     registrar_identifier: &str,
-    routes: &mut Vec<ForkExternalInputRouteV1>,
+    routes: &mut [ForkExternalInputRouteV1],
 ) -> Result<(), ForkEventProvenanceErrorV1> {
     if descriptor_hash == Hash::zero()
         || registrar_identifier.is_empty()
@@ -1352,16 +1411,16 @@ impl<'a> Reader<'a> {
     fn entity(&mut self) -> Result<EntityId, ForkEventProvenanceErrorV1> {
         Ok(EntityId::from_ulid(ulid::Ulid::from_bytes(self.fixed()?)))
     }
-    fn null(&mut self) -> Result<bool, ForkEventProvenanceErrorV1> {
+    fn null(&mut self) -> bool {
         if self.bytes.get(self.offset) == Some(&0xf6) {
             self.offset += 1;
-            Ok(true)
+            true
         } else {
-            Ok(false)
+            false
         }
     }
     fn optional_event(&mut self) -> Result<Option<EventId>, ForkEventProvenanceErrorV1> {
-        if self.null()? {
+        if self.null() {
             Ok(None)
         } else {
             self.event().map(Some)
@@ -1370,7 +1429,7 @@ impl<'a> Reader<'a> {
     fn optional_correlation(
         &mut self,
     ) -> Result<Option<CorrelationId>, ForkEventProvenanceErrorV1> {
-        if self.null()? {
+        if self.null() {
             Ok(None)
         } else {
             Ok(Some(CorrelationId::from_ulid(ulid::Ulid::from_bytes(
@@ -1379,14 +1438,14 @@ impl<'a> Reader<'a> {
         }
     }
     fn optional_wall_time(&mut self) -> Result<Option<WallTime>, ForkEventProvenanceErrorV1> {
-        if self.null()? {
+        if self.null() {
             Ok(None)
         } else {
             self.uint().map(WallTime::from_micros).map(Some)
         }
     }
     fn optional_hash(&mut self) -> Result<Option<Hash>, ForkEventProvenanceErrorV1> {
-        if self.null()? {
+        if self.null() {
             Ok(None)
         } else {
             self.hash().map(Some)

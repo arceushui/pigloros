@@ -58,14 +58,13 @@ use pos_core::{
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationReceiptV1,
     ForkClassifierRegistrationRequestV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
     ForkClassifierTableInputV1, ForkClassifierTableV1, ForkEventAppendRequestV1,
-    ForkEventAuthorityBindingV1, ForkEventAuthorityErrorV1, ForkEventClassificationV1,
-    ForkEventOriginKindV1, ForkEventProvenanceAuthorityPortV1, ForkEventSourceV1,
-    ForkInterventionAdmissionInputV1, ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    LocalPrincipalOwnerBindingPermitV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1,
-    PrincipalOwnerBindingV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    ForkEventAuthorityBindingV1, ForkEventAuthorityErrorV1, ForkEventOriginKindV1,
+    ForkEventProvenanceAuthorityPortV1, ForkEventSourceV1, ForkInterventionAdmissionInputV1,
+    ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, LocalPrincipalOwnerBindingPermitV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
